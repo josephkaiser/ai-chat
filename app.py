@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-AI Chat with Conversation Memory - vLLM Backend
-Optimized for GPU servers with better throughput
+AI Chat with vLLM - Full Featured
+- Word-by-word streaming
+- Conversation management (delete, rename)
+- Chat history sidebar
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from typing import List, Dict
+from pydantic import BaseModel
+from typing import List, Dict, Optional
 import sqlite3
 from datetime import datetime
 import logging
 from openai import OpenAI
+import traceback
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +25,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = "http://vllm:8000/v1"
 
-app = FastAPI(title="AI Chat with vLLM")
+app = FastAPI(title="AI Chat")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,10 +36,11 @@ app.add_middleware(
 )
 
 # Initialize OpenAI client for vLLM
-client = OpenAI(
-    base_url=VLLM_HOST,
-    api_key="dummy"  # vLLM doesn't require real API key
-)
+try:
+    client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+    logger.info(f"✓ Connected to vLLM at {VLLM_HOST}")
+except Exception as e:
+    logger.error(f"Failed to initialize vLLM client: {e}")
 
 # ==================== Database ====================
 
@@ -63,6 +68,11 @@ def init_db():
     logger.info("✓ Database initialized")
 
 init_db()
+
+# ==================== Models ====================
+
+class RenameRequest(BaseModel):
+    title: str
 
 # ==================== Helper Functions ====================
 
@@ -119,19 +129,97 @@ async def home():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Chat - vLLM</title>
+    <title>AI Chat</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0f172a;
             color: #f1f5f9;
             height: 100vh;
+            display: flex;
+        }
+        
+        .sidebar {
+            width: 280px;
+            background: #1e293b;
+            border-right: 1px solid #334155;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid #334155;
+        }
+        
+        .new-chat-btn {
+            width: 100%;
+            padding: 12px;
+            background: #10b981;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        .new-chat-btn:hover { background: #059669; }
+        
+        .conversations {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+        
+        .conv-item {
+            padding: 12px;
+            margin-bottom: 5px;
+            background: #0f172a;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+        }
+        
+        .conv-item:hover { background: #334155; }
+        .conv-item.active { background: #10b981; color: white; }
+        
+        .conv-title {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 13px;
+        }
+        
+        .conv-actions {
+            display: none;
+            gap: 5px;
+        }
+        
+        .conv-item:hover .conv-actions { display: flex; }
+        
+        .conv-btn {
+            padding: 4px 8px;
+            background: #334155;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        
+        .conv-btn:hover { background: #475569; }
+        .conv-btn.delete { background: #ef4444; }
+        .conv-btn.delete:hover { background: #dc2626; }
+        
+        .main {
+            flex: 1;
             display: flex;
             flex-direction: column;
         }
@@ -145,18 +233,7 @@ async def home():
             align-items: center;
         }
         
-        .header h1 {
-            font-size: 24px;
-            font-weight: 600;
-        }
-        
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-            color: #94a3b8;
-        }
+        .header h1 { font-size: 24px; font-weight: 600; }
         
         .badge {
             background: #10b981;
@@ -168,6 +245,14 @@ async def home():
             text-transform: uppercase;
         }
         
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #94a3b8;
+        }
+        
         .status-dot {
             width: 8px;
             height: 8px;
@@ -176,10 +261,7 @@ async def home():
             animation: pulse 2s infinite;
         }
         
-        .status-dot.disconnected {
-            background: #ef4444;
-            animation: none;
-        }
+        .status-dot.disconnected { background: #ef4444; animation: none; }
         
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -206,14 +288,8 @@ async def home():
         }
         
         @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         .message.user {
@@ -241,13 +317,9 @@ async def home():
             border: 1px solid #334155;
             border-radius: 12px;
             align-self: flex-start;
-            border-bottom-left-radius: 4px;
         }
         
-        .loading-spinner {
-            display: flex;
-            gap: 5px;
-        }
+        .loading-spinner { display: flex; gap: 5px; }
         
         .loading-dot {
             width: 8px;
@@ -257,29 +329,15 @@ async def home():
             animation: bounce 1.4s infinite ease-in-out both;
         }
         
-        .loading-dot:nth-child(1) {
-            animation-delay: -0.32s;
-        }
-        
-        .loading-dot:nth-child(2) {
-            animation-delay: -0.16s;
-        }
+        .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dot:nth-child(2) { animation-delay: -0.16s; }
         
         @keyframes bounce {
-            0%, 80%, 100% {
-                transform: scale(0);
-                opacity: 0.5;
-            }
-            40% {
-                transform: scale(1);
-                opacity: 1;
-            }
+            0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
+            40% { transform: scale(1); opacity: 1; }
         }
         
-        .loading-text {
-            color: #94a3b8;
-            font-size: 14px;
-        }
+        .loading-text { color: #94a3b8; font-size: 14px; }
         
         .input-area {
             padding: 20px 30px;
@@ -287,10 +345,7 @@ async def home():
             border-top: 1px solid #334155;
         }
         
-        .input-container {
-            display: flex;
-            gap: 15px;
-        }
+        .input-container { display: flex; gap: 15px; }
         
         #input {
             flex: 1;
@@ -304,15 +359,8 @@ async def home():
             font-family: inherit;
         }
         
-        #input:focus {
-            outline: none;
-            border-color: #10b981;
-        }
-        
-        #input:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        #input:focus { outline: none; border-color: #10b981; }
+        #input:disabled { opacity: 0.5; cursor: not-allowed; }
         
         #send {
             padding: 15px 30px;
@@ -326,32 +374,13 @@ async def home():
             transition: all 0.2s;
         }
         
-        #send:hover:not(:disabled) {
-            background: #059669;
-            transform: translateY(-1px);
-        }
+        #send:hover:not(:disabled) { background: #059669; transform: translateY(-1px); }
+        #send:disabled { opacity: 0.5; cursor: not-allowed; }
         
-        #send:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        
-        ::-webkit-scrollbar-track {
-            background: #1e293b;
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: #334155;
-            border-radius: 4px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: #475569;
-        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
         
         .welcome {
             text-align: center;
@@ -359,56 +388,113 @@ async def home():
             padding: 40px;
         }
         
-        .welcome h2 {
-            font-size: 20px;
-            margin-bottom: 10px;
-            color: #f1f5f9;
+        .welcome h2 { font-size: 20px; margin-bottom: 10px; color: #f1f5f9; }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
         }
         
-        .welcome .feature {
-            display: inline-block;
-            margin: 5px;
-            padding: 6px 12px;
+        .modal.show { display: flex; }
+        
+        .modal-content {
             background: #1e293b;
+            padding: 30px;
+            border-radius: 12px;
+            min-width: 400px;
+            border: 1px solid #334155;
+        }
+        
+        .modal-content h3 { margin-bottom: 20px; }
+        
+        .modal-content input {
+            width: 100%;
+            padding: 12px;
+            background: #0f172a;
             border: 1px solid #334155;
             border-radius: 6px;
-            font-size: 12px;
+            color: #f1f5f9;
+            margin-bottom: 20px;
+        }
+        
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+        
+        .modal-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        .modal-btn.cancel {
+            background: #334155;
+            color: white;
+        }
+        
+        .modal-btn.confirm {
+            background: #10b981;
+            color: white;
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>
-            🚀 AI Chat
-            <span class="badge">vLLM Powered</span>
-        </h1>
-        <div class="status">
-            <div class="status-dot disconnected" id="statusDot"></div>
-            <span id="statusText">Connecting...</span>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
         </div>
+        <div class="conversations" id="conversations"></div>
     </div>
     
-    <div class="messages" id="messages">
-        <div class="welcome">
-            <h2>⚡ GPU-Accelerated AI Chat</h2>
-            <p style="margin: 15px 0;">Powered by vLLM for maximum performance</p>
-            <div>
-                <span class="feature">🔥 Fast Inference</span>
-                <span class="feature">💾 Conversation Memory</span>
-                <span class="feature">🎯 High Throughput</span>
+    <div class="main">
+        <div class="header">
+            <h1>🚀 AI Chat <span class="badge">vLLM</span></h1>
+            <div class="status">
+                <div class="status-dot disconnected" id="statusDot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </div>
+        
+        <div class="messages" id="messages">
+            <div class="welcome">
+                <h2>Welcome! 👋</h2>
+                <p>GPU-accelerated AI chat with conversation memory</p>
+            </div>
+        </div>
+        
+        <div class="input-area">
+            <div class="input-container">
+                <textarea 
+                    id="input" 
+                    placeholder="Type your message..." 
+                    rows="2"
+                    onkeydown="handleKeyDown(event)"
+                ></textarea>
+                <button id="send" onclick="sendMessage()">Send</button>
             </div>
         </div>
     </div>
     
-    <div class="input-area">
-        <div class="input-container">
-            <textarea 
-                id="input" 
-                placeholder="Type your message... (Press Enter to send, Shift+Enter for new line)" 
-                rows="2"
-                onkeydown="handleKeyDown(event)"
-            ></textarea>
-            <button id="send" onclick="sendMessage()">Send</button>
+    <div class="modal" id="renameModal">
+        <div class="modal-content">
+            <h3>Rename Conversation</h3>
+            <input type="text" id="renameInput" placeholder="Enter new title...">
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="closeRenameModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="confirmRename()">Rename</button>
+            </div>
         </div>
     </div>
     
@@ -416,25 +502,20 @@ async def home():
         let ws = null;
         let currentConvId = generateId();
         let isGenerating = false;
+        let renameConvId = null;
         
         function generateId() {
-            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0;
+                return (c == 'x' ? r : (r & 0x3 | 0x8)).toString(16);
             });
         }
         
         function updateStatus(connected) {
-            const dot = document.getElementById('statusDot');
-            const text = document.getElementById('statusText');
-            
-            if (connected) {
-                dot.classList.remove('disconnected');
-                text.textContent = 'Connected';
-            } else {
-                dot.classList.add('disconnected');
-                text.textContent = 'Disconnected';
-            }
+            document.getElementById('statusDot').className = 
+                'status-dot ' + (connected ? '' : 'disconnected');
+            document.getElementById('statusText').textContent = 
+                connected ? 'Connected' : 'Disconnected';
         }
         
         function connectWS() {
@@ -447,43 +528,34 @@ async def home():
                 };
                 
                 ws.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        
-                        if (data.type === 'start') {
-                            removeLoading();
-                            addMessage('', 'assistant');
-                        } else if (data.type === 'token') {
-                            appendToLastMessage(data.content);
-                        } else if (data.type === 'done') {
-                            isGenerating = false;
-                            document.getElementById('send').disabled = false;
-                            document.getElementById('input').disabled = false;
-                            document.getElementById('input').focus();
-                        } else if (data.type === 'error') {
-                            removeLoading();
-                            addMessage('⚠️ Error: ' + data.content, 'assistant');
-                            isGenerating = false;
-                            document.getElementById('send').disabled = false;
-                            document.getElementById('input').disabled = false;
-                        }
-                    } catch (e) {
-                        console.error('Error:', e);
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'start') {
+                        removeLoading();
+                        addMessage('', 'assistant');
+                    } else if (data.type === 'token') {
+                        appendToLastMessage(data.content);
+                    } else if (data.type === 'done') {
+                        isGenerating = false;
+                        document.getElementById('send').disabled = false;
+                        document.getElementById('input').disabled = false;
+                        document.getElementById('input').focus();
+                        loadConversations();
+                    } else if (data.type === 'error') {
+                        removeLoading();
+                        addMessage('⚠️ ' + data.content, 'assistant');
+                        isGenerating = false;
+                        document.getElementById('send').disabled = false;
+                        document.getElementById('input').disabled = false;
                     }
                 };
                 
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    updateStatus(false);
-                };
-                
+                ws.onerror = () => updateStatus(false);
                 ws.onclose = () => {
-                    console.log('Disconnected');
                     updateStatus(false);
                     setTimeout(connectWS, 2000);
                 };
             } catch (e) {
-                console.error('Connection error:', e);
                 setTimeout(connectWS, 2000);
             }
         }
@@ -492,12 +564,9 @@ async def home():
             const input = document.getElementById('input');
             const message = input.value.trim();
             
-            if (!message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) {
-                return;
-            }
+            if (!message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
             
-            const welcome = document.querySelector('.welcome');
-            if (welcome) welcome.remove();
+            document.querySelector('.welcome')?.remove();
             
             addMessage(message, 'user');
             input.value = '';
@@ -515,17 +584,15 @@ async def home():
         }
         
         function addMessage(content, role) {
-            const messages = document.getElementById('messages');
             const msg = document.createElement('div');
             msg.className = `message ${role}`;
             msg.textContent = content;
-            messages.appendChild(msg);
-            messages.scrollTop = messages.scrollHeight;
+            document.getElementById('messages').appendChild(msg);
+            scrollToBottom();
             return msg;
         }
         
         function showLoading() {
-            const messages = document.getElementById('messages');
             const loading = document.createElement('div');
             loading.className = 'loading';
             loading.id = 'loadingIndicator';
@@ -537,22 +604,26 @@ async def home():
                 </div>
                 <div class="loading-text">Thinking...</div>
             `;
-            messages.appendChild(loading);
-            messages.scrollTop = messages.scrollHeight;
+            document.getElementById('messages').appendChild(loading);
+            scrollToBottom();
         }
         
         function removeLoading() {
-            const loading = document.getElementById('loadingIndicator');
-            if (loading) loading.remove();
+            document.getElementById('loadingIndicator')?.remove();
         }
         
         function appendToLastMessage(content) {
             const messages = document.getElementById('messages');
             const lastMsg = messages.lastElementChild;
-            if (lastMsg && lastMsg.classList.contains('assistant')) {
+            if (lastMsg?.classList.contains('assistant')) {
                 lastMsg.textContent += content;
-                messages.scrollTop = messages.scrollHeight;
+                scrollToBottom();
             }
+        }
+        
+        function scrollToBottom() {
+            const messages = document.getElementById('messages');
+            messages.scrollTop = messages.scrollHeight;
         }
         
         function handleKeyDown(event) {
@@ -562,16 +633,161 @@ async def home():
             }
         }
         
+        async function loadConversations() {
+            const resp = await fetch('/api/conversations');
+            const data = await resp.json();
+            
+            const container = document.getElementById('conversations');
+            container.innerHTML = '';
+            
+            data.conversations.forEach(conv => {
+                const item = document.createElement('div');
+                item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+                item.innerHTML = `
+                    <div class="conv-title">${conv.title}</div>
+                    <div class="conv-actions">
+                        <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${conv.id}', '${conv.title.replace(/'/g, "\\'")}')">✏️</button>
+                        <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${conv.id}')">🗑️</button>
+                    </div>
+                `;
+                item.onclick = () => loadConversation(conv.id);
+                container.appendChild(item);
+            });
+        }
+        
+        async function loadConversation(id) {
+            currentConvId = id;
+            const resp = await fetch(`/api/conversation/${id}`);
+            const data = await resp.json();
+            
+            const messages = document.getElementById('messages');
+            messages.innerHTML = '';
+            
+            data.messages.forEach(msg => addMessage(msg.content, msg.role));
+            loadConversations();
+        }
+        
+        function newChat() {
+            currentConvId = generateId();
+            document.getElementById('messages').innerHTML = 
+                '<div class="welcome"><h2>New Conversation</h2><p>Start chatting!</p></div>';
+            loadConversations();
+        }
+        
+        function renameConv(id, currentTitle) {
+            renameConvId = id;
+            document.getElementById('renameInput').value = currentTitle;
+            document.getElementById('renameModal').classList.add('show');
+            document.getElementById('renameInput').focus();
+        }
+        
+        function closeRenameModal() {
+            document.getElementById('renameModal').classList.remove('show');
+            renameConvId = null;
+        }
+        
+        async function confirmRename() {
+            const newTitle = document.getElementById('renameInput').value.trim();
+            if (!newTitle || !renameConvId) return;
+            
+            await fetch(`/api/conversation/${renameConvId}/rename`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title: newTitle})
+            });
+            
+            closeRenameModal();
+            loadConversations();
+        }
+        
+        async function deleteConv(id) {
+            if (!confirm('Delete this conversation?')) return;
+            
+            await fetch(`/api/conversation/${id}`, {method: 'DELETE'});
+            
+            if (id === currentConvId) {
+                newChat();
+            } else {
+                loadConversations();
+            }
+        }
+        
         connectWS();
+        loadConversations();
         document.getElementById('input').focus();
     </script>
 </body>
 </html>
     """
 
+@app.get("/api/conversations")
+async def get_conversations():
+    """Get all conversations"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''SELECT id, title, created_at, updated_at 
+                     FROM conversations 
+                     ORDER BY updated_at DESC''')
+        
+        conversations = []
+        for row in c.fetchall():
+            conversations.append({
+                'id': row[0],
+                'title': row[1],
+                'created_at': row[2],
+                'updated_at': row[3]
+            })
+        
+        conn.close()
+        return {'conversations': conversations}
+    except Exception as e:
+        logger.error(f"Error getting conversations: {e}")
+        return {'conversations': []}
+
+@app.get("/api/conversation/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    """Get conversation messages"""
+    try:
+        history = get_conversation_history(conversation_id, limit=100)
+        return {'messages': history}
+    except Exception as e:
+        logger.error(f"Error getting conversation: {e}")
+        return {'messages': []}
+
+@app.post("/api/conversation/{conversation_id}/rename")
+async def rename_conversation(conversation_id: str, request: RenameRequest):
+    """Rename a conversation"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('UPDATE conversations SET title = ? WHERE id = ?',
+                  (request.title, conversation_id))
+        conn.commit()
+        conn.close()
+        return {'status': 'success'}
+    except Exception as e:
+        logger.error(f"Error renaming conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Delete a conversation"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
+        c.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
+        conn.commit()
+        conn.close()
+        return {'status': 'success'}
+    except Exception as e:
+        logger.error(f"Error deleting conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
-    """WebSocket endpoint for streaming chat"""
+    """WebSocket for streaming chat"""
     await websocket.accept()
     logger.info("WebSocket connected")
     
@@ -586,28 +802,28 @@ async def chat_websocket(websocket: WebSocket):
                 await websocket.send_json({'type': 'error', 'content': 'Empty message'})
                 continue
             
-            logger.info(f"Received: {message[:50]}...")
-            
-            # Save user message
-            save_message(conv_id, 'user', message)
-            
-            # Get conversation history
-            history = get_conversation_history(conv_id)
-            
-            # Build messages for vLLM
-            messages = []
-            for msg in history[-10:]:
-                messages.append({'role': msg['role'], 'content': msg['content']})
-            
-            messages.append({'role': 'user', 'content': message})
+            logger.info(f"Received message: {message[:50]}...")
             
             try:
+                # Save user message
+                save_message(conv_id, 'user', message)
+                
+                # Get history
+                history = get_conversation_history(conv_id)
+                
+                # Build messages
+                messages = []
+                for msg in history[-10:]:
+                    messages.append({'role': msg['role'], 'content': msg['content']})
+                messages.append({'role': 'user', 'content': message})
+                
                 # Signal start
                 await websocket.send_json({'type': 'start'})
                 
                 # Stream from vLLM
                 full_response = ""
                 
+                logger.info("Calling vLLM...")
                 stream = client.chat.completions.create(
                     model="meta-llama/Llama-3.2-3B-Instruct",
                     messages=messages,
@@ -621,34 +837,48 @@ async def chat_websocket(websocket: WebSocket):
                         token = chunk.choices[0].delta.content
                         full_response += token
                         
-                        # Send token to client
                         await websocket.send_json({
                             'type': 'token',
                             'content': token
                         })
                 
-                # Save assistant message
+                logger.info(f"Generated {len(full_response)} chars")
+                
+                # Save response
                 save_message(conv_id, 'assistant', full_response)
                 
-                # Signal completion
                 await websocket.send_json({'type': 'done'})
                 
             except Exception as e:
-                logger.error(f"Generation error: {e}")
+                logger.error(f"Generation error: {e}\n{traceback.format_exc()}")
                 await websocket.send_json({
                     'type': 'error',
-                    'content': f'Failed to generate response: {str(e)}'
+                    'content': f'Error: {str(e)}. Check vLLM is running.'
                 })
             
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}\n{traceback.format_exc()}")
 
 @app.get("/health")
 async def health():
     """Health check"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    try:
+        # Test vLLM connection
+        models = client.models.list()
+        return {
+            "status": "healthy",
+            "vllm_connected": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "vllm_connected": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 if __name__ == "__main__":
     import uvicorn
