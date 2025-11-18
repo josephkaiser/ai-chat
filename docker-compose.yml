@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  chat-app:
+    build: .
+    container_name: ai-chat-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - model_cache:/app/data/models
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - HF_HOME=/app/data/models  # Changed from TRANSFORMERS_CACHE
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  model_cache:
+    driver: local
