@@ -1,22 +1,9 @@
 # AI Chat with vLLM - GPU Optimized
 
-Maximum performance AI chat optimized for GPU servers. Uses vLLM for 2-5x better throughput than Ollama.
+AI chat web server that can be run on a single GPU server (e.g. a desktop PC) using vLLM and WebAI. 
 
-## 🚀 Why vLLM?
-
-### Performance Gains
-- **Single user:** 25-40 tokens/sec (vs 20-30 with Ollama)
-- **10 concurrent users:** 15-20 tokens/sec each (vs 2-5 with Ollama)
-- **GPU utilization:** 90-95% (vs 60-70% with Ollama)
-- **Memory efficiency:** Better batching, lower overhead
-- **Throughput:** 2-5x better for multiple users
-
-### Perfect For
-- ✅ GPU servers (RTX 3090, 4090, A100, H100, etc.)
-- ✅ Multiple concurrent users
-- ✅ Production deployments
-- ✅ Maximum performance needed
-- ✅ High request volume
+**Next Steps**
+- Quantization to run larger models / cheaper inference
 
 ## ⚡ Quick Start
 
@@ -31,31 +18,9 @@ docker-compose logs -f vllm
 # http://localhost:8000
 ```
 
-**That's it!** vLLM auto-detects your GPU and optimizes settings.
+vLLM will auto-detect your GPU and optimize its settings accordingly.
 
-## 🎯 Features
-
-- 🔥 **GPU-optimized** - 90%+ GPU utilization
-- ⚡ **Fast streaming** - 25-40 tokens/second
-- 🧠 **Conversation memory** - Remembers everything
-- 📊 **Batching** - Handles multiple users efficiently
-- 💾 **KV cache** - Faster repeated queries
-- 🎨 **Same great UI** - Loading animation, streaming text
-
-## 📊 Performance Comparison
-
-| Scenario | Ollama (GPU) | vLLM (GPU) |
-|----------|--------------|------------|
-| Single user | 20-30 tok/s | 25-40 tok/s |
-| 5 users | 4-6 tok/s each | 15-20 tok/s each |
-| 10 users | 2-3 tok/s each | 12-15 tok/s each |
-| GPU usage | 60-70% | 90-95% |
-| Memory | 4GB | 3.5GB |
-| Batching | Basic | Advanced |
-
-**Bottom line:** vLLM is 2-5x better for concurrent users.
-
-## 🛠️ Configuration
+## Configuration
 
 ### Current Setup (Optimized)
 
@@ -123,7 +88,7 @@ stream = client.chat.completions.create(
 )
 ```
 
-## 🔧 Advanced Features
+## Advanced Features
 
 ### Enable Speculative Decoding (Faster!)
 ```yaml
@@ -168,14 +133,7 @@ Created automatically:
     └── chat.db        # Conversations
 ```
 
-## 🎨 UI Highlights
-
-- Green theme (vs blue) to distinguish from Ollama version
-- "vLLM Powered" badge in header
-- Performance indicators
-- Same great UX: loading animation, streaming
-
-## 💻 System Requirements
+## System Requirements
 
 **Minimum:**
 - GPU: RTX 3060 (12GB VRAM)
@@ -192,7 +150,7 @@ Created automatically:
 - RAM: 64GB+
 - Storage: 50GB+ (for multiple models)
 
-## 🚀 First Run
+## First Run
 
 ```bash
 docker-compose up -d
@@ -213,7 +171,7 @@ Starting server on 0.0.0.0:8000
 **First run:** 2-3 minutes (downloads model)
 **Later runs:** 30-60 seconds (model cached)
 
-## 🔍 Monitoring
+## Monitoring
 
 ### Check GPU Usage
 ```bash
@@ -242,18 +200,7 @@ docker-compose logs -f vllm
 docker-compose logs -f chat-app
 ```
 
-## 🎯 Usage Tips
-
-### Single User
-vLLM will feel slightly faster than Ollama. Main benefit is consistency and lower latency variance.
-
-### Multiple Users
-This is where vLLM shines! Open multiple browser tabs and chat simultaneously - all will stay fast.
-
-### High Volume
-vLLM's batching automatically groups requests for maximum throughput. No configuration needed!
-
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### CUDA Out of Memory
 ```yaml
@@ -287,7 +234,7 @@ ports:
   - "8002:8000"  # Changed from 8001
 ```
 
-## 📊 Benchmarking
+## Benchmarking
 
 ### Test Single User Speed
 ```bash
@@ -311,7 +258,7 @@ ab -n 100 -c 10 -p request.json -T application/json \
   http://localhost:8001/v1/chat/completions
 ```
 
-## 🎓 vLLM vs Ollama Decision
+## vLLM vs Ollama Decision
 
 **Use vLLM (this version) if:**
 - You have a GPU server
@@ -327,7 +274,7 @@ ab -n 100 -c 10 -p request.json -T application/json \
 - You're prototyping
 - You don't need maximum performance
 
-## 🔒 Security
+## Security
 
 For production:
 1. Add authentication to the chat app
@@ -336,7 +283,7 @@ For production:
 4. Rate limiting on endpoints
 5. Monitor GPU usage and set alerts
 
-## 📈 Scaling
+## Scaling
 
 ### Vertical (Bigger GPU)
 - Upgrade to A100/H100
@@ -357,38 +304,4 @@ upstream vllm_backend {
     server vllm2:8000;
     server vllm3:8000;
 }
-```
-
-## ✅ What's Different from Ollama Version
-
-| Feature | Ollama | vLLM |
-|---------|--------|------|
-| **Backend** | Ollama | vLLM |
-| **API** | Ollama API | OpenAI-compatible |
-| **Performance** | Good | Excellent |
-| **GPU usage** | 60-70% | 90-95% |
-| **Batching** | Basic | Advanced |
-| **Concurrent users** | Limited | Optimized |
-| **Setup** | Simple | Simple (GPU required) |
-
-**Same great UI, better engine!**
-
-## 🎉 Summary
-
-This version gives you:
-- ✅ Maximum GPU performance (90%+ utilization)
-- ✅ 2-5x better throughput for concurrent users
-- ✅ Advanced batching and memory management
-- ✅ Same easy setup: `docker-compose up -d`
-- ✅ Same great UI with streaming and animations
-- ✅ Production-ready performance
-
-**For GPU servers, this is the optimal choice.**
-
----
-
-**Ready to max out your GPU? Run it now!** 🚀
-
-```bash
-docker-compose up -d
 ```
