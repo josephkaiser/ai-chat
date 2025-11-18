@@ -46,3 +46,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# keyfile
+*.deb
+cuda-keyring*.deb
