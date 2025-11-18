@@ -50,3 +50,6 @@ Thumbs.db
 # keyfile
 *.deb
 cuda-keyring*.deb
+
+# Backups
+*.backup
