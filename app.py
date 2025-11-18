@@ -825,7 +825,7 @@ async def chat_websocket(websocket: WebSocket):
                 
                 logger.info("Calling vLLM...")
                 stream = client.chat.completions.create(
-                    model="meta-llama/Llama-3.2-3B-Instruct",
+                    model="Qwen/Qwen2.5-Coder-3B-Instruct",
                     messages=messages,
                     stream=True,
                     max_tokens=2048,
