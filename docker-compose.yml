@@ -1,27 +1,20 @@
 version: '3.8'
 
 services:
-  chat-app:
-    build: .
-    container_name: ai-chat-app-enhanced
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
     ports:
-      - "8000:8000"
+      - "11434:11434"
     volumes:
-      - ./data:/app/data
-      - model_cache:/app/data/models
-    environment:
-      - OLLAMA_HOST=http://host.docker.internal:11434
-      - HF_HOME=/app/data/models
-      - PYTHONUNBUFFERED=1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ollama_data:/root/.ollama
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 60s
     # Uncomment for GPU support (requires nvidia-docker)
     # deploy:
     #   resources:
@@ -31,6 +24,45 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
+  chat-app:
+    build: .
+    container_name: ai-chat
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Init container to pull the model on first run
+  model-puller:
+    image: ollama/ollama:latest
+    container_name: model-puller
+    volumes:
+      - ollama_data:/root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    command: >
+      sh -c "
+        echo 'Pulling llama3.2:3b model...';
+        ollama pull llama3.2:3b;
+        echo 'Model ready!';
+      "
+    restart: "no"
+
 volumes:
-  model_cache:
+  ollama_data:
     driver: local
