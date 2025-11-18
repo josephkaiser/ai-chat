@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Chat with Conversation Memory
-Streaming responses with proper loading states
+AI Chat with Conversation Memory - vLLM Backend
+Optimized for GPU servers with better throughput
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -11,8 +11,7 @@ from typing import List, Dict
 import sqlite3
 from datetime import datetime
 import logging
-import asyncio
-import ollama
+from openai import OpenAI
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -20,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DB_PATH = "/app/data/chat.db"
-OLLAMA_HOST = "http://ollama:11434"
+VLLM_HOST = "http://vllm:8000/v1"
 
-app = FastAPI(title="AI Chat")
+app = FastAPI(title="AI Chat with vLLM")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,6 +29,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Initialize OpenAI client for vLLM
+client = OpenAI(
+    base_url=VLLM_HOST,
+    api_key="dummy"  # vLLM doesn't require real API key
 )
 
 # ==================== Database ====================
@@ -114,7 +119,7 @@ async def home():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Chat</title>
+    <title>AI Chat - vLLM</title>
     <style>
         * {
             margin: 0;
@@ -151,6 +156,16 @@ async def home():
             gap: 8px;
             font-size: 14px;
             color: #94a3b8;
+        }
+        
+        .badge {
+            background: #10b981;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
         }
         
         .status-dot {
@@ -238,7 +253,7 @@ async def home():
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: #3b82f6;
+            background: #10b981;
             animation: bounce 1.4s infinite ease-in-out both;
         }
         
@@ -291,7 +306,7 @@ async def home():
         
         #input:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: #10b981;
         }
         
         #input:disabled {
@@ -301,7 +316,7 @@ async def home():
         
         #send {
             padding: 15px 30px;
-            background: #2563eb;
+            background: #10b981;
             color: white;
             border: none;
             border-radius: 8px;
@@ -312,7 +327,7 @@ async def home():
         }
         
         #send:hover:not(:disabled) {
-            background: #1e40af;
+            background: #059669;
             transform: translateY(-1px);
         }
         
@@ -349,11 +364,24 @@ async def home():
             margin-bottom: 10px;
             color: #f1f5f9;
         }
+        
+        .welcome .feature {
+            display: inline-block;
+            margin: 5px;
+            padding: 6px 12px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🤖 AI Chat</h1>
+        <h1>
+            🚀 AI Chat
+            <span class="badge">vLLM Powered</span>
+        </h1>
         <div class="status">
             <div class="status-dot disconnected" id="statusDot"></div>
             <span id="statusText">Connecting...</span>
@@ -362,8 +390,13 @@ async def home():
     
     <div class="messages" id="messages">
         <div class="welcome">
-            <h2>Welcome! 👋</h2>
-            <p>I remember our conversations and learn from you. Ask me anything!</p>
+            <h2>⚡ GPU-Accelerated AI Chat</h2>
+            <p style="margin: 15px 0;">Powered by vLLM for maximum performance</p>
+            <div>
+                <span class="feature">🔥 Fast Inference</span>
+                <span class="feature">💾 Conversation Memory</span>
+                <span class="feature">🎯 High Throughput</span>
+            </div>
         </div>
     </div>
     
@@ -463,23 +496,18 @@ async def home():
                 return;
             }
             
-            // Remove welcome message
             const welcome = document.querySelector('.welcome');
             if (welcome) welcome.remove();
             
-            // Add user message
             addMessage(message, 'user');
             input.value = '';
             
-            // Show loading
             showLoading();
             
-            // Disable input
             isGenerating = true;
             document.getElementById('send').disabled = true;
             document.getElementById('input').disabled = true;
             
-            // Send message
             ws.send(JSON.stringify({
                 message: message,
                 conversation_id: currentConvId
@@ -534,10 +562,7 @@ async def home():
             }
         }
         
-        // Connect on load
         connectWS();
-        
-        // Focus input
         document.getElementById('input').focus();
     </script>
 </body>
@@ -569,31 +594,31 @@ async def chat_websocket(websocket: WebSocket):
             # Get conversation history
             history = get_conversation_history(conv_id)
             
-            # Build messages for AI
+            # Build messages for vLLM
             messages = []
-            for msg in history[-10:]:  # Last 10 messages for context
+            for msg in history[-10:]:
                 messages.append({'role': msg['role'], 'content': msg['content']})
             
             messages.append({'role': 'user', 'content': message})
             
             try:
-                # Signal start of generation
+                # Signal start
                 await websocket.send_json({'type': 'start'})
                 
-                # Connect to Ollama and stream response
-                client = ollama.Client(host=OLLAMA_HOST)
-                
+                # Stream from vLLM
                 full_response = ""
                 
-                stream = client.chat(
-                    model='llama3.2:3b',
+                stream = client.chat.completions.create(
+                    model="meta-llama/Llama-3.2-3B-Instruct",
                     messages=messages,
-                    stream=True
+                    stream=True,
+                    max_tokens=2048,
+                    temperature=0.7,
                 )
                 
                 for chunk in stream:
-                    if chunk and 'message' in chunk and 'content' in chunk['message']:
-                        token = chunk['message']['content']
+                    if chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
                         full_response += token
                         
                         # Send token to client
@@ -612,7 +637,7 @@ async def chat_websocket(websocket: WebSocket):
                 logger.error(f"Generation error: {e}")
                 await websocket.send_json({
                     'type': 'error',
-                    'content': f'Failed to generate response. Make sure Ollama is running with llama3.2:3b model.'
+                    'content': f'Failed to generate response: {str(e)}'
                 })
             
     except WebSocketDisconnect:
@@ -627,6 +652,6 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("🚀 Starting AI Chat...")
+    logger.info("🚀 Starting AI Chat with vLLM...")
     logger.info("📍 http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
