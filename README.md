@@ -5,7 +5,7 @@ AI chat web server that can be run on a single GPU server (e.g. a desktop PC) us
 **Next Steps**
 - Quantization to run larger models / cheaper inference
 
-## ⚡ Quick Start
+## Quick Start
 
 ```bash
 # One command - everything auto-configured for GPU
