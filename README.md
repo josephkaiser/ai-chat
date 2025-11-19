@@ -22,6 +22,23 @@ docker compose logs -f vllm
 
 vLLM will auto-detect your GPU and optimize its settings accordingly.
 
+### Gated Models (Llama, etc.)
+
+Some models like Llama require a Hugging Face token to access. To use these models:
+
+1. Get your Hugging Face token from https://huggingface.co/settings/tokens
+2. Request access to the model (e.g., https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)
+3. Create a `.env` file in the project root (copy from `.env.example`):
+
+```bash
+cp .env.example .env
+# Edit .env and add your token
+```
+
+The `.env` file is gitignored for security. The token will be automatically passed to vLLM containers when switching models.
+
+**Security Note:** Never commit your `.env` file. It's already in `.gitignore`.
+
 ## Configuration
 
 ### Current Setup (Optimized)
