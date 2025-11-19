@@ -186,12 +186,13 @@ from asyncio import Queue
 import uuid
 
 class Job:
-    def __init__(self, prompt: str, model_id: str, websocket: WebSocket, conversation_id: str):
+    def __init__(self, prompt: str, model_id: str, websocket: WebSocket, conversation_id: str, system_prompt: str = None):
         self.id = str(uuid.uuid4())
         self.prompt = prompt
         self.model_id = model_id
         self.websocket = websocket
         self.conversation_id = conversation_id
+        self.system_prompt = system_prompt
         self.created_at = datetime.now()
 
 job_queue = Queue()  # Queue of Job objects
@@ -328,8 +329,12 @@ async def process_single_job(job: Job):
         # Build messages with system prompt for reasoning
         messages = []
         
-        # Enhanced system prompt for deep reasoning with internal validation
-        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. You must think through problems thoroughly and validate your reasoning internally, but only present final, polished conclusions to the user.
+        # Use custom system prompt if provided, otherwise use default
+        if job.system_prompt:
+            system_prompt = job.system_prompt
+        else:
+            # Enhanced system prompt for deep reasoning with internal validation
+            system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. You must think through problems thoroughly and validate your reasoning internally, but only present final, polished conclusions to the user.
 
 CRITICAL REASONING PROTOCOL - INTERNAL REASONING, POLISHED OUTPUT:
 
@@ -1559,36 +1564,60 @@ def generate_css(mode='light'):
             border-right: 3px solid {colors['accent_primary']};
             display: flex;
             flex-direction: column;
-            z-index: 1;
-            transition: width {ANIMATIONS['transition_speed']};
-            position: relative;
-            flex-shrink: 0;
+            z-index: 100;
+            transition: transform {ANIMATIONS['transition_speed']}, width {ANIMATIONS['transition_speed']};
+            position: fixed;
+            top: 0;
+            left: 0;
             height: 100vh;
             overflow: hidden;
+            box-shadow: 2px 0 8px rgba(0, 0, 0, 0.1);
         }}
         
         .sidebar.collapsed {{
             width: {DIMENSIONS['sidebar_collapsed_width']};
+            transform: translateX(0);
+        }}
+        
+        .sidebar:not(.collapsed) {{
+            transform: translateX(0);
+        }}
+        
+        /* Sidebar overlay when open */
+        .sidebar-overlay {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.3);
+            z-index: 99;
+            backdrop-filter: blur(2px);
+            transition: opacity 0.3s ease;
+        }}
+        
+        .sidebar-overlay.show {{
+            display: block;
         }}
         
         .sidebar-toggle {{
             width: 32px;
             height: 32px;
-            background: {colors['btn_secondary']};
-            border: 2px solid {colors['accent_primary']};
+            background: {colors['accent_primary']};
+            border: none;
             border-radius: 4px;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 14px;
-            color: {colors['text_primary']};
+            color: {colors['bg_primary']};
             transition: all {ANIMATIONS['transition_speed']};
         }}
         
         .sidebar-toggle:hover {{
-            background: {colors['btn_secondary_hover']};
-            border-color: {colors['accent_hover']};
+            background: {colors['accent_hover']};
         }}
         
         .sidebar.collapsed .sidebar-content {{
@@ -1605,8 +1634,8 @@ def generate_css(mode='light'):
             width: 40px;
             height: 40px;
             margin: 16px auto 0;
-            background: {COLORS['btn_primary']};
-            color: {COLORS['bg_primary']};
+            background: {colors['btn_primary']};
+            color: {colors['bg_primary']};
             border: none;
             border-radius: 8px;
             cursor: pointer;
@@ -1622,7 +1651,7 @@ def generate_css(mode='light'):
         }}
         
         .new-chat-icon-btn:hover {{
-            background: {COLORS['btn_primary_hover']};
+            background: {colors['btn_primary_hover']};
             transform: scale(1.05);
         }}
         
@@ -1632,15 +1661,16 @@ def generate_css(mode='light'):
         
         .sidebar-header {{
             padding: 20px;
-            border-bottom: 2px solid {colors['accent_primary']};
+            background: {colors['bg_secondary']};
+            border: none;
         }}
         
         .new-chat-btn {{
             width: 100%;
             padding: 12px;
-            background: {colors['btn_secondary']};
-            color: {colors['text_primary']};
-            border: 2px solid {colors['accent_primary']};
+            background: {colors['accent_primary']};
+            color: {colors['bg_primary']};
+            border: none;
             border-radius: 4px;
             font-size: {FONTS['size_base']};
             font-weight: 600;
@@ -1650,22 +1680,22 @@ def generate_css(mode='light'):
         }}
         
         .new-chat-btn:hover {{ 
-            background: {colors['btn_secondary_hover']}; 
-            border-color: {colors['accent_hover']}; 
-            color: {colors['text_primary']};
+            background: {colors['accent_hover']}; 
+            color: {colors['bg_primary']};
             transform: translateX(3px);
         }}
         
         .search-container {{
             padding: 15px;
-            border-bottom: 2px solid {colors['accent_primary']};
+            background: {colors['bg_secondary']};
+            border: none;
         }}
         
         .search-input {{
             width: 100%;
             padding: 10px 14px;
-            background: {colors['bg_primary']};
-            border: 2px solid {colors['bg_tertiary']};
+            background: {colors['bg_tertiary']};
+            border: none;
             border-radius: 4px;
             color: {colors['text_primary']};
             font-size: {FONTS['size_small']};
@@ -1743,35 +1773,73 @@ def generate_css(mode='light'):
         .conv-item {{
             padding: 12px 16px;
             margin-bottom: 8px;
-            background: {colors['bg_primary']};
-            border: 2px solid {colors['bg_tertiary']};
+            background: {colors['bg_tertiary']};
+            border: none;
             border-radius: 4px;
             cursor: pointer;
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             color: {colors['text_primary']};
             transition: all 0.2s;
+            gap: 10px;
         }}
         
         .conv-item:hover {{ 
             background: {colors['btn_secondary']}; 
-            border-color: {colors['accent_primary']};
             color: {colors['text_primary']};
             transform: translateX(3px);
         }}
         .conv-item.active {{ 
             background: {colors['accent_primary']}; 
             color: {colors['bg_primary']}; 
-            border-color: {colors['accent_primary']};
+        }}
+        
+        .conv-content {{
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
         }}
         
         .conv-title {{
-            flex: 1;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
             font-size: {FONTS['size_small']};
+            font-weight: 600;
+        }}
+        
+        .conv-preview {{
+            font-size: 12px;
+            color: {colors['text_secondary']};
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            line-height: 1.4;
+            max-height: 2.8em;
+            transition: all 0.2s;
+        }}
+        
+        .conv-item:hover .conv-preview {{
+            -webkit-line-clamp: 4;
+            max-height: 5.6em;
+            color: {colors['text_primary']};
+        }}
+        
+        .conv-timestamp {{
+            font-size: 11px;
+            color: {colors['text_tertiary']};
+            margin-top: 2px;
+        }}
+        
+        .conv-item.active .conv-preview,
+        .conv-item.active .conv-timestamp {{
+            color: {colors['bg_primary']};
+            opacity: 0.9;
         }}
         
         .conv-actions {{
@@ -1783,17 +1851,17 @@ def generate_css(mode='light'):
         
         .conv-btn {{
             padding: 4px 8px;
-            background: {COLORS['btn_secondary']};
+            background: {colors['btn_secondary']};
             border: none;
             border-radius: 4px;
-            color: white;
+            color: {colors['bg_primary']};
             cursor: pointer;
             font-size: 11px;
         }}
         
-        .conv-btn:hover {{ background: {COLORS['btn_secondary_hover']}; }}
-        .conv-btn.delete {{ background: {COLORS['btn_danger']}; }}
-        .conv-btn.delete:hover {{ background: {COLORS['btn_danger_hover']}; }}
+        .conv-btn:hover {{ background: {colors['btn_secondary_hover']}; }}
+        .conv-btn.delete {{ background: {colors['btn_danger']}; }}
+        .conv-btn.delete:hover {{ background: {colors['btn_danger_hover']}; }}
         
         .main {{
             flex: 1;
@@ -1803,6 +1871,13 @@ def generate_css(mode='light'):
             min-width: 0;
             overflow: hidden;
             height: 100vh;
+            margin-left: 0;
+            transition: margin-left {ANIMATIONS['transition_speed']};
+        }}
+        
+        /* When sidebar is open, add margin to main content */
+        .sidebar:not(.collapsed) ~ .main {{
+            margin-left: 0;
         }}
         
         .header {{
@@ -1840,17 +1915,17 @@ def generate_css(mode='light'):
         
         .model-selector {{
             padding: 8px 12px;
-            background: {COLORS['bg_primary']};
-            border: 1px solid {COLORS['bg_tertiary']};
+            background: {colors['bg_primary']};
+            border: 1px solid {colors['bg_tertiary']};
             border-radius: {DIMENSIONS['border_radius_small']};
-            color: {COLORS['text_primary']};
+            color: {colors['text_primary']};
             font-size: {FONTS['size_small']};
             cursor: pointer;
             min-width: 200px;
         }}
         
-        .model-selector:focus {{ outline: none; border-color: {COLORS['accent_primary']}; }}
-        .model-selector:hover {{ border-color: {COLORS['accent_primary']}; }}
+        .model-selector:focus {{ outline: none; border-color: {colors['accent_primary']}; }}
+        .model-selector:hover {{ border-color: {colors['accent_primary']}; }}
         
         .status {{
             display: flex;
@@ -1916,11 +1991,12 @@ def generate_css(mode='light'):
             flex: 1;
             overflow-y: auto;
             overflow-x: hidden;
-            padding: 20px;
+            padding: 40px 20px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 16px;
             align-items: center;
+            justify-content: flex-start;
             max-width: 100%;
             width: 100%;
             background: {colors['bg_primary']};
@@ -1930,13 +2006,14 @@ def generate_css(mode='light'):
         .message {{
             width: 100%;
             max-width: {DIMENSIONS['message_max_width']};
-            padding: 16px 20px;
-            line-height: 1.6;
+            padding: 20px 24px;
+            line-height: 1.7;
             animation: slideIn {ANIMATIONS['slide_duration']} ease-out;
             font-size: {FONTS['size_base']};
             border: 2px solid {colors['accent_primary']};
-            border-radius: 4px;
+            border-radius: 8px;
             transition: all 0.2s;
+            box-sizing: border-box;
         }}
         
         @keyframes slideIn {{
@@ -1949,27 +2026,28 @@ def generate_css(mode='light'):
             color: {colors['msg_user_text']};
             text-align: right;
             margin-left: auto;
+            margin-right: 0;
             border-color: {colors['accent_primary']};
         }}
         
         .message.user:hover {{
-            border-color: #8194b1;
-            background: #b0c9df;
-            color: #fff4de;
+            border-color: {colors['accent_hover']};
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }}
         
         .message.assistant {{
             background: {colors['msg_assistant_bg']};
             color: {colors['msg_assistant_text']};
             text-align: left;
+            margin-left: 0;
             margin-right: auto;
             position: relative;
-            border-color: #8194b1;
+            border-color: {colors['accent_primary']};
         }}
         
         .message.assistant:hover {{
-            border-color: #b0c9df;
-            box-shadow: 0 4px 12px rgba(129,148,177,0.2);
+            border-color: {colors['accent_hover']};
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }}
         
         .message-timestamp {{
@@ -2258,12 +2336,12 @@ def generate_css(mode='light'):
         }}
         
         .copy-btn:hover {{
-            background: {COLORS['btn_secondary_hover']};
+            background: {colors['btn_secondary_hover']};
         }}
         
         .copy-btn.copied {{
-            background: {COLORS['accent_secondary']};
-            color: white;
+            background: {colors['accent_secondary']};
+            color: {colors['bg_primary']};
         }}
         
         .loading {{
@@ -2274,6 +2352,7 @@ def generate_css(mode='light'):
             width: 100%;
             padding: 8px 0;
             background: transparent;
+            margin-left: 0;
             margin-right: auto;
         }}
         
@@ -2283,7 +2362,7 @@ def generate_css(mode='light'):
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: {COLORS['accent_primary']};
+            background: {colors['accent_primary']};
             animation: bounce 1.4s infinite ease-in-out both;
         }}
         
@@ -2295,10 +2374,10 @@ def generate_css(mode='light'):
             40% {{ transform: scale(1); opacity: 1; }}
         }}
         
-        .loading-text {{ color: {COLORS['text_secondary']}; font-size: {FONTS['size_base']}; }}
+        .loading-text {{ color: {colors['text_secondary']}; font-size: {FONTS['size_base']}; }}
         
         .input-area {{
-            padding: 16px 24px;
+            padding: 20px 24px;
             background: {colors['bg_quaternary']};
             border-top: 3px solid {colors['accent_primary']};
             display: flex;
@@ -2311,13 +2390,13 @@ def generate_css(mode='light'):
         .input-container {{
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             max-width: {DIMENSIONS['message_max_width']};
             width: 100%;
             background: {colors['bg_primary']};
             border: 2px solid {colors['accent_primary']};
-            border-radius: 4px;
-            padding: 12px 16px;
+            border-radius: 8px;
+            padding: 14px 18px;
             cursor: text;
             box-sizing: border-box;
         }}
@@ -2524,7 +2603,7 @@ def generate_css(mode='light'):
         
         .welcome {{
             text-align: center;
-            color: {COLORS['text_secondary']};
+            color: {colors['text_secondary']};
             padding: 60px 40px;
             max-width: {DIMENSIONS['message_max_width']};
             width: 100%;
@@ -2534,12 +2613,13 @@ def generate_css(mode='light'):
         .welcome h2 {{
             font-size: 28px;
             margin-bottom: 12px;
-            color: {COLORS['text_primary']};
+            color: {colors['text_primary']};
             font-weight: 500;
         }}
         
         .welcome p {{
             font-size: {FONTS['size_base']};
+            color: {colors['text_secondary']};
             color: {COLORS['text_secondary']};
         }}
         
@@ -3300,8 +3380,8 @@ def generate_css(mode='light'):
             }}
             
             .sidebar {{
-                width: 66.67%;
-                max-width: 66.67%;
+                width: 280px;
+                max-width: 85%;
                 height: 100vh;
                 border-right: 3px solid {colors['accent_primary']};
                 border-bottom: none;
@@ -3319,7 +3399,7 @@ def generate_css(mode='light'):
             }}
             
             .sidebar.collapsed {{
-                width: 66.67%;
+                width: 280px;
                 transform: translateX(-100%);
             }}
             
@@ -3333,10 +3413,10 @@ def generate_css(mode='light'):
                 bottom: 0;
                 background: rgba(0, 0, 0, 0.5);
                 z-index: 99;
+                backdrop-filter: blur(2px);
             }}
             
-            .sidebar.show ~ .sidebar-overlay,
-            .sidebar.show + .main::before {{
+            .sidebar-overlay.show {{
                 display: block;
             }}
             
@@ -3344,6 +3424,14 @@ def generate_css(mode='light'):
                 width: 100%;
                 margin-left: 0;
                 padding-top: 70px;
+            }}
+            
+            .messages {{
+                padding: 20px 15px;
+            }}
+            
+            .message {{
+                max-width: 95%;
             }}
             
             .header {{
@@ -3661,6 +3749,8 @@ async def home(mode: str = "light"):
         </div>
     </div>
     
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+    
     <div class="main">
         <div class="header">
             <div class="header-left">
@@ -3740,6 +3830,10 @@ async def home(mode: str = "light"):
                 <span class="settings-label">Model</span>
                 <span id="currentModelName" class="settings-model-name">Loading...</span>
             </button>
+            <button class="settings-menu-item" onclick="openSystemPromptEditor()" title="Edit System Prompt">
+                <span class="settings-icon">⚙️</span>
+                <span class="settings-label">System Prompt</span>
+            </button>
         </div>
         <div class="model-dropdown settings-dropdown" id="modelDropdown" style="display: none;">
             {''.join([f'''
@@ -3809,6 +3903,22 @@ async def home(mode: str = "light"):
         </div>
     </div>
     
+    <!-- System Prompt Editor Modal -->
+    <div class="modal" id="systemPromptModal">
+        <div class="modal-content" style="max-width: 800px; max-height: 80vh; display: flex; flex-direction: column;">
+            <h3>Edit System Prompt</h3>
+            <textarea id="systemPromptInput" placeholder="Enter system prompt..." style="flex: 1; min-height: 300px; padding: 12px; font-family: monospace; font-size: 13px; resize: vertical; background: {COLORS['bg_tertiary']}; color: {COLORS['text_primary']}; border: none; border-radius: 4px; margin-bottom: 15px;"></textarea>
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
+                <button class="modal-btn" onclick="resetSystemPrompt()" style="background: {COLORS['btn_secondary']}; color: {COLORS['text_primary']};">Reset to Default</button>
+                <span style="font-size: 12px; color: {COLORS['text_secondary']}; flex: 1;">Leave empty to use default prompt</span>
+            </div>
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="closeSystemPromptModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="saveSystemPrompt()">Save</button>
+            </div>
+        </div>
+    </div>
+    
     <script>
         let ws = null;
         let logWs = null;
@@ -3866,23 +3976,34 @@ async def home(mode: str = "light"):
                 modelAvailable = true;
                 document.getElementById('input').disabled = false;
                 document.getElementById('send').disabled = false;
+                document.getElementById('send').title = 'Send message';
                 progressContainer.style.display = 'none';
             }} else if (status === 'booting' || status === 'loading') {{
                 modelAvailable = false;
-                document.getElementById('input').disabled = true;
+                // Allow typing but disable sending
+                document.getElementById('input').disabled = false;
                 document.getElementById('send').disabled = true;
+                document.getElementById('send').title = 'Model is loading... Please wait';
                 progressContainer.style.display = 'block';
             }} else {{
                 modelAvailable = false;
-                document.getElementById('input').disabled = true;
+                // Allow typing but disable sending
+                document.getElementById('input').disabled = false;
                 document.getElementById('send').disabled = true;
+                document.getElementById('send').title = 'Model not available';
                 progressContainer.style.display = 'none';
             }}
             
             // Update status display
             if (status === 'booting' || status === 'loading') {{
                 statusDot.className = 'status-dot booting';
-                statusText.textContent = message || 'Loading model...';
+                // Only update message if a new one is provided
+                if (message !== null && message !== undefined) {{
+                    statusText.textContent = message;
+                }} else if (statusText.textContent === '') {{
+                    // Only set default if message is empty
+                    statusText.textContent = 'Loading model...';
+                }}
                 
                 // Update progress bar
                 if (progress !== null && progress !== undefined) {{
@@ -3904,26 +4025,131 @@ async def home(mode: str = "light"):
             }}
         }}
         
-        // Model loading progress polling
+        // Model loading progress polling with learning
         let modelProgressInterval = null;
+        let loadingStartTime = null;
+        let lastProgress = 0;
+        let progressHistory = [];
+        let milestoneTimes = {{}};
+        let currentMilestone = null;
+        let lastDisplayedSeconds = -1;
+        
+        // Load learned loading times from localStorage
+        function loadLearnedTimes() {{
+            try {{
+                const stored = localStorage.getItem('modelLoadingTimes');
+                if (stored) {{
+                    return JSON.parse(stored);
+                }}
+            }} catch (e) {{
+                console.warn('Failed to load learned times:', e);
+            }}
+            return {{
+                averageTotalTime: 120000, // 2 minutes default
+                milestones: {{
+                    'starting': 5000,    // 5s to start
+                    'weights': 45000,    // 45s to load weights
+                    'initializing': 80000, // 80s to initialize
+                    'server': 110000,     // 110s to start server
+                    'ready': 120000       // 120s total
+                }},
+                samples: 0
+            }};
+        }}
+        
+        // Save learned loading times to localStorage
+        function saveLearnedTimes(times) {{
+            try {{
+                localStorage.setItem('modelLoadingTimes', JSON.stringify(times));
+            }} catch (e) {{
+                console.warn('Failed to save learned times:', e);
+            }}
+        }}
+        
+        // Record a completed loading session
+        function recordLoadingTime(totalTime, milestones) {{
+            const learned = loadLearnedTimes();
+            const alpha = 0.3; // Learning rate (exponential moving average)
+            
+            // Update average total time
+            if (learned.samples === 0) {{
+                learned.averageTotalTime = totalTime;
+            }} else {{
+                learned.averageTotalTime = alpha * totalTime + (1 - alpha) * learned.averageTotalTime;
+            }}
+            
+            // Update milestone times
+            for (const [milestone, time] of Object.entries(milestones)) {{
+                if (!learned.milestones[milestone]) {{
+                    learned.milestones[milestone] = time;
+                }} else {{
+                    learned.milestones[milestone] = alpha * time + (1 - alpha) * learned.milestones[milestone];
+                }}
+            }}
+            
+            learned.samples++;
+            saveLearnedTimes(learned);
+            console.log(`📊 Updated loading time estimates (sample ${{learned.samples}}): ${{Math.round(learned.averageTotalTime/1000)}}s average`);
+        }}
+        
+        // Estimate progress based on learned times and elapsed time
+        function estimateProgress(elapsedMs, currentMilestone = null) {{
+            const learned = loadLearnedTimes();
+            const avgTotal = learned.averageTotalTime;
+            
+            // If we have a milestone, use it for more accurate estimate
+            if (currentMilestone && learned.milestones[currentMilestone]) {{
+                const milestoneTime = learned.milestones[currentMilestone];
+                const remainingTime = Math.max(avgTotal - milestoneTime, 10000); // At least 10s remaining
+                const progressFromMilestone = Math.min(95, (milestoneTime / avgTotal) * 100);
+                const progressFromElapsed = Math.min(5, (elapsedMs - milestoneTime) / remainingTime * 5);
+                return Math.min(95, progressFromMilestone + progressFromElapsed);
+            }}
+            
+            // Time-based estimate with smoothing
+            const baseProgress = Math.min(95, (elapsedMs / avgTotal) * 100);
+            
+            // Apply smoothing to prevent bouncing - use exponential moving average
+            if (lastProgress > 0) {{
+                // Only allow progress to increase or stay the same (with small tolerance for rounding)
+                const smoothedProgress = Math.max(lastProgress - 1, baseProgress * 0.7 + lastProgress * 0.3);
+                return Math.min(95, smoothedProgress);
+            }}
+            
+            return Math.min(95, baseProgress);
+        }}
         
         function startModelProgressPolling() {{
             if (modelProgressInterval) {{
                 clearInterval(modelProgressInterval);
             }}
             
+            loadingStartTime = Date.now();
+            lastProgress = 0;
+            progressHistory = [];
+            currentMilestone = null;
+            milestoneTimes = {{}};
+            lastDisplayedSeconds = -1;
+            
             modelProgressInterval = setInterval(async () => {{
                 try {{
+                    const elapsed = Date.now() - loadingStartTime;
+                    
                     // Check health endpoint
                     const healthResponse = await fetch('/health');
                     const health = await healthResponse.json();
                     
                     if (health.model_available) {{
+                        // Model is ready! Record the loading time
+                        const totalTime = Date.now() - loadingStartTime;
+                        recordLoadingTime(totalTime, milestoneTimes);
+                        
                         updateStatus(true);
                         if (modelProgressInterval) {{
                             clearInterval(modelProgressInterval);
                             modelProgressInterval = null;
                         }}
+                        loadingStartTime = null;
                         return;
                     }}
                     
@@ -3934,11 +4160,21 @@ async def home(mode: str = "light"):
                     if (statusData.status && statusData.status.progress !== undefined) {{
                         const progress = statusData.status.progress;
                         const message = statusData.status.message || 'Loading model...';
+                        lastProgress = progress;
                         updateStatus('loading', progress, message);
                     }} else {{
-                        // Estimate progress based on time (rough estimate)
-                        // This is a fallback if no explicit progress is available
-                        updateStatus('loading', null, 'Loading model...');
+                        // Use learned time-based estimation
+                        const estimatedProgress = Math.round(estimateProgress(elapsed, currentMilestone));
+                        lastProgress = estimatedProgress;
+                        // Round to nearest 5 seconds and only update message every 5 seconds
+                        const elapsedSeconds = Math.round(elapsed / 5000) * 5;
+                        if (elapsedSeconds !== lastDisplayedSeconds) {{
+                            lastDisplayedSeconds = elapsedSeconds;
+                            updateStatus('loading', estimatedProgress, `Loading model... (${{elapsedSeconds}}s)`);
+                        }} else {{
+                            // Just update progress without changing message
+                            updateStatus('loading', estimatedProgress, null);
+                        }}
                     }}
                 }} catch (e) {{
                     // Silently fail - don't spam console
@@ -3969,9 +4205,7 @@ async def home(mode: str = "light"):
                             updateStatus('loading', null, health.message || 'Loading model...');
                             // Start polling for progress
                             startModelProgressPolling();
-                            // Disable input when model not available
-                            document.getElementById('input').disabled = true;
-                            document.getElementById('send').disabled = true;
+                            // updateStatus will handle disabling send button
                         }}
                     }}).catch((error) => {{
                         console.error('Health check failed:', error);
@@ -3979,8 +4213,7 @@ async def home(mode: str = "light"):
                         modelAvailable = false;
                         updateStatus('loading', null, 'Checking model status...');
                         startModelProgressPolling();
-                        document.getElementById('input').disabled = true;
-                        document.getElementById('send').disabled = true;
+                        // updateStatus will handle disabling send button
                     }});
                 }};
                 
@@ -3994,8 +4227,11 @@ async def home(mode: str = "light"):
                         appendToLastMessage(data.content);
                     }} else if (data.type === 'done') {{
                         isGenerating = false;
-                        document.getElementById('send').disabled = false;
+                        // Re-enable input and send if model is available
                         document.getElementById('input').disabled = false;
+                        if (modelAvailable) {{
+                            document.getElementById('send').disabled = false;
+                        }}
                         document.getElementById('input').focus();
                         loadConversations();
                         // Wait a bit for marked to be ready, then render
@@ -4006,8 +4242,11 @@ async def home(mode: str = "light"):
                         removeLoading();
                         addMessage('⚠️ ' + data.content, 'assistant');
                         isGenerating = false;
-                        document.getElementById('send').disabled = false;
+                        // Re-enable input and send if model is available
                         document.getElementById('input').disabled = false;
+                        if (modelAvailable) {{
+                            document.getElementById('send').disabled = false;
+                        }}
                     }}
                 }};
                 
@@ -4015,24 +4254,21 @@ async def home(mode: str = "light"):
                     console.error('WebSocket error:', error);
                     modelAvailable = false;
                     updateStatus(false);
-                    document.getElementById('input').disabled = true;
-                    document.getElementById('send').disabled = true;
+                    // updateStatus will handle disabling send button, input stays enabled
                 }};
                 
                 ws.onclose = (event) => {{
                     console.log('WebSocket closed:', event.code, event.reason);
                     modelAvailable = false;
                     updateStatus(false);
-                    document.getElementById('input').disabled = true;
-                    document.getElementById('send').disabled = true;
+                    // updateStatus will handle disabling send button, input stays enabled
                     setTimeout(connectWS, 2000);
                 }};
             }} catch (e) {{
                 console.error('Failed to create WebSocket:', e);
                 modelAvailable = false;
                 updateStatus(false);
-                document.getElementById('input').disabled = true;
-                document.getElementById('send').disabled = true;
+                // updateStatus will handle disabling send button, input stays enabled
                 setTimeout(connectWS, 2000);
             }}
         }}
@@ -4060,41 +4296,58 @@ async def home(mode: str = "light"):
                         logContent.textContent += data.content;
                         logContent.scrollTop = logContent.scrollHeight;
                         
-                        // Check for model loading messages and estimate progress
+                        // Check for model loading messages and track milestones
                         const logText = data.content.toLowerCase();
-                        let estimatedProgress = null;
+                        let milestone = null;
                         let progressMessage = 'Loading model...';
                         
-                        if (logText.includes('starting to load model') || 
-                            logText.includes('loading model') ||
-                            (logText.includes('model_runner') && logText.includes('load'))) {{
-                            estimatedProgress = 20;
+                        if ((logText.includes('starting to load model') || 
+                             logText.includes('loading model') ||
+                             (logText.includes('model_runner') && logText.includes('load'))) && 
+                            !loadingStartTime) {{
+                            // Start tracking
+                            loadingStartTime = Date.now();
+                            milestone = 'starting';
+                            milestoneTimes = {{starting: Date.now() - loadingStartTime}};
                             progressMessage = 'Starting to load model...';
-                            updateStatus('loading', estimatedProgress, progressMessage);
                             if (!modelProgressInterval) {{
                                 startModelProgressPolling();
                             }}
                         }} else if (logText.includes('weight_utils') && logText.includes('model weights')) {{
-                            estimatedProgress = 40;
+                            milestone = 'weights';
+                            if (loadingStartTime && !milestoneTimes.weights) {{
+                                milestoneTimes.weights = Date.now() - loadingStartTime;
+                            }}
                             progressMessage = 'Loading model weights...';
-                            updateStatus('loading', estimatedProgress, progressMessage);
                         }} else if (logText.includes('initializing') || logText.includes('initialization')) {{
-                            estimatedProgress = 60;
+                            milestone = 'initializing';
+                            if (loadingStartTime && !milestoneTimes.initializing) {{
+                                milestoneTimes.initializing = Date.now() - loadingStartTime;
+                            }}
                             progressMessage = 'Initializing model...';
-                            updateStatus('loading', estimatedProgress, progressMessage);
                         }} else if (logText.includes('uvicorn.run') || logText.includes('application startup complete')) {{
-                            estimatedProgress = 90;
+                            milestone = 'server';
+                            if (loadingStartTime && !milestoneTimes.server) {{
+                                milestoneTimes.server = Date.now() - loadingStartTime;
+                            }}
                             progressMessage = 'Starting API server...';
-                            updateStatus('loading', estimatedProgress, progressMessage);
                         }} else if (logText.includes('api server version')) {{
-                            estimatedProgress = 95;
+                            milestone = 'ready';
+                            if (loadingStartTime && !milestoneTimes.ready) {{
+                                milestoneTimes.ready = Date.now() - loadingStartTime;
+                            }}
                             progressMessage = 'API server ready, verifying...';
-                            updateStatus('loading', estimatedProgress, progressMessage);
                             // Wait a bit then check if actually connected
                             setTimeout(() => {{
                                 // Check health to see if model is actually ready
                                 fetch('/health').then(r => r.json()).then(health => {{
                                     if (health.model_available) {{
+                                        // Record successful loading
+                                        if (loadingStartTime) {{
+                                            const totalTime = Date.now() - loadingStartTime;
+                                            recordLoadingTime(totalTime, milestoneTimes);
+                                            loadingStartTime = null;
+                                        }}
                                         updateStatus(true);
                                         if (modelProgressInterval) {{
                                             clearInterval(modelProgressInterval);
@@ -4103,6 +4356,23 @@ async def home(mode: str = "light"):
                                     }}
                                 }}).catch(() => {{}});
                             }}, 2000);
+                        }}
+                        
+                        // Update progress with milestone-based estimation if we have a milestone
+                        if (milestone && loadingStartTime) {{
+                            currentMilestone = milestone;
+                            const elapsed = Date.now() - loadingStartTime;
+                            const estimatedProgress = Math.round(estimateProgress(elapsed, milestone));
+                            lastProgress = estimatedProgress;
+                            // Round to nearest 5 seconds and only update message every 5 seconds
+                            const elapsedSeconds = Math.round(elapsed / 5000) * 5;
+                            if (elapsedSeconds !== lastDisplayedSeconds) {{
+                                lastDisplayedSeconds = elapsedSeconds;
+                                updateStatus('loading', estimatedProgress, `${{progressMessage}} (${{elapsedSeconds}}s)`);
+                            }} else {{
+                                // Just update progress without changing message
+                                updateStatus('loading', estimatedProgress, null);
+                            }}
                         }}
                     }}
                 }};
@@ -4140,30 +4410,60 @@ async def home(mode: str = "light"):
         function toggleSidebar() {{
             const sidebar = document.getElementById('sidebar');
             const toggle = document.getElementById('sidebarToggle');
+            const overlay = document.getElementById('sidebarOverlay');
+            
             // On mobile, toggle show/hide instead of collapse
             if (window.innerWidth <= 768) {{
                 sidebar.classList.toggle('show');
-                // Add/remove overlay
-                let overlay = document.querySelector('.sidebar-overlay');
-                if (!overlay) {{
-                    overlay = document.createElement('div');
-                    overlay.className = 'sidebar-overlay';
-                    overlay.onclick = () => {{
-                        sidebar.classList.remove('show');
-                        overlay.remove();
-                    }};
-                    document.body.appendChild(overlay);
-                }}
                 if (sidebar.classList.contains('show')) {{
-                    overlay.style.display = 'block';
+                    if (overlay) {{
+                        overlay.style.display = 'block';
+                        overlay.classList.add('show');
+                    }}
                 }} else {{
-                    overlay.style.display = 'none';
+                    if (overlay) {{
+                        overlay.style.display = 'none';
+                        overlay.classList.remove('show');
+                    }}
                 }}
             }} else {{
+                // Desktop: toggle collapsed state
                 sidebar.classList.toggle('collapsed');
-                toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
+                if (toggle) {{
+                    toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
+                }}
+                
+                // Show/hide overlay when sidebar is open (not collapsed)
+                if (sidebar.classList.contains('collapsed')) {{
+                    if (overlay) {{
+                        overlay.style.display = 'none';
+                        overlay.classList.remove('show');
+                    }}
+                }} else {{
+                    if (overlay) {{
+                        overlay.style.display = 'block';
+                        overlay.classList.add('show');
+                    }}
+                }}
             }}
         }}
+        
+        // Initialize sidebar state - start collapsed on desktop
+        document.addEventListener('DOMContentLoaded', function() {{
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebarOverlay');
+            const toggle = document.getElementById('sidebarToggle');
+            
+            // Start with sidebar collapsed on desktop (hidden/overlaying)
+            if (window.innerWidth > 768) {{
+                sidebar.classList.add('collapsed');
+                if (overlay) {{
+                    overlay.style.display = 'none';
+                    overlay.classList.remove('show');
+                }}
+                if (toggle) toggle.textContent = '📕';
+            }}
+        }});
         
         function toggleLogViewer() {{
             const viewer = document.getElementById('logViewer');
@@ -4537,10 +4837,14 @@ async def home(mode: str = "light"):
             document.getElementById('send').disabled = true;
             document.getElementById('input').disabled = true;
             
+            // Get custom system prompt from localStorage
+            const customSystemPrompt = localStorage.getItem('customSystemPrompt') || '';
+            
             ws.send(JSON.stringify({{
                 message: message,
                 conversation_id: currentConvId,
-                model: currentModel
+                model: currentModel,
+                system_prompt: customSystemPrompt || null
             }}));
         }}
         
@@ -4593,6 +4897,23 @@ async def home(mode: str = "light"):
                     return `${{dateStr}} ${{timeStr}}`;
                 }}
             }}
+        }}
+        
+        function formatFullTimestamp(isoString) {{
+            const date = new Date(isoString);
+            const dateStr = date.toLocaleDateString('en-US', {{ 
+                weekday: 'short', 
+                year: 'numeric', 
+                month: 'short', 
+                day: 'numeric' 
+            }});
+            const timeStr = date.toLocaleTimeString('en-US', {{ 
+                hour: 'numeric', 
+                minute: '2-digit', 
+                second: '2-digit',
+                hour12: true 
+            }});
+            return `${{dateStr}} ${{timeStr}}`;
         }}
         
         function downloadAsJSON(content, filename = 'chat-response.json') {{
@@ -4871,20 +5192,42 @@ async def home(mode: str = "light"):
                 const item = document.createElement('div');
                 item.className = 'conv-item conversation-item' + (conv.id === currentConvId ? ' active' : '');
                 
+                // Format timestamp for display
+                const lastTimestamp = conv.last_message_timestamp || conv.updated_at;
+                const timestampDate = new Date(lastTimestamp);
+                const formattedTimestamp = formatFullTimestamp(lastTimestamp);
+                
+                // Get preview text (strip markdown, limit length)
+                let previewText = conv.last_message || '';
+                // Remove markdown formatting for preview
+                previewText = previewText.replace(/[#*_`\[\]]/g, '').replace(/\n/g, ' ').trim();
+                const maxPreviewLength = 150; // Will show more on hover
+                const shortPreview = previewText.length > maxPreviewLength 
+                    ? previewText.substring(0, maxPreviewLength) + '...' 
+                    : previewText;
+                
                 // Desktop: show buttons on hover, Mobile: use swipe gestures
                 if (window.innerWidth <= 768) {{
                     // Mobile: swipe actions
                     item.innerHTML = `
-                        <div class="conv-title">${{conv.title}}</div>
+                        <div class="conv-content">
+                            <div class="conv-title">${{conv.title}}</div>
+                            <div class="conv-preview">${{shortPreview || 'No messages yet'}}</div>
+                            <div class="conv-timestamp">${{formattedTimestamp}}</div>
+                        </div>
                         <div class="swipe-actions">
                             <button onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">Rename</button>
                             <button onclick="event.stopPropagation(); deleteConv('${{conv.id}}')" style="background: #fd7589;">Delete</button>
                         </div>
                     `;
                 }} else {{
-                    // Desktop: hover buttons
+                    // Desktop: hover buttons with expanded preview
                     item.innerHTML = `
-                        <div class="conv-title">${{conv.title}}</div>
+                        <div class="conv-content">
+                            <div class="conv-title">${{conv.title}}</div>
+                            <div class="conv-preview" data-full-preview="${{previewText.replace(/"/g, '&quot;')}}">${{shortPreview || 'No messages yet'}}</div>
+                            <div class="conv-timestamp">${{formattedTimestamp}}</div>
+                        </div>
                         <div class="conv-actions">
                             <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">✏️</button>
                             <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${{conv.id}}')">🗑️</button>
@@ -4984,6 +5327,44 @@ async def home(mode: str = "light"):
                 body: JSON.stringify({{title: newTitle}})
             }});
             
+            loadConversations();
+            closeRenameModal();
+        }}
+        
+        function openSystemPromptEditor() {{
+            const modal = document.getElementById('systemPromptModal');
+            const textarea = document.getElementById('systemPromptInput');
+            // Load current custom prompt or default
+            const savedPrompt = localStorage.getItem('customSystemPrompt') || '';
+            textarea.value = savedPrompt;
+            modal.classList.add('show');
+            textarea.focus();
+            // Close settings menu
+            document.getElementById('settingsMenuContent').classList.remove('show');
+        }}
+        
+        function closeSystemPromptModal() {{
+            document.getElementById('systemPromptModal').classList.remove('show');
+        }}
+        
+        function saveSystemPrompt() {{
+            const textarea = document.getElementById('systemPromptInput');
+            const prompt = textarea.value.trim();
+            
+            if (prompt) {{
+                localStorage.setItem('customSystemPrompt', prompt);
+            }} else {{
+                localStorage.removeItem('customSystemPrompt');
+            }}
+            
+            closeSystemPromptModal();
+        }}
+        
+        function resetSystemPrompt() {{
+            document.getElementById('systemPromptInput').value = '';
+            localStorage.removeItem('customSystemPrompt');
+        }}
+            
             closeRenameModal();
             loadConversations();
         }}
@@ -5014,6 +5395,13 @@ async def home(mode: str = "light"):
                 const renameModal = document.getElementById('renameModal');
                 if (renameModal && renameModal.classList.contains('show')) {{
                     closeRenameModal();
+                    return;
+                }}
+                
+                // Close system prompt modal if open
+                const systemPromptModal = document.getElementById('systemPromptModal');
+                if (systemPromptModal && systemPromptModal.classList.contains('show')) {{
+                    closeSystemPromptModal();
                     return;
                 }}
                 
@@ -5204,16 +5592,14 @@ async def home(mode: str = "light"):
                     modelAvailable = false;
                     updateStatus('loading', null, health.message || 'Loading model...');
                     startModelProgressPolling();
-                    document.getElementById('input').disabled = true;
-                    document.getElementById('send').disabled = true;
+                    // updateStatus will handle disabling send button, input stays enabled
                 }}
             }}).catch((error) => {{
                 console.error('Initial health check failed:', error);
                 modelAvailable = false;
                 updateStatus('loading', null, 'Checking connection...');
                 startModelProgressPolling();
-                document.getElementById('input').disabled = true;
-                document.getElementById('send').disabled = true;
+                // updateStatus will handle disabling send button, input stays enabled
             }});
         }}, 1000);
         
@@ -5312,13 +5698,19 @@ async def select_model_endpoint(request: SelectModelRequest):
 
 @app.get("/api/conversations")
 async def get_conversations():
-    """Get all conversations"""
+    """Get all conversations with last message preview"""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute('''SELECT id, title, created_at, updated_at 
-                     FROM conversations 
-                     ORDER BY updated_at DESC''')
+        c.execute('''SELECT c.id, c.title, c.created_at, c.updated_at,
+                     m.content, m.timestamp
+                     FROM conversations c
+                     LEFT JOIN (
+                         SELECT conversation_id, content, timestamp,
+                                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY timestamp DESC) as rn
+                         FROM messages
+                     ) m ON c.id = m.conversation_id AND m.rn = 1
+                     ORDER BY c.updated_at DESC''')
         
         conversations = []
         for row in c.fetchall():
@@ -5326,7 +5718,9 @@ async def get_conversations():
                 'id': row[0],
                 'title': row[1],
                 'created_at': row[2],
-                'updated_at': row[3]
+                'updated_at': row[3],
+                'last_message': row[4] if row[4] else '',
+                'last_message_timestamp': row[5] if row[5] else row[3]  # Fallback to updated_at if no messages
             })
         
         conn.close()
@@ -5658,6 +6052,9 @@ async def chat_websocket(websocket: WebSocket):
             # Get selected model for this conversation (or default)
             model_id = selected_models.get(conv_id, DEFAULT_MODEL)
             
+            # Get custom system prompt if provided
+            custom_system_prompt = data.get('system_prompt')
+            
             logger.info(f"📥 Queuing message for model: {model_id} (conv: {conv_id})")
                 
             # Create job and add to queue
@@ -5665,7 +6062,8 @@ async def chat_websocket(websocket: WebSocket):
                 prompt=message,
                 model_id=model_id,
                 websocket=websocket,
-                conversation_id=conv_id
+                conversation_id=conv_id,
+                system_prompt=custom_system_prompt
             )
             
             await job_queue.put(job)
