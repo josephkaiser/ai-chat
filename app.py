@@ -91,6 +91,13 @@ VLLM_CONTAINER = os.getenv("VLLM_CONTAINER", "vllm")
 HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hugging Face token for gated models
 VLLM_PORT = 8001  # Host port for vLLM
 
+# Log HF_TOKEN status (but not the actual token)
+if HF_TOKEN:
+    logger.info(f"✓ Hugging Face token loaded ({len(HF_TOKEN)} chars)")
+else:
+    logger.warning("⚠️ No HF_TOKEN found. Gated models (like Llama) will not work.")
+    logger.warning("   Create a .env file with: HF_TOKEN=your_token_here")
+
 # Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
     {
@@ -166,6 +173,155 @@ model_switch_status = {"status": "ready", "message": "", "progress": 0}
 model_switch_history = []  # List of dicts: {"timestamp": str, "from": str, "to": str, "status": str, "duration": float}
 model_containers = {}  # Cache of container names per model: {model_id: container_name}
 
+# Job queue system for efficient model switching
+from collections import deque
+from asyncio import Queue
+import uuid
+
+class Job:
+    def __init__(self, prompt: str, model_id: str, websocket: WebSocket, conversation_id: str):
+        self.id = str(uuid.uuid4())
+        self.prompt = prompt
+        self.model_id = model_id
+        self.websocket = websocket
+        self.conversation_id = conversation_id
+        self.created_at = datetime.now()
+
+job_queue = Queue()  # Queue of Job objects
+queue_processor_running = False
+queue_processor_task = None
+selected_models = {}  # Store selected model per conversation: {conversation_id: model_id}
+
+async def process_job_queue():
+    """Process jobs from the queue, batching by model to minimize switches"""
+    global queue_processor_running, current_model, client
+    
+    queue_processor_running = True
+    logger.info("🚀 Job queue processor started")
+    
+    while True:
+        try:
+            # Collect jobs, grouping by model
+            jobs_by_model = {}
+            batch_timeout = 2.0  # Wait up to 2 seconds to batch requests
+            
+            # Get first job
+            try:
+                first_job = await asyncio.wait_for(job_queue.get(), timeout=batch_timeout)
+                jobs_by_model[first_job.model_id] = [first_job]
+            except asyncio.TimeoutError:
+                continue  # No jobs, wait again
+            
+            # Collect more jobs for the same model (quick batch)
+            start_time = asyncio.get_event_loop().time()
+            while (asyncio.get_event_loop().time() - start_time) < 0.5:  # 500ms batching window
+                try:
+                    job = await asyncio.wait_for(job_queue.get(), timeout=0.1)
+                    if job.model_id not in jobs_by_model:
+                        jobs_by_model[job.model_id] = []
+                    jobs_by_model[job.model_id].append(job)
+                except asyncio.TimeoutError:
+                    break
+            
+            # Process each model's batch
+            for model_id, jobs in jobs_by_model.items():
+                logger.info(f"📦 Processing {len(jobs)} job(s) for model: {model_id}")
+                
+                # Switch model if needed
+                if model_id != current_model:
+                    logger.info(f"🔄 Switching to model: {model_id} (current: {current_model})")
+                    await switch_model(model_id)
+                
+                # Process all jobs for this model
+                for job in jobs:
+                    try:
+                        await process_single_job(job)
+                    except Exception as e:
+                        logger.error(f"❌ Error processing job {job.id}: {e}")
+                        try:
+                            await job.websocket.send_json({
+                                'type': 'error',
+                                'content': f'Error processing request: {str(e)}'
+                            })
+                        except:
+                            pass
+                            
+        except Exception as e:
+            logger.error(f"❌ Queue processor error: {e}\n{traceback.format_exc()}")
+            await asyncio.sleep(1)  # Wait before retrying
+
+async def process_single_job(job: Job):
+    """Process a single job with the current model"""
+    global client
+    
+    try:
+        # Save user message
+        save_message(job.conversation_id, 'user', job.prompt)
+        
+        # Get history
+        history = get_conversation_history(job.conversation_id)
+        
+        # Build messages
+        messages = []
+        for msg in history[-10:]:
+            messages.append({'role': msg['role'], 'content': msg['content']})
+        messages.append({'role': 'user', 'content': job.prompt})
+        
+        # Signal start
+        await job.websocket.send_json({'type': 'start'})
+        
+        # Check if model is switching
+        if model_switching:
+            await job.websocket.send_json({
+                'type': 'error',
+                'content': 'Model is currently switching. Please wait...'
+            })
+            return
+        
+        # Use current client
+        if not client:
+            await job.websocket.send_json({
+                'type': 'error',
+                'content': 'vLLM client not available. Model may be loading...'
+            })
+            return
+        
+        # Stream from vLLM
+        full_response = ""
+        logger.info(f"📤 Processing job {job.id} with model: {current_model}")
+        
+        stream = client.chat.completions.create(
+            model=current_model,
+            messages=messages,
+            stream=True,
+            max_tokens=2048,
+            temperature=0.7,
+        )
+        
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                full_response += token
+                
+                await job.websocket.send_json({
+                    'type': 'token',
+                    'content': token
+                })
+        
+        logger.info(f"✅ Job {job.id} completed ({len(full_response)} chars)")
+        
+        # Save response
+        save_message(job.conversation_id, 'assistant', full_response)
+        
+        await job.websocket.send_json({'type': 'done'})
+        
+    except Exception as e:
+        logger.error(f"❌ Job processing error: {e}\n{traceback.format_exc()}")
+        await job.websocket.send_json({
+            'type': 'error',
+            'content': f'Error: {str(e)}. Check vLLM is running.'
+        })
+
 # Initialize Docker client
 try:
     docker_client = docker.from_env()
@@ -199,6 +355,16 @@ def ensure_model_container(model_id: str, model_config: dict) -> str:
         env_vars = {}
         if HF_TOKEN:
             env_vars["HF_TOKEN"] = HF_TOKEN
+            env_vars["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN  # vLLM may use either
+            logger.info("🔑 Using Hugging Face token for gated model access")
+        else:
+            # Check if this is a gated model (Llama models)
+            if "llama" in model_id.lower() or "meta-llama" in model_id.lower():
+                logger.warning(f"⚠️ WARNING: No HF_TOKEN set, but model {model_id} is gated!")
+                logger.warning("   You need to:")
+                logger.warning("   1. Get a token from https://huggingface.co/settings/tokens")
+                logger.warning(f"   2. Request access to {model_id}")
+                logger.warning("   3. Set HF_TOKEN in your .env file")
         
         container = docker_client.containers.create(
             "vllm/vllm-openai:v0.5.4",
@@ -2975,27 +3141,35 @@ async def home():
                 bootMenuItems.forEach(i => i.classList.add('loading'));
                 document.getElementById('bootMenuError').classList.remove('show');
                 
-                switchModel(modelId).then(() => {{
-                    // Check if model is now available
-                    setTimeout(async () => {{
-                        try {{
-                            const healthResponse = await fetch('/health');
-                            const health = await healthResponse.json();
-                            if (health.model_available) {{
-                                hideBootMenu();
-                                bootMenuItems.forEach(i => i.classList.remove('loading'));
-                                loadCurrentModel();
-                            }} else {{
-                                showBootMenuError(health.error || 'Model failed to load');
-                                bootMenuItems.forEach(i => i.classList.remove('loading'));
-                            }}
-                        }} catch (e) {{
-                            showBootMenuError('Failed to verify model status');
-                            bootMenuItems.forEach(i => i.classList.remove('loading'));
-                        }}
-                    }}, 3000);
+                // Get current conversation ID (or create new one)
+                let convId = currentConversationId;
+                if (!convId) {{
+                    convId = generateId();
+                    currentConversationId = convId;
+                }}
+                
+                // Just select the model (don't switch immediately)
+                fetch('/api/model/select', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{
+                        model_id: modelId,
+                        conversation_id: convId
+                    }})
+                }}).then(response => response.json()).then(data => {{
+                    if (data.status === 'selected') {{
+                        hideBootMenu();
+                        bootMenuItems.forEach(i => i.classList.remove('loading'));
+                        loadCurrentModel();
+                        // Show success message
+                        const modelName = data.model_name;
+                        console.log(`Model ${{modelName}} selected for this session`);
+                    }} else {{
+                        showBootMenuError(data.message || 'Failed to select model');
+                        bootMenuItems.forEach(i => i.classList.remove('loading'));
+                    }}
                 }}).catch(error => {{
-                    showBootMenuError(error.message || 'Failed to switch model');
+                    showBootMenuError(error.message || 'Failed to select model');
                     bootMenuItems.forEach(i => i.classList.remove('loading'));
                 }});
             }}
@@ -3116,6 +3290,31 @@ async def switch_model_endpoint(request: ModelSwitchRequest):
     
     return {"status": "initiated", "message": "Model switch started"}
 
+class SelectModelRequest(BaseModel):
+    model_id: str
+    conversation_id: str
+
+@app.post("/api/model/select")
+async def select_model_endpoint(request: SelectModelRequest):
+    """Select a model for a conversation (doesn't switch immediately)"""
+    global selected_models
+    
+    # Validate model exists
+    model_config = next((m for m in AVAILABLE_MODELS if m["id"] == request.model_id), None)
+    if not model_config:
+        raise HTTPException(status_code=400, detail=f"Model {request.model_id} not found")
+    
+    # Store selected model for this conversation
+    selected_models[request.conversation_id] = request.model_id
+    logger.info(f"📌 Model {request.model_id} selected for conversation {request.conversation_id}")
+    
+    return {
+        "status": "selected",
+        "model_id": request.model_id,
+        "model_name": model_config["name"],
+        "message": f"Model {model_config['name']} selected. It will be used when you send a message."
+    }
+
 @app.get("/api/conversations")
 async def get_conversations():
     """Get all conversations"""
@@ -3193,7 +3392,7 @@ async def search_chats(query: str):
 
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
-    """WebSocket for streaming chat"""
+    """WebSocket for streaming chat - queues jobs for efficient processing"""
     await websocket.accept()
     logger.info("WebSocket connected")
     
@@ -3203,89 +3402,26 @@ async def chat_websocket(websocket: WebSocket):
             
             message = data.get('message', '').strip()
             conv_id = data.get('conversation_id')
-            model = data.get('model', DEFAULT_MODEL)
             
             if not message:
                 await websocket.send_json({'type': 'error', 'content': 'Empty message'})
                 continue
             
-            logger.info(f"Received message: {message[:50]}... (model: {model})")
+            # Get selected model for this conversation (or default)
+            model_id = selected_models.get(conv_id, DEFAULT_MODEL)
             
-            try:
-                # Save user message
-                save_message(conv_id, 'user', message)
-                
-                # Get history
-                history = get_conversation_history(conv_id)
-                
-                # Build messages
-                messages = []
-                for msg in history[-10:]:
-                    messages.append({'role': msg['role'], 'content': msg['content']})
-                messages.append({'role': 'user', 'content': message})
-                
-                # Signal start
-                await websocket.send_json({'type': 'start'})
-                
-                # Check if model is switching
-                if model_switching:
-                    await websocket.send_json({
-                        'type': 'error',
-                        'content': 'Model is currently switching. Please wait...'
-                    })
-                    continue
-                
-                # Check if requested model matches current model
-                if model != current_model:
-                    await websocket.send_json({
-                        'type': 'error',
-                        'content': f'Model {model} is not active. Current model: {current_model}. Please switch models first.'
-                    })
-                    continue
-                
-                # Use current client
-                if not client:
-                    await websocket.send_json({
-                        'type': 'error',
-                        'content': 'vLLM client not available. Model may be loading...'
-                    })
-                    continue
-                
-                # Stream from vLLM
-                full_response = ""
-                
-                logger.info(f"Calling vLLM with model: {model}")
-                stream = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                    max_tokens=2048,
-                    temperature=0.7,
-                )
-                
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        full_response += token
-                        
-                        await websocket.send_json({
-                            'type': 'token',
-                            'content': token
-                        })
-                
-                logger.info(f"Generated {len(full_response)} chars")
-                
-                # Save response
-                save_message(conv_id, 'assistant', full_response)
-                
-                await websocket.send_json({'type': 'done'})
-                
-            except Exception as e:
-                logger.error(f"Generation error: {e}\n{traceback.format_exc()}")
-                await websocket.send_json({
-                    'type': 'error',
-                    'content': f'Error: {str(e)}. Check vLLM is running.'
-                })
+            logger.info(f"📥 Queuing message for model: {model_id} (conv: {conv_id})")
+            
+            # Create job and add to queue
+            job = Job(
+                prompt=message,
+                model_id=model_id,
+                websocket=websocket,
+                conversation_id=conv_id
+            )
+            
+            await job_queue.put(job)
+            logger.info(f"✅ Job {job.id} queued (model: {model_id})")
             
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
@@ -3354,8 +3490,20 @@ async def health():
     
     return status
 
+@app.on_event("startup")
+async def startup_event():
+    """Start the job queue processor on app startup"""
+    global queue_processor_task
+    if not queue_processor_running:
+        queue_processor_task = asyncio.create_task(process_job_queue())
+        logger.info("✅ Job queue processor task created")
+
 if __name__ == "__main__":
     import uvicorn
     logger.info("🚀 Starting AI Chat with vLLM...")
     logger.info("📍 http://0.0.0.0:8000")
+    # Start queue processor
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.create_task(process_job_queue())
     uvicorn.run(app, host="0.0.0.0", port=8000)
