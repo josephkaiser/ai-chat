@@ -38,6 +38,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./out:/app/out  # Mount out folder for gallery/images (create it if it doesn't exist)
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for model switching
       - .:/app/compose  # Mount docker-compose directory
     env_file:

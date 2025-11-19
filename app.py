@@ -11,6 +11,7 @@ AI Chat with vLLM - Simplified UI with Customizations
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import sqlite3
@@ -712,6 +713,14 @@ except Exception as e:
 
 app = FastAPI(title="AI Chat")
 
+# Mount static files for gallery/images
+# Serve files from /app/out directory at /out URL path
+if os.path.exists("/app/out"):
+    app.mount("/out", StaticFiles(directory="/app/out"), name="out")
+# Also serve from local out folder if it exists (for development)
+elif os.path.exists("out"):
+    app.mount("/out", StaticFiles(directory="out"), name="out")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1069,8 +1078,7 @@ async def recover_to_default_model():
                 logger.warning(f"⚠️ Error stopping containers during recovery: {e}")
         
         # Wait a bit for ports to clear
-        import time
-        time.sleep(2)
+        await asyncio.sleep(2)
         
         # Ensure default model container exists
         if docker_client:
@@ -1082,7 +1090,7 @@ async def recover_to_default_model():
                 container.reload()
                 if container.status != "running":
                     container.start()
-                    time.sleep(3)  # Brief wait for container to start
+                    await asyncio.sleep(3)  # Brief wait for container to start
                 
                 # Wait for model to be ready (allow enough time for model loading)
                 max_wait = 600  # 10 minutes for recovery (models can take 5+ minutes to load)
@@ -1090,7 +1098,7 @@ async def recover_to_default_model():
                 last_log_check = 0
                 
                 while wait_time < max_wait:
-                    time.sleep(5)
+                    await asyncio.sleep(5)
                     wait_time += 5
                     try:
                         container.reload()
@@ -1101,7 +1109,7 @@ async def recover_to_default_model():
                             # Try to restart it
                             try:
                                 container.start()
-                                time.sleep(3)
+                                await asyncio.sleep(3)
                                 continue
                             except Exception as e:
                                 logger.error(f"❌ Failed to restart container: {e}")
@@ -1136,19 +1144,29 @@ async def recover_to_default_model():
                             model_switch_status["progress"] = progress_estimate
                             model_switch_status["message"] = f"Loading... ({wait_time}s)"
                         
-                        # Try to connect to the API
-                        test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=10)
-                        test_client.models.list()
-                        # Success!
-                        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
-                        current_model = DEFAULT_MODEL
-                        model_switch_status = {
-                            "status": "ready",
-                            "current_model": DEFAULT_MODEL,
-                            "message": f"Recovered to {DEFAULT_MODEL}"
-                        }
-                        logger.info(f"✅ Default model recovered and ready! (loaded in {wait_time}s)")
-                        return {"success": True, "message": f"Recovered to {DEFAULT_MODEL}"}
+                        # Try to connect to the API (use async httpx for non-blocking)
+                        try:
+                            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                                response = await http_client.get(f"{VLLM_HOST.replace('/v1', '')}/health")
+                                if response.status_code == 200:
+                                    # Health check passed, try models endpoint
+                                    models_response = await http_client.get(f"{VLLM_HOST}/models")
+                                    if models_response.status_code == 200:
+                                        # Success!
+                                        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+                                        current_model = DEFAULT_MODEL
+                                        model_switch_status = {
+                                            "status": "ready",
+                                            "current_model": DEFAULT_MODEL,
+                                            "message": f"Recovered to {DEFAULT_MODEL}"
+                                        }
+                                        logger.info(f"✅ Default model recovered and ready! (loaded in {wait_time}s)")
+                                        return {"success": True, "message": f"Recovered to {DEFAULT_MODEL}"}
+                        except Exception as api_error:
+                            # Connection error, continue waiting
+                            if wait_time % 30 == 0:
+                                logger.debug(f"⏳ API not ready yet: {str(api_error)[:100]}")
+                            pass
                     except Exception as e:
                         # Only log every 30 seconds to avoid spam
                         if wait_time % 30 == 0:
@@ -5360,18 +5378,27 @@ async def ensure_model_loaded():
         except:
             logger.warning(f"⚠️ No model responding at {VLLM_HOST}, will attempt to load default model")
         
-        # No working model found, try to load default
+        # No working model found, try to load default with timeout
         logger.info(f"🔄 No working model found, attempting to load default model: {DEFAULT_MODEL}")
         logger.info("💡 This may take 5-10 minutes if the model needs to load. The web UI will remain available.")
-        recovery_result = await recover_to_default_model()
         
-        if recovery_result.get("success"):
-            logger.info("✅ Default model loaded successfully on startup")
-            return True
-        else:
-            error_msg = recovery_result.get('error', 'Unknown error')
-            logger.error(f"❌ Failed to load default model on startup: {error_msg}")
-            logger.warning("⚠️ Model health monitor will continue attempting recovery in the background")
+        try:
+            # Set a timeout of 10 minutes for recovery
+            recovery_result = await asyncio.wait_for(
+                recover_to_default_model(),
+                timeout=600.0  # 10 minutes
+            )
+            
+            if recovery_result.get("success"):
+                logger.info("✅ Default model loaded successfully on startup")
+                return True
+            else:
+                error_msg = recovery_result.get('error', 'Unknown error')
+                logger.error(f"❌ Failed to load default model on startup: {error_msg}")
+                logger.warning("⚠️ Model health monitor will continue attempting recovery in the background")
+                return False
+        except asyncio.TimeoutError:
+            logger.error("❌ Recovery timeout after 10 minutes. Model health monitor will continue in background.")
             return False
             
     except Exception as e:
@@ -5396,14 +5423,20 @@ async def model_health_monitor():
                     logger.warning(f"⚠️ Model health check failed: {e}")
                     client = None
             
-            # Model not working, attempt recovery
+            # Model not working, attempt recovery with timeout
             if not client:
                 logger.warning("⚠️ Model not responding, attempting recovery...")
-                recovery_result = await recover_to_default_model()
-                if recovery_result.get("success"):
-                    logger.info("✅ Model recovered successfully")
-                else:
-                    logger.error(f"❌ Model recovery failed: {recovery_result.get('error')}")
+                try:
+                    recovery_result = await asyncio.wait_for(
+                        recover_to_default_model(),
+                        timeout=300.0  # 5 minute timeout for health monitor recovery
+                    )
+                    if recovery_result.get("success"):
+                        logger.info("✅ Model recovered successfully")
+                    else:
+                        logger.error(f"❌ Model recovery failed: {recovery_result.get('error')}")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Recovery timeout in health monitor, will retry later")
                     
         except Exception as e:
             logger.error(f"❌ Error in model health monitor: {e}")
