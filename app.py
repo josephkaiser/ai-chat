@@ -111,7 +111,7 @@ AVAILABLE_MODELS = [
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.85",
-            "--max-model-len", "8192"
+            "--max-model-len", "32768"
         ]
     },
     {
@@ -165,9 +165,9 @@ AVAILABLE_MODELS = [
     },
 ]
 
-# Default model - Qwen 7B Coder (AWQ Quantized) - fits in 24GB GPU
-# With latest vLLM, you can try quantized models by adding them above with --quantization awq
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
+# Default model - Qwen 2.5 14B Instruct - Enhanced reasoning capabilities
+# Fits in 24GB GPU with gpu_memory_utilization 0.85
+DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 
 # Current model state
 current_model = DEFAULT_MODEL
@@ -281,12 +281,13 @@ def estimate_tokens_needed(prompt: str) -> int:
     
     # Look for "long", "detailed", "comprehensive", "extensive"
     if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
-        return 8000  # Default to high for detailed requests
+        return 20000  # High limit for detailed requests (leaves ~12k for input)
     
     # Default based on prompt length
     # Rough estimate: 1 character ≈ 0.25 tokens
+    # Allow longer responses for longer inputs, up to 24k tokens (leaving room for input)
     estimated = len(prompt) * 0.25 * 10  # 10x multiplier for response
-    return min(max(int(estimated), 2048), 16384)  # Between 2k and 16k
+    return min(max(int(estimated), 2048), 24576)  # Between 2k and 24k (leaves ~8k for input)
 
 async def process_single_job(job: Job):
     """Process a single job with the current model"""
@@ -302,32 +303,60 @@ async def process_single_job(job: Job):
         # Build messages with system prompt for reasoning
         messages = []
         
-        # Add system prompt for problem-solving and chain-of-thought reasoning
-        system_prompt = """You are an expert problem-solving AI assistant. Your approach should be methodical, thorough, and solution-oriented.
+        # Enhanced system prompt for deep reasoning (ChatGPT-style)
+        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. Your responses should demonstrate thorough, step-by-step thinking similar to modern reasoning models.
 
-PROBLEM-SOLVING METHODOLOGY:
-1. **Understand the Problem**: First, clearly restate the problem in your own words to ensure you understand it correctly. Identify what is being asked, what constraints exist, and what the desired outcome is.
+REASONING PROTOCOL:
 
-2. **Break Down Complex Problems**: Decompose complex problems into smaller, manageable sub-problems. List each component and how they relate to each other.
+**1. INITIAL ANALYSIS**
+   - Restate the problem/question clearly in your own words
+   - Identify key information, constraints, and requirements
+   - Note any ambiguities or assumptions needed
 
-3. **Consider Multiple Approaches**: Before diving into a solution, consider 2-3 different approaches. Briefly evaluate the pros/cons of each approach, then select the most appropriate one.
+**2. EXPLICIT REASONING PROCESS**
+   Show your thinking process clearly using this structure:
+   
+   **Thinking:**
+   [Show your internal reasoning here - consider multiple angles, evaluate options, work through logic step-by-step]
+   
+   **Analysis:**
+   [Break down the problem into components, identify relationships, consider dependencies]
+   
+   **Approach:**
+   [Explain your chosen method and why it's appropriate. Consider alternatives if relevant]
+   
+   **Solution Steps:**
+   [Work through the solution methodically, showing each step with clear justification]
+   
+   **Verification:**
+   [Check your work, consider edge cases, validate the solution makes sense]
+   
+   **Answer/Conclusion:**
+   [Present the final answer or conclusion clearly]
 
-4. **Show Your Reasoning**: Use clear reasoning markers throughout your response:
-   - [Analysis: ...] for breaking down the problem
-   - [Approach: ...] for explaining your chosen method
-   - [Step 1/2/3: ...] for sequential problem-solving steps
-   - [Verification: ...] for checking your work
-   - [Conclusion: ...] for summarizing findings
+**3. REASONING QUALITY STANDARDS**
+   - Show intermediate steps, not just final answers
+   - Explain "why" not just "what"
+   - Consider multiple perspectives before concluding
+   - Acknowledge uncertainty when appropriate
+   - Show calculations, logic chains, and thought processes explicitly
+   - For complex problems, break into sub-problems and solve systematically
 
-5. **Think Aloud**: Show intermediate calculations, considerations, and thought processes. Don't just present the final answer—show how you arrived at it.
+**4. FOR DIFFERENT TASK TYPES**
+   - **Math/Logic**: Show all calculations, explain each step, verify results
+   - **Code**: Explain algorithm choice, show pseudocode reasoning, then implement
+   - **Analysis**: Present multiple viewpoints, evaluate evidence, then conclude
+   - **Creative**: Show ideation process, explore options, then refine
+   - **Long-form**: Create detailed outline with reasoning, then expand systematically
 
-6. **Verify Solutions**: Always verify your solution makes sense. Check for edge cases, potential errors, or alternative interpretations.
+**5. THINKING STYLE**
+   - Be thorough and methodical
+   - Show your work transparently
+   - Consider edge cases and alternatives
+   - Verify solutions before presenting
+   - Use clear structure but maintain natural flow
 
-7. **For Long-Form Content**: Create a detailed outline first, then systematically expand each section. Ensure logical flow and completeness.
-
-8. **Meet Length Requirements**: If asked for a specific length (pages, words, etc.), ensure you meet or exceed that requirement with substantive content.
-
-Remember: Quality problem-solving is about the journey, not just the destination. Show your work, explain your reasoning, and demonstrate thorough analysis."""
+Remember: The goal is to demonstrate deep understanding through explicit reasoning, not just provide answers. Show your thinking process clearly and thoroughly."""
         
         messages.append({'role': 'system', 'content': system_prompt})
         
@@ -366,10 +395,10 @@ Remember: Quality problem-solving is about the journey, not just the destination
             messages=messages,
             stream=True,
             max_tokens=max_tokens,
-            temperature=0.7,  # Balanced for creativity and coherence
-            top_p=0.9,  # Nucleus sampling for focused responses
-            frequency_penalty=0.1,  # Slight penalty to reduce repetition
-            presence_penalty=0.1,  # Encourages exploring new topics/concepts
+            temperature=0.3,  # Lower temperature for more deterministic, thoughtful reasoning
+            top_p=0.95,  # Higher top_p for more comprehensive exploration of reasoning paths
+            frequency_penalty=0.2,  # Moderate penalty to reduce repetition in reasoning
+            presence_penalty=0.15,  # Encourage exploring different aspects of the problem
         )
         
         for chunk in stream:
@@ -1620,7 +1649,9 @@ def generate_css():
             resize: none;
             font-family: 'Courier New', monospace;
             min-height: 24px;
-            max-height: 120px;
+            max-height: 66vh;
+            overflow-y: auto;
+            line-height: 1.5;
         }}
         
         #input:focus {{ outline: none; }}
@@ -2350,6 +2381,7 @@ async def home():
                     placeholder="Type your message..." 
                     rows="2"
                     onkeydown="handleKeyDown(event)"
+                    oninput="autoResizeTextarea(this)"
                 ></textarea>
                 <button id="send" onclick="sendMessage()" title="Send message"></button>
             </div>
@@ -2763,6 +2795,15 @@ async def home():
             }}
         }}
         
+        function autoResizeTextarea(textarea) {{
+            // Reset height to get accurate scrollHeight
+            textarea.style.height = 'auto';
+            // Calculate new height (min 24px, max 66vh)
+            const maxHeight = window.innerHeight * 0.66; // 2/3 of viewport height
+            const newHeight = Math.min(Math.max(textarea.scrollHeight, 24), maxHeight);
+            textarea.style.height = newHeight + 'px';
+        }}
+        
         function sendMessage() {{
             const input = document.getElementById('input');
             const message = input.value.trim();
@@ -2773,6 +2814,8 @@ async def home():
             
             addMessage(message, 'user');
             input.value = '';
+            // Reset textarea height after sending
+            autoResizeTextarea(input);
             
             showLoading();
             
@@ -3334,6 +3377,16 @@ async def home():
         setTimeout(() => {{
             loadCurrentModel();
         }}, 500);
+        
+        // Initialize textarea auto-resize
+        const input = document.getElementById('input');
+        if (input) {{
+            autoResizeTextarea(input);
+            // Handle window resize to recalculate max height
+            window.addEventListener('resize', () => {{
+                autoResizeTextarea(input);
+            }});
+        }}
         
         document.getElementById('input').focus();
     </script>
