@@ -88,6 +88,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
 VLLM_CONTAINER = os.getenv("VLLM_CONTAINER", "vllm")
+HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hugging Face token for gated models
 
 # Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
@@ -251,12 +252,19 @@ async def switch_model(new_model_id: str):
         logger.info(f"   Command: {' '.join(model_config['command'])}")
         
         try:
+            # Prepare environment variables
+            env_vars = {}
+            if HF_TOKEN:
+                env_vars["HF_TOKEN"] = HF_TOKEN
+                logger.info("🔑 Using Hugging Face token for gated model access")
+            
             # Start new container with new model command
             container = docker_client.containers.run(
                 "vllm/vllm-openai:v0.5.4",
                 name=VLLM_CONTAINER,
                 command=model_config["command"],
                 ports={"8000/tcp": 8001},
+                environment=env_vars if env_vars else None,
                 detach=True,
                 remove=False,
                 device_requests=[
@@ -371,14 +379,14 @@ def get_conversation_history(conv_id: str, limit: int = 10) -> List[Dict]:
     """Get recent conversation history"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''SELECT role, content FROM messages 
+    c.execute('''SELECT role, content, timestamp FROM messages 
                  WHERE conversation_id = ? 
                  ORDER BY timestamp DESC 
                  LIMIT ?''', (conv_id, limit))
     
     messages = []
     for row in c.fetchall():
-        messages.append({'role': row[0], 'content': row[1]})
+        messages.append({'role': row[0], 'content': row[1], 'timestamp': row[2]})
     
     conn.close()
     return list(reversed(messages))
@@ -593,6 +601,10 @@ def generate_css():
             gap: 15px;
         }}
         
+        .header-left .sidebar-toggle {{
+            margin-right: 8px;
+        }}
+        
         .header h1 {{ font-size: {FONTS['size_large']}; font-weight: 600; }}
         
         .model-selector {{
@@ -670,6 +682,21 @@ def generate_css():
             text-align: left;
             margin-right: auto;
             position: relative;
+        }}
+        
+        .message-timestamp {{
+            font-size: 11px;
+            color: {COLORS['text_tertiary']};
+            margin-top: 4px;
+            opacity: 0.7;
+        }}
+        
+        .message.user .message-timestamp {{
+            text-align: right;
+        }}
+        
+        .message.assistant .message-timestamp {{
+            text-align: left;
         }}
         
         .message.assistant pre {{
@@ -1172,6 +1199,220 @@ def generate_css():
         .model-status-status.error {{
             color: {COLORS['status_disconnected']};
         }}
+        
+        /* Boot Menu Styles */
+        .boot-menu {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #e9eced;
+            z-index: 10000;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Courier New', monospace;
+        }}
+        
+        .boot-menu.show {{
+            display: flex;
+        }}
+        
+        .boot-menu-content {{
+            background: #fff4de;
+            border: 3px solid #8194b1;
+            padding: 40px;
+            max-width: 800px;
+            width: 90%;
+            box-shadow: 0 8px 32px rgba(129,148,177,0.3);
+        }}
+        
+        .boot-menu-header {{
+            text-align: center;
+            margin-bottom: 30px;
+            color: #8194b1;
+        }}
+        
+        .boot-menu-header h1 {{
+            font-size: 24px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #8194b1;
+        }}
+        
+        .boot-menu-header p {{
+            font-size: 14px;
+            color: #8194b1;
+        }}
+        
+        .boot-menu-list {{
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }}
+        
+        .boot-menu-item {{
+            padding: 12px 16px;
+            margin: 8px 0;
+            background: #e9eced;
+            border: 2px solid #b0c9df;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: #8194b1;
+        }}
+        
+        .boot-menu-item:hover {{
+            background: #b0c9df;
+            border-color: #8194b1;
+            transform: translateX(5px);
+            color: #fff4de;
+        }}
+        
+        .boot-menu-item.selected {{
+            background: #8194b1;
+            color: #fff4de;
+            border-color: #8194b1;
+        }}
+        
+        .boot-menu-item.loading {{
+            opacity: 0.6;
+            cursor: not-allowed;
+        }}
+        
+        .boot-menu-item-name {{
+            font-weight: 600;
+        }}
+        
+        .boot-menu-item-badge {{
+            font-size: 11px;
+            padding: 2px 8px;
+            background: #b0c9df;
+            border-radius: 3px;
+            color: #8194b1;
+        }}
+        
+        .boot-menu-item:hover .boot-menu-item-badge {{
+            background: rgba(255,255,255,0.3);
+            color: #fff4de;
+        }}
+        
+        .boot-menu-item.selected .boot-menu-item-badge {{
+            background: rgba(255,255,255,0.3);
+            color: #fff4de;
+        }}
+        
+        .boot-menu-instructions {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #b0c9df;
+            text-align: center;
+            color: #8194b1;
+            font-size: 12px;
+        }}
+        
+        .boot-menu-error {{
+            margin-top: 20px;
+            padding: 12px;
+            background: #ff7863;
+            color: white;
+            border-radius: 4px;
+            font-size: 13px;
+            display: none;
+        }}
+        
+        .boot-menu-error.show {{
+            display: block;
+        }}
+        
+        /* Model Switch Confirmation Modal */
+        .model-switch-confirm {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.6);
+            z-index: 10001;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }}
+        
+        .model-switch-confirm.show {{
+            display: flex;
+        }}
+        
+        .model-switch-confirm-content {{
+            background: #fff4de;
+            border: 3px solid #8194b1;
+            padding: 30px;
+            max-width: 500px;
+            width: 90%;
+            border-radius: 8px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }}
+        
+        .model-switch-confirm-header {{
+            color: #8194b1;
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 15px;
+        }}
+        
+        .model-switch-confirm-warning {{
+            background: #fff4de;
+            border-left: 4px solid #ff7863;
+            padding: 12px;
+            margin: 15px 0;
+            color: #8194b1;
+            font-size: 14px;
+        }}
+        
+        .model-switch-confirm-info {{
+            color: #8194b1;
+            font-size: 14px;
+            margin: 15px 0;
+            line-height: 1.6;
+        }}
+        
+        .model-switch-confirm-buttons {{
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }}
+        
+        .model-switch-confirm-btn {{
+            padding: 10px 20px;
+            border: 2px solid #8194b1;
+            background: #e9eced;
+            color: #8194b1;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }}
+        
+        .model-switch-confirm-btn:hover {{
+            background: #b0c9df;
+            transform: translateY(-1px);
+        }}
+        
+        .model-switch-confirm-btn.primary {{
+            background: #8194b1;
+            color: #fff4de;
+        }}
+        
+        .model-switch-confirm-btn.primary:hover {{
+            background: #b0c9df;
+            border-color: #b0c9df;
+        }}
     """
 
 # ==================== API Endpoints ====================
@@ -1197,8 +1438,53 @@ async def home():
     </style>
 </head>
 <body>
+    <!-- Model Switch Confirmation Modal -->
+    <div class="model-switch-confirm" id="modelSwitchConfirm">
+        <div class="model-switch-confirm-content">
+            <div class="model-switch-confirm-header">⚠️ Experimental Feature Warning</div>
+            <div class="model-switch-confirm-warning">
+                <strong>Model switching is an experimental feature that may fail.</strong>
+            </div>
+            <div class="model-switch-confirm-info">
+                <p><strong>Switching to:</strong> <span id="confirmModelName"></span></p>
+                <p>⚠️ <strong>Please note:</strong></p>
+                <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li>Model switching can take several minutes</li>
+                    <li>The process may fail and require manual intervention</li>
+                    <li>You will be returned to the model selection menu if it fails</li>
+                    <li>All current chat sessions will be preserved</li>
+                </ul>
+            </div>
+            <div class="model-switch-confirm-buttons">
+                <button class="model-switch-confirm-btn" onclick="cancelModelSwitch()">Cancel</button>
+                <button class="model-switch-confirm-btn primary" onclick="proceedWithModelSwitch()">Continue</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Boot Menu -->
+    <div class="boot-menu" id="bootMenu">
+        <div class="boot-menu-content">
+            <div class="boot-menu-header">
+                <h1>AI Chat - Model Selection</h1>
+                <p>Select a model to load. Use arrow keys to navigate, Enter to select.</p>
+            </div>
+            <ul class="boot-menu-list" id="bootMenuList">
+                {''.join([f'''
+                <li class="boot-menu-item" data-model-id="{m['id']}" onclick="selectModelFromBootMenu('{m['id']}')">
+                    <span class="boot-menu-item-name">{m['name']}</span>
+                    <span class="boot-menu-item-badge">{'Quantized' if m.get('quantized') else 'Standard'}</span>
+                </li>
+                ''' for m in AVAILABLE_MODELS])}
+            </ul>
+            <div class="boot-menu-error" id="bootMenuError"></div>
+            <div class="boot-menu-instructions">
+                <p>↑↓ Navigate | Enter Select | ESC Cancel</p>
+            </div>
+        </div>
+    </div>
+    
     <div class="sidebar" id="sidebar">
-        <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">◀</button>
         <button class="new-chat-icon-btn" onclick="newChat()" title="New Chat">+</button>
         <div class="sidebar-content">
             <div class="sidebar-header">
@@ -1211,6 +1497,7 @@ async def home():
     <div class="main">
         <div class="header">
             <div class="header-left">
+                <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" id="sidebarToggle">📖</button>
                 <h1>AI Chat</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
@@ -1222,7 +1509,7 @@ async def home():
                     </button>
                     <div class="model-dropdown" id="modelDropdown" style="display: none;">
                         {''.join([f'''
-                        <div class="model-option" id="model-{m["id"]}" onclick="switchModel('{m["id"]}')">
+                        <div class="model-option" id="model-{m["id"]}" onclick="confirmModelSwitch('{m["id"]}', '{m["name"]}')">
                             <span class="model-option-name">{m["name"]}</span>
                             <span class="model-option-badge">{'Quantized' if m.get('quantized') else 'Standard'}</span>
                         </div>
@@ -1411,9 +1698,9 @@ async def home():
         
         function toggleSidebar() {{
             const sidebar = document.getElementById('sidebar');
-            const toggle = sidebar.querySelector('.sidebar-toggle');
+            const toggle = document.getElementById('sidebarToggle');
             sidebar.classList.toggle('collapsed');
-            toggle.textContent = sidebar.classList.contains('collapsed') ? '▶' : '◀';
+            toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
         }}
         
         function toggleLogViewer() {{
@@ -1454,39 +1741,81 @@ async def home():
             }}
         }});
         
-        async function switchModel(modelId) {{
+        // Model switch confirmation
+        let pendingModelSwitch = null;
+        
+        function confirmModelSwitch(modelId, modelName) {{
             // Close dropdown
             document.getElementById('modelDropdown').classList.remove('show');
             
-            // Show status console
-            const console = document.getElementById('modelStatusConsole');
-            console.classList.add('show');
+            // Store pending switch
+            pendingModelSwitch = modelId;
             
-            // Disable toggle button
-            const btn = document.getElementById('modelToggleBtn');
-            btn.classList.add('switching');
-            btn.disabled = true;
+            // Update modal with model name
+            document.getElementById('confirmModelName').textContent = modelName;
             
-            try {{
-                const response = await fetch('/api/model/switch', {{
+            // Show confirmation modal
+            document.getElementById('modelSwitchConfirm').classList.add('show');
+        }}
+        
+        function cancelModelSwitch() {{
+            pendingModelSwitch = null;
+            document.getElementById('modelSwitchConfirm').classList.remove('show');
+        }}
+        
+        function proceedWithModelSwitch() {{
+            if (pendingModelSwitch) {{
+                const modelId = pendingModelSwitch;
+                pendingModelSwitch = null;
+                document.getElementById('modelSwitchConfirm').classList.remove('show');
+                switchModel(modelId);
+            }}
+        }}
+        
+        // Close confirmation modal on Escape key
+        document.addEventListener('keydown', function(event) {{
+            const confirmModal = document.getElementById('modelSwitchConfirm');
+            if (event.key === 'Escape' && confirmModal && confirmModal.classList.contains('show')) {{
+                cancelModelSwitch();
+            }}
+        }});
+        
+        async function switchModel(modelId) {{
+            return new Promise((resolve, reject) => {{
+                // Close dropdown
+                document.getElementById('modelDropdown').classList.remove('show');
+                
+                // Show status console
+                const console = document.getElementById('modelStatusConsole');
+                console.classList.add('show');
+                
+                // Disable toggle button
+                const btn = document.getElementById('modelToggleBtn');
+                btn.classList.add('switching');
+                btn.disabled = true;
+                
+                fetch('/api/model/switch', {{
                     method: 'POST',
                     headers: {{'Content-Type': 'application/json'}},
                     body: JSON.stringify({{model_id: modelId}})
+                }}).then(response => response.json()).then(data => {{
+                    if (data.status === 'initiated') {{
+                        // Start polling for status
+                        startModelStatusPolling();
+                        resolve();
+                    }} else {{
+                        reject(new Error(data.message || 'Failed to initiate model switch'));
+                    }}
+                }}).catch(e => {{
+                    console.error('Error switching model:', e);
+                    updateModelStatus({{
+                        status: 'error',
+                        message: 'Failed to initiate model switch',
+                        progress: 0
+                    }});
+                    reject(e);
                 }});
-                
-                const data = await response.json();
-                if (data.status === 'initiated') {{
-                    // Start polling for status
-                    startModelStatusPolling();
-                }}
-            }} catch (e) {{
-                console.error('Error switching model:', e);
-                updateModelStatus({{
-                    status: 'error',
-                    message: 'Failed to initiate model switch',
-                    progress: 0
-                }});
-            }}
+            }});
         }}
         
         function startModelStatusPolling() {{
@@ -1512,6 +1841,14 @@ async def home():
                             btn.classList.remove('switching');
                             btn.disabled = false;
                         }}, 2000);
+                        
+                        // If error, show boot menu
+                        if (data.status.status === 'error') {{
+                            setTimeout(() => {{
+                                showBootMenu();
+                                showBootMenuError(data.status.message || 'Model switch failed');
+                            }}, 2000);
+                        }}
                     }}
                 }} catch (e) {{
                     console.error('Error polling model status:', e);
@@ -1604,10 +1941,26 @@ async def home():
             }}));
         }}
         
-        function addMessage(content, role) {{
+        function addMessage(content, role, timestamp = null) {{
             const msg = document.createElement('div');
             msg.className = `message ${{role}}`;
-            msg.textContent = content;
+            
+            // Create content wrapper
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = content;
+            msg.appendChild(contentDiv);
+            
+            // Add timestamp
+            const timestampDiv = document.createElement('div');
+            timestampDiv.className = 'message-timestamp';
+            if (timestamp) {{
+                timestampDiv.textContent = formatTimestamp(timestamp);
+            }} else {{
+                timestampDiv.textContent = formatTimestamp(new Date().toISOString());
+            }}
+            msg.appendChild(timestampDiv);
+            
             if (role === 'assistant') {{
                 msg.dataset.needsMarkdown = 'true';
                 msg.dataset.originalContent = content; // Store original content for copying
@@ -1615,6 +1968,28 @@ async def home():
             document.getElementById('messages').appendChild(msg);
             scrollToBottom();
             return msg;
+        }}
+        
+        function formatTimestamp(isoString) {{
+            const date = new Date(isoString);
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+            
+            const timeStr = date.toLocaleTimeString('en-US', {{ hour: 'numeric', minute: '2-digit', hour12: true }});
+            
+            if (messageDate.getTime() === today.getTime()) {{
+                return timeStr;
+            }} else {{
+                const yesterday = new Date(today);
+                yesterday.setDate(yesterday.getDate() - 1);
+                if (messageDate.getTime() === yesterday.getTime()) {{
+                    return `Yesterday ${{timeStr}}`;
+                }} else {{
+                    const dateStr = date.toLocaleDateString('en-US', {{ month: 'short', day: 'numeric' }});
+                    return `${{dateStr}} ${{timeStr}}`;
+                }}
+            }}
         }}
         
         function copyToClipboard(text, button) {{
@@ -1660,16 +2035,27 @@ async def home():
             
             const messages = document.querySelectorAll('.message.assistant[data-needs-markdown="true"]');
             messages.forEach(msg => {{
-                const content = msg.textContent || msg.innerText;
+                const contentDiv = msg.querySelector('.message-content');
+                if (!contentDiv) return;
+                
+                const content = contentDiv.textContent || contentDiv.innerText;
                 if (!content || content.trim() === '') return;
+                
+                // Preserve timestamp
+                const timestampDiv = msg.querySelector('.message-timestamp');
                 
                 try {{
                     if (typeof marked !== 'undefined') {{
                         const html = marked.parse(content);
                         const originalContent = msg.dataset.originalContent || content;
-                        msg.innerHTML = html;
+                        contentDiv.innerHTML = html;
                         msg.dataset.needsMarkdown = 'false';
                         msg.dataset.rendered = 'true';
+                        
+                        // Restore timestamp if it was removed
+                        if (timestampDiv && !msg.querySelector('.message-timestamp')) {{
+                            msg.appendChild(timestampDiv);
+                        }}
                         
                         // Add copy button for the entire message
                         if (!msg.querySelector('.copy-btn.message-copy-btn')) {{
@@ -1713,7 +2099,7 @@ async def home():
                 }} catch (e) {{
                     console.error('Markdown render error:', e);
                     // Fallback to plain text if markdown fails
-                    msg.textContent = content;
+                    contentDiv.textContent = content;
                 }}
             }});
         }}
@@ -1742,8 +2128,15 @@ async def home():
             const messages = document.getElementById('messages');
             const lastMsg = messages.lastElementChild;
             if (lastMsg?.classList.contains('assistant')) {{
-                const currentText = lastMsg.textContent || '';
-                lastMsg.textContent = currentText + content;
+                const contentDiv = lastMsg.querySelector('.message-content');
+                if (contentDiv) {{
+                    const currentText = contentDiv.textContent || '';
+                    contentDiv.textContent = currentText + content;
+                    // Update original content for copying
+                    if (lastMsg.dataset.originalContent !== undefined) {{
+                        lastMsg.dataset.originalContent = currentText + content;
+                    }}
+                }}
                 scrollToBottom();
             }}
         }}
@@ -1791,7 +2184,7 @@ async def home():
             messages.innerHTML = '';
             
             data.messages.forEach(msg => {{
-                addMessage(msg.content, msg.role);
+                addMessage(msg.content, msg.role, msg.timestamp);
             }});
             setTimeout(() => {{
                 renderMarkdown();
@@ -1878,9 +2271,115 @@ async def home():
             }}
         }});
         
+        // Boot Menu Functions
+        let bootMenuSelectedIndex = 0;
+        let bootMenuItems = [];
+        
+        function showBootMenu() {{
+            const bootMenu = document.getElementById('bootMenu');
+            bootMenu.classList.add('show');
+            bootMenuItems = Array.from(document.querySelectorAll('.boot-menu-item'));
+            bootMenuSelectedIndex = 0;
+            updateBootMenuSelection();
+            document.getElementById('bootMenuError').classList.remove('show');
+        }}
+        
+        function hideBootMenu() {{
+            const bootMenu = document.getElementById('bootMenu');
+            bootMenu.classList.remove('show');
+        }}
+        
+        function updateBootMenuSelection() {{
+            bootMenuItems.forEach((item, index) => {{
+                item.classList.toggle('selected', index === bootMenuSelectedIndex);
+            }});
+            if (bootMenuItems[bootMenuSelectedIndex]) {{
+                bootMenuItems[bootMenuSelectedIndex].scrollIntoView({{ block: 'nearest' }});
+            }}
+        }}
+        
+        function selectModelFromBootMenu(modelId) {{
+            const item = bootMenuItems.find(el => el.dataset.modelId === modelId);
+            if (item && !item.classList.contains('loading')) {{
+                bootMenuItems.forEach(i => i.classList.add('loading'));
+                document.getElementById('bootMenuError').classList.remove('show');
+                
+                switchModel(modelId).then(() => {{
+                    // Check if model is now available
+                    setTimeout(async () => {{
+                        try {{
+                            const healthResponse = await fetch('/health');
+                            const health = await healthResponse.json();
+                            if (health.model_available) {{
+                                hideBootMenu();
+                                bootMenuItems.forEach(i => i.classList.remove('loading'));
+                                loadCurrentModel();
+                            }} else {{
+                                showBootMenuError(health.error || 'Model failed to load');
+                                bootMenuItems.forEach(i => i.classList.remove('loading'));
+                            }}
+                        }} catch (e) {{
+                            showBootMenuError('Failed to verify model status');
+                            bootMenuItems.forEach(i => i.classList.remove('loading'));
+                        }}
+                    }}, 3000);
+                }}).catch(error => {{
+                    showBootMenuError(error.message || 'Failed to switch model');
+                    bootMenuItems.forEach(i => i.classList.remove('loading'));
+                }});
+            }}
+        }}
+        
+        function showBootMenuError(message) {{
+            const errorDiv = document.getElementById('bootMenuError');
+            errorDiv.textContent = `Error: ${{message}}`;
+            errorDiv.classList.add('show');
+        }}
+        
+        // Boot menu keyboard navigation
+        document.addEventListener('keydown', function(event) {{
+            const bootMenu = document.getElementById('bootMenu');
+            if (!bootMenu.classList.contains('show')) return;
+            
+            if (event.key === 'ArrowDown') {{
+                event.preventDefault();
+                bootMenuSelectedIndex = (bootMenuSelectedIndex + 1) % bootMenuItems.length;
+                updateBootMenuSelection();
+            }} else if (event.key === 'ArrowUp') {{
+                event.preventDefault();
+                bootMenuSelectedIndex = (bootMenuSelectedIndex - 1 + bootMenuItems.length) % bootMenuItems.length;
+                updateBootMenuSelection();
+            }} else if (event.key === 'Enter') {{
+                event.preventDefault();
+                const selectedItem = bootMenuItems[bootMenuSelectedIndex];
+                if (selectedItem) {{
+                    selectModelFromBootMenu(selectedItem.dataset.modelId);
+                }}
+            }} else if (event.key === 'Escape') {{
+                // Don't close boot menu on escape - user must select a model
+            }}
+        }});
+        
+        // Check model availability on startup
+        async function checkModelAvailability() {{
+            try {{
+                const response = await fetch('/health');
+                const health = await response.json();
+                if (!health.model_available) {{
+                    showBootMenu();
+                }}
+            }} catch (e) {{
+                console.error('Failed to check model availability:', e);
+                showBootMenu();
+            }}
+        }}
+        
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {{
             console.log('Page loaded, initializing...');
+            
+            // Check model availability first
+            checkModelAvailability();
             
             // Load current model immediately
             loadCurrentModel();
@@ -2152,21 +2651,24 @@ async def health():
     status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "models": {}
+        "current_model": current_model,
+        "model_available": False
     }
     
-    # Check each model client
-    for model_id, client in model_clients.items():
+    # Check if current model is working
+    if client:
         try:
             models = client.models.list()
-            status["models"][model_id] = "connected"
+            status["model_available"] = True
+            status["status"] = "healthy"
         except Exception as e:
-            status["models"][model_id] = f"error: {str(e)}"
-            status["status"] = "degraded"
-    
-    if not status["models"]:
+            status["model_available"] = False
+            status["status"] = "unhealthy"
+            status["error"] = str(e)
+    else:
+        status["model_available"] = False
         status["status"] = "unhealthy"
-        status["error"] = "No model clients available"
+        status["error"] = "No vLLM client available"
     
     return status
 
