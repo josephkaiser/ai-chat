@@ -322,8 +322,8 @@ async def process_single_job(job: Job):
         # Save user message
         save_message(job.conversation_id, 'user', job.prompt)
         
-        # Get history
-        history = get_conversation_history(job.conversation_id)
+        # Get history with relevance-based selection (pass current query for relevance matching)
+        history = get_conversation_history(job.conversation_id, current_query=job.prompt)
         
         # Build messages with system prompt for reasoning
         messages = []
@@ -1168,13 +1168,66 @@ class ChatRequest(BaseModel):
 
 # ==================== Helper Functions ====================
 
-def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = None) -> List[Dict]:
-    """Get conversation history, using as much context as possible
+def calculate_message_relevance_score(msg: Dict, current_query: str, message_index: int, total_messages: int) -> float:
+    """Calculate relevance and quality score for a message
+    
+    Args:
+        msg: Message dict with role, content, timestamp, feedback, id
+        current_query: Current user query for relevance matching
+        message_index: Index of message in conversation (0 = oldest, total-1 = newest)
+        total_messages: Total number of messages in conversation
+    
+    Returns:
+        Relevance score (higher = more relevant/important)
+    """
+    score = 0.0
+    
+    # 1. Recency score (0.0 to 1.0) - more recent = higher, but not the only factor
+    recency_ratio = message_index / max(total_messages, 1)
+    recency_score = 0.3 * recency_ratio  # Up to 30% of score from recency
+    score += recency_score
+    
+    # 2. Feedback score (quality indicator)
+    feedback = msg.get('feedback', '').lower()
+    if feedback == 'positive':
+        score += 0.4  # High boost for positive feedback
+    elif feedback == 'negative':
+        score -= 0.2  # Penalty for negative feedback
+    
+    # 3. Relevance to current query (keyword matching)
+    if current_query:
+        query_words = set(current_query.lower().split())
+        content_lower = msg.get('content', '').lower()
+        content_words = set(content_lower.split())
+        
+        # Calculate word overlap
+        common_words = query_words.intersection(content_words)
+        if common_words:
+            # More overlap = more relevant
+            relevance_ratio = len(common_words) / max(len(query_words), 1)
+            score += 0.3 * min(relevance_ratio, 1.0)  # Up to 30% from relevance
+    
+    # 4. Message length score (longer messages often more informative)
+    content_length = len(msg.get('content', ''))
+    if content_length > 500:  # Substantial messages
+        score += 0.1
+    if content_length > 1000:  # Very detailed messages
+        score += 0.1
+    
+    # 5. User messages get slight boost (they define the conversation direction)
+    if msg.get('role') == 'user':
+        score += 0.05
+    
+    return score
+
+def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = None, current_query: str = None) -> List[Dict]:
+    """Get conversation history, selecting messages by quality and relevance
     
     Args:
         conv_id: Conversation ID
         limit: Maximum number of messages (None = unlimited, use token limit instead)
         max_tokens: Maximum tokens to include (None = auto-calculate based on model context window)
+        current_query: Current user query for relevance matching (optional)
     """
     # Auto-calculate max_tokens based on model's context window
     if max_tokens is None:
@@ -1187,42 +1240,82 @@ def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # Get all messages for this conversation (using index for faster queries)
-    c.execute('''SELECT role, content, timestamp FROM messages 
+    # Get all messages with feedback for this conversation
+    c.execute('''SELECT id, role, content, timestamp, feedback FROM messages 
                  WHERE conversation_id = ? 
                  ORDER BY timestamp ASC''', (conv_id,))
     
     all_messages = []
     for row in c.fetchall():
-        all_messages.append({'role': row[0], 'content': row[1], 'timestamp': row[2]})
+        all_messages.append({
+            'id': row[0],
+            'role': row[1],
+            'content': row[2],
+            'timestamp': row[3],
+            'feedback': row[4] if row[4] else ''
+        })
     
     conn.close()
     
     if not all_messages:
         return []
     
-    # Estimate tokens more accurately (account for message formatting overhead)
-    # Rough: 1 token ≈ 4 characters, plus ~10 tokens per message for formatting
-    selected_messages = []
-    total_tokens = 0
+    # Strategy: Always include most recent messages, then fill with highest-scoring older messages
+    total_messages = len(all_messages)
+    min_recent_messages = min(10, total_messages // 4)  # Always include at least 25% most recent, or 10 messages
     
-    # Reverse to start from most recent (most important context)
-    for msg in reversed(all_messages):
-        # Estimate: content tokens + formatting overhead
-        content_tokens = len(msg['content']) // 4
-        formatting_tokens = 10  # Role, formatting, etc.
-        msg_tokens = content_tokens + formatting_tokens
-        
-        if total_tokens + msg_tokens > max_tokens:
-            break
-        selected_messages.insert(0, msg)  # Insert at beginning to maintain order
-        total_tokens += msg_tokens
+    # Step 1: Always include the most recent messages (they're usually most relevant)
+    recent_messages = all_messages[-min_recent_messages:]
+    recent_tokens = sum((len(msg['content']) // 4) + 10 for msg in recent_messages)
+    
+    # Step 2: Score all older messages (excluding the recent ones we already included)
+    older_messages = all_messages[:-min_recent_messages] if min_recent_messages < total_messages else []
+    
+    scored_messages = []
+    for idx, msg in enumerate(older_messages):
+        score = calculate_message_relevance_score(
+            msg, 
+            current_query or '', 
+            idx, 
+            len(older_messages)
+        )
+        scored_messages.append((score, msg))
+    
+    # Sort by score (highest first)
+    scored_messages.sort(key=lambda x: x[0], reverse=True)
+    
+    # Step 3: Select highest-scoring messages that fit in remaining token budget
+    selected_messages = list(recent_messages)  # Start with recent messages
+    total_tokens = recent_tokens
+    
+    remaining_tokens = max_tokens - total_tokens
+    
+    for score, msg in scored_messages:
+        msg_tokens = (len(msg['content']) // 4) + 10
+        if total_tokens + msg_tokens <= max_tokens and remaining_tokens > 0:
+            # Insert in chronological order (find where this message should go)
+            msg_timestamp = msg['timestamp']
+            insert_pos = 0
+            for i, existing_msg in enumerate(selected_messages):
+                if existing_msg['timestamp'] > msg_timestamp:
+                    insert_pos = i
+                    break
+                insert_pos = i + 1
+            selected_messages.insert(insert_pos, msg)
+            total_tokens += msg_tokens
+            remaining_tokens -= msg_tokens
+    
+    # Remove metadata we don't need in the response
+    for msg in selected_messages:
+        msg.pop('id', None)
+        msg.pop('feedback', None)
     
     # If we have a limit and haven't hit token limit, respect message limit
     if limit and len(selected_messages) > limit:
+        # Keep most recent messages if we hit the limit
         selected_messages = selected_messages[-limit:]
     
-    logger.debug(f"📚 Loaded {len(selected_messages)} messages (~{total_tokens} tokens) from conversation {conv_id}")
+    logger.debug(f"📚 Loaded {len(selected_messages)} messages (~{total_tokens} tokens) from conversation {conv_id} using quality/relevance selection")
     return selected_messages
 
 def search_messages(query: str, limit: int = 20) -> List[Dict]:
@@ -4710,7 +4803,7 @@ async def retry_message(message_id: int, request: dict):
 async def get_conversation(conversation_id: str):
     """Get conversation messages"""
     try:
-        history = get_conversation_history(conversation_id, limit=100)
+        history = get_conversation_history(conversation_id, limit=100, current_query=None)
         return {'messages': history}
     except Exception as e:
         logger.error(f"Error getting conversation: {e}")
