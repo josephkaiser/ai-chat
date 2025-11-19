@@ -190,7 +190,7 @@ app.add_middleware(
 
 # Model switching functions
 async def switch_model(new_model_id: str):
-    """Switch vLLM to a new model by restarting the container"""
+    """Switch vLLM to a new model by restarting the container with docker-compose"""
     global current_model, model_switching, model_switch_status, client
     
     with model_switch_lock:
@@ -215,109 +215,138 @@ async def switch_model(new_model_id: str):
         model_switch_status["progress"] = 20
         model_switch_status["message"] = "Stopping vLLM container..."
         
-        # Stop the container
-        if docker_client:
-            try:
-                container = docker_client.containers.get(VLLM_CONTAINER)
-                container.stop(timeout=10)
-                model_switch_status["progress"] = 40
-                model_switch_status["message"] = "Container stopped. Starting with new model..."
-            except docker.errors.NotFound:
-                logger.warning(f"Container {VLLM_CONTAINER} not found")
-            except Exception as e:
-                logger.error(f"Error stopping container: {e}")
-                raise
+        # Stop the container using docker-compose
+        compose_dir = os.getenv("COMPOSE_DIR", "/app")
+        compose_file = os.getenv("COMPOSE_FILE", "docker-compose.yml")
         
-        # Update status
+        import time
+        
+        # Step 1: Stop the vllm service
+        try:
+            result = subprocess.run(
+                ["docker-compose", "-f", compose_file, "stop", "vllm"],
+                cwd=compose_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                logger.warning(f"docker-compose stop returned: {result.stderr}")
+            model_switch_status["progress"] = 30
+            model_switch_status["message"] = "Container stopped. Removing..."
+        except Exception as e:
+            logger.error(f"Error stopping container: {e}")
+            # Try alternative: docker stop
+            try:
+                subprocess.run(["docker", "stop", VLLM_CONTAINER], timeout=10, check=False)
+            except:
+                pass
+        
+        # Step 2: Remove the container
+        model_switch_status["progress"] = 40
+        model_switch_status["message"] = "Removing old container..."
+        try:
+            subprocess.run(
+                ["docker-compose", "-f", compose_file, "rm", "-f", "vllm"],
+                cwd=compose_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+        except Exception as e:
+            logger.warning(f"Error removing container: {e}")
+            try:
+                subprocess.run(["docker", "rm", "-f", VLLM_CONTAINER], timeout=10, check=False)
+            except:
+                pass
+        
+        # Step 3: Create docker-compose override with new model
         model_switch_status["progress"] = 50
+        model_switch_status["message"] = "Preparing new model configuration..."
+        
+        # Build command string for docker-compose
+        command_parts = model_config["command"]
+        command_str = " ".join(f'"{part}"' if " " in part else part for part in command_parts)
+        
+        # Create override file
+        override_content = f"""version: '3.8'
+
+services:
+  vllm:
+    command: {command_str}
+"""
+        override_file = os.path.join(compose_dir, "docker-compose.override.yml")
+        try:
+            with open(override_file, "w") as f:
+                f.write(override_content)
+            logger.info(f"Created override file: {override_file}")
+        except Exception as e:
+            logger.error(f"Error creating override file: {e}")
+            raise
+        
+        # Step 4: Start container with new model
+        model_switch_status["progress"] = 60
         model_switch_status["message"] = "Starting container with new model..."
         
-        # Restart container with new model using docker-compose
-        # We'll use subprocess to run docker-compose
-        import json
-        model_args = " ".join(model_config["command"])
+        try:
+            result = subprocess.run(
+                ["docker-compose", "-f", compose_file, "up", "-d", "vllm"],
+                cwd=compose_dir,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result.returncode != 0:
+                raise Exception(f"docker-compose up failed: {result.stderr}")
+            logger.info(f"Container started: {result.stdout}")
+        except Exception as e:
+            logger.error(f"Error starting container: {e}")
+            raise
         
-        # Create a temporary docker-compose override
-        compose_override = {
-            "services": {
-                "vllm": {
-                    "command": model_args.split()
-                }
-            }
-        }
-        
-        # Use docker-compose to restart with new config
-        # For now, we'll use docker run directly
-        model_switch_status["progress"] = 60
+        # Step 5: Wait for model to load
+        model_switch_status["progress"] = 70
         model_switch_status["message"] = "Loading new model (this may take a few minutes)..."
         
-        # Start container with new model
-        if docker_client:
+        max_wait = 300  # 5 minutes max
+        wait_time = 0
+        while wait_time < max_wait:
+            time.sleep(5)
+            wait_time += 5
             try:
-                # Remove old container if exists
-                try:
-                    old_container = docker_client.containers.get(VLLM_CONTAINER)
-                    old_container.remove(force=True)
-                except:
-                    pass
-                
-                # Start new container
-                container = docker_client.containers.run(
-                    "vllm/vllm-openai:v0.5.4",
-                    name=VLLM_CONTAINER,
-                    command=model_config["command"],
-                    ports={"8000/tcp": 8001},
-                    detach=True,
-                    remove=False,
-                    device_requests=[
-                        docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])
-                    ],
-                    restart_policy={"Name": "unless-stopped"}
+                # Check if container is running
+                result = subprocess.run(
+                    ["docker", "ps", "--filter", f"name={VLLM_CONTAINER}", "--format", "{{{{.Status}}}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
                 )
-                
-                model_switch_status["progress"] = 70
-                model_switch_status["message"] = "Waiting for model to load..."
-                
-                # Wait for container to be ready
-                import time
-                max_wait = 300  # 5 minutes max
-                wait_time = 0
-                while wait_time < max_wait:
-                    time.sleep(5)
-                    wait_time += 5
+                if "Up" in result.stdout:
+                    # Try to connect to vLLM
                     try:
-                        # Check if container is running
-                        container.reload()
-                        if container.status == "running":
-                            # Try to connect to vLLM
-                            try:
-                                test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
-                                test_client.models.list()
-                                # Success!
-                                break
-                            except:
-                                model_switch_status["progress"] = 70 + int((wait_time / max_wait) * 20)
-                                model_switch_status["message"] = f"Model loading... ({wait_time}s)"
-                                continue
-                    except:
-                        pass
-                
-                if wait_time >= max_wait:
-                    raise Exception("Model loading timeout")
-                
-                # Update client
-                client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
-                current_model = new_model_id
-                
-                model_switch_status = {"status": "success", "message": f"Successfully switched to {model_config['name']}", "progress": 100}
-                logger.info(f"Successfully switched to model {new_model_id}")
-                
+                        test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
+                        test_client.models.list()
+                        # Success!
+                        break
+                    except Exception as e:
+                        model_switch_status["progress"] = 70 + int((wait_time / max_wait) * 20)
+                        model_switch_status["message"] = f"Model loading... ({wait_time}s)"
+                        logger.info(f"Waiting for model to be ready... ({wait_time}s)")
+                        continue
             except Exception as e:
-                logger.error(f"Error switching model: {e}")
-                model_switch_status = {"status": "error", "message": f"Failed to switch model: {str(e)}", "progress": 0}
-                raise
-        else:
-            raise Exception("Docker client not available")
+                logger.warning(f"Error checking container status: {e}")
+        
+        if wait_time >= max_wait:
+            raise Exception("Model loading timeout after 5 minutes")
+        
+        # Step 6: Update client and model
+        model_switch_status["progress"] = 95
+        model_switch_status["message"] = "Finalizing..."
+        
+        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+        current_model = new_model_id
+        
+        model_switch_status = {"status": "success", "message": f"Successfully switched to {model_config['name']}", "progress": 100}
+        logger.info(f"Successfully switched to model {new_model_id}")
         
     except Exception as e:
         logger.error(f"Model switch error: {e}\n{traceback.format_exc()}")
@@ -1041,13 +1070,13 @@ async def home():
                 <h1>AI Chat</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
-                <div class="model-toggle">
-                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown()" title="Click to switch model">
-                        <span>🤖</span>
-                        <span id="currentModelName">Loading...</span>
+                <div class="model-toggle" style="position: relative;">
+                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown(event)" title="Click to switch model" style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 16px;">🤖</span>
+                        <span id="currentModelName" style="font-weight: 500;">Loading...</span>
                         <span style="font-size: 10px; margin-left: 5px;">▼</span>
                     </button>
-                    <div class="model-dropdown" id="modelDropdown">
+                    <div class="model-dropdown" id="modelDropdown" style="display: none;">
                         {''.join([f'''
                         <div class="model-option" id="model-{m["id"]}" onclick="switchModel('{m["id"]}')">
                             <span class="model-option-name">{m["name"]}</span>
@@ -1247,16 +1276,29 @@ async def home():
         // Model switching functions
         let modelStatusPollInterval = null;
         
-        function toggleModelDropdown() {{
+        function toggleModelDropdown(event) {{
+            if (event) event.stopPropagation();
             const dropdown = document.getElementById('modelDropdown');
-            dropdown.classList.toggle('show');
+            if (dropdown) {{
+                const isShowing = dropdown.style.display === 'block' || dropdown.classList.contains('show');
+                if (isShowing) {{
+                    dropdown.style.display = 'none';
+                    dropdown.classList.remove('show');
+                }} else {{
+                    dropdown.style.display = 'block';
+                    dropdown.classList.add('show');
+                }}
+            }} else {{
+                console.error('Model dropdown not found!');
+            }}
         }}
         
         // Close dropdown when clicking outside
         document.addEventListener('click', function(event) {{
             const toggle = document.getElementById('modelToggleBtn');
             const dropdown = document.getElementById('modelDropdown');
-            if (!toggle.contains(event.target) && !dropdown.contains(event.target)) {{
+            if (toggle && dropdown && !toggle.contains(event.target) && !dropdown.contains(event.target)) {{
+                dropdown.style.display = 'none';
                 dropdown.classList.remove('show');
             }}
         }});

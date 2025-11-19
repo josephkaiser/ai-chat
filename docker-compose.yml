@@ -30,9 +30,12 @@ services:
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for model switching
+      - .:/app/compose  # Mount docker-compose directory
     environment:
       - VLLM_HOST=http://vllm:8000/v1
       - VLLM_CONTAINER=vllm
+      - COMPOSE_DIR=/app/compose
+      - COMPOSE_FILE=docker-compose.yml
     depends_on:
       - vllm
     restart: unless-stopped
