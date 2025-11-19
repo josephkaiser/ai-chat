@@ -699,7 +699,7 @@ async def switch_model(new_model_id: str):
         logger.info("🔧 Finalizing model switch...")
         
         previous_model = current_model
-    client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
         current_model = new_model_id
         
         switch_duration = time.time() - switch_start_time
