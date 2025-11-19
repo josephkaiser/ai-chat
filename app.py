@@ -305,13 +305,14 @@ def estimate_tokens_needed(prompt: str) -> int:
     
     # Look for "long", "detailed", "comprehensive", "extensive"
     if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
-        return 10000  # High limit for detailed requests (leaves ~6k for input)
+        return 20000  # High limit for detailed requests (leaves ~12k for input with 32k context)
     
     # Default based on prompt length
     # Rough estimate: 1 character ≈ 0.25 tokens
-    # Allow longer responses for longer inputs, up to 12k tokens (leaving room for input)
+    # With 32k context window, we can allow much longer responses
+    # Use up to 24k tokens for response (leaving 8k for system + input + overhead)
     estimated = len(prompt) * 0.25 * 10  # 10x multiplier for response
-    return min(max(int(estimated), 2048), 12288)  # Between 2k and 12k (leaves ~4k for input)
+    return min(max(int(estimated), 2048), 24000)  # Between 2k and 24k (leaves ~8k for input)
 
 async def process_single_job(job: Job):
     """Process a single job with the current model"""
@@ -382,7 +383,8 @@ Remember: Do your reasoning internally for quality, but present only polished, f
         
         messages.append({'role': 'system', 'content': system_prompt})
         
-        for msg in history[-10:]:
+        # Use full history (already token-limited by get_conversation_history)
+        for msg in history:
             messages.append({'role': msg['role'], 'content': msg['content']})
         messages.append({'role': 'user', 'content': job.prompt})
         
@@ -1140,9 +1142,17 @@ def init_db():
     except sqlite3.OperationalError:
         pass  # Column already exists
     
+    # Create indexes for faster queries (especially for conversation history)
+    try:
+        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
+    except sqlite3.OperationalError:
+        pass  # Indexes might already exist
+    
     conn.commit()
     conn.close()
-    logger.info("✓ Database initialized")
+    logger.info("✓ Database initialized with indexes")
 
 init_db()
 
@@ -1158,21 +1168,62 @@ class ChatRequest(BaseModel):
 
 # ==================== Helper Functions ====================
 
-def get_conversation_history(conv_id: str, limit: int = 10) -> List[Dict]:
-    """Get recent conversation history"""
+def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = None) -> List[Dict]:
+    """Get conversation history, using as much context as possible
+    
+    Args:
+        conv_id: Conversation ID
+        limit: Maximum number of messages (None = unlimited, use token limit instead)
+        max_tokens: Maximum tokens to include (None = auto-calculate based on model context window)
+    """
+    # Auto-calculate max_tokens based on model's context window
+    if max_tokens is None:
+        # Default: Use 75% of context window for history, leave 25% for system prompt + response
+        # For 32k context: 24k for history, 8k for system + response
+        # For 16k context: 12k for history, 4k for system + response
+        model_max_len = 32768  # Current max-model-len setting
+        max_tokens = int(model_max_len * 0.75)  # Use 75% for history
+    
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    
+    # Get all messages for this conversation (using index for faster queries)
     c.execute('''SELECT role, content, timestamp FROM messages 
                  WHERE conversation_id = ? 
-                 ORDER BY timestamp DESC 
-                 LIMIT ?''', (conv_id, limit))
+                 ORDER BY timestamp ASC''', (conv_id,))
     
-    messages = []
+    all_messages = []
     for row in c.fetchall():
-        messages.append({'role': row[0], 'content': row[1], 'timestamp': row[2]})
+        all_messages.append({'role': row[0], 'content': row[1], 'timestamp': row[2]})
     
     conn.close()
-    return list(reversed(messages))
+    
+    if not all_messages:
+        return []
+    
+    # Estimate tokens more accurately (account for message formatting overhead)
+    # Rough: 1 token ≈ 4 characters, plus ~10 tokens per message for formatting
+    selected_messages = []
+    total_tokens = 0
+    
+    # Reverse to start from most recent (most important context)
+    for msg in reversed(all_messages):
+        # Estimate: content tokens + formatting overhead
+        content_tokens = len(msg['content']) // 4
+        formatting_tokens = 10  # Role, formatting, etc.
+        msg_tokens = content_tokens + formatting_tokens
+        
+        if total_tokens + msg_tokens > max_tokens:
+            break
+        selected_messages.insert(0, msg)  # Insert at beginning to maintain order
+        total_tokens += msg_tokens
+    
+    # If we have a limit and haven't hit token limit, respect message limit
+    if limit and len(selected_messages) > limit:
+        selected_messages = selected_messages[-limit:]
+    
+    logger.debug(f"📚 Loaded {len(selected_messages)} messages (~{total_tokens} tokens) from conversation {conv_id}")
+    return selected_messages
 
 def search_messages(query: str, limit: int = 20) -> List[Dict]:
     """Search through all messages"""
@@ -5074,10 +5125,7 @@ async def startup_event():
     """Start the job queue processor and ensure model is loaded on app startup"""
     global queue_processor_task
     
-    # Ensure a model is loaded
-    await ensure_model_loaded()
-    
-    # Start job queue processor
+    # Start job queue processor immediately (non-blocking)
     if not queue_processor_running:
         queue_processor_task = asyncio.create_task(process_job_queue())
         logger.info("✅ Job queue processor task created")
@@ -5085,6 +5133,11 @@ async def startup_event():
     # Start model health monitor
     asyncio.create_task(model_health_monitor())
     logger.info("✅ Model health monitor started")
+    
+    # Check for model in background (don't block startup)
+    # This allows the web UI to load immediately
+    asyncio.create_task(ensure_model_loaded())
+    logger.info("🔄 Checking for model availability in background...")
 
 if __name__ == "__main__":
     import uvicorn
