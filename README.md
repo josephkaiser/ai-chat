@@ -2,8 +2,11 @@
 
 AI chat web server that can be run on a single GPU server (e.g. a desktop PC) using vLLM and WebAI. 
 
-**Next Steps**
-- Quantization to run larger models / cheaper inference
+**Features**
+- ✅ Quantization support (AWQ) for running larger models
+- ✅ Latest vLLM with improved quantized model support
+- ✅ Dynamic model switching with efficient job queue
+- ✅ Problem-solving focused responses with chain-of-thought reasoning
 
 ## Quick Start
 

@@ -100,20 +100,8 @@ else:
     logger.warning("   Create a .env file with: HF_TOKEN=your_token_here")
 
 # Available models with their vLLM command configurations
+# Note: With vLLM latest, AWQ quantization is supported via --quantization awq flag
 AVAILABLE_MODELS = [
-    {
-        "id": "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
-        "name": "Qwen 2.5 VL 72B (AWQ Quantized)",
-        "quantized": True,
-        "command": [
-            "--model", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
-            "--host", "0.0.0.0",
-            "--port", "8000",
-            "--gpu-memory-utilization", "0.95",
-            "--max-model-len", "8192",
-            "--quantization", "awq"
-        ]
-    },
     {
         "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
         "name": "Qwen 2.5 Coder 32B",
@@ -124,6 +112,19 @@ AVAILABLE_MODELS = [
             "--port", "8000",
             "--gpu-memory-utilization", "0.95",
             "--max-model-len", "8192"
+        ]
+    },
+    {
+        "id": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+        "name": "Qwen 2.5 Coder 7B (AWQ Quantized)",
+        "quantized": True,
+        "command": [
+            "--model", "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.90",
+            "--max-model-len", "8192",
+            "--quantization", "awq"
         ]
     },
     {
@@ -152,8 +153,9 @@ AVAILABLE_MODELS = [
     },
 ]
 
-# Default model - Qwen 72B quantized (VL model, works for text and coding)
-DEFAULT_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
+# Default model - Qwen 32B Coder (largest supported Coder model)
+# With latest vLLM, you can try quantized models by adding them above with --quantization awq
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
 # Current model state
 current_model = DEFAULT_MODEL
@@ -416,18 +418,25 @@ def ensure_model_container(model_id: str, model_config: dict) -> str:
         if HF_TOKEN:
             env_vars["HF_TOKEN"] = HF_TOKEN
             env_vars["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN  # vLLM may use either
-            logger.info("🔑 Using Hugging Face token for gated model access")
+            logger.info("🔑 Using Hugging Face token for model access")
         else:
-            # Check if this is a gated model (Llama models)
-            if "llama" in model_id.lower() or "meta-llama" in model_id.lower():
-                logger.warning(f"⚠️ WARNING: No HF_TOKEN set, but model {model_id} is gated!")
+            # Check if this is a gated model (Llama models, large Qwen models)
+            is_gated = (
+                "llama" in model_id.lower() or 
+                "meta-llama" in model_id.lower() or
+                "72b" in model_id.lower() or
+                "70b" in model_id.lower()
+            )
+            if is_gated:
+                logger.warning(f"⚠️ WARNING: No HF_TOKEN set, but model {model_id} may be gated!")
                 logger.warning("   You need to:")
-                logger.warning("   1. Get a token from https://huggingface.co/settings/tokens")
-                logger.warning(f"   2. Request access to {model_id}")
-                logger.warning("   3. Set HF_TOKEN in your .env file")
+                logger.warning("   1. Create a free account at https://huggingface.co/join")
+                logger.warning(f"   2. Visit https://huggingface.co/{model_id.replace('/', '/')} and request access if gated")
+                logger.warning("   3. Get a token from https://huggingface.co/settings/tokens (Read access)")
+                logger.warning("   4. Set HF_TOKEN in your .env file")
         
         container = docker_client.containers.create(
-            "vllm/vllm-openai:v0.5.4",
+            "vllm/vllm-openai:latest",
             name=container_name,
             command=model_config["command"],
             ports={"8000/tcp": VLLM_PORT},
