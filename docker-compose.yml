@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # Single vLLM instance - model can be switched dynamically
   vllm:
     image: vllm/vllm-openai:v0.5.4
     container_name: vllm
@@ -28,8 +29,10 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for model switching
     environment:
       - VLLM_HOST=http://vllm:8000/v1
+      - VLLM_CONTAINER=vllm
     depends_on:
       - vllm
     restart: unless-stopped
