@@ -102,11 +102,11 @@ else:
 # Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
     {
-        "id": "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ",
+        "id": "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
         "name": "Qwen 2.5 Coder 72B (AWQ Quantized)",
         "quantized": True,
         "command": [
-            "--model", "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ",
+            "--model", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.95",
@@ -154,7 +154,7 @@ AVAILABLE_MODELS = [
 ]
 
 # Default model - Qwen 70B quantized (or closest available)
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ"
+DEFAULT_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
 
 # Current model state
 current_model = DEFAULT_MODEL
