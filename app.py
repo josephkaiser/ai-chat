@@ -214,6 +214,7 @@ def generate_css():
             border-right: 1px solid {COLORS['bg_tertiary']};
             display: flex;
             flex-direction: column;
+            z-index: 1;
         }}
         
         .sidebar-header {{
@@ -317,9 +318,11 @@ def generate_css():
             color: {COLORS['text_primary']};
             font-size: {FONTS['size_small']};
             cursor: pointer;
+            min-width: 200px;
         }}
         
         .model-selector:focus {{ outline: none; border-color: {COLORS['accent_primary']}; }}
+        .model-selector:hover {{ border-color: {COLORS['accent_primary']}; }}
         
         .status {{
             display: flex;
@@ -553,8 +556,9 @@ def generate_css():
             border-radius: {DIMENSIONS['border_radius']};
             cursor: pointer;
             font-size: {FONTS['size_small']};
-            z-index: 100;
+            z-index: 1000;
             transition: all {ANIMATIONS['transition_speed']};
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         }}
         
         .log-viewer-btn:hover {{ background: {COLORS['btn_secondary_hover']}; }}
@@ -628,7 +632,7 @@ async def home():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chat</title>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <style>
         {css}
     </style>
@@ -675,7 +679,7 @@ async def home():
         </div>
     </div>
     
-    <button class="log-viewer-btn" onclick="toggleLogViewer()">📋 Logs</button>
+    <button class="log-viewer-btn" onclick="toggleLogViewer()" title="View Terminal Logs">📋 Logs</button>
     
     <div class="log-viewer" id="logViewer">
         <div class="log-viewer-header">
@@ -703,13 +707,31 @@ async def home():
         let isGenerating = false;
         let renameConvId = null;
         let currentModel = '{DEFAULT_MODEL}';
-        let markedOptions = {{
-            breaks: true,
-            gfm: true,
-            highlight: function(code, lang) {{
-                return code;
+        let markedReady = false;
+        
+        // Initialize marked library when ready
+        function initMarked() {{
+            if (typeof marked !== 'undefined') {{
+                markedReady = true;
+                marked.setOptions({{
+                    breaks: true,
+                    gfm: true,
+                    headerIds: false,
+                    mangle: false
+                }});
+                console.log('Marked library loaded');
+                renderMarkdown(); // Render any existing messages
+            }} else {{
+                setTimeout(initMarked, 50);
             }}
-        }};
+        }}
+        
+        // Start checking for marked library
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', initMarked);
+        }} else {{
+            initMarked();
+        }}
         
         function generateId() {{
             return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {{
@@ -748,7 +770,10 @@ async def home():
                         document.getElementById('input').disabled = false;
                         document.getElementById('input').focus();
                         loadConversations();
-                        renderMarkdown();
+                        // Wait a bit for marked to be ready, then render
+                        setTimeout(() => {{
+                            renderMarkdown();
+                        }}, 100);
                     }} else if (data.type === 'error') {{
                         removeLoading();
                         addMessage('⚠️ ' + data.content, 'assistant');
@@ -842,15 +867,30 @@ async def home():
         }}
         
         function renderMarkdown() {{
+            if (!markedReady || typeof marked === 'undefined') {{
+                console.log('Marked library not ready yet, will retry...');
+                setTimeout(renderMarkdown, 100);
+                return;
+            }}
+            
             const messages = document.querySelectorAll('.message.assistant[data-needs-markdown="true"]');
             messages.forEach(msg => {{
-                const content = msg.textContent;
+                const content = msg.textContent || msg.innerText;
+                if (!content || content.trim() === '') return;
+                
                 try {{
-                    msg.innerHTML = marked.parse(content, markedOptions);
-                    msg.dataset.needsMarkdown = 'false';
-                    msg.dataset.rendered = 'true';
+                    if (typeof marked !== 'undefined') {{
+                        const html = marked.parse(content);
+                        msg.innerHTML = html;
+                        msg.dataset.needsMarkdown = 'false';
+                        msg.dataset.rendered = 'true';
+                    }} else {{
+                        console.error('Marked library not available');
+                    }}
                 }} catch (e) {{
                     console.error('Markdown render error:', e);
+                    // Fallback to plain text if markdown fails
+                    msg.textContent = content;
                 }}
             }});
         }}
@@ -930,7 +970,9 @@ async def home():
             data.messages.forEach(msg => {{
                 addMessage(msg.content, msg.role);
             }});
-            renderMarkdown();
+            setTimeout(() => {{
+                renderMarkdown();
+            }}, 100);
             loadConversations();
         }}
         
@@ -979,10 +1021,34 @@ async def home():
             }}
         }}
         
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {{
+            console.log('Page loaded, initializing...');
+            const modelSelector = document.getElementById('modelSelector');
+            if (modelSelector) {{
+                modelSelector.value = currentModel;
+                console.log('Model selector initialized with:', currentModel);
+            }} else {{
+                console.error('Model selector not found!');
+            }}
+            
+            const logBtn = document.querySelector('.log-viewer-btn');
+            if (logBtn) {{
+                console.log('Log button found');
+            }} else {{
+                console.error('Log button not found!');
+            }}
+        }});
+        
         connectWS();
         loadConversations();
         document.getElementById('input').focus();
-        document.getElementById('modelSelector').value = currentModel;
+        
+        // Set model selector value
+        const modelSelector = document.getElementById('modelSelector');
+        if (modelSelector) {{
+            modelSelector.value = currentModel;
+        }}
     </script>
 </body>
 </html>
