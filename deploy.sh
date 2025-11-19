@@ -11,6 +11,11 @@ echo "🚀 Starting deployment..."
 echo "📥 Pulling latest code from GitHub..."
 git pull origin main
 
+# Optional: Clean up dynamically created vLLM containers
+# Uncomment the next 2 lines if you want to clean them up during deployment
+# echo "🧹 Cleaning up old vLLM containers..."
+# ./cleanup.sh
+
 # Rebuild the chat-app container
 echo "🔨 Rebuilding chat-app container..."
 docker compose build chat-app
