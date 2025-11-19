@@ -4671,10 +4671,6 @@ async def home(mode: str = "light"):
                         contentDiv.innerHTML = html;
                         msg.dataset.needsMarkdown = 'false';
                         msg.dataset.rendered = 'true';
-                    }} else {{
-                        console.warn('Marked library not available');
-                        return;
-                    }}
                         
                         // Restore timestamp if it was removed
                         if (timestampDiv && !msg.querySelector('.message-timestamp')) {{
@@ -4732,7 +4728,8 @@ async def home(mode: str = "light"):
                             }}
                         }});
                     }} else {{
-                        console.error('Marked library not available');
+                        console.warn('Marked library not available');
+                        return;
                     }}
                 }} catch (e) {{
                     console.error('Markdown render error:', e);
