@@ -103,7 +103,7 @@ else:
 AVAILABLE_MODELS = [
     {
         "id": "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
-        "name": "Qwen 2.5 Coder 72B (AWQ Quantized)",
+        "name": "Qwen 2.5 VL 72B (AWQ Quantized)",
         "quantized": True,
         "command": [
             "--model", "Qwen/Qwen2.5-VL-72B-Instruct-AWQ",
@@ -115,16 +115,15 @@ AVAILABLE_MODELS = [
         ]
     },
     {
-        "id": "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
-        "name": "Qwen 2.5 Coder 32B (AWQ Quantized)",
-        "quantized": True,
+        "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "name": "Qwen 2.5 Coder 32B",
+        "quantized": False,
         "command": [
-            "--model", "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+            "--model", "Qwen/Qwen2.5-Coder-32B-Instruct",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.95",
-            "--max-model-len", "8192",
-            "--quantization", "awq"
+            "--max-model-len", "8192"
         ]
     },
     {
@@ -153,7 +152,7 @@ AVAILABLE_MODELS = [
     },
 ]
 
-# Default model - Qwen 70B quantized (or closest available)
+# Default model - Qwen 72B quantized (VL model, works for text and coding)
 DEFAULT_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
 
 # Current model state
