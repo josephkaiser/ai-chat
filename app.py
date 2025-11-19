@@ -209,7 +209,7 @@ async def switch_model(new_model_id: str):
         model_switch_status = {"status": "switching", "message": f"Switching to {model_config['name']}...", "progress": 10}
     
     try:
-        logger.info(f"Switching model from {current_model} to {new_model_id}")
+        logger.info(f"🔄 MODEL SWITCH INITIATED: {current_model} → {new_model_id} ({model_config['name']})")
         
         if not docker_client:
             raise Exception("Docker client not available")
@@ -219,31 +219,36 @@ async def switch_model(new_model_id: str):
         # Step 1: Stop the vllm container
         model_switch_status["progress"] = 20
         model_switch_status["message"] = "Stopping vLLM container..."
+        logger.info("📦 Step 1/5: Stopping current vLLM container...")
         try:
             container = docker_client.containers.get(VLLM_CONTAINER)
             container.stop(timeout=10)
-            logger.info("Container stopped")
+            logger.info("✓ Container stopped successfully")
         except docker.errors.NotFound:
-            logger.warning(f"Container {VLLM_CONTAINER} not found, may already be stopped")
+            logger.warning(f"⚠️ Container {VLLM_CONTAINER} not found, may already be stopped")
         except Exception as e:
-            logger.error(f"Error stopping container: {e}")
+            logger.error(f"❌ Error stopping container: {e}")
             raise
         
         # Step 2: Remove the container
         model_switch_status["progress"] = 40
         model_switch_status["message"] = "Removing old container..."
+        logger.info("🗑️ Step 2/5: Removing old container...")
         try:
             container = docker_client.containers.get(VLLM_CONTAINER)
             container.remove(force=True)
-            logger.info("Container removed")
+            logger.info("✓ Container removed successfully")
         except docker.errors.NotFound:
-            logger.info("Container already removed")
+            logger.info("ℹ️ Container already removed")
         except Exception as e:
-            logger.warning(f"Error removing container: {e}")
+            logger.warning(f"⚠️ Error removing container: {e}")
         
         # Step 3: Start container with new model
         model_switch_status["progress"] = 50
         model_switch_status["message"] = "Starting container with new model..."
+        logger.info(f"🚀 Step 3/5: Starting container with new model: {model_config['name']}")
+        logger.info(f"   Model ID: {new_model_id}")
+        logger.info(f"   Command: {' '.join(model_config['command'])}")
         
         try:
             # Start new container with new model command
@@ -259,14 +264,15 @@ async def switch_model(new_model_id: str):
                 ],
                 restart_policy={"Name": "unless-stopped"}
             )
-            logger.info(f"Container started: {container.id}")
+            logger.info(f"✓ Container started successfully (ID: {container.id[:12]})")
         except Exception as e:
-            logger.error(f"Error starting container: {e}")
+            logger.error(f"❌ Error starting container: {e}")
             raise
         
         # Step 4: Wait for model to load
         model_switch_status["progress"] = 60
         model_switch_status["message"] = "Loading new model (this may take a few minutes)..."
+        logger.info("⏳ Step 4/5: Waiting for model to load (this may take several minutes)...")
         
         max_wait = 300  # 5 minutes max
         wait_time = 0
@@ -282,33 +288,40 @@ async def switch_model(new_model_id: str):
                         test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
                         test_client.models.list()
                         # Success!
-                        logger.info("Model is ready!")
+                        logger.info(f"✓ Model is ready! (loaded in {wait_time}s)")
                         break
                     except Exception as e:
                         model_switch_status["progress"] = 60 + int((wait_time / max_wait) * 30)
                         model_switch_status["message"] = f"Model loading... ({wait_time}s)"
-                        logger.info(f"Waiting for model to be ready... ({wait_time}s)")
+                        if wait_time % 30 == 0:  # Log every 30 seconds
+                            logger.info(f"⏳ Still loading... ({wait_time}s elapsed)")
                         continue
                 else:
                     raise Exception(f"Container status: {container.status}")
             except Exception as e:
-                logger.warning(f"Error checking container: {e}")
+                logger.warning(f"⚠️ Error checking container: {e}")
         
         if wait_time >= max_wait:
+            logger.error("❌ Model loading timeout after 5 minutes")
             raise Exception("Model loading timeout after 5 minutes")
         
-        # Step 6: Update client and model
+        # Step 5: Update client and model
         model_switch_status["progress"] = 95
         model_switch_status["message"] = "Finalizing..."
+        logger.info("🔧 Step 5/5: Finalizing model switch...")
         
+        previous_model = current_model
         client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
         current_model = new_model_id
         
         model_switch_status = {"status": "success", "message": f"Successfully switched to {model_config['name']}", "progress": 100}
-        logger.info(f"Successfully switched to model {new_model_id}")
+        logger.info(f"✅ MODEL SWITCH COMPLETE: Successfully switched to {model_config['name']} ({new_model_id})")
+        logger.info(f"   Previous model: {previous_model}")
+        logger.info(f"   New model: {new_model_id}")
         
     except Exception as e:
-        logger.error(f"Model switch error: {e}\n{traceback.format_exc()}")
+        logger.error(f"❌ MODEL SWITCH FAILED: {str(e)}")
+        logger.error(f"   Error details: {traceback.format_exc()}")
         model_switch_status = {"status": "error", "message": f"Error: {str(e)}", "progress": 0}
     finally:
         model_switching = False
@@ -456,6 +469,37 @@ def generate_css():
         
         .sidebar.collapsed .sidebar-toggle {{
             right: -12px;
+        }}
+        
+        /* New Chat button for collapsed sidebar */
+        .new-chat-icon-btn {{
+            display: none;
+            width: 40px;
+            height: 40px;
+            margin: 16px auto 0;
+            background: {COLORS['btn_primary']};
+            color: {COLORS['bg_primary']};
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 20px;
+            align-items: center;
+            justify-content: center;
+            transition: all {ANIMATIONS['transition_speed']};
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        
+        .sidebar.collapsed .new-chat-icon-btn {{
+            display: flex;
+        }}
+        
+        .new-chat-icon-btn:hover {{
+            background: {COLORS['btn_primary_hover']};
+            transform: scale(1.05);
+        }}
+        
+        .new-chat-icon-btn:active {{
+            transform: scale(0.95);
         }}
         
         .sidebar-header {{
@@ -1155,6 +1199,7 @@ async def home():
 <body>
     <div class="sidebar" id="sidebar">
         <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">◀</button>
+        <button class="new-chat-icon-btn" onclick="newChat()" title="New Chat">+</button>
         <div class="sidebar-content">
             <div class="sidebar-header">
                 <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
