@@ -838,27 +838,33 @@ def generate_css():
         }}
         
         .model-toggle-btn {{
-            padding: 8px 15px;
+            padding: 10px 18px;
             background: {COLORS['bg_primary']};
-            border: 1px solid {COLORS['bg_tertiary']};
+            border: 2px solid {COLORS['bg_tertiary']};
             border-radius: {DIMENSIONS['border_radius_small']};
             color: {COLORS['text_primary']};
-            font-size: {FONTS['size_small']};
+            font-size: {FONTS['size_base']};
+            font-weight: 500;
             cursor: pointer;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
+            min-width: 180px;
+            justify-content: space-between;
         }}
         
         .model-toggle-btn:hover {{
             border-color: {COLORS['accent_primary']};
             background: {COLORS['bg_tertiary']};
+            transform: translateY(-1px);
         }}
         
         .model-toggle-btn.switching {{
             opacity: 0.6;
             cursor: not-allowed;
+            border-color: {COLORS['accent_primary']};
         }}
+        
         
         .model-dropdown {{
             display: none;
@@ -1036,9 +1042,10 @@ async def home():
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
                 <div class="model-toggle">
-                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown()">
+                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown()" title="Click to switch model">
+                        <span>🤖</span>
                         <span id="currentModelName">Loading...</span>
-                        <span>▼</span>
+                        <span style="font-size: 10px; margin-left: 5px;">▼</span>
                     </button>
                     <div class="model-dropdown" id="modelDropdown">
                         {''.join([f'''
@@ -1345,7 +1352,10 @@ async def home():
             currentModel = modelId;
             const model = availableModels.find(m => m.id === modelId);
             if (model) {{
-                document.getElementById('currentModelName').textContent = model.name;
+                const nameEl = document.getElementById('currentModelName');
+                if (nameEl) {{
+                    nameEl.textContent = model.name;
+                }}
                 
                 // Update active state in dropdown
                 document.querySelectorAll('.model-option').forEach(opt => {{
@@ -1571,12 +1581,16 @@ async def home():
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {{
             console.log('Page loaded, initializing...');
-            const modelSelector = document.getElementById('modelSelector');
-            if (modelSelector) {{
-                modelSelector.value = currentModel;
-                console.log('Model selector initialized with:', currentModel);
+            
+            // Load current model immediately
+            loadCurrentModel();
+            
+            // Check for model toggle button
+            const modelBtn = document.getElementById('modelToggleBtn');
+            if (modelBtn) {{
+                console.log('Model toggle button found');
             }} else {{
-                console.error('Model selector not found!');
+                console.error('Model toggle button not found!');
             }}
             
             const logBtn = document.querySelector('.log-viewer-btn');
@@ -1589,13 +1603,13 @@ async def home():
         
         connectWS();
         loadConversations();
-        document.getElementById('input').focus();
         
-        // Set model selector value
-        const modelSelector = document.getElementById('modelSelector');
-        if (modelSelector) {{
-            modelSelector.value = currentModel;
-        }}
+        // Load current model on startup
+        setTimeout(() => {{
+            loadCurrentModel();
+        }}, 500);
+        
+        document.getElementById('input').focus();
     </script>
 </body>
 </html>
