@@ -89,6 +89,7 @@ DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
 VLLM_CONTAINER = os.getenv("VLLM_CONTAINER", "vllm")
 HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hugging Face token for gated models
+VLLM_PORT = 8001  # Host port for vLLM
 
 # Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
@@ -163,6 +164,7 @@ model_switching = False
 model_switch_lock = Lock()
 model_switch_status = {"status": "ready", "message": "", "progress": 0}
 model_switch_history = []  # List of dicts: {"timestamp": str, "from": str, "to": str, "status": str, "duration": float}
+model_containers = {}  # Cache of container names per model: {model_id: container_name}
 
 # Initialize Docker client
 try:
@@ -171,6 +173,46 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize Docker client: {e}")
     docker_client = None
+
+def get_model_container_name(model_id: str) -> str:
+    """Get container name for a model (creates if doesn't exist)"""
+    # Sanitize model ID for container name
+    safe_name = model_id.replace("/", "-").replace("_", "-").lower()
+    return f"vllm-{safe_name}"
+
+def ensure_model_container(model_id: str, model_config: dict) -> str:
+    """Ensure a container exists for a model, create if needed"""
+    container_name = get_model_container_name(model_id)
+    
+    if not docker_client:
+        raise Exception("Docker client not available")
+    
+    try:
+        # Check if container already exists
+        container = docker_client.containers.get(container_name)
+        logger.info(f"✓ Container {container_name} already exists")
+        return container_name
+    except docker.errors.NotFound:
+        # Container doesn't exist, create it (but don't start it)
+        logger.info(f"📦 Creating container for model: {model_id}")
+        
+        env_vars = {}
+        if HF_TOKEN:
+            env_vars["HF_TOKEN"] = HF_TOKEN
+        
+        container = docker_client.containers.create(
+            "vllm/vllm-openai:v0.5.4",
+            name=container_name,
+            command=model_config["command"],
+            ports={"8000/tcp": VLLM_PORT},
+            environment=env_vars if env_vars else None,
+            device_requests=[
+                docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])
+            ],
+            restart_policy={"Name": "unless-stopped"}
+        )
+        logger.info(f"✓ Container {container_name} created (ID: {container.id[:12]})")
+        return container_name
 
 # Initialize OpenAI client
 try:
@@ -211,6 +253,8 @@ async def switch_model(new_model_id: str):
         model_switch_status = {"status": "switching", "message": f"Switching to {model_config['name']}...", "progress": 10}
     
     try:
+        import time
+        
         switch_start_time = time.time()
         switch_timestamp = datetime.now().isoformat()
         
@@ -235,64 +279,57 @@ async def switch_model(new_model_id: str):
         if not docker_client:
             raise Exception("Docker client not available")
         
-        import time
-        
-        # Step 1: Stop the vllm container
+        # Step 1: Stop all model containers (coordinator pattern)
         model_switch_status["progress"] = 20
-        model_switch_status["message"] = "Stopping vLLM container..."
-        logger.info("📦 Step 1/5: Stopping current vLLM container...")
-        try:
-            container = docker_client.containers.get(VLLM_CONTAINER)
-            container.stop(timeout=10)
-            logger.info("✓ Container stopped successfully")
-        except docker.errors.NotFound:
-            logger.warning(f"⚠️ Container {VLLM_CONTAINER} not found, may already be stopped")
-        except Exception as e:
-            logger.error(f"❌ Error stopping container: {e}")
-            raise
+        model_switch_status["message"] = "Stopping other model containers..."
+        logger.info("📦 Step 1/4: Stopping all model containers...")
         
-        # Step 2: Remove the container
+        stopped_count = 0
+        for model in AVAILABLE_MODELS:
+            container_name = get_model_container_name(model["id"])
+            try:
+                container = docker_client.containers.get(container_name)
+                if container.status == "running":
+                    container.stop(timeout=5)
+                    logger.info(f"✓ Stopped container: {container_name}")
+                    stopped_count += 1
+            except docker.errors.NotFound:
+                pass  # Container doesn't exist, that's fine
+            except Exception as e:
+                logger.warning(f"⚠️ Error stopping {container_name}: {e}")
+        
+        if stopped_count > 0:
+            time.sleep(1)  # Brief pause after stopping
+        logger.info(f"✓ Stopped {stopped_count} container(s)")
+        
+        # Step 2: Ensure target model container exists
         model_switch_status["progress"] = 40
-        model_switch_status["message"] = "Removing old container..."
-        logger.info("🗑️ Step 2/5: Removing old container...")
-        try:
-            container = docker_client.containers.get(VLLM_CONTAINER)
-            container.remove(force=True)
-            logger.info("✓ Container removed successfully")
-        except docker.errors.NotFound:
-            logger.info("ℹ️ Container already removed")
-        except Exception as e:
-            logger.warning(f"⚠️ Error removing container: {e}")
+        model_switch_status["message"] = "Preparing model container..."
+        logger.info(f"🔧 Step 2/4: Ensuring container exists for {model_config['name']}...")
         
-        # Step 3: Start container with new model
+        target_container_name = ensure_model_container(new_model_id, model_config)
+        model_containers[new_model_id] = target_container_name
+        
+        # Step 3: Start the target container
         model_switch_status["progress"] = 50
-        model_switch_status["message"] = "Starting container with new model..."
-        logger.info(f"🚀 Step 3/5: Starting container with new model: {model_config['name']}")
-        logger.info(f"   Model ID: {new_model_id}")
-        logger.info(f"   Command: {' '.join(model_config['command'])}")
+        model_switch_status["message"] = "Starting model container..."
+        logger.info(f"🚀 Step 3/4: Starting container: {target_container_name}")
         
         try:
-            # Prepare environment variables
-            env_vars = {}
-            if HF_TOKEN:
-                env_vars["HF_TOKEN"] = HF_TOKEN
-                logger.info("🔑 Using Hugging Face token for gated model access")
+            container = docker_client.containers.get(target_container_name)
             
-            # Start new container with new model command
-            container = docker_client.containers.run(
-                "vllm/vllm-openai:v0.5.4",
-                name=VLLM_CONTAINER,
-                command=model_config["command"],
-                ports={"8000/tcp": 8001},
-                environment=env_vars if env_vars else None,
-                detach=True,
-                remove=False,
-                device_requests=[
-                    docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])
-                ],
-                restart_policy={"Name": "unless-stopped"}
-            )
-            logger.info(f"✓ Container started successfully (ID: {container.id[:12]})")
+            # Check if already running
+            container.reload()
+            if container.status == "running":
+                logger.info(f"✓ Container {target_container_name} is already running")
+            else:
+                container.start()
+                logger.info(f"✓ Container {target_container_name} started")
+                time.sleep(2)  # Brief pause for container to initialize
+                
+        except docker.errors.NotFound:
+            logger.error(f"❌ Container {target_container_name} not found after creation")
+            raise Exception(f"Container {target_container_name} was not created properly")
         except Exception as e:
             logger.error(f"❌ Error starting container: {e}")
             raise
@@ -300,7 +337,7 @@ async def switch_model(new_model_id: str):
         # Step 4: Wait for model to load
         model_switch_status["progress"] = 60
         model_switch_status["message"] = "Loading new model (this may take a few minutes)..."
-        logger.info("⏳ Step 4/5: Waiting for model to load (this may take several minutes)...")
+        logger.info("⏳ Step 4/4: Waiting for model to load (this may take several minutes)...")
         
         max_wait = 300  # 5 minutes max
         wait_time = 0
@@ -336,7 +373,7 @@ async def switch_model(new_model_id: str):
         # Step 5: Update client and model
         model_switch_status["progress"] = 95
         model_switch_status["message"] = "Finalizing..."
-        logger.info("🔧 Step 5/5: Finalizing model switch...")
+        logger.info("🔧 Finalizing model switch...")
         
         previous_model = current_model
         client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
@@ -366,7 +403,7 @@ async def switch_model(new_model_id: str):
         logger.info(f"   Total switches recorded: {len(model_switch_history)}")
         logger.info("=" * 80)
         
-    except Exception as e:
+except Exception as e:
         switch_duration = time.time() - switch_start_time if 'switch_start_time' in locals() else 0
         
         # Record failed switch in history
@@ -1657,14 +1694,14 @@ async def home():
     <div class="sidebar" id="sidebar">
         <button class="new-chat-icon-btn" onclick="newChat()" title="New Chat">+</button>
         <div class="sidebar-content">
-            <div class="sidebar-header">
-                <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
-            </div>
+        <div class="sidebar-header">
+            <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+        </div>
             <div class="search-container">
                 <input type="text" class="search-input" id="searchInput" placeholder="🔍 Search chats..." oninput="handleSearch(this.value)" />
                 <div class="search-results" id="searchResults" style="display: none;"></div>
-            </div>
-            <div class="conversations" id="conversations"></div>
+        </div>
+        <div class="conversations" id="conversations"></div>
         </div>
     </div>
     
@@ -1690,9 +1727,9 @@ async def home():
                         ''' for m in AVAILABLE_MODELS])}
                     </div>
                 </div>
-                <div class="status">
-                    <div class="status-dot disconnected" id="statusDot"></div>
-                    <span id="statusText">Connecting...</span>
+            <div class="status">
+                <div class="status-dot disconnected" id="statusDot"></div>
+                <span id="statusText">Connecting...</span>
                 </div>
             </div>
         </div>
@@ -1818,7 +1855,7 @@ async def home():
                     // Check if model is actually available (might be booting)
                     fetch('/health').then(r => r.json()).then(health => {{
                         if (health.model_available) {{
-                            updateStatus(true);
+                    updateStatus(true);
                         }} else {{
                             updateStatus('booting');
                         }}
@@ -2949,7 +2986,7 @@ async def logs_websocket(websocket: WebSocket):
 async def health():
     """Health check"""
     status = {
-        "status": "healthy",
+            "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "current_model": current_model,
         "model_available": False
@@ -2961,7 +2998,7 @@ async def health():
             models = client.models.list()
             status["model_available"] = True
             status["status"] = "healthy"
-        except Exception as e:
+    except Exception as e:
             status["model_available"] = False
             status["status"] = "unhealthy"
             status["error"] = str(e)
