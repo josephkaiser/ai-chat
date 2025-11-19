@@ -403,7 +403,7 @@ async def switch_model(new_model_id: str):
         logger.info(f"   Total switches recorded: {len(model_switch_history)}")
         logger.info("=" * 80)
         
-except Exception as e:
+    except Exception as e:
         switch_duration = time.time() - switch_start_time if 'switch_start_time' in locals() else 0
         
         # Record failed switch in history
