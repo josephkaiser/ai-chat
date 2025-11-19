@@ -13,22 +13,26 @@ A comprehensive AI chat application with a modern web UI, running on a single GP
 - ✅ **Model Health Monitoring** - Automatic recovery if model becomes unresponsive
 
 ### Advanced Features
-- ✅ **Web Search** - Search Google, Wikipedia, Reddit, GitHub, and Stack Overflow
+- ✅ **Automatic Web Search** - AI automatically searches the web for current events, recent information, and up-to-date facts
+- ✅ **Manual Web Search** - Search Google, Wikipedia, Reddit, GitHub, and Stack Overflow via UI button
 - ✅ **Code Execution** - Sandboxed Python code execution with resource limits
 - ✅ **File System Access** - Read files and traverse directories (with security checks)
 - ✅ **Chat History Search** - Full-text search through all conversations
 - ✅ **Feedback & Retry** - Provide feedback on responses and retry with extended thinking
-- ✅ **Terminal Log Viewer** - Real-time view of vLLM logs and model status
+- ✅ **Terminal Log Viewer** - Real-time view of vLLM logs and model status with helpful startup messages
 - ✅ **Prefix Caching** - Faster responses for repeated prompts
 - ✅ **Chunked Prefill** - Optimized context processing
+- ✅ **Fast Startup** - Web UI loads immediately, model loading happens in background
 
 ### UI Features
 - ✅ **Collapsible Sidebar** - Conversation history with search
 - ✅ **Markdown Rendering** - Full markdown support with syntax highlighting
 - ✅ **Copy to Clipboard** - Easy copying of code and responses
 - ✅ **Timestamps** - Message timestamps for all conversations
-- ✅ **Mobile Responsive** - Works great on mobile devices
+- ✅ **Mobile Responsive** - Works great on mobile devices with optimized touch interactions
 - ✅ **Auto-resizing Input** - Text input grows with content
+- ✅ **Status Indicator** - Visual connection status (green=connected, yellow=booting/loading, red=disconnected)
+- ✅ **Theme Support** - Light and dark modes with customizable colors
 
 ## Quick Start
 
@@ -137,10 +141,12 @@ The system intelligently manages context:
    - Status console shows progress
    - Automatic recovery to default model on failure
 
-2. **Web Search** - Click "🔍 Web" button to search online
-   - Select sources: Google, Wikipedia, Reddit, GitHub, Stack Overflow
-   - Results open in new tabs
-   - Press Enter to search, Escape to close
+2. **Web Search** - Two ways to search:
+   - **Automatic**: The AI automatically searches the web when you ask about current events, recent information, or topics that may have changed (e.g., "What's the latest news about...", "Current status of...", "Recent updates on...")
+   - **Manual**: Click "🔍 Web" button to search online
+     - Select sources: Google, Wikipedia, Reddit, GitHub, Stack Overflow
+     - Results open in new tabs
+     - Press Enter to search, Escape to close
 
 3. **Code Execution** - The AI can execute Python code
    - Use `[EXECUTE_CODE:python]` in prompts
@@ -245,6 +251,8 @@ Starting server on 0.0.0.0:8000
 **First run:** 2-5 minutes (downloads model ~2-4GB)
 **Later runs:** 30-60 seconds (model cached, faster with prefix caching)
 
+**Note:** The web UI loads immediately - you don't have to wait for the model to finish loading. The status indicator shows the connection state, and you can monitor progress in the Log Viewer (📋 Logs button).
+
 ## Monitoring
 
 ### Check GPU Usage
@@ -330,10 +338,12 @@ chat-app:
 - For gated models, ensure `HF_TOKEN` is set in `.env`
 
 ### Application Stalls on Startup
-- The app now loads the UI immediately and checks for model in background
-- Check model status in the web UI (status indicator in header)
+- The app loads the UI immediately and checks for model in background (non-blocking startup)
+- Check model status in the web UI (status indicator in header - yellow means loading, green means ready)
+- Open the Log Viewer (📋 Logs button) to see detailed startup progress and helpful messages
 - View logs: `docker compose logs -f chat-app`
 - Model health monitor will attempt recovery automatically
+- Boot time has been optimized with reduced wait times for faster startup
 
 ## Performance Tips
 

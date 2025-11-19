@@ -372,7 +372,10 @@ CRITICAL REASONING PROTOCOL - INTERNAL REASONING, POLISHED OUTPUT:
    - This helps you understand codebases, analyze project structure, and provide better programming assistance
    - Always read relevant files when answering questions about code or projects
 
-**6. THINKING STYLE:**
+**6. WEB SEARCH INTEGRATION:**
+   When the user asks about current events, recent information, specific facts, or topics that may have changed recently, the system will automatically search the web and provide you with up-to-date information. Use this information to provide accurate, current responses. Cite sources when appropriate.
+
+**7. THINKING STYLE:**
    - Be methodical: reason internally → validate → present polished conclusion
    - Be thorough: don't skip validation steps internally
    - Be self-critical: question your own reasoning before presenting
@@ -386,6 +389,45 @@ Remember: Do your reasoning internally for quality, but present only polished, f
         # Use full history (already token-limited by get_conversation_history)
         for msg in history:
             messages.append({'role': msg['role'], 'content': msg['content']})
+        
+        # Check if query might benefit from web search
+        search_keywords = ['current', 'recent', 'latest', 'today', 'now', '2024', '2025', 'news', 'update', 'happening', 'what is', 'who is', 'when did', 'where is']
+        query_lower = job.prompt.lower()
+        needs_web_search = any(keyword in query_lower for keyword in search_keywords) or len(job.prompt) > 50
+        
+        web_search_results = None
+        if needs_web_search:
+            try:
+                logger.info(f"🔍 Auto-searching web for: {job.prompt[:100]}")
+                await job.websocket.send_json({'type': 'token', 'content': '🔍 Searching for up-to-date information...\n\n'})
+                
+                # Perform web search
+                with DDGS() as ddgs:
+                    search_results = list(ddgs.text(job.prompt, max_results=5))
+                    if search_results:
+                        web_search_results = []
+                        for result in search_results:
+                            web_search_results.append({
+                                'title': result.get('title', ''),
+                                'url': result.get('href', ''),
+                                'snippet': result.get('body', '')[:300]  # Limit snippet length
+                            })
+                        
+                        # Add web search results to context
+                        search_context = "\n\n**Up-to-date information from web search:**\n"
+                        for i, result in enumerate(web_search_results[:3], 1):  # Use top 3 results
+                            search_context += f"\n[{i}] {result['title']}\nURL: {result['url']}\n{result['snippet']}\n"
+                        
+                        # Add as a system message with search results
+                        messages.append({
+                            'role': 'system',
+                            'content': f'Web search results for the user\'s query:\n{search_context}\n\nUse this information to provide accurate, up-to-date responses. Cite sources when appropriate.'
+                        })
+                        logger.info(f"✅ Found {len(web_search_results)} web search results")
+            except Exception as e:
+                logger.warning(f"⚠️ Web search failed: {e}")
+                # Continue without web search results
+        
         messages.append({'role': 'user', 'content': job.prompt})
         
         # Signal start
@@ -1068,8 +1110,8 @@ async def recover_to_default_model():
             except Exception as e:
                 logger.warning(f"⚠️ Error stopping containers during recovery: {e}")
         
-        # Wait a bit for ports to clear
-        await asyncio.sleep(2)
+        # Wait a bit for ports to clear (reduced from 2s to 1s for faster startup)
+        await asyncio.sleep(1)
         
         # Ensure default model container exists
         if docker_client:
@@ -1081,7 +1123,7 @@ async def recover_to_default_model():
                 container.reload()
                 if container.status != "running":
                     container.start()
-                    await asyncio.sleep(3)  # Brief wait for container to start
+                    await asyncio.sleep(2)  # Brief wait for container to start (reduced from 3s)
                 
                 # Wait for model to be ready (allow enough time for model loading)
                 max_wait = 600  # 10 minutes for recovery (models can take 5+ minutes to load)
@@ -1579,15 +1621,15 @@ def generate_css(mode='light'):
         
         .sidebar-header {{
             padding: 20px;
-            border-bottom: 2px solid #8194b1;
+            border-bottom: 2px solid {colors['accent_primary']};
         }}
         
         .new-chat-btn {{
             width: 100%;
             padding: 12px;
-            background: #e9eced;
-            color: #8194b1;
-            border: 2px solid #b0c9df;
+            background: {colors['btn_secondary']};
+            color: {colors['text_primary']};
+            border: 2px solid {colors['accent_primary']};
             border-radius: 4px;
             font-size: {FONTS['size_base']};
             font-weight: 600;
@@ -1597,36 +1639,36 @@ def generate_css(mode='light'):
         }}
         
         .new-chat-btn:hover {{ 
-            background: #b0c9df; 
-            border-color: #8194b1; 
-            color: #fff4de;
+            background: {colors['btn_secondary_hover']}; 
+            border-color: {colors['accent_hover']}; 
+            color: {colors['text_primary']};
             transform: translateX(3px);
         }}
         
         .search-container {{
             padding: 15px;
-            border-bottom: 2px solid #8194b1;
+            border-bottom: 2px solid {colors['accent_primary']};
         }}
         
         .search-input {{
             width: 100%;
             padding: 10px 14px;
-            background: #e9eced;
-            border: 2px solid #b0c9df;
+            background: {colors['bg_primary']};
+            border: 2px solid {colors['bg_tertiary']};
             border-radius: 4px;
-            color: #8194b1;
+            color: {colors['text_primary']};
             font-size: {FONTS['size_small']};
             font-family: {FONTS['family']};
         }}
         
         .search-input:focus {{
             outline: none;
-            border-color: #8194b1;
-            box-shadow: 0 0 0 2px rgba(129,148,177,0.1);
+            border-color: {colors['accent_primary']};
+            box-shadow: 0 0 0 2px {colors['accent_primary']}33;
         }}
         
         .search-input::placeholder {{
-            color: #b0c9df;
+            color: {colors['text_tertiary']};
         }}
         
         .search-results {{
@@ -1638,31 +1680,31 @@ def generate_css(mode='light'):
         .search-result-item {{
             padding: 12px 16px;
             margin: 5px 0;
-            background: #e9eced;
-            border: 2px solid #b0c9df;
+            background: {colors['bg_primary']};
+            border: 2px solid {colors['bg_tertiary']};
             border-radius: 4px;
             cursor: pointer;
             transition: all 0.2s;
-            color: #8194b1;
+            color: {colors['text_primary']};
         }}
         
         .search-result-item:hover {{
-            background: #b0c9df;
-            border-color: #8194b1;
-            color: #fff4de;
+            background: {colors['btn_secondary']};
+            border-color: {colors['accent_primary']};
+            color: {colors['text_primary']};
             transform: translateX(3px);
         }}
         
         .search-result-title {{
             font-weight: 600;
             font-size: {FONTS['size_small']};
-            color: #8194b1;
+            color: {colors['text_primary']};
             margin-bottom: 4px;
         }}
         
         .search-result-preview {{
             font-size: 12px;
-            color: #5898b7;
+            color: {colors['text_secondary']};
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -1670,14 +1712,14 @@ def generate_css(mode='light'):
         
         .search-result-meta {{
             font-size: 11px;
-            color: #b0c9df;
+            color: {colors['text_tertiary']};
             margin-top: 4px;
         }}
         
         .search-no-results {{
             padding: 20px;
             text-align: center;
-            color: {COLORS['text_tertiary']};
+            color: {colors['text_tertiary']};
             font-size: {FONTS['size_small']};
         }}
         
@@ -1690,27 +1732,27 @@ def generate_css(mode='light'):
         .conv-item {{
             padding: 12px 16px;
             margin-bottom: 8px;
-            background: #e9eced;
-            border: 2px solid #b0c9df;
+            background: {colors['bg_primary']};
+            border: 2px solid {colors['bg_tertiary']};
             border-radius: 4px;
             cursor: pointer;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            color: #8194b1;
+            color: {colors['text_primary']};
             transition: all 0.2s;
         }}
         
         .conv-item:hover {{ 
-            background: #b0c9df; 
-            border-color: #8194b1;
-            color: #fff4de;
+            background: {colors['btn_secondary']}; 
+            border-color: {colors['accent_primary']};
+            color: {colors['text_primary']};
             transform: translateX(3px);
         }}
         .conv-item.active {{ 
-            background: #8194b1; 
-            color: #fff4de; 
-            border-color: #8194b1;
+            background: {colors['accent_primary']}; 
+            color: {colors['bg_primary']}; 
+            border-color: {colors['accent_primary']};
         }}
         
         .conv-title {{
@@ -1771,7 +1813,7 @@ def generate_css(mode='light'):
         .header h1 {{ 
             font-size: {FONTS['size_large']}; 
             font-weight: 600;
-            color: #8194b1;
+            color: {colors['text_primary']};
             text-transform: uppercase;
             letter-spacing: 1px;
         }}
@@ -1795,18 +1837,18 @@ def generate_css(mode='light'):
             align-items: center;
             gap: 8px;
             font-size: {FONTS['size_base']};
-            color: {COLORS['text_secondary']};
+            color: {colors['text_secondary']};
         }}
         
         .status-dot {{
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: {COLORS['status_connected']};
+            background: {colors['status_connected']};
             animation: pulse 2s infinite;
         }}
         
-        .status-dot.disconnected {{ background: {COLORS['status_disconnected']}; animation: none; }}
+        .status-dot.disconnected {{ background: {colors['status_disconnected']}; animation: none; }}
         
         .status-dot.booting {{
             background: #ffa500;
@@ -1958,40 +2000,40 @@ def generate_css(mode='light'):
             color: {colors['text_primary']};
         }}
         
-        .message.assistant .hljs-keyword {{ color: #8194b1; font-weight: 600; }}
-        .message.assistant .hljs-string {{ color: #91b461; }}
-        .message.assistant .hljs-comment {{ color: #b0c9df; font-style: italic; }}
-        .message.assistant .hljs-number {{ color: #ff7863; }}
-        .message.assistant .hljs-function {{ color: #8194b1; }}
-        .message.assistant .hljs-variable {{ color: #5898b7; }}
-        .message.assistant .hljs-title {{ color: #8194b1; }}
-        .message.assistant .hljs-type {{ color: #5898b7; }}
+        .message.assistant .hljs-keyword {{ color: {colors['text_primary']}; font-weight: 600; }}
+        .message.assistant .hljs-string {{ color: {colors['accent_secondary']}; }}
+        .message.assistant .hljs-comment {{ color: {colors['text_tertiary']}; font-style: italic; }}
+        .message.assistant .hljs-number {{ color: {colors['accent_primary']}; }}
+        .message.assistant .hljs-function {{ color: {colors['text_primary']}; }}
+        .message.assistant .hljs-variable {{ color: {colors['text_secondary']}; }}
+        .message.assistant .hljs-title {{ color: {colors['text_primary']}; }}
+        .message.assistant .hljs-type {{ color: {colors['text_secondary']}; }}
         
         /* Markdown Typography Styles */
         .message.assistant h1 {{
             font-size: 1.8em;
             font-weight: 700;
-            color: #8194b1;
+            color: {colors['text_primary']};
             margin: 20px 0 12px 0;
             padding-bottom: 8px;
-            border-bottom: 3px solid #8194b1;
+            border-bottom: 3px solid {colors['accent_primary']};
             line-height: 1.3;
         }}
         
         .message.assistant h2 {{
             font-size: 1.5em;
             font-weight: 700;
-            color: #8194b1;
+            color: {colors['text_primary']};
             margin: 18px 0 10px 0;
             padding-bottom: 6px;
-            border-bottom: 2px solid #b0c9df;
+            border-bottom: 2px solid {colors['bg_tertiary']};
             line-height: 1.3;
         }}
         
         .message.assistant h3 {{
             font-size: 1.3em;
             font-weight: 600;
-            color: #8194b1;
+            color: {colors['text_primary']};
             margin: 16px 0 8px 0;
             line-height: 1.4;
         }}
@@ -1999,7 +2041,7 @@ def generate_css(mode='light'):
         .message.assistant h4 {{
             font-size: 1.15em;
             font-weight: 600;
-            color: #5898b7;
+            color: {colors['text_secondary']};
             margin: 14px 0 6px 0;
             line-height: 1.4;
         }}
@@ -2007,7 +2049,7 @@ def generate_css(mode='light'):
         .message.assistant h5 {{
             font-size: 1.05em;
             font-weight: 600;
-            color: #5898b7;
+            color: {colors['text_secondary']};
             margin: 12px 0 6px 0;
             line-height: 1.4;
         }}
@@ -2015,7 +2057,7 @@ def generate_css(mode='light'):
         .message.assistant h6 {{
             font-size: 1em;
             font-weight: 600;
-            color: #5898b7;
+            color: {colors['text_secondary']};
             margin: 10px 0 4px 0;
             line-height: 1.4;
         }}
@@ -2023,14 +2065,14 @@ def generate_css(mode='light'):
         .message.assistant p {{
             margin: 10px 0;
             line-height: 1.7;
-            color: #8194b1;
+            color: {colors['text_primary']};
         }}
         
         .message.assistant strong,
         .message.assistant b {{
             font-weight: 700;
-            color: #8194b1;
-            background: rgba(129,148,177,0.1);
+            color: {colors['text_primary']};
+            background: {colors['bg_tertiary']}33;
             padding: 1px 3px;
             border-radius: 2px;
         }}
@@ -2038,7 +2080,7 @@ def generate_css(mode='light'):
         .message.assistant em,
         .message.assistant i {{
             font-style: italic;
-            color: #5898b7;
+            color: {colors['text_secondary']};
         }}
         
         .message.assistant strong em,
@@ -2047,14 +2089,14 @@ def generate_css(mode='light'):
         .message.assistant i b {{
             font-weight: 700;
             font-style: italic;
-            color: #8194b1;
+            color: {colors['text_primary']};
         }}
         
         .message.assistant ul,
         .message.assistant ol {{
             margin: 12px 0;
             padding-left: 30px;
-            color: #8194b1;
+            color: {colors['text_primary']};
         }}
         
         .message.assistant ul {{
@@ -2068,7 +2110,7 @@ def generate_css(mode='light'):
         .message.assistant li {{
             margin: 6px 0;
             line-height: 1.6;
-            color: #8194b1;
+            color: {colors['text_primary']};
         }}
         
         .message.assistant li p {{
@@ -2085,10 +2127,10 @@ def generate_css(mode='light'):
         .message.assistant blockquote {{
             margin: 16px 0;
             padding: 12px 16px;
-            border-left: 4px solid #8194b1;
-            background: #e9eced;
+            border-left: 4px solid {colors['accent_primary']};
+            background: {colors['bg_secondary']};
             border-radius: 4px;
-            color: #5898b7;
+            color: {colors['text_secondary']};
             font-style: italic;
         }}
         
@@ -2105,23 +2147,23 @@ def generate_css(mode='light'):
         }}
         
         .message.assistant a {{
-            color: #5898b7;
+            color: {colors['text_secondary']};
             text-decoration: underline;
-            text-decoration-color: #b0c9df;
+            text-decoration-color: {colors['bg_tertiary']};
             transition: all 0.2s;
         }}
         
         .message.assistant a:hover {{
-            color: #8194b1;
-            text-decoration-color: #8194b1;
-            background: rgba(129,148,177,0.1);
+            color: {colors['accent_primary']};
+            text-decoration-color: {colors['accent_primary']};
+            background: {colors['bg_tertiary']}33;
             padding: 1px 2px;
             border-radius: 2px;
         }}
         
         .message.assistant hr {{
             border: none;
-            border-top: 2px solid #b0c9df;
+            border-top: 2px solid {colors['bg_tertiary']};
             margin: 20px 0;
         }}
         
@@ -2129,27 +2171,27 @@ def generate_css(mode='light'):
             width: 100%;
             border-collapse: collapse;
             margin: 16px 0;
-            border: 2px solid #b0c9df;
+            border: 2px solid {colors['bg_tertiary']};
             border-radius: 4px;
             overflow: hidden;
         }}
         
         .message.assistant thead {{
-            background: #e9eced;
+            background: {colors['bg_secondary']};
         }}
         
         .message.assistant th {{
             padding: 10px 12px;
             text-align: left;
             font-weight: 600;
-            color: #8194b1;
-            border-bottom: 2px solid #8194b1;
+            color: {colors['text_primary']};
+            border-bottom: 2px solid {colors['accent_primary']};
         }}
         
         .message.assistant td {{
             padding: 8px 12px;
-            border-bottom: 1px solid #b0c9df;
-            color: #8194b1;
+            border-bottom: 1px solid {colors['bg_tertiary']};
+            color: {colors['text_primary']};
         }}
         
         .message.assistant tbody tr:last-child td {{
@@ -3451,9 +3493,9 @@ async def home(mode: str = "light"):
                     </div>
                 </div>
             <div class="status">
-                <div class="status-dot disconnected" id="statusDot"></div>
+                <div class="status-dot booting" id="statusDot"></div>
                 <span id="statusText">Connecting...</span>
-                <div class="status-progress-container" id="statusProgressContainer" style="display: none;">
+                <div class="status-progress-container" id="statusProgressContainer" style="display: block;">
                     <div class="status-progress-bar" id="statusProgressBar"></div>
                     <span class="status-progress-text" id="statusProgressText"></span>
                 </div>
@@ -3759,6 +3801,18 @@ async def home(mode: str = "light"):
         function connectLogWS() {{
             try {{
                 logWs = new WebSocket(`ws://${{location.host}}/ws/logs`);
+                
+                logWs.onopen = () => {{
+                    console.log('Log WebSocket connected');
+                    const logContent = document.getElementById('logContent');
+                    if (logContent && logContent.textContent.trim() === '') {{
+                        logContent.textContent = '📋 Terminal Logs - Real-time application output\\n';
+                        logContent.textContent += '='.repeat(60) + '\\n';
+                        logContent.textContent += '💡 Tip: This shows detailed logs from the AI Chat application\\n';
+                        logContent.textContent += '💡 Use this to monitor model loading, errors, and system status\\n';
+                        logContent.textContent += '='.repeat(60) + '\\n\\n';
+                    }}
+                }};
                 
                 logWs.onmessage = (event) => {{
                     const data = JSON.parse(event.data);
@@ -4851,6 +4905,10 @@ async def home(mode: str = "light"):
             }}
         }});
         
+        // Set initial status to loading/booting
+        updateStatus('loading', null, 'Connecting...');
+        startModelProgressPolling();
+        
         connectWS();
         loadConversations();
         
@@ -4863,10 +4921,13 @@ async def home(mode: str = "light"):
         setTimeout(() => {{
             fetch('/health').then(r => r.json()).then(health => {{
                 if (!health.model_available) {{
-                    updateStatus('loading');
+                    updateStatus('loading', null, 'Loading model...');
                     startModelProgressPolling();
                 }}
-            }}).catch(() => {{}});
+            }}).catch(() => {{
+                // Keep loading status if health check fails
+                updateStatus('loading', null, 'Checking connection...');
+            }});
         }}, 1000);
         
         // Initialize textarea auto-resize
@@ -5395,11 +5456,14 @@ async def ensure_model_loaded():
     global current_model, client
     
     try:
+        logger.info("🔍 Checking for existing model connection...")
+        
         # Check if current model is actually working
         if client:
             try:
                 client.models.list()
-                logger.info(f"✓ Model {current_model} is already loaded and working")
+                logger.info(f"✅ Model {current_model} is already loaded and working")
+                logger.info("🎉 Ready to chat! The model is available.")
                 return True
             except:
                 logger.warning(f"⚠️ Model {current_model} client exists but not responding")
@@ -5407,17 +5471,23 @@ async def ensure_model_loaded():
         
         # Try to connect to see if any model is running
         try:
+            logger.info(f"🔌 Attempting to connect to vLLM server at {VLLM_HOST}...")
             test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
             test_client.models.list()
             client = test_client
-            logger.info(f"✓ Found working model at {VLLM_HOST}")
+            logger.info(f"✅ Found working model at {VLLM_HOST}")
+            logger.info("🎉 Ready to chat! The model is available.")
             return True
-        except:
-            logger.warning(f"⚠️ No model responding at {VLLM_HOST}, will attempt to load default model")
+        except Exception as e:
+            logger.warning(f"⚠️ No model responding at {VLLM_HOST}: {str(e)}")
+            logger.info("🔄 Will attempt to load default model...")
         
         # No working model found, try to load default with timeout
-        logger.info(f"🔄 No working model found, attempting to load default model: {DEFAULT_MODEL}")
-        logger.info("💡 This may take 5-10 minutes if the model needs to load. The web UI will remain available.")
+        logger.info("=" * 60)
+        logger.info(f"📦 Loading default model: {DEFAULT_MODEL}")
+        logger.info("⏱️  This may take 5-10 minutes if the model needs to download/load")
+        logger.info("🌐 The web UI remains available - you can monitor progress in the Log Viewer")
+        logger.info("=" * 60)
         
         try:
             # Set a timeout of 10 minutes for recovery
@@ -5427,15 +5497,25 @@ async def ensure_model_loaded():
             )
             
             if recovery_result.get("success"):
-                logger.info("✅ Default model loaded successfully on startup")
+                logger.info("=" * 60)
+                logger.info("✅ Default model loaded successfully!")
+                logger.info("🎉 Ready to chat! You can now send messages.")
+                logger.info("=" * 60)
                 return True
             else:
                 error_msg = recovery_result.get('error', 'Unknown error')
-                logger.error(f"❌ Failed to load default model on startup: {error_msg}")
+                logger.error("=" * 60)
+                logger.error(f"❌ Failed to load default model: {error_msg}")
                 logger.warning("⚠️ Model health monitor will continue attempting recovery in the background")
+                logger.info("💡 You can try manually switching models using the model selector")
+                logger.info("=" * 60)
                 return False
         except asyncio.TimeoutError:
-            logger.error("❌ Recovery timeout after 10 minutes. Model health monitor will continue in background.")
+            logger.error("=" * 60)
+            logger.error("⏱️  Recovery timeout after 10 minutes")
+            logger.warning("⚠️ Model health monitor will continue attempting recovery in the background")
+            logger.info("💡 The model may still be loading - check the Log Viewer for details")
+            logger.info("=" * 60)
             return False
             
     except Exception as e:
@@ -5484,19 +5564,27 @@ async def startup_event():
     """Start the job queue processor and ensure model is loaded on app startup"""
     global queue_processor_task
     
+    logger.info("=" * 60)
+    logger.info("🚀 AI Chat Application Starting...")
+    logger.info("=" * 60)
+    
     # Start job queue processor immediately (non-blocking)
     if not queue_processor_running:
         queue_processor_task = asyncio.create_task(process_job_queue())
-        logger.info("✅ Job queue processor task created")
+        logger.info("✅ Job queue processor started")
     
     # Start model health monitor
     asyncio.create_task(model_health_monitor())
-    logger.info("✅ Model health monitor started")
+    logger.info("✅ Model health monitor started (checks every 30 seconds)")
     
     # Check for model in background (don't block startup)
     # This allows the web UI to load immediately
-    asyncio.create_task(ensure_model_loaded())
+    logger.info("🌐 Web interface is ready - you can access it now!")
     logger.info("🔄 Checking for model availability in background...")
+    logger.info("💡 Tip: Open the Log Viewer (📋 Logs button) to see detailed startup progress")
+    logger.info("=" * 60)
+    
+    asyncio.create_task(ensure_model_loaded())
 
 if __name__ == "__main__":
     import uvicorn
