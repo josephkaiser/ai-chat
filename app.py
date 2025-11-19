@@ -460,6 +460,43 @@ def generate_css():
             display: flex;
             flex-direction: column;
             z-index: 1;
+            transition: width {ANIMATIONS['transition_speed']};
+            position: relative;
+        }}
+        
+        .sidebar.collapsed {{
+            width: {DIMENSIONS['sidebar_collapsed_width']};
+        }}
+        
+        .sidebar-toggle {{
+            position: absolute;
+            top: 16px;
+            right: -12px;
+            width: 24px;
+            height: 24px;
+            background: {COLORS['bg_primary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            font-size: 10px;
+            color: {COLORS['text_primary']};
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        
+        .sidebar-toggle:hover {{
+            background: {COLORS['bg_tertiary']};
+        }}
+        
+        .sidebar.collapsed .sidebar-content {{
+            display: none;
+        }}
+        
+        .sidebar.collapsed .sidebar-toggle {{
+            right: -12px;
         }}
         
         .sidebar-header {{
@@ -471,7 +508,7 @@ def generate_css():
             width: 100%;
             padding: 12px;
             background: {COLORS['btn_primary']};
-            color: white;
+            color: {COLORS['bg_primary']};
             border: none;
             border-radius: {DIMENSIONS['border_radius']};
             font-size: {FONTS['size_base']};
@@ -480,7 +517,7 @@ def generate_css():
             transition: all {ANIMATIONS['transition_speed']};
         }}
         
-        .new-chat-btn:hover {{ background: {COLORS['btn_primary_hover']}; }}
+        .new-chat-btn:hover {{ background: {COLORS['btn_primary_hover']}; color: {COLORS['bg_primary']}; }}
         
         .conversations {{
             flex: 1;
@@ -500,7 +537,7 @@ def generate_css():
         }}
         
         .conv-item:hover {{ background: {COLORS['bg_tertiary']}; }}
-        .conv-item.active {{ background: {COLORS['accent_primary']}; color: white; }}
+        .conv-item.active {{ background: {COLORS['accent_primary']}; color: {COLORS['bg_primary']}; }}
         
         .conv-title {{
             flex: 1;
@@ -595,18 +632,22 @@ def generate_css():
         .messages {{
             flex: 1;
             overflow-y: auto;
-            padding: 30px;
+            padding: 40px 20px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            gap: 32px;
+            align-items: center;
+            max-width: 100%;
         }}
         
         .message {{
+            width: 100%;
             max-width: {DIMENSIONS['message_max_width']};
-            padding: 15px 20px;
+            padding: 24px 32px;
             border-radius: {DIMENSIONS['border_radius']};
-            line-height: 1.6;
+            line-height: 1.8;
             animation: slideIn {ANIMATIONS['slide_duration']} ease-out;
+            font-size: {FONTS['size_message']};
         }}
         
         @keyframes slideIn {{
@@ -617,29 +658,33 @@ def generate_css():
         .message.user {{
             background: {COLORS['msg_user_bg']};
             color: {COLORS['msg_user_text']};
-            align-self: flex-end;
+            text-align: right;
+            margin-left: auto;
         }}
         
         .message.assistant {{
             background: {COLORS['msg_assistant_bg']};
             color: {COLORS['msg_assistant_text']};
-            align-self: flex-start;
+            text-align: left;
+            margin-right: auto;
             border: 1px solid {COLORS['bg_tertiary']};
         }}
         
         .message.assistant pre {{
-            background: {COLORS['bg_primary']};
-            padding: 12px;
+            background: {COLORS['bg_secondary']};
+            padding: 16px;
             border-radius: {DIMENSIONS['border_radius_small']};
             overflow-x: auto;
-            margin: 10px 0;
+            margin: 16px 0;
+            border: 1px solid {COLORS['bg_tertiary']};
         }}
         
         .message.assistant code {{
-            background: {COLORS['bg_primary']};
-            padding: 2px 6px;
+            background: {COLORS['bg_secondary']};
+            padding: 3px 6px;
             border-radius: 4px;
             font-family: 'Courier New', monospace;
+            font-size: 0.9em;
         }}
         
         .message.assistant pre code {{
@@ -652,11 +697,12 @@ def generate_css():
             align-items: center;
             gap: 10px;
             max-width: {DIMENSIONS['message_max_width']};
-            padding: 15px 20px;
+            width: 100%;
+            padding: 24px 32px;
             background: {COLORS['msg_assistant_bg']};
             border: 1px solid {COLORS['bg_tertiary']};
             border-radius: {DIMENSIONS['border_radius']};
-            align-self: flex-start;
+            margin-right: auto;
         }}
         
         .loading-spinner {{ display: flex; gap: 5px; }}
@@ -680,42 +726,71 @@ def generate_css():
         .loading-text {{ color: {COLORS['text_secondary']}; font-size: {FONTS['size_base']}; }}
         
         .input-area {{
-            padding: 20px 30px;
-            background: {COLORS['bg_secondary']};
+            padding: 16px 24px;
+            background: {COLORS['bg_quaternary']};
             border-top: 1px solid {COLORS['bg_tertiary']};
+            display: flex;
+            justify-content: center;
         }}
         
-        .input-container {{ display: flex; gap: 15px; }}
+        .input-container {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            max-width: {DIMENSIONS['message_max_width']};
+            width: 100%;
+            background: {COLORS['bg_primary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            padding: 8px 12px;
+        }}
         
         #input {{
             flex: 1;
-            padding: {DIMENSIONS['input_padding']};
-            background: {COLORS['bg_primary']};
+            padding: 8px 12px;
+            background: transparent;
             color: {COLORS['text_primary']};
-            border: 1px solid {COLORS['bg_tertiary']};
-            border-radius: {DIMENSIONS['border_radius']};
+            border: none;
+            border-radius: 0;
             font-size: {FONTS['size_base']};
             resize: none;
             font-family: inherit;
+            min-height: 24px;
+            max-height: 120px;
         }}
         
-        #input:focus {{ outline: none; border-color: {COLORS['accent_primary']}; }}
+        #input:focus {{ outline: none; }}
         #input:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+        #input::placeholder {{ color: {COLORS['text_tertiary']}; }}
         
         #send {{
-            padding: 15px 30px;
-            background: {COLORS['btn_primary']};
-            color: white;
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            background: transparent;
+            color: {COLORS['text_primary']};
             border: none;
-            border-radius: {DIMENSIONS['border_radius']};
-            font-size: {FONTS['size_base']};
-            font-weight: 600;
+            border-radius: 50%;
             cursor: pointer;
             transition: all {ANIMATIONS['transition_speed']};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
         }}
         
-        #send:hover:not(:disabled) {{ background: {COLORS['btn_primary_hover']}; transform: translateY(-1px); }}
-        #send:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+        #send:hover:not(:disabled) {{
+            background: {COLORS['bg_tertiary']};
+            transform: scale(1.1);
+        }}
+        #send:disabled {{
+            opacity: 0.3;
+            cursor: not-allowed;
+        }}
+        #send::before {{
+            content: '→';
+        }}
         
         ::-webkit-scrollbar {{ width: 8px; }}
         ::-webkit-scrollbar-track {{ background: {COLORS['scrollbar_track']}; }}
@@ -725,10 +800,23 @@ def generate_css():
         .welcome {{
             text-align: center;
             color: {COLORS['text_secondary']};
-            padding: 40px;
+            padding: 60px 40px;
+            max-width: {DIMENSIONS['message_max_width']};
+            width: 100%;
+            margin: 0 auto;
         }}
         
-        .welcome h2 {{ font-size: 20px; margin-bottom: 10px; color: {COLORS['text_primary']}; }}
+        .welcome h2 {{
+            font-size: 28px;
+            margin-bottom: 12px;
+            color: {COLORS['text_primary']};
+            font-weight: 500;
+        }}
+        
+        .welcome p {{
+            font-size: {FONTS['size_base']};
+            color: {COLORS['text_secondary']};
+        }}
         
         .modal {{
             display: none;
@@ -1057,11 +1145,14 @@ async def home():
     </style>
 </head>
 <body>
-    <div class="sidebar">
-        <div class="sidebar-header">
-            <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+    <div class="sidebar" id="sidebar">
+        <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">◀</button>
+        <div class="sidebar-content">
+            <div class="sidebar-header">
+                <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
+            </div>
+            <div class="conversations" id="conversations"></div>
         </div>
-        <div class="conversations" id="conversations"></div>
     </div>
     
     <div class="main">
@@ -1121,7 +1212,7 @@ async def home():
                     rows="2"
                     onkeydown="handleKeyDown(event)"
                 ></textarea>
-                <button id="send" onclick="sendMessage()">Send</button>
+                <button id="send" onclick="sendMessage()" title="Send message"></button>
             </div>
         </div>
     </div>
@@ -1263,6 +1354,13 @@ async def home():
             }} catch (e) {{
                 setTimeout(connectLogWS, 2000);
             }}
+        }}
+        
+        function toggleSidebar() {{
+            const sidebar = document.getElementById('sidebar');
+            const toggle = sidebar.querySelector('.sidebar-toggle');
+            sidebar.classList.toggle('collapsed');
+            toggle.textContent = sidebar.classList.contains('collapsed') ? '▶' : '◀';
         }}
         
         function toggleLogViewer() {{
