@@ -135,7 +135,7 @@ AVAILABLE_MODELS = [
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.90",
-            "--max-model-len", "8192",
+            "--max-model-len", "16384",
             "--quantization", "awq_marlin"
         ]
     },
@@ -165,9 +165,9 @@ AVAILABLE_MODELS = [
     },
 ]
 
-# Default model - Qwen 2.5 14B Instruct - Enhanced reasoning capabilities
-# Fits in 24GB GPU with gpu_memory_utilization 0.85
-DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
+# Default model - Qwen 2.5 Coder 7B (AWQ Marlin) - Fast and efficient
+# Fits in 24GB GPU with 16K context window
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
 
 # Current model state
 current_model = DEFAULT_MODEL
