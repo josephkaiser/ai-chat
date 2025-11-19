@@ -128,7 +128,7 @@ AVAILABLE_MODELS = [
     },
     {
         "id": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
-        "name": "Qwen 2.5 Coder 7B (AWQ Quantized)",
+        "name": "Qwen 2.5 Coder 7B (AWQ Marlin - Fast)",
         "quantized": True,
         "command": [
             "--model", "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
@@ -136,7 +136,7 @@ AVAILABLE_MODELS = [
             "--port", "8000",
             "--gpu-memory-utilization", "0.90",
             "--max-model-len", "8192",
-            "--quantization", "awq"
+            "--quantization", "awq_marlin"
         ]
     },
     {
