@@ -111,7 +111,7 @@ AVAILABLE_MODELS = [
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.85",
-            "--max-model-len", "32768"
+            "--max-model-len", "16384"
         ]
     },
     {
@@ -281,13 +281,13 @@ def estimate_tokens_needed(prompt: str) -> int:
     
     # Look for "long", "detailed", "comprehensive", "extensive"
     if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
-        return 20000  # High limit for detailed requests (leaves ~12k for input)
+        return 10000  # High limit for detailed requests (leaves ~6k for input)
     
     # Default based on prompt length
     # Rough estimate: 1 character ≈ 0.25 tokens
-    # Allow longer responses for longer inputs, up to 24k tokens (leaving room for input)
+    # Allow longer responses for longer inputs, up to 12k tokens (leaving room for input)
     estimated = len(prompt) * 0.25 * 10  # 10x multiplier for response
-    return min(max(int(estimated), 2048), 24576)  # Between 2k and 24k (leaves ~8k for input)
+    return min(max(int(estimated), 2048), 12288)  # Between 2k and 12k (leaves ~4k for input)
 
 async def process_single_job(job: Job):
     """Process a single job with the current model"""
