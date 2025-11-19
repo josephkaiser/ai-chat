@@ -285,21 +285,65 @@ async def switch_model(new_model_id: str):
         logger.info("📦 Step 1/4: Stopping all model containers...")
         
         stopped_count = 0
+        
+        # First, stop the legacy "vllm" container if it exists
+        try:
+            legacy_container = docker_client.containers.get(VLLM_CONTAINER)
+            if legacy_container.status == "running":
+                logger.info(f"🛑 Stopping legacy container: {VLLM_CONTAINER}")
+                legacy_container.stop(timeout=10)
+                stopped_count += 1
+        except docker.errors.NotFound:
+            pass  # Legacy container doesn't exist, that's fine
+        except Exception as e:
+            logger.warning(f"⚠️ Error stopping legacy container: {e}")
+        
+        # Stop all model-specific containers
         for model in AVAILABLE_MODELS:
             container_name = get_model_container_name(model["id"])
             try:
                 container = docker_client.containers.get(container_name)
+                container.reload()  # Refresh status
                 if container.status == "running":
-                    container.stop(timeout=5)
-                    logger.info(f"✓ Stopped container: {container_name}")
+                    logger.info(f"🛑 Stopping container: {container_name}")
+                    container.stop(timeout=10)
                     stopped_count += 1
             except docker.errors.NotFound:
                 pass  # Container doesn't exist, that's fine
             except Exception as e:
                 logger.warning(f"⚠️ Error stopping {container_name}: {e}")
         
+        # Wait for containers to fully stop and port to be released
         if stopped_count > 0:
-            time.sleep(1)  # Brief pause after stopping
+            logger.info(f"⏳ Waiting for containers to stop and port {VLLM_PORT} to be released...")
+            for i in range(10):  # Wait up to 5 seconds
+                time.sleep(0.5)
+                # Check if any container is still using port 8001
+                port_in_use = False
+                try:
+                    # Check all containers for port usage
+                    all_containers = docker_client.containers.list(all=True)
+                    for cont in all_containers:
+                        try:
+                            cont.reload()
+                            if cont.status == "running":
+                                # Check port bindings
+                                port_bindings = cont.attrs.get('HostConfig', {}).get('PortBindings', {})
+                                for port_config in port_bindings.values():
+                                    if port_config and any(binding.get('HostPort') == str(VLLM_PORT) for binding in port_config):
+                                        port_in_use = True
+                                        break
+                        except:
+                            pass
+                except:
+                    pass
+                
+                if not port_in_use:
+                    logger.info(f"✓ Port {VLLM_PORT} is now available")
+                    break
+            else:
+                logger.warning(f"⚠️ Port {VLLM_PORT} may still be in use, proceeding anyway...")
+        
         logger.info(f"✓ Stopped {stopped_count} container(s)")
         
         # Step 2: Ensure target model container exists
@@ -323,9 +367,41 @@ async def switch_model(new_model_id: str):
             if container.status == "running":
                 logger.info(f"✓ Container {target_container_name} is already running")
             else:
-                container.start()
-                logger.info(f"✓ Container {target_container_name} started")
-                time.sleep(2)  # Brief pause for container to initialize
+                # Double-check port is available before starting
+                logger.info(f"🔍 Verifying port {VLLM_PORT} is available...")
+                time.sleep(1)  # Extra wait before starting
+                
+                try:
+                    container.start()
+                    logger.info(f"✓ Container {target_container_name} started")
+                    time.sleep(2)  # Brief pause for container to initialize
+                except docker.errors.APIError as api_err:
+                    if "port is already allocated" in str(api_err).lower() or "bind" in str(api_err).lower():
+                        logger.error(f"❌ Port {VLLM_PORT} is still in use. Attempting to find and stop conflicting container...")
+                        # Try to find what's using the port
+                        all_containers = docker_client.containers.list(all=True)
+                        for cont in all_containers:
+                            try:
+                                cont.reload()
+                                if cont.status == "running" and cont.name != target_container_name:
+                                    port_bindings = cont.attrs.get('HostConfig', {}).get('PortBindings', {})
+                                    for port_config in port_bindings.values():
+                                        if port_config and any(binding.get('HostPort') == str(VLLM_PORT) for binding in port_config):
+                                            logger.info(f"🛑 Found container using port {VLLM_PORT}: {cont.name}, stopping it...")
+                                            cont.stop(timeout=10)
+                                            time.sleep(2)
+                                            # Retry starting
+                                            container.start()
+                                            logger.info(f"✓ Container {target_container_name} started after clearing port")
+                                            time.sleep(2)
+                                            break
+                            except:
+                                pass
+                        else:
+                            # If we didn't find it, raise the original error
+                            raise api_err
+                    else:
+                        raise api_err
                 
         except docker.errors.NotFound:
             logger.error(f"❌ Container {target_container_name} not found after creation")
@@ -995,6 +1071,207 @@ def generate_css():
         .message.assistant .hljs-variable {{ color: #5898b7; }}
         .message.assistant .hljs-title {{ color: #8194b1; }}
         .message.assistant .hljs-type {{ color: #5898b7; }}
+        
+        /* Markdown Typography Styles */
+        .message.assistant h1 {{
+            font-size: 1.8em;
+            font-weight: 700;
+            color: #8194b1;
+            margin: 20px 0 12px 0;
+            padding-bottom: 8px;
+            border-bottom: 3px solid #8194b1;
+            line-height: 1.3;
+        }}
+        
+        .message.assistant h2 {{
+            font-size: 1.5em;
+            font-weight: 700;
+            color: #8194b1;
+            margin: 18px 0 10px 0;
+            padding-bottom: 6px;
+            border-bottom: 2px solid #b0c9df;
+            line-height: 1.3;
+        }}
+        
+        .message.assistant h3 {{
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #8194b1;
+            margin: 16px 0 8px 0;
+            line-height: 1.4;
+        }}
+        
+        .message.assistant h4 {{
+            font-size: 1.15em;
+            font-weight: 600;
+            color: #5898b7;
+            margin: 14px 0 6px 0;
+            line-height: 1.4;
+        }}
+        
+        .message.assistant h5 {{
+            font-size: 1.05em;
+            font-weight: 600;
+            color: #5898b7;
+            margin: 12px 0 6px 0;
+            line-height: 1.4;
+        }}
+        
+        .message.assistant h6 {{
+            font-size: 1em;
+            font-weight: 600;
+            color: #5898b7;
+            margin: 10px 0 4px 0;
+            line-height: 1.4;
+        }}
+        
+        .message.assistant p {{
+            margin: 10px 0;
+            line-height: 1.7;
+            color: #8194b1;
+        }}
+        
+        .message.assistant strong,
+        .message.assistant b {{
+            font-weight: 700;
+            color: #8194b1;
+            background: rgba(129,148,177,0.1);
+            padding: 1px 3px;
+            border-radius: 2px;
+        }}
+        
+        .message.assistant em,
+        .message.assistant i {{
+            font-style: italic;
+            color: #5898b7;
+        }}
+        
+        .message.assistant strong em,
+        .message.assistant em strong,
+        .message.assistant b i,
+        .message.assistant i b {{
+            font-weight: 700;
+            font-style: italic;
+            color: #8194b1;
+        }}
+        
+        .message.assistant ul,
+        .message.assistant ol {{
+            margin: 12px 0;
+            padding-left: 30px;
+            color: #8194b1;
+        }}
+        
+        .message.assistant ul {{
+            list-style-type: disc;
+        }}
+        
+        .message.assistant ol {{
+            list-style-type: decimal;
+        }}
+        
+        .message.assistant li {{
+            margin: 6px 0;
+            line-height: 1.6;
+            color: #8194b1;
+        }}
+        
+        .message.assistant li p {{
+            margin: 4px 0;
+        }}
+        
+        .message.assistant ul ul,
+        .message.assistant ol ol,
+        .message.assistant ul ol,
+        .message.assistant ol ul {{
+            margin: 4px 0;
+        }}
+        
+        .message.assistant blockquote {{
+            margin: 16px 0;
+            padding: 12px 16px;
+            border-left: 4px solid #8194b1;
+            background: #e9eced;
+            border-radius: 4px;
+            color: #5898b7;
+            font-style: italic;
+        }}
+        
+        .message.assistant blockquote p {{
+            margin: 4px 0;
+        }}
+        
+        .message.assistant blockquote p:first-child {{
+            margin-top: 0;
+        }}
+        
+        .message.assistant blockquote p:last-child {{
+            margin-bottom: 0;
+        }}
+        
+        .message.assistant a {{
+            color: #5898b7;
+            text-decoration: underline;
+            text-decoration-color: #b0c9df;
+            transition: all 0.2s;
+        }}
+        
+        .message.assistant a:hover {{
+            color: #8194b1;
+            text-decoration-color: #8194b1;
+            background: rgba(129,148,177,0.1);
+            padding: 1px 2px;
+            border-radius: 2px;
+        }}
+        
+        .message.assistant hr {{
+            border: none;
+            border-top: 2px solid #b0c9df;
+            margin: 20px 0;
+        }}
+        
+        .message.assistant table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            border: 2px solid #b0c9df;
+            border-radius: 4px;
+            overflow: hidden;
+        }}
+        
+        .message.assistant thead {{
+            background: #e9eced;
+        }}
+        
+        .message.assistant th {{
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #8194b1;
+            border-bottom: 2px solid #8194b1;
+        }}
+        
+        .message.assistant td {{
+            padding: 8px 12px;
+            border-bottom: 1px solid #b0c9df;
+            color: #8194b1;
+        }}
+        
+        .message.assistant tbody tr:last-child td {{
+            border-bottom: none;
+        }}
+        
+        .message.assistant tbody tr:hover {{
+            background: rgba(176,201,223,0.2);
+        }}
+        
+        .message.assistant img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+            border: 2px solid #b0c9df;
+            margin: 12px 0;
+        }}
         
         /* Copy button styles */
         .copy-btn {{
@@ -1870,7 +2147,11 @@ async def home():
                     breaks: true,
                     gfm: true,
                     headerIds: false,
-                    mangle: false
+                    mangle: false,
+                    pedantic: false,
+                    sanitize: false,
+                    smartLists: true,
+                    smartypants: true
                 }});
                 console.log('Marked library loaded');
                 renderMarkdown(); // Render any existing messages
