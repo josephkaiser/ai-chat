@@ -9,12 +9,11 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+      --model Qwen/Qwen2.5-14B-Instruct
       --host 0.0.0.0
       --port 8000
-      --gpu-memory-utilization 0.90
-      --max-model-len 8192
-      --quantization awq_marlin
+      --gpu-memory-utilization 0.85
+      --max-model-len 32768
     deploy:
       resources:
         reservations:
