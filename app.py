@@ -1038,6 +1038,7 @@ async def recover_to_default_model():
     
     try:
         logger.info("🔄 Starting recovery to default model...")
+        model_switch_status = {"status": "switching", "message": "Recovering to default model...", "progress": 10}
         
         # Find default model config
         default_config = next((m for m in AVAILABLE_MODELS if m["id"] == DEFAULT_MODEL), None)
@@ -1083,28 +1084,88 @@ async def recover_to_default_model():
                     container.start()
                     time.sleep(3)  # Brief wait for container to start
                 
-                # Wait for model to be ready (shorter timeout for recovery)
-                max_wait = 180  # 3 minutes for recovery
+                # Wait for model to be ready (allow enough time for model loading)
+                max_wait = 600  # 10 minutes for recovery (models can take 5+ minutes to load)
                 wait_time = 0
+                last_log_check = 0
+                
                 while wait_time < max_wait:
                     time.sleep(5)
                     wait_time += 5
                     try:
                         container.reload()
-                        if container.status == "running":
-                            test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
-                            test_client.models.list()
-                            # Success!
-                            client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
-                            current_model = DEFAULT_MODEL
-                            logger.info(f"✅ Default model recovered and ready! (loaded in {wait_time}s)")
-                            return {"success": True, "message": f"Recovered to {DEFAULT_MODEL}"}
-                    except:
+                        
+                        # Check if container is still running
+                        if container.status != "running":
+                            logger.warning(f"⚠️ Container {target_container_name} is not running (status: {container.status})")
+                            # Try to restart it
+                            try:
+                                container.start()
+                                time.sleep(3)
+                                continue
+                            except Exception as e:
+                                logger.error(f"❌ Failed to restart container: {e}")
+                                return {"success": False, "error": f"Container not running: {container.status}"}
+                        
+                        # Check container logs for loading progress (every 30 seconds)
+                        if wait_time - last_log_check >= 30:
+                            try:
+                                logs = container.logs(tail=20).decode('utf-8', errors='ignore')
+                                # Estimate progress based on log content
+                                progress_estimate = min(60 + int((wait_time / max_wait) * 35), 95)
+                                if 'Starting to load model' in logs or 'Loading model' in logs:
+                                    logger.info(f"📦 Model is loading... (checking logs)")
+                                    model_switch_status["progress"] = progress_estimate
+                                    model_switch_status["message"] = f"Loading model... ({wait_time}s)"
+                                elif 'Uvicorn running' in logs or 'Application startup complete' in logs:
+                                    logger.info(f"✅ vLLM server started, checking API...")
+                                    model_switch_status["progress"] = 90
+                                    model_switch_status["message"] = "API server starting..."
+                                else:
+                                    model_switch_status["progress"] = progress_estimate
+                                    model_switch_status["message"] = f"Loading... ({wait_time}s)"
+                            except:
+                                # Fallback progress estimate
+                                progress_estimate = min(60 + int((wait_time / max_wait) * 35), 95)
+                                model_switch_status["progress"] = progress_estimate
+                                model_switch_status["message"] = f"Loading... ({wait_time}s)"
+                            last_log_check = wait_time
+                        else:
+                            # Update progress even when not checking logs
+                            progress_estimate = min(60 + int((wait_time / max_wait) * 35), 95)
+                            model_switch_status["progress"] = progress_estimate
+                            model_switch_status["message"] = f"Loading... ({wait_time}s)"
+                        
+                        # Try to connect to the API
+                        test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=10)
+                        test_client.models.list()
+                        # Success!
+                        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+                        current_model = DEFAULT_MODEL
+                        model_switch_status = {
+                            "status": "ready",
+                            "current_model": DEFAULT_MODEL,
+                            "message": f"Recovered to {DEFAULT_MODEL}"
+                        }
+                        logger.info(f"✅ Default model recovered and ready! (loaded in {wait_time}s)")
+                        return {"success": True, "message": f"Recovered to {DEFAULT_MODEL}"}
+                    except Exception as e:
+                        # Only log every 30 seconds to avoid spam
                         if wait_time % 30 == 0:
-                            logger.info(f"⏳ Recovery: Still loading default model... ({wait_time}s)")
+                            logger.info(f"⏳ Recovery: Still loading default model... ({wait_time}s) - {str(e)[:100]}")
                         continue
                 
-                return {"success": False, "error": "Default model loading timeout during recovery"}
+                # Check container status one more time before giving up
+                try:
+                    container.reload()
+                    if container.status == "running":
+                        # Container is running but API not responding - might be stuck
+                        logger.error(f"❌ Container running but API not responding after {max_wait}s")
+                        return {"success": False, "error": f"Model API not responding after {max_wait}s. Container status: {container.status}"}
+                    else:
+                        return {"success": False, "error": f"Container not running after {max_wait}s. Status: {container.status}"}
+                except Exception as e:
+                    return {"success": False, "error": f"Default model loading timeout after {max_wait}s: {str(e)}"}
             except Exception as e:
                 return {"success": False, "error": f"Failed to start default model container: {str(e)}"}
         else:
@@ -1731,6 +1792,38 @@ def generate_css(mode='light'):
         .status-dot.booting {{
             background: #ffa500;
             animation: pulse 1s infinite;
+        }}
+        
+        .status-progress-container {{
+            margin-top: 8px;
+            width: 200px;
+        }}
+        
+        .status-progress-bar {{
+            width: 100%;
+            height: 4px;
+            background: {colors['bg_tertiary']};
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 4px;
+            position: relative;
+        }}
+        
+        .status-progress-bar::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: {colors['accent_primary']};
+            border-radius: 2px;
+            transition: width 0.3s ease;
+            width: var(--progress, 0%);
+        }}
+        
+        .status-progress-text {{
+            font-size: {FONTS['size_small']};
+            color: {colors['text_secondary']};
         }}
         
         @keyframes pulse {{
@@ -3323,6 +3416,9 @@ async def home(mode: str = "light"):
             <div class="status">
                 <div class="status-dot disconnected" id="statusDot"></div>
                 <span id="statusText">Connecting...</span>
+                <div class="status-progress-container" id="statusProgressContainer" style="display: none;">
+                    <div class="status-progress-bar" id="statusProgressBar"></div>
+                    <span class="status-progress-text" id="statusProgressText"></span>
                 </div>
             </div>
         </div>
@@ -3465,36 +3561,96 @@ async def home(mode: str = "light"):
             }});
         }}
         
-        function updateStatus(status) {{
+        function updateStatus(status, progress = null, message = null) {{
             const statusDot = document.getElementById('statusDot');
             const statusText = document.getElementById('statusText');
+            const progressContainer = document.getElementById('statusProgressContainer');
+            const progressBar = document.getElementById('statusProgressBar');
+            const progressText = document.getElementById('statusProgressText');
             
             // Update modelAvailable based on status
             if (status === true || status === 'connected') {{
                 modelAvailable = true;
                 document.getElementById('input').disabled = false;
                 document.getElementById('send').disabled = false;
-            }} else if (status === 'booting') {{
+                progressContainer.style.display = 'none';
+            }} else if (status === 'booting' || status === 'loading') {{
                 modelAvailable = false;
                 document.getElementById('input').disabled = true;
                 document.getElementById('send').disabled = true;
+                progressContainer.style.display = 'block';
             }} else {{
                 modelAvailable = false;
                 document.getElementById('input').disabled = true;
                 document.getElementById('send').disabled = true;
+                progressContainer.style.display = 'none';
             }}
             
-            // status can be: true (connected), false (disconnected), 'booting'
-            if (status === 'booting') {{
+            // Update status display
+            if (status === 'booting' || status === 'loading') {{
                 statusDot.className = 'status-dot booting';
-                statusText.textContent = 'Booting...';
+                statusText.textContent = message || 'Loading model...';
+                
+                // Update progress bar
+                if (progress !== null && progress !== undefined) {{
+                    // Set CSS variable for the ::before pseudo-element
+                    progressBar.style.setProperty('--progress', progress + '%');
+                    progressText.textContent = progress + '%';
+                }} else {{
+                    progressBar.style.setProperty('--progress', '0%');
+                    progressText.textContent = '';
+                }}
             }} else if (status === true) {{
                 statusDot.className = 'status-dot';
                 statusText.textContent = 'Connected';
+                progressContainer.style.display = 'none';
             }} else {{
                 statusDot.className = 'status-dot disconnected';
                 statusText.textContent = 'Disconnected';
+                progressContainer.style.display = 'none';
             }}
+        }}
+        
+        // Model loading progress polling
+        let modelProgressInterval = null;
+        
+        function startModelProgressPolling() {{
+            if (modelProgressInterval) {{
+                clearInterval(modelProgressInterval);
+            }}
+            
+            modelProgressInterval = setInterval(async () => {{
+                try {{
+                    // Check health endpoint
+                    const healthResponse = await fetch('/health');
+                    const health = await healthResponse.json();
+                    
+                    if (health.model_available) {{
+                        updateStatus(true);
+                        if (modelProgressInterval) {{
+                            clearInterval(modelProgressInterval);
+                            modelProgressInterval = null;
+                        }}
+                        return;
+                    }}
+                    
+                    // Check model status for progress info
+                    const statusResponse = await fetch('/api/model/status');
+                    const statusData = await statusResponse.json();
+                    
+                    if (statusData.status && statusData.status.progress !== undefined) {{
+                        const progress = statusData.status.progress;
+                        const message = statusData.status.message || 'Loading model...';
+                        updateStatus('loading', progress, message);
+                    }} else {{
+                        // Estimate progress based on time (rough estimate)
+                        // This is a fallback if no explicit progress is available
+                        updateStatus('loading', null, 'Loading model...');
+                    }}
+                }} catch (e) {{
+                    // Silently fail - don't spam console
+                }}
+            }}, 2000); // Poll every 2 seconds
         }}
         
         function connectWS() {{
@@ -3508,9 +3664,15 @@ async def home(mode: str = "light"):
                         if (health.model_available) {{
                             modelAvailable = true;
                             updateStatus(true);
+                            if (modelProgressInterval) {{
+                                clearInterval(modelProgressInterval);
+                                modelProgressInterval = null;
+                            }}
                         }} else {{
                             modelAvailable = false;
-                            updateStatus('booting');
+                            updateStatus('loading');
+                            // Start polling for progress
+                            startModelProgressPolling();
                             // Disable input when model not available
                             document.getElementById('input').disabled = true;
                             document.getElementById('send').disabled = true;
@@ -3568,25 +3730,46 @@ async def home(mode: str = "light"):
                         logContent.textContent += data.content;
                         logContent.scrollTop = logContent.scrollHeight;
                         
-                        // Check for model loading messages
+                        // Check for model loading messages and estimate progress
                         const logText = data.content.toLowerCase();
+                        let estimatedProgress = null;
+                        let progressMessage = 'Loading model...';
+                        
                         if (logText.includes('starting to load model') || 
                             logText.includes('loading model') ||
-                            (logText.includes('model_runner') && logText.includes('load')) ||
-                            (logText.includes('weight_utils') && logText.includes('model weights'))) {{
-                            updateStatus('booting');
-                        }}
-                        
-                        // Check if model is ready (vLLM API server ready messages)
-                        if (logText.includes('uvicorn.run') || 
-                            logText.includes('application startup complete') ||
-                            logText.includes('api server version')) {{
+                            (logText.includes('model_runner') && logText.includes('load'))) {{
+                            estimatedProgress = 20;
+                            progressMessage = 'Starting to load model...';
+                            updateStatus('loading', estimatedProgress, progressMessage);
+                            if (!modelProgressInterval) {{
+                                startModelProgressPolling();
+                            }}
+                        }} else if (logText.includes('weight_utils') && logText.includes('model weights')) {{
+                            estimatedProgress = 40;
+                            progressMessage = 'Loading model weights...';
+                            updateStatus('loading', estimatedProgress, progressMessage);
+                        }} else if (logText.includes('initializing') || logText.includes('initialization')) {{
+                            estimatedProgress = 60;
+                            progressMessage = 'Initializing model...';
+                            updateStatus('loading', estimatedProgress, progressMessage);
+                        }} else if (logText.includes('uvicorn.run') || logText.includes('application startup complete')) {{
+                            estimatedProgress = 90;
+                            progressMessage = 'Starting API server...';
+                            updateStatus('loading', estimatedProgress, progressMessage);
+                        }} else if (logText.includes('api server version')) {{
+                            estimatedProgress = 95;
+                            progressMessage = 'API server ready, verifying...';
+                            updateStatus('loading', estimatedProgress, progressMessage);
                             // Wait a bit then check if actually connected
                             setTimeout(() => {{
                                 // Check health to see if model is actually ready
                                 fetch('/health').then(r => r.json()).then(health => {{
                                     if (health.model_available) {{
                                         updateStatus(true);
+                                        if (modelProgressInterval) {{
+                                            clearInterval(modelProgressInterval);
+                                            modelProgressInterval = null;
+                                        }}
                                     }}
                                 }}).catch(() => {{}});
                             }}, 2000);
@@ -4621,6 +4804,16 @@ async def home(mode: str = "light"):
             loadCurrentModel();
         }}, 500);
         
+        // Start checking for model loading progress on page load
+        setTimeout(() => {{
+            fetch('/health').then(r => r.json()).then(health => {{
+                if (!health.model_available) {{
+                    updateStatus('loading');
+                    startModelProgressPolling();
+                }}
+            }}).catch(() => {{}});
+        }}, 1000);
+        
         // Initialize textarea auto-resize
         const input = document.getElementById('input');
         if (input) {{
@@ -5169,13 +5362,16 @@ async def ensure_model_loaded():
         
         # No working model found, try to load default
         logger.info(f"🔄 No working model found, attempting to load default model: {DEFAULT_MODEL}")
+        logger.info("💡 This may take 5-10 minutes if the model needs to load. The web UI will remain available.")
         recovery_result = await recover_to_default_model()
         
         if recovery_result.get("success"):
             logger.info("✅ Default model loaded successfully on startup")
             return True
         else:
-            logger.error(f"❌ Failed to load default model on startup: {recovery_result.get('error')}")
+            error_msg = recovery_result.get('error', 'Unknown error')
+            logger.error(f"❌ Failed to load default model on startup: {error_msg}")
+            logger.warning("⚠️ Model health monitor will continue attempting recovery in the background")
             return False
             
     except Exception as e:
