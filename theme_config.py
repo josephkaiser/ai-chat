@@ -1,10 +1,11 @@
 """
 Centralized theme and color configuration.
 Uses custom color palette with blues, beiges, and soft tones.
+Supports both light and dark modes.
 """
 
-# Color Palette - Custom Colors
-COLORS = {
+# Light Mode Color Palette - Custom Colors
+COLORS_LIGHT = {
     # Background colors
     'bg_primary': '#fffefb',      # Main background (almost white from palette 3)
     'bg_secondary': '#ececdf',    # Sidebar, subtle backgrounds (from palette 2)
@@ -48,6 +49,55 @@ COLORS = {
     'scrollbar_thumb': '#a6d4f2', # Scrollbar thumb (light blue)
     'scrollbar_thumb_hover': '#9dceda', # Scrollbar thumb hover
 }
+
+# Dark Mode Color Palette
+COLORS_DARK = {
+    # Background colors
+    'bg_primary': '#1a1a1a',      # Main background (dark)
+    'bg_secondary': '#2d2d2d',    # Sidebar, subtle backgrounds
+    'bg_tertiary': '#404040',     # Borders, dividers
+    'bg_quaternary': '#2a2a2a',   # Input area
+    
+    # Text colors
+    'text_primary': '#e0e0e0',    # Main text (light)
+    'text_secondary': '#b0b0b0',  # Secondary text
+    'text_tertiary': '#808080',   # Placeholders, muted text
+    
+    # Accent colors
+    'accent_primary': '#67a2cb',  # Primary accent (medium blue - same as light)
+    'accent_hover': '#5898b7',    # Accent hover state
+    'accent_secondary': '#91b461', # Secondary accent (green - same as light)
+    
+    # Message colors
+    'msg_user_bg': '#3a3a3a',     # User message background
+    'msg_user_text': '#67a2cb',   # User message text (blue)
+    'msg_assistant_bg': '#1a1a1a', # Assistant message background
+    'msg_assistant_text': '#e0e0e0', # Assistant message text (light)
+    
+    # Status colors
+    'status_connected': '#91b461', # Connected status (green - same as light)
+    'status_disconnected': '#e0556a', # Disconnected status (red - same as light)
+    
+    # Button colors
+    'btn_primary': '#67a2cb',     # Primary button (medium blue)
+    'btn_primary_hover': '#5898b7', # Primary button hover
+    'btn_danger': '#fd7589',      # Danger button (pink/red)
+    'btn_danger_hover': '#e0556a', # Danger button hover (red)
+    'btn_secondary': '#404040',   # Secondary button
+    'btn_secondary_hover': '#505050', # Secondary button hover
+    
+    # Modal/overlay
+    'modal_overlay': 'rgba(0,0,0,0.7)', # Modal backdrop
+    'modal_bg': '#2d2d2d',        # Modal background
+    
+    # Scrollbar
+    'scrollbar_track': '#2d2d2d', # Scrollbar track
+    'scrollbar_thumb': '#505050', # Scrollbar thumb
+    'scrollbar_thumb_hover': '#606060', # Scrollbar thumb hover
+}
+
+# Default to light mode
+COLORS = COLORS_LIGHT
 
 # UI Dimensions
 DIMENSIONS = {

@@ -162,6 +162,7 @@ current_model = DEFAULT_MODEL
 model_switching = False
 model_switch_lock = Lock()
 model_switch_status = {"status": "ready", "message": "", "progress": 0}
+model_switch_history = []  # List of dicts: {"timestamp": str, "from": str, "to": str, "status": str, "duration": float}
 
 # Initialize Docker client
 try:
@@ -210,7 +211,26 @@ async def switch_model(new_model_id: str):
         model_switch_status = {"status": "switching", "message": f"Switching to {model_config['name']}...", "progress": 10}
     
     try:
-        logger.info(f"🔄 MODEL SWITCH INITIATED: {current_model} → {new_model_id} ({model_config['name']})")
+        switch_start_time = time.time()
+        switch_timestamp = datetime.now().isoformat()
+        
+        logger.info("=" * 80)
+        logger.info(f"🔄 MODEL SWITCH INITIATED")
+        logger.info(f"   Timestamp: {switch_timestamp}")
+        logger.info(f"   From: {current_model}")
+        logger.info(f"   To: {new_model_id} ({model_config['name']})")
+        logger.info("=" * 80)
+        
+        # Log recent switch history
+        if model_switch_history:
+            logger.info("📜 Recent Model Switch History:")
+            for i, hist in enumerate(model_switch_history[-5:], 1):  # Show last 5 switches
+                status_icon = "✅" if hist["status"] == "success" else "❌"
+                duration_str = f"{hist.get('duration', 0):.1f}s" if hist.get('duration') else "N/A"
+                logger.info(f"   {i}. {hist['timestamp']} | {status_icon} {hist['from']} → {hist['to']} ({duration_str})")
+        else:
+            logger.info("📜 No previous model switches recorded")
+        logger.info("-" * 80)
         
         if not docker_client:
             raise Exception("Docker client not available")
@@ -322,14 +342,52 @@ async def switch_model(new_model_id: str):
         client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
         current_model = new_model_id
         
+        switch_duration = time.time() - switch_start_time
+        
         model_switch_status = {"status": "success", "message": f"Successfully switched to {model_config['name']}", "progress": 100}
-        logger.info(f"✅ MODEL SWITCH COMPLETE: Successfully switched to {model_config['name']} ({new_model_id})")
+        
+        # Record successful switch in history
+        model_switch_history.append({
+            "timestamp": switch_timestamp,
+            "from": previous_model,
+            "to": new_model_id,
+            "status": "success",
+            "duration": switch_duration
+        })
+        # Keep only last 20 switches
+        if len(model_switch_history) > 20:
+            model_switch_history.pop(0)
+        
+        logger.info("=" * 80)
+        logger.info(f"✅ MODEL SWITCH COMPLETE")
+        logger.info(f"   Duration: {switch_duration:.1f} seconds ({switch_duration/60:.1f} minutes)")
         logger.info(f"   Previous model: {previous_model}")
-        logger.info(f"   New model: {new_model_id}")
+        logger.info(f"   New model: {new_model_id} ({model_config['name']})")
+        logger.info(f"   Total switches recorded: {len(model_switch_history)}")
+        logger.info("=" * 80)
         
     except Exception as e:
-        logger.error(f"❌ MODEL SWITCH FAILED: {str(e)}")
+        switch_duration = time.time() - switch_start_time if 'switch_start_time' in locals() else 0
+        
+        # Record failed switch in history
+        model_switch_history.append({
+            "timestamp": switch_timestamp if 'switch_timestamp' in locals() else datetime.now().isoformat(),
+            "from": current_model,
+            "to": new_model_id,
+            "status": "failed",
+            "duration": switch_duration,
+            "error": str(e)
+        })
+        # Keep only last 20 switches
+        if len(model_switch_history) > 20:
+            model_switch_history.pop(0)
+        
+        logger.error("=" * 80)
+        logger.error(f"❌ MODEL SWITCH FAILED")
+        logger.error(f"   Duration: {switch_duration:.1f} seconds")
+        logger.error(f"   Error: {str(e)}")
         logger.error(f"   Error details: {traceback.format_exc()}")
+        logger.error("=" * 80)
         model_switch_status = {"status": "error", "message": f"Error: {str(e)}", "progress": 0}
     finally:
         model_switching = False
@@ -390,6 +448,36 @@ def get_conversation_history(conv_id: str, limit: int = 10) -> List[Dict]:
     
     conn.close()
     return list(reversed(messages))
+
+def search_messages(query: str, limit: int = 20) -> List[Dict]:
+    """Search through all messages"""
+    if not query or len(query.strip()) < 2:
+        return []
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Search in message content (case-insensitive)
+    search_term = f"%{query.strip()}%"
+    c.execute('''SELECT m.conversation_id, m.role, m.content, m.timestamp, c.title
+                 FROM messages m
+                 LEFT JOIN conversations c ON m.conversation_id = c.id
+                 WHERE m.content LIKE ?
+                 ORDER BY m.timestamp DESC
+                 LIMIT ?''', (search_term, limit))
+    
+    results = []
+    for row in c.fetchall():
+        results.append({
+            'conversation_id': row[0],
+            'role': row[1],
+            'content': row[2],
+            'timestamp': row[3],
+            'conversation_title': row[4] or 'Untitled'
+        })
+    
+    conn.close()
+    return results
 
 def save_message(conv_id: str, role: str, content: str):
     """Save message to database"""
@@ -475,6 +563,10 @@ def generate_css():
             display: none;
         }}
         
+        .sidebar.collapsed .search-container {{
+            display: none;
+        }}
+        
         .sidebar.collapsed .sidebar-toggle {{
             right: -12px;
         }}
@@ -529,6 +621,79 @@ def generate_css():
         }}
         
         .new-chat-btn:hover {{ background: {COLORS['btn_primary_hover']}; color: {COLORS['bg_primary']}; }}
+        
+        .search-container {{
+            padding: 15px;
+            border-bottom: 1px solid {COLORS['bg_tertiary']};
+        }}
+        
+        .search-input {{
+            width: 100%;
+            padding: 8px 12px;
+            background: {COLORS['bg_primary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: 6px;
+            color: {COLORS['text_primary']};
+            font-size: {FONTS['size_small']};
+        }}
+        
+        .search-input:focus {{
+            outline: none;
+            border-color: {COLORS['accent_primary']};
+        }}
+        
+        .search-input::placeholder {{
+            color: {COLORS['text_tertiary']};
+        }}
+        
+        .search-results {{
+            max-height: 400px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }}
+        
+        .search-result-item {{
+            padding: 10px;
+            margin: 5px 0;
+            background: {COLORS['bg_primary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+        
+        .search-result-item:hover {{
+            background: {COLORS['bg_tertiary']};
+            border-color: {COLORS['accent_primary']};
+        }}
+        
+        .search-result-title {{
+            font-weight: 600;
+            font-size: {FONTS['size_small']};
+            color: {COLORS['text_primary']};
+            margin-bottom: 4px;
+        }}
+        
+        .search-result-preview {{
+            font-size: 12px;
+            color: {COLORS['text_secondary']};
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        
+        .search-result-meta {{
+            font-size: 11px;
+            color: {COLORS['text_tertiary']};
+            margin-top: 4px;
+        }}
+        
+        .search-no-results {{
+            padding: 20px;
+            text-align: center;
+            color: {COLORS['text_tertiary']};
+            font-size: {FONTS['size_small']};
+        }}
         
         .conversations {{
             flex: 1;
@@ -638,6 +803,11 @@ def generate_css():
         }}
         
         .status-dot.disconnected {{ background: {COLORS['status_disconnected']}; animation: none; }}
+        
+        .status-dot.booting {{
+            background: #ffa500;
+            animation: pulse 1s infinite;
+        }}
         
         @keyframes pulse {{
             0%, 100% {{ opacity: 1; }}
@@ -1490,6 +1660,10 @@ async def home():
             <div class="sidebar-header">
                 <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
             </div>
+            <div class="search-container">
+                <input type="text" class="search-input" id="searchInput" placeholder="🔍 Search chats..." oninput="handleSearch(this.value)" />
+                <div class="search-results" id="searchResults" style="display: none;"></div>
+            </div>
             <div class="conversations" id="conversations"></div>
         </div>
     </div>
@@ -1618,11 +1792,21 @@ async def home():
             }});
         }}
         
-        function updateStatus(connected) {{
-            document.getElementById('statusDot').className = 
-                'status-dot ' + (connected ? '' : 'disconnected');
-            document.getElementById('statusText').textContent = 
-                connected ? 'Connected' : 'Disconnected';
+        function updateStatus(status) {{
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            
+            // status can be: true (connected), false (disconnected), 'booting'
+            if (status === 'booting') {{
+                statusDot.className = 'status-dot booting';
+                statusText.textContent = 'Booting...';
+            }} else if (status === true) {{
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Connected';
+            }} else {{
+                statusDot.className = 'status-dot disconnected';
+                statusText.textContent = 'Disconnected';
+            }}
         }}
         
         function connectWS() {{
@@ -1631,7 +1815,16 @@ async def home():
                 
                 ws.onopen = () => {{
                     console.log('Connected');
-                    updateStatus(true);
+                    // Check if model is actually available (might be booting)
+                    fetch('/health').then(r => r.json()).then(health => {{
+                        if (health.model_available) {{
+                            updateStatus(true);
+                        }} else {{
+                            updateStatus('booting');
+                        }}
+                    }}).catch(() => {{
+                        updateStatus(true); // Default to connected if health check fails
+                    }});
                 }};
                 
                 ws.onmessage = (event) => {{
@@ -1681,6 +1874,30 @@ async def home():
                         const logContent = document.getElementById('logContent');
                         logContent.textContent += data.content;
                         logContent.scrollTop = logContent.scrollHeight;
+                        
+                        // Check for model loading messages
+                        const logText = data.content.toLowerCase();
+                        if (logText.includes('starting to load model') || 
+                            logText.includes('loading model') ||
+                            (logText.includes('model_runner') && logText.includes('load')) ||
+                            (logText.includes('weight_utils') && logText.includes('model weights'))) {{
+                            updateStatus('booting');
+                        }}
+                        
+                        // Check if model is ready (vLLM API server ready messages)
+                        if (logText.includes('uvicorn.run') || 
+                            logText.includes('application startup complete') ||
+                            logText.includes('api server version')) {{
+                            // Wait a bit then check if actually connected
+                            setTimeout(() => {{
+                                // Check health to see if model is actually ready
+                                fetch('/health').then(r => r.json()).then(health => {{
+                                    if (health.model_available) {{
+                                        updateStatus(true);
+                                    }}
+                                }}).catch(() => {{}});
+                            }}, 2000);
+                        }}
                     }}
                 }};
                 
@@ -2153,6 +2370,78 @@ async def home():
             }}
         }}
         
+        let searchTimeout = null;
+        
+        async function handleSearch(query) {{
+            const searchResults = document.getElementById('searchResults');
+            const conversations = document.getElementById('conversations');
+            
+            // Clear previous timeout
+            if (searchTimeout) {{
+                clearTimeout(searchTimeout);
+            }}
+            
+            if (!query || query.trim().length < 2) {{
+                searchResults.style.display = 'none';
+                conversations.style.display = 'block';
+                return;
+            }}
+            
+            // Debounce search
+            searchTimeout = setTimeout(async () => {{
+                try {{
+                    const resp = await fetch(`/api/search?query=${{encodeURIComponent(query.trim())}}`);
+                    const data = await resp.json();
+                    
+                    conversations.style.display = 'none';
+                    searchResults.style.display = 'block';
+                    searchResults.innerHTML = '';
+                    
+                    if (data.results && data.results.length > 0) {{
+                        // Group results by conversation
+                        const grouped = {{}};
+                        data.results.forEach(result => {{
+                            if (!grouped[result.conversation_id]) {{
+                                grouped[result.conversation_id] = [];
+                            }}
+                            grouped[result.conversation_id].push(result);
+                        }});
+                        
+                        // Display grouped results
+                        Object.keys(grouped).forEach(convId => {{
+                            const results = grouped[convId];
+                            const firstResult = results[0];
+                            
+                            const item = document.createElement('div');
+                            item.className = 'search-result-item';
+                            item.onclick = () => {{
+                                loadConversation(convId);
+                                document.getElementById('searchInput').value = '';
+                                searchResults.style.display = 'none';
+                                conversations.style.display = 'block';
+                            }};
+                            
+                            const preview = firstResult.content.substring(0, 100);
+                            const timestamp = formatTimestamp(firstResult.timestamp);
+                            
+                            item.innerHTML = `
+                                <div class="search-result-title">${{firstResult.conversation_title}}</div>
+                                <div class="search-result-preview">${{preview}}${{firstResult.content.length > 100 ? '...' : ''}}</div>
+                                <div class="search-result-meta">${{results.length}} match${{results.length > 1 ? 'es' : ''}} • ${{timestamp}}</div>
+                            `;
+                            
+                            searchResults.appendChild(item);
+                        }});
+                    }} else {{
+                        searchResults.innerHTML = '<div class="search-no-results">No results found</div>';
+                    }}
+                }} catch (e) {{
+                    console.error('Search error:', e);
+                    searchResults.innerHTML = '<div class="search-no-results">Error searching</div>';
+                }}
+            }}, 300); // 300ms debounce
+        }}
+        
         async function loadConversations() {{
             const resp = await fetch('/api/conversations');
             const data = await resp.json();
@@ -2429,7 +2718,8 @@ async def get_model_status():
     return {
         "current_model": current_model,
         "switching": model_switching,
-        "status": model_switch_status
+        "status": model_switch_status,
+        "switch_history": model_switch_history[-10:]  # Last 10 switches
     }
 
 class ModelSwitchRequest(BaseModel):
@@ -2508,6 +2798,16 @@ async def delete_conversation(conversation_id: str):
     except Exception as e:
         logger.error(f"Error deleting conversation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/search")
+async def search_chats(query: str):
+    """Search through all chat messages"""
+    try:
+        results = search_messages(query, limit=50)
+        return {'results': results, 'count': len(results)}
+    except Exception as e:
+        logger.error(f"Error searching messages: {e}")
+        return {'results': [], 'count': 0}
 
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
