@@ -224,14 +224,14 @@ async def switch_model(new_model_id: str):
         # Step 1: Stop the vllm service
         try:
             result = subprocess.run(
-                ["docker-compose", "-f", compose_file, "stop", "vllm"],
+                ["docker", "compose", "-f", compose_file, "stop", "vllm"],
                 cwd=compose_dir,
                 capture_output=True,
                 text=True,
                 timeout=30
             )
             if result.returncode != 0:
-                logger.warning(f"docker-compose stop returned: {result.stderr}")
+                logger.warning(f"docker compose stop returned: {result.stderr}")
             model_switch_status["progress"] = 30
             model_switch_status["message"] = "Container stopped. Removing..."
         except Exception as e:
@@ -247,7 +247,7 @@ async def switch_model(new_model_id: str):
         model_switch_status["message"] = "Removing old container..."
         try:
             subprocess.run(
-                ["docker-compose", "-f", compose_file, "rm", "-f", "vllm"],
+                ["docker", "compose", "-f", compose_file, "rm", "-f", "vllm"],
                 cwd=compose_dir,
                 capture_output=True,
                 text=True,
@@ -290,14 +290,14 @@ services:
         
         try:
             result = subprocess.run(
-                ["docker-compose", "-f", compose_file, "up", "-d", "vllm"],
+                ["docker", "compose", "-f", compose_file, "up", "-d", "vllm"],
                 cwd=compose_dir,
                 capture_output=True,
                 text=True,
                 timeout=60
             )
             if result.returncode != 0:
-                raise Exception(f"docker-compose up failed: {result.stderr}")
+                raise Exception(f"docker compose up failed: {result.stderr}")
             logger.info(f"Container started: {result.stdout}")
         except Exception as e:
             logger.error(f"Error starting container: {e}")
