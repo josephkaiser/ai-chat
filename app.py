@@ -2399,17 +2399,42 @@ def generate_css(mode='light'):
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), inset 0 2px 4px rgba(255, 255, 255, 0.2);
             transition: all 0.3s ease;
             z-index: 1001;
+            position: relative;
+            overflow: visible;
         }}
         
         .settings-menu-toggle:hover {{
             background: {colors['accent_hover']};
             border-color: {colors['accent_hover']};
-            transform: scale(1.1);
-            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+            transform: scale(1.1) rotate(15deg);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2), inset 0 2px 4px rgba(255, 255, 255, 0.3);
+        }}
+        
+        .settings-menu-toggle:active {{
+            transform: scale(0.95) rotate(15deg);
+        }}
+        
+        .gear-icon {{
+            width: 28px;
+            height: 28px;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.2));
+            animation: none;
+        }}
+        
+        .settings-menu-toggle:hover .gear-icon {{
+            animation: rotateGear 2s linear infinite;
+        }}
+        
+        @keyframes rotateGear {{
+            from {{ transform: rotate(0deg); }}
+            to {{ transform: rotate(360deg); }}
         }}
         
         .settings-menu-content {{
@@ -2426,14 +2451,16 @@ def generate_css(mode='light'):
             min-width: 200px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             opacity: 0;
-            transform: translateY(10px);
-            transition: all 0.3s ease;
+            transform: translateY(10px) scale(0.95);
+            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            pointer-events: none;
         }}
         
         .settings-menu-content.show {{
             display: flex;
             opacity: 1;
-            transform: translateY(0);
+            transform: translateY(0) scale(1);
+            pointer-events: auto;
         }}
         
         .settings-menu-item {{
@@ -3689,10 +3716,15 @@ async def home(mode: str = "light"):
     
     <!-- Settings Menu (Bottom Left) -->
     <div class="settings-menu" id="settingsMenu">
-        <button class="settings-menu-toggle" onclick="toggleSettingsMenu()" title="Settings">⚙️</button>
+        <button class="settings-menu-toggle" onclick="toggleSettingsMenu(event)" title="Settings">
+            <svg class="gear-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M12 1v6m0 6v6m11-7h-6m-6 0H1m16.364-5.636l-4.243 4.243m0 4.243l4.243 4.243M6.636 6.636l4.243 4.243m0 4.243l-4.243 4.243"/>
+            </svg>
+        </button>
         <div class="settings-menu-content" id="settingsMenuContent">
-            <button class="settings-menu-item" onclick="toggleTheme()" title="Toggle theme" id="themeToggle">
-                <span class="settings-icon">🌙</span>
+            <button class="settings-menu-item" onclick="toggleTheme()" title="Toggle theme" id="themeToggleBtn">
+                <span class="settings-icon" id="themeIcon">🌙</span>
                 <span class="settings-label">Theme</span>
             </button>
             <button class="settings-menu-item" onclick="toggleWebSearch()" title="Web Search">
@@ -3919,27 +3951,36 @@ async def home(mode: str = "light"):
                 ws = new WebSocket(`ws://${{location.host}}/ws/chat`);
                 
                 ws.onopen = () => {{
-                    console.log('Connected');
+                    console.log('WebSocket connected');
                     // Check if model is actually available (might be booting)
                     fetch('/health').then(r => r.json()).then(health => {{
+                        console.log('Health check result:', health);
                         if (health.model_available) {{
                             modelAvailable = true;
                             updateStatus(true);
+                            document.getElementById('input').disabled = false;
+                            document.getElementById('send').disabled = false;
                             if (modelProgressInterval) {{
                                 clearInterval(modelProgressInterval);
                                 modelProgressInterval = null;
                             }}
                         }} else {{
                             modelAvailable = false;
-                            updateStatus('loading');
+                            updateStatus('loading', null, health.message || 'Loading model...');
                             // Start polling for progress
                             startModelProgressPolling();
                             // Disable input when model not available
                             document.getElementById('input').disabled = true;
                             document.getElementById('send').disabled = true;
                         }}
-                    }}).catch(() => {{
-                        updateStatus(true); // Default to connected if health check fails
+                    }}).catch((error) => {{
+                        console.error('Health check failed:', error);
+                        // If health check fails, assume model is not available
+                        modelAvailable = false;
+                        updateStatus('loading', null, 'Checking model status...');
+                        startModelProgressPolling();
+                        document.getElementById('input').disabled = true;
+                        document.getElementById('send').disabled = true;
                     }});
                 }};
                 
@@ -3970,12 +4011,28 @@ async def home(mode: str = "light"):
                     }}
                 }};
                 
-                ws.onerror = () => updateStatus(false);
-                ws.onclose = () => {{
+                ws.onerror = (error) => {{
+                    console.error('WebSocket error:', error);
+                    modelAvailable = false;
                     updateStatus(false);
+                    document.getElementById('input').disabled = true;
+                    document.getElementById('send').disabled = true;
+                }};
+                
+                ws.onclose = (event) => {{
+                    console.log('WebSocket closed:', event.code, event.reason);
+                    modelAvailable = false;
+                    updateStatus(false);
+                    document.getElementById('input').disabled = true;
+                    document.getElementById('send').disabled = true;
                     setTimeout(connectWS, 2000);
                 }};
             }} catch (e) {{
+                console.error('Failed to create WebSocket:', e);
+                modelAvailable = false;
+                updateStatus(false);
+                document.getElementById('input').disabled = true;
+                document.getElementById('send').disabled = true;
                 setTimeout(connectWS, 2000);
             }}
         }}
@@ -4074,9 +4131,9 @@ async def home(mode: str = "light"):
         // Set theme icon on load
         document.addEventListener('DOMContentLoaded', function() {{
             const currentMode = localStorage.getItem('theme') || 'light';
-            const themeBtn = document.getElementById('themeToggle');
-            if (themeBtn) {{
-                themeBtn.textContent = currentMode === 'light' ? '🌙' : '☀️';
+            const themeIcon = document.getElementById('themeIcon');
+            if (themeIcon) {{
+                themeIcon.textContent = currentMode === 'light' ? '🌙' : '☀️';
             }}
         }});
         
@@ -4118,17 +4175,31 @@ async def home(mode: str = "light"):
             }}
         }}
         
-        function toggleSettingsMenu() {{
+        function toggleSettingsMenu(event) {{
+            if (event) event.stopPropagation();
             const menu = document.getElementById('settingsMenuContent');
-            menu.classList.toggle('show');
+            if (menu) {{
+                const isShowing = menu.classList.contains('show');
+                if (isShowing) {{
+                    menu.classList.remove('show');
+                }} else {{
+                    menu.classList.add('show');
+                }}
+            }} else {{
+                console.error('Settings menu not found!');
+            }}
         }}
         
         // Close settings menu when clicking outside
         document.addEventListener('click', function(event) {{
             const menu = document.getElementById('settingsMenu');
             const menuContent = document.getElementById('settingsMenuContent');
-            if (menu && menuContent && !menu.contains(event.target)) {{
-                menuContent.classList.remove('show');
+            const toggle = document.querySelector('.settings-menu-toggle');
+            if (menu && menuContent && toggle) {{
+                // Don't close if clicking on the toggle button or inside the menu
+                if (!menu.contains(event.target) && !toggle.contains(event.target)) {{
+                    menuContent.classList.remove('show');
+                }}
             }}
         }});
         
@@ -5126,13 +5197,26 @@ async def home(mode: str = "light"):
         // Start checking for model loading progress on page load
         setTimeout(() => {{
             fetch('/health').then(r => r.json()).then(health => {{
-                if (!health.model_available) {{
-                    updateStatus('loading', null, 'Loading model...');
+                console.log('Initial health check:', health);
+                if (health.model_available) {{
+                    modelAvailable = true;
+                    updateStatus(true);
+                    document.getElementById('input').disabled = false;
+                    document.getElementById('send').disabled = false;
+                }} else {{
+                    modelAvailable = false;
+                    updateStatus('loading', null, health.message || 'Loading model...');
                     startModelProgressPolling();
+                    document.getElementById('input').disabled = true;
+                    document.getElementById('send').disabled = true;
                 }}
-            }}).catch(() => {{
-                // Keep loading status if health check fails
+            }}).catch((error) => {{
+                console.error('Initial health check failed:', error);
+                modelAvailable = false;
                 updateStatus('loading', null, 'Checking connection...');
+                startModelProgressPolling();
+                document.getElementById('input').disabled = true;
+                document.getElementById('send').disabled = true;
             }});
         }}, 1000);
         
@@ -5634,10 +5718,11 @@ async def logs_websocket(websocket: WebSocket):
 async def health():
     """Health check"""
     status = {
-            "status": "healthy",
+        "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "current_model": current_model,
-        "model_available": False
+        "model_available": False,
+        "message": "Model is loading or unavailable"
     }
     
     # Check if current model is working
@@ -5646,14 +5731,18 @@ async def health():
             models = client.models.list()
             status["model_available"] = True
             status["status"] = "healthy"
+            status["message"] = f"Model {current_model} is ready"
         except Exception as e:
             status["model_available"] = False
             status["status"] = "unhealthy"
             status["error"] = str(e)
+            status["message"] = f"Model connection error: {str(e)}"
+            logger.warning(f"Health check failed: {e}")
     else:
         status["model_available"] = False
         status["status"] = "unhealthy"
         status["error"] = "No vLLM client available"
+        status["message"] = "Waiting for model to load..."
     
     return status
 
