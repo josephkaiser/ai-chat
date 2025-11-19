@@ -11,7 +11,6 @@ AI Chat with vLLM - Simplified UI with Customizations
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import sqlite3
@@ -712,14 +711,6 @@ except Exception as e:
     client = None
 
 app = FastAPI(title="AI Chat")
-
-# Mount static files for gallery/images
-# Serve files from /app/out directory at /out URL path
-if os.path.exists("/app/out"):
-    app.mount("/out", StaticFiles(directory="/app/out"), name="out")
-# Also serve from local out folder if it exists (for development)
-elif os.path.exists("out"):
-    app.mount("/out", StaticFiles(directory="out"), name="out")
 
 app.add_middleware(
     CORSMiddleware,
