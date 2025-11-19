@@ -20,7 +20,13 @@ from openai import OpenAI
 import traceback
 import io
 import sys
+import os
+import docker
+import asyncio
+import subprocess
+import json
 from contextlib import redirect_stdout, redirect_stderr
+from threading import Lock
 
 # Import theme configuration
 try:
@@ -80,19 +86,97 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DB_PATH = "/app/data/chat.db"
-VLLM_HOST = "http://vllm:8000/v1"
+VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
+VLLM_CONTAINER = os.getenv("VLLM_CONTAINER", "vllm")
 
-# Available models (including quantized versions)
+# Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
-    {"id": "Qwen/Qwen2.5-Coder-3B-Instruct", "name": "Qwen 2.5 Coder 3B", "quantized": False},
-    {"id": "Qwen/Qwen2.5-Coder-7B-Instruct", "name": "Qwen 2.5 Coder 7B", "quantized": False},
-    {"id": "meta-llama/Llama-3.2-3B-Instruct", "name": "Llama 3.2 3B", "quantized": False},
-    {"id": "meta-llama/Llama-3.2-1B-Instruct", "name": "Llama 3.2 1B (Quantized)", "quantized": True},
-    {"id": "mistralai/Mistral-7B-Instruct-v0.3", "name": "Mistral 7B", "quantized": False},
+    {
+        "id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+        "name": "Qwen 2.5 Coder 3B",
+        "quantized": False,
+        "command": [
+            "--model", "Qwen/Qwen2.5-Coder-3B-Instruct",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.90",
+            "--max-model-len", "4096"
+        ]
+    },
+    {
+        "id": "meta-llama/Llama-3.2-3B-Instruct",
+        "name": "Llama 3.2 3B",
+        "quantized": False,
+        "command": [
+            "--model", "meta-llama/Llama-3.2-3B-Instruct",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.90",
+            "--max-model-len", "4096"
+        ]
+    },
+    {
+        "id": "meta-llama/Llama-3.2-1B-Instruct",
+        "name": "Llama 3.2 1B",
+        "quantized": True,
+        "command": [
+            "--model", "meta-llama/Llama-3.2-1B-Instruct",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.85",
+            "--max-model-len", "4096"
+        ]
+    },
+    {
+        "id": "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "name": "Qwen 2.5 Coder 7B",
+        "quantized": False,
+        "command": [
+            "--model", "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.90",
+            "--max-model-len", "4096"
+        ]
+    },
+    {
+        "id": "mistralai/Mistral-7B-Instruct-v0.3",
+        "name": "Mistral 7B",
+        "quantized": False,
+        "command": [
+            "--model", "mistralai/Mistral-7B-Instruct-v0.3",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.90",
+            "--max-model-len", "8192"
+        ]
+    },
 ]
 
 # Default model
 DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-3B-Instruct"
+
+# Current model state
+current_model = DEFAULT_MODEL
+model_switching = False
+model_switch_lock = Lock()
+model_switch_status = {"status": "ready", "message": "", "progress": 0}
+
+# Initialize Docker client
+try:
+    docker_client = docker.from_env()
+    logger.info("✓ Docker client initialized")
+except Exception as e:
+    logger.error(f"Failed to initialize Docker client: {e}")
+    docker_client = None
+
+# Initialize OpenAI client
+try:
+    client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+    logger.info(f"✓ Connected to vLLM at {VLLM_HOST}")
+except Exception as e:
+    logger.error(f"Failed to initialize vLLM client: {e}")
+    client = None
 
 app = FastAPI(title="AI Chat")
 
@@ -104,12 +188,144 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OpenAI client for vLLM
-try:
-    client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
-    logger.info(f"✓ Connected to vLLM at {VLLM_HOST}")
-except Exception as e:
-    logger.error(f"Failed to initialize vLLM client: {e}")
+# Model switching functions
+async def switch_model(new_model_id: str):
+    """Switch vLLM to a new model by restarting the container"""
+    global current_model, model_switching, model_switch_status, client
+    
+    with model_switch_lock:
+        if model_switching:
+            return {"status": "error", "message": "Model switch already in progress"}
+        
+        if new_model_id == current_model:
+            return {"status": "success", "message": f"Model {new_model_id} is already active"}
+        
+        # Find model config
+        model_config = next((m for m in AVAILABLE_MODELS if m["id"] == new_model_id), None)
+        if not model_config:
+            return {"status": "error", "message": f"Model {new_model_id} not found"}
+        
+        model_switching = True
+        model_switch_status = {"status": "switching", "message": f"Switching to {model_config['name']}...", "progress": 10}
+    
+    try:
+        logger.info(f"Switching model from {current_model} to {new_model_id}")
+        
+        # Update status
+        model_switch_status["progress"] = 20
+        model_switch_status["message"] = "Stopping vLLM container..."
+        
+        # Stop the container
+        if docker_client:
+            try:
+                container = docker_client.containers.get(VLLM_CONTAINER)
+                container.stop(timeout=10)
+                model_switch_status["progress"] = 40
+                model_switch_status["message"] = "Container stopped. Starting with new model..."
+            except docker.errors.NotFound:
+                logger.warning(f"Container {VLLM_CONTAINER} not found")
+            except Exception as e:
+                logger.error(f"Error stopping container: {e}")
+                raise
+        
+        # Update status
+        model_switch_status["progress"] = 50
+        model_switch_status["message"] = "Starting container with new model..."
+        
+        # Restart container with new model using docker-compose
+        # We'll use subprocess to run docker-compose
+        import json
+        model_args = " ".join(model_config["command"])
+        
+        # Create a temporary docker-compose override
+        compose_override = {
+            "services": {
+                "vllm": {
+                    "command": model_args.split()
+                }
+            }
+        }
+        
+        # Use docker-compose to restart with new config
+        # For now, we'll use docker run directly
+        model_switch_status["progress"] = 60
+        model_switch_status["message"] = "Loading new model (this may take a few minutes)..."
+        
+        # Start container with new model
+        if docker_client:
+            try:
+                # Remove old container if exists
+                try:
+                    old_container = docker_client.containers.get(VLLM_CONTAINER)
+                    old_container.remove(force=True)
+                except:
+                    pass
+                
+                # Start new container
+                container = docker_client.containers.run(
+                    "vllm/vllm-openai:v0.5.4",
+                    name=VLLM_CONTAINER,
+                    command=model_config["command"],
+                    ports={"8000/tcp": 8001},
+                    detach=True,
+                    remove=False,
+                    device_requests=[
+                        docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])
+                    ],
+                    restart_policy={"Name": "unless-stopped"}
+                )
+                
+                model_switch_status["progress"] = 70
+                model_switch_status["message"] = "Waiting for model to load..."
+                
+                # Wait for container to be ready
+                import time
+                max_wait = 300  # 5 minutes max
+                wait_time = 0
+                while wait_time < max_wait:
+                    time.sleep(5)
+                    wait_time += 5
+                    try:
+                        # Check if container is running
+                        container.reload()
+                        if container.status == "running":
+                            # Try to connect to vLLM
+                            try:
+                                test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
+                                test_client.models.list()
+                                # Success!
+                                break
+                            except:
+                                model_switch_status["progress"] = 70 + int((wait_time / max_wait) * 20)
+                                model_switch_status["message"] = f"Model loading... ({wait_time}s)"
+                                continue
+                    except:
+                        pass
+                
+                if wait_time >= max_wait:
+                    raise Exception("Model loading timeout")
+                
+                # Update client
+                client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+                current_model = new_model_id
+                
+                model_switch_status = {"status": "success", "message": f"Successfully switched to {model_config['name']}", "progress": 100}
+                logger.info(f"Successfully switched to model {new_model_id}")
+                
+            except Exception as e:
+                logger.error(f"Error switching model: {e}")
+                model_switch_status = {"status": "error", "message": f"Failed to switch model: {str(e)}", "progress": 0}
+                raise
+        else:
+            raise Exception("Docker client not available")
+        
+    except Exception as e:
+        logger.error(f"Model switch error: {e}\n{traceback.format_exc()}")
+        model_switch_status = {"status": "error", "message": f"Error: {str(e)}", "progress": 0}
+    finally:
+        model_switching = False
+    
+    return model_switch_status
 
 # ==================== Database ====================
 
@@ -615,6 +831,174 @@ def generate_css():
             white-space: pre-wrap;
             word-wrap: break-word;
         }}
+        
+        /* Model Toggle */
+        .model-toggle {{
+            position: relative;
+        }}
+        
+        .model-toggle-btn {{
+            padding: 8px 15px;
+            background: {COLORS['bg_primary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+            color: {COLORS['text_primary']};
+            font-size: {FONTS['size_small']};
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+        
+        .model-toggle-btn:hover {{
+            border-color: {COLORS['accent_primary']};
+            background: {COLORS['bg_tertiary']};
+        }}
+        
+        .model-toggle-btn.switching {{
+            opacity: 0.6;
+            cursor: not-allowed;
+        }}
+        
+        .model-dropdown {{
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 5px;
+            background: {COLORS['bg_secondary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            min-width: 250px;
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }}
+        
+        .model-dropdown.show {{
+            display: block;
+        }}
+        
+        .model-option {{
+            padding: 12px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid {COLORS['bg_tertiary']};
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .model-option:last-child {{
+            border-bottom: none;
+        }}
+        
+        .model-option:hover {{
+            background: {COLORS['bg_tertiary']};
+        }}
+        
+        .model-option.active {{
+            background: {COLORS['accent_primary']};
+            color: white;
+        }}
+        
+        .model-option-name {{
+            font-weight: 500;
+        }}
+        
+        .model-option-badge {{
+            font-size: 10px;
+            padding: 2px 6px;
+            background: {COLORS['bg_primary']};
+            border-radius: 4px;
+            color: {COLORS['text_secondary']};
+        }}
+        
+        .model-option.active .model-option-badge {{
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }}
+        
+        /* Model Switch Status Console */
+        .model-status-console {{
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            width: 350px;
+            max-height: 200px;
+            background: {COLORS['bg_secondary']};
+            border: 1px solid {COLORS['bg_tertiary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            z-index: 999;
+            display: none;
+            flex-direction: column;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }}
+        
+        .model-status-console.show {{
+            display: flex;
+        }}
+        
+        .model-status-header {{
+            padding: 10px 15px;
+            background: {COLORS['bg_primary']};
+            border-bottom: 1px solid {COLORS['bg_tertiary']};
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: {FONTS['size_small']};
+            font-weight: 600;
+        }}
+        
+        .model-status-close {{
+            background: none;
+            border: none;
+            color: {COLORS['text_secondary']};
+            cursor: pointer;
+            font-size: 16px;
+            padding: 0;
+            width: 20px;
+            height: 20px;
+        }}
+        
+        .model-status-content {{
+            padding: 15px;
+            font-size: {FONTS['size_small']};
+        }}
+        
+        .model-status-message {{
+            margin-bottom: 10px;
+            color: {COLORS['text_primary']};
+        }}
+        
+        .model-status-progress {{
+            width: 100%;
+            height: 6px;
+            background: {COLORS['bg_primary']};
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 10px;
+        }}
+        
+        .model-status-progress-bar {{
+            height: 100%;
+            background: {COLORS['accent_primary']};
+            transition: width 0.3s;
+        }}
+        
+        .model-status-status {{
+            margin-top: 8px;
+            font-size: 11px;
+            color: {COLORS['text_secondary']};
+        }}
+        
+        .model-status-status.success {{
+            color: {COLORS['status_connected']};
+        }}
+        
+        .model-status-status.error {{
+            color: {COLORS['status_disconnected']};
+        }}
     """
 
 # ==================== API Endpoints ====================
@@ -649,13 +1033,40 @@ async def home():
         <div class="header">
             <div class="header-left">
                 <h1>AI Chat</h1>
-                <select class="model-selector" id="modelSelector" onchange="updateModel()">
-                    {''.join([f'<option value="{m["id"]}">{m["name"]}</option>' for m in AVAILABLE_MODELS])}
-                </select>
             </div>
-            <div class="status">
-                <div class="status-dot disconnected" id="statusDot"></div>
-                <span id="statusText">Connecting...</span>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <div class="model-toggle">
+                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown()">
+                        <span id="currentModelName">Loading...</span>
+                        <span>▼</span>
+                    </button>
+                    <div class="model-dropdown" id="modelDropdown">
+                        {''.join([f'''
+                        <div class="model-option" id="model-{m["id"]}" onclick="switchModel('{m["id"]}')">
+                            <span class="model-option-name">{m["name"]}</span>
+                            <span class="model-option-badge">{'Quantized' if m.get('quantized') else 'Standard'}</span>
+                        </div>
+                        ''' for m in AVAILABLE_MODELS])}
+                    </div>
+                </div>
+                <div class="status">
+                    <div class="status-dot disconnected" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="model-status-console" id="modelStatusConsole">
+            <div class="model-status-header">
+                <span>Model Switch Status</span>
+                <button class="model-status-close" onclick="closeModelStatus()">×</button>
+            </div>
+            <div class="model-status-content">
+                <div class="model-status-message" id="modelStatusMessage">Ready</div>
+                <div class="model-status-progress">
+                    <div class="model-status-progress-bar" id="modelStatusProgress" style="width: 0%"></div>
+                </div>
+                <div class="model-status-status" id="modelStatusStatus"></div>
             </div>
         </div>
         
@@ -826,8 +1237,144 @@ async def home():
             }}
         }}
         
-        function updateModel() {{
-            currentModel = document.getElementById('modelSelector').value;
+        // Model switching functions
+        let modelStatusPollInterval = null;
+        
+        function toggleModelDropdown() {{
+            const dropdown = document.getElementById('modelDropdown');
+            dropdown.classList.toggle('show');
+        }}
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(event) {{
+            const toggle = document.getElementById('modelToggleBtn');
+            const dropdown = document.getElementById('modelDropdown');
+            if (!toggle.contains(event.target) && !dropdown.contains(event.target)) {{
+                dropdown.classList.remove('show');
+            }}
+        }});
+        
+        async function switchModel(modelId) {{
+            // Close dropdown
+            document.getElementById('modelDropdown').classList.remove('show');
+            
+            // Show status console
+            const console = document.getElementById('modelStatusConsole');
+            console.classList.add('show');
+            
+            // Disable toggle button
+            const btn = document.getElementById('modelToggleBtn');
+            btn.classList.add('switching');
+            btn.disabled = true;
+            
+            try {{
+                const response = await fetch('/api/model/switch', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{model_id: modelId}})
+                }});
+                
+                const data = await response.json();
+                if (data.status === 'initiated') {{
+                    // Start polling for status
+                    startModelStatusPolling();
+                }}
+            }} catch (e) {{
+                console.error('Error switching model:', e);
+                updateModelStatus({{
+                    status: 'error',
+                    message: 'Failed to initiate model switch',
+                    progress: 0
+                }});
+            }}
+        }}
+        
+        function startModelStatusPolling() {{
+            if (modelStatusPollInterval) {{
+                clearInterval(modelStatusPollInterval);
+            }}
+            
+            modelStatusPollInterval = setInterval(async () => {{
+                try {{
+                    const response = await fetch('/api/model/status');
+                    const data = await response.json();
+                    
+                    updateModelStatus(data.status);
+                    updateCurrentModel(data.current_model);
+                    
+                    if (data.status.status === 'success' || data.status.status === 'error') {{
+                        clearInterval(modelStatusPollInterval);
+                        modelStatusPollInterval = null;
+                        
+                        // Re-enable toggle after a delay
+                        setTimeout(() => {{
+                            const btn = document.getElementById('modelToggleBtn');
+                            btn.classList.remove('switching');
+                            btn.disabled = false;
+                        }}, 2000);
+                    }}
+                }} catch (e) {{
+                    console.error('Error polling model status:', e);
+                }}
+            }}, 1000); // Poll every second
+        }}
+        
+        function updateModelStatus(status) {{
+            const messageEl = document.getElementById('modelStatusMessage');
+            const progressEl = document.getElementById('modelStatusProgress');
+            const statusEl = document.getElementById('modelStatusStatus');
+            
+            messageEl.textContent = status.message || 'Ready';
+            progressEl.style.width = (status.progress || 0) + '%';
+            
+            if (status.status === 'success') {{
+                statusEl.textContent = '✓ Success';
+                statusEl.className = 'model-status-status success';
+            }} else if (status.status === 'error') {{
+                statusEl.textContent = '✗ Error';
+                statusEl.className = 'model-status-status error';
+            }} else {{
+                statusEl.textContent = 'In progress...';
+                statusEl.className = 'model-status-status';
+            }}
+        }}
+        
+        const availableModels = {json.dumps(AVAILABLE_MODELS)};
+        
+        function updateCurrentModel(modelId) {{
+            currentModel = modelId;
+            const model = availableModels.find(m => m.id === modelId);
+            if (model) {{
+                document.getElementById('currentModelName').textContent = model.name;
+                
+                // Update active state in dropdown
+                document.querySelectorAll('.model-option').forEach(opt => {{
+                    opt.classList.remove('active');
+                }});
+                const activeOpt = document.getElementById(`model-${{modelId}}`);
+                if (activeOpt) {{
+                    activeOpt.classList.add('active');
+                }}
+            }}
+        }}
+        
+        function closeModelStatus() {{
+            document.getElementById('modelStatusConsole').classList.remove('show');
+        }}
+        
+        async function loadCurrentModel() {{
+            try {{
+                const response = await fetch('/api/model/status');
+                const data = await response.json();
+                updateCurrentModel(data.current_model);
+                
+                if (data.switching) {{
+                    startModelStatusPolling();
+                    document.getElementById('modelStatusConsole').classList.add('show');
+                }}
+            }} catch (e) {{
+                console.error('Error loading current model:', e);
+            }}
         }}
         
         function sendMessage() {{
@@ -1057,7 +1604,32 @@ async def home():
 @app.get("/api/models")
 async def get_models():
     """Get available models"""
-    return {"models": AVAILABLE_MODELS}
+    return {
+        "models": AVAILABLE_MODELS,
+        "current_model": current_model,
+        "switching": model_switching
+    }
+
+@app.get("/api/model/status")
+async def get_model_status():
+    """Get current model and switch status"""
+    return {
+        "current_model": current_model,
+        "switching": model_switching,
+        "status": model_switch_status
+    }
+
+class ModelSwitchRequest(BaseModel):
+    model_id: str
+
+@app.post("/api/model/switch")
+async def switch_model_endpoint(request: ModelSwitchRequest):
+    """Switch to a different model"""
+    # Run switch in background
+    import asyncio
+    asyncio.create_task(switch_model(request.model_id))
+    
+    return {"status": "initiated", "message": "Model switch started"}
 
 @app.get("/api/conversations")
 async def get_conversations():
@@ -1160,6 +1732,30 @@ async def chat_websocket(websocket: WebSocket):
                 # Signal start
                 await websocket.send_json({'type': 'start'})
                 
+                # Check if model is switching
+                if model_switching:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'content': 'Model is currently switching. Please wait...'
+                    })
+                    continue
+                
+                # Check if requested model matches current model
+                if model != current_model:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'content': f'Model {model} is not active. Current model: {current_model}. Please switch models first.'
+                    })
+                    continue
+                
+                # Use current client
+                if not client:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'content': 'vLLM client not available. Model may be loading...'
+                    })
+                    continue
+                
                 # Stream from vLLM
                 full_response = ""
                 
@@ -1239,21 +1835,26 @@ async def logs_websocket(websocket: WebSocket):
 @app.get("/health")
 async def health():
     """Health check"""
-    try:
-        # Test vLLM connection
-        models = client.models.list()
-        return {
-            "status": "healthy",
-            "vllm_connected": True,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        return {
-            "status": "degraded",
-            "vllm_connected": False,
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
+    status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "models": {}
+    }
+    
+    # Check each model client
+    for model_id, client in model_clients.items():
+        try:
+            models = client.models.list()
+            status["models"][model_id] = "connected"
+        except Exception as e:
+            status["models"][model_id] = f"error: {str(e)}"
+            status["status"] = "degraded"
+    
+    if not status["models"]:
+        status["status"] = "unhealthy"
+        status["error"] = "No model clients available"
+    
+    return status
 
 if __name__ == "__main__":
     import uvicorn
