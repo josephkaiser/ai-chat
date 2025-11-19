@@ -235,7 +235,28 @@ async def process_job_queue():
                 # Switch model if needed
                 if model_id != current_model:
                     logger.info(f"🔄 Switching to model: {model_id} (current: {current_model})")
-                    await switch_model(model_id)
+                    try:
+                        switch_result = await switch_model(model_id)
+                        # Check if switch failed (but not recovered)
+                        if switch_result.get("status") == "error":
+                            logger.warning(f"⚠️ Model switch had issues, but continuing with current state")
+                            # If switch failed and we're now on default model, update model_id for jobs
+                            if current_model == DEFAULT_MODEL:
+                                model_id = DEFAULT_MODEL
+                                logger.info(f"🔄 Using default model for queued jobs")
+                        elif switch_result.get("status") == "recovered":
+                            # Switch failed but we recovered to default
+                            model_id = DEFAULT_MODEL
+                            logger.info(f"🔄 Using recovered default model for queued jobs")
+                    except Exception as switch_error:
+                        logger.error(f"❌ Model switch error in queue processor: {switch_error}")
+                        # Try to recover
+                        try:
+                            await recover_to_default_model()
+                            model_id = DEFAULT_MODEL
+                        except:
+                            pass
+                        # Continue processing with whatever model is available
                 
                 # Process all jobs for this model
                 for job in jobs:
@@ -594,8 +615,14 @@ Remember: Do your reasoning internally for quality, but present only polished, f
                     'content': error_msg
                 })
         
-        # Save response
-        save_message(job.conversation_id, 'assistant', full_response)
+        # Save response and get message ID
+        assistant_message_id = save_message(job.conversation_id, 'assistant', full_response)
+        
+        # Send message ID to client for feedback/retry buttons
+        await job.websocket.send_json({
+            'type': 'message_id',
+            'message_id': assistant_message_id
+        })
         
         await job.websocket.send_json({'type': 'done'})
         
@@ -958,11 +985,130 @@ async def switch_model(new_model_id: str):
         logger.error(f"   Error: {str(e)}")
         logger.error(f"   Error details: {traceback.format_exc()}")
         logger.error("=" * 80)
-        model_switch_status = {"status": "error", "message": f"Error: {str(e)}", "progress": 0}
+        
+        # Attempt to recover by loading default model
+        logger.info("🔄 Attempting to recover by loading default model...")
+        model_switch_status = {"status": "error", "message": f"Switch failed: {str(e)}. Attempting to recover...", "progress": 0}
+        
+        try:
+            # Only attempt recovery if we're not already on the default model
+            if current_model != DEFAULT_MODEL:
+                logger.info(f"🔄 Attempting to load default model: {DEFAULT_MODEL}")
+                recovery_result = await recover_to_default_model()
+                if recovery_result.get("success"):
+                    model_switch_status = {
+                        "status": "recovered",
+                        "message": f"Switch failed, but recovered to default model ({DEFAULT_MODEL})",
+                        "progress": 100
+                    }
+                    logger.info("✅ Successfully recovered to default model")
+                else:
+                    model_switch_status = {
+                        "status": "error",
+                        "message": f"Switch failed and recovery failed: {recovery_result.get('error', 'Unknown error')}",
+                        "progress": 0
+                    }
+                    logger.error(f"❌ Recovery to default model also failed: {recovery_result.get('error')}")
+            else:
+                logger.warning("⚠️ Already on default model, cannot recover")
+                model_switch_status = {
+                    "status": "error",
+                    "message": f"Switch failed and already on default model: {str(e)}",
+                    "progress": 0
+                }
+        except Exception as recovery_error:
+            logger.error(f"❌ Recovery attempt failed: {recovery_error}\n{traceback.format_exc()}")
+            model_switch_status = {
+                "status": "error",
+                "message": f"Switch failed and recovery failed: {str(recovery_error)}",
+                "progress": 0
+            }
     finally:
         model_switching = False
     
     return model_switch_status
+
+async def recover_to_default_model():
+    """Attempt to recover by loading the default model"""
+    global current_model, client, model_switch_status
+    
+    try:
+        logger.info("🔄 Starting recovery to default model...")
+        
+        # Find default model config
+        default_config = next((m for m in AVAILABLE_MODELS if m["id"] == DEFAULT_MODEL), None)
+        if not default_config:
+            return {"success": False, "error": f"Default model {DEFAULT_MODEL} not found in available models"}
+        
+        # Stop all containers first
+        if docker_client:
+            try:
+                # Stop legacy container
+                try:
+                    legacy_container = docker_client.containers.get(VLLM_CONTAINER)
+                    if legacy_container.status == "running":
+                        legacy_container.stop(timeout=10)
+                except docker.errors.NotFound:
+                    pass
+                
+                # Stop all model containers
+                for model in AVAILABLE_MODELS:
+                    container_name = get_model_container_name(model["id"])
+                    try:
+                        container = docker_client.containers.get(container_name)
+                        if container.status == "running":
+                            container.stop(timeout=10)
+                    except docker.errors.NotFound:
+                        pass
+            except Exception as e:
+                logger.warning(f"⚠️ Error stopping containers during recovery: {e}")
+        
+        # Wait a bit for ports to clear
+        import time
+        time.sleep(2)
+        
+        # Ensure default model container exists
+        if docker_client:
+            target_container_name = ensure_model_container(DEFAULT_MODEL, default_config)
+            
+            # Start the default model container
+            try:
+                container = docker_client.containers.get(target_container_name)
+                container.reload()
+                if container.status != "running":
+                    container.start()
+                    time.sleep(3)  # Brief wait for container to start
+                
+                # Wait for model to be ready (shorter timeout for recovery)
+                max_wait = 180  # 3 minutes for recovery
+                wait_time = 0
+                while wait_time < max_wait:
+                    time.sleep(5)
+                    wait_time += 5
+                    try:
+                        container.reload()
+                        if container.status == "running":
+                            test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
+                            test_client.models.list()
+                            # Success!
+                            client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+                            current_model = DEFAULT_MODEL
+                            logger.info(f"✅ Default model recovered and ready! (loaded in {wait_time}s)")
+                            return {"success": True, "message": f"Recovered to {DEFAULT_MODEL}"}
+                    except:
+                        if wait_time % 30 == 0:
+                            logger.info(f"⏳ Recovery: Still loading default model... ({wait_time}s)")
+                        continue
+                
+                return {"success": False, "error": "Default model loading timeout during recovery"}
+            except Exception as e:
+                return {"success": False, "error": f"Failed to start default model container: {str(e)}"}
+        else:
+            return {"success": False, "error": "Docker client not available for recovery"}
+            
+    except Exception as e:
+        logger.error(f"❌ Recovery error: {e}\n{traceback.format_exc()}")
+        return {"success": False, "error": str(e)}
 
 # ==================== Database ====================
 
@@ -983,7 +1129,14 @@ def init_db():
                   role TEXT,
                   content TEXT,
                   timestamp TEXT,
+                  feedback TEXT,
                   FOREIGN KEY(conversation_id) REFERENCES conversations(id))''')
+    
+    # Add feedback column if it doesn't exist (for existing databases)
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     conn.commit()
     conn.close()
@@ -1049,8 +1202,8 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
     conn.close()
     return results
 
-def save_message(conv_id: str, role: str, content: str):
-    """Save message to database"""
+def save_message(conv_id: str, role: str, content: str) -> int:
+    """Save message to database and return message ID"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
@@ -1068,12 +1221,43 @@ def save_message(conv_id: str, role: str, content: str):
                  VALUES (?, ?, ?, ?)''',
               (conv_id, role, content, datetime.now().isoformat()))
     
+    message_id = c.lastrowid
+    
     # Update conversation
     c.execute('UPDATE conversations SET updated_at = ? WHERE id = ?',
               (datetime.now().isoformat(), conv_id))
     
     conn.commit()
     conn.close()
+    return message_id
+
+def update_message_feedback(message_id: int, feedback: str):
+    """Update feedback for a message"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('UPDATE messages SET feedback = ? WHERE id = ?', (feedback, message_id))
+    conn.commit()
+    conn.close()
+
+def get_message_by_id(message_id: int) -> Optional[Dict]:
+    """Get a message by its ID"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT id, conversation_id, role, content, timestamp, feedback 
+                 FROM messages WHERE id = ?''', (message_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        return {
+            'id': row[0],
+            'conversation_id': row[1],
+            'role': row[2],
+            'content': row[3],
+            'timestamp': row[4],
+            'feedback': row[5]
+        }
+    return None
 
 # ==================== Generate CSS from Theme ====================
 
@@ -1085,7 +1269,7 @@ def generate_css(mode='light'):
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         
         body {{
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
             background: {colors['bg_primary']};
             color: {colors['text_primary']};
             height: 100vh;
@@ -1183,7 +1367,7 @@ def generate_css(mode='light'):
             font-weight: 600;
             cursor: pointer;
             transition: all {ANIMATIONS['transition_speed']};
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
         }}
         
         .new-chat-btn:hover {{ 
@@ -1206,7 +1390,7 @@ def generate_css(mode='light'):
             border-radius: 4px;
             color: #8194b1;
             font-size: {FONTS['size_small']};
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
         }}
         
         .search-input:focus {{
@@ -1426,7 +1610,7 @@ def generate_css(mode='light'):
             padding: 16px 20px;
             line-height: 1.6;
             animation: slideIn {ANIMATIONS['slide_duration']} ease-out;
-            font-size: {FONTS['size_message']};
+            font-size: {FONTS['size_base']};
             border: 2px solid {colors['accent_primary']};
             border-radius: 4px;
             transition: all 0.2s;
@@ -1494,7 +1678,7 @@ def generate_css(mode='light'):
             background: #e9eced;
             padding: 2px 6px;
             border-radius: 3px;
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
             font-size: 0.9em;
             border: 1px solid #b0c9df;
             color: #8194b1;
@@ -1801,14 +1985,15 @@ def generate_css(mode='light'):
             gap: 8px;
             max-width: {DIMENSIONS['message_max_width']};
             width: 100%;
-            background: #e9eced;
-            border: 2px solid #b0c9df;
+            background: {colors['bg_primary']};
+            border: 2px solid {colors['accent_primary']};
             border-radius: 4px;
             padding: 12px 16px;
+            cursor: text;
         }}
         
         .input-container:focus-within {{
-            border-color: #8194b1;
+            border-color: {colors['accent_hover']};
             box-shadow: 0 0 0 2px rgba(129,148,177,0.1);
         }}
         
@@ -1821,7 +2006,7 @@ def generate_css(mode='light'):
             border-radius: 0;
             font-size: {FONTS['size_base']};
             resize: none;
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
             min-height: 24px;
             max-height: 66vh;
             overflow-y: auto;
@@ -1949,22 +2134,21 @@ def generate_css(mode='light'):
         
         /* Terminal Log Viewer */
         .log-viewer-btn {{
-            position: fixed;
-            bottom: 20px;
-            left: 20px;
-            padding: 10px 15px;
-            background: {COLORS['btn_secondary']};
-            color: white;
-            border: none;
-            border-radius: {DIMENSIONS['border_radius']};
+            padding: 8px 12px;
+            background: {colors['btn_secondary']};
+            color: {colors['text_primary']};
+            border: 2px solid {colors['accent_primary']};
+            border-radius: 4px;
             cursor: pointer;
             font-size: {FONTS['size_small']};
-            z-index: 1000;
             transition: all {ANIMATIONS['transition_speed']};
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            font-family: {FONTS['family']};
         }}
         
-        .log-viewer-btn:hover {{ background: {COLORS['btn_secondary_hover']}; }}
+        .log-viewer-btn:hover {{
+            background: {colors['btn_secondary_hover']};
+            border-color: {colors['accent_hover']};
+        }}
         
         .log-viewer {{
             display: none;
@@ -2012,7 +2196,7 @@ def generate_css(mode='light'):
             flex: 1;
             overflow-y: auto;
             padding: 15px;
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
             font-size: 12px;
             color: {COLORS['text_primary']};
             white-space: pre-wrap;
@@ -2059,7 +2243,7 @@ def generate_css(mode='light'):
             gap: 10px;
             min-width: 180px;
             justify-content: space-between;
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
         }}
         
         .model-toggle-btn:hover {{
@@ -2234,7 +2418,7 @@ def generate_css(mode='light'):
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            font-family: 'Courier New', monospace;
+            font-family: {FONTS['family']};
         }}
         
         .boot-menu.show {{
@@ -2587,6 +2771,13 @@ def generate_css(mode='light'):
                 font-size: 14px;
             }}
             
+            /* Hide swipe actions on desktop */
+            @media (min-width: 769px) {{
+                .conversation-item .swipe-actions {{
+                    display: none !important;
+                }}
+            }}
+            
             .model-toggle-btn {{
                 font-size: 12px;
                 padding: 6px 10px;
@@ -2604,11 +2795,8 @@ def generate_css(mode='light'):
             }}
             
             .log-viewer-btn {{
-                bottom: 80px;
-                right: 15px;
-                width: 50px;
-                height: 50px;
-                font-size: 20px;
+                padding: 6px 10px;
+                font-size: 12px;
             }}
             
             .log-viewer {{
@@ -2769,6 +2957,7 @@ async def home(mode: str = "light"):
                 <h1>AI Chat</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
+                <button class="log-viewer-btn" onclick="toggleLogViewer()" title="View Terminal Logs">📋 Logs</button>
                 <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
                 <div class="model-toggle" style="position: relative;">
                     <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown(event)" title="Click to switch model" style="display: flex; align-items: center; gap: 8px;">
@@ -2814,7 +3003,7 @@ async def home(mode: str = "light"):
         </div>
         
         <div class="input-area">
-            <div class="input-container">
+            <div class="input-container" onclick="focusInput()">
                 <textarea 
                     id="input" 
                     placeholder="Type your message..." 
@@ -2826,8 +3015,6 @@ async def home(mode: str = "light"):
             </div>
         </div>
     </div>
-    
-    <button class="log-viewer-btn" onclick="toggleLogViewer()" title="View Terminal Logs">📋 Logs</button>
     
     <div class="log-viewer" id="logViewer">
         <div class="log-viewer-header">
@@ -3301,6 +3488,16 @@ async def home(mode: str = "light"):
             textarea.style.height = newHeight + 'px';
         }}
         
+        function focusInput() {{
+            const input = document.getElementById('input');
+            if (input && !input.disabled) {{
+                input.focus();
+                // Position cursor at end of text
+                const len = input.value.length;
+                input.setSelectionRange(len, len);
+            }}
+        }}
+        
         function sendMessage() {{
             const input = document.getElementById('input');
             const message = input.value.trim();
@@ -3644,16 +3841,31 @@ async def home(mode: str = "light"):
             data.conversations.forEach(conv => {{
                 const item = document.createElement('div');
                 item.className = 'conv-item conversation-item' + (conv.id === currentConvId ? ' active' : '');
-                item.innerHTML = `
-                    <div class="conv-title">${{conv.title}}</div>
-                    <div class="swipe-actions">
-                        <button onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">Rename</button>
-                        <button onclick="event.stopPropagation(); deleteConv('${{conv.id}}')" style="background: #fd7589;">Delete</button>
-                    </div>
-                `;
+                
+                // Desktop: show buttons on hover, Mobile: use swipe gestures
+                if (window.innerWidth <= 768) {{
+                    // Mobile: swipe actions
+                    item.innerHTML = `
+                        <div class="conv-title">${{conv.title}}</div>
+                        <div class="swipe-actions">
+                            <button onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">Rename</button>
+                            <button onclick="event.stopPropagation(); deleteConv('${{conv.id}}')" style="background: #fd7589;">Delete</button>
+                        </div>
+                    `;
+                }} else {{
+                    // Desktop: hover buttons
+                    item.innerHTML = `
+                        <div class="conv-title">${{conv.title}}</div>
+                        <div class="conv-actions">
+                            <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">✏️</button>
+                            <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${{conv.id}}')">🗑️</button>
+                        </div>
+                    `;
+                }}
+                
                 item.onclick = () => loadConversation(conv.id);
                 
-                // Add swipe gesture handling for mobile
+                // Add swipe gesture handling ONLY for mobile
                 if (window.innerWidth <= 768) {{
                     let startX = 0;
                     let currentX = 0;
@@ -3980,11 +4192,32 @@ class ModelSwitchRequest(BaseModel):
 @app.post("/api/model/switch")
 async def switch_model_endpoint(request: ModelSwitchRequest):
     """Switch to a different model"""
-    # Run switch in background
-    import asyncio
-    asyncio.create_task(switch_model(request.model_id))
-    
-    return {"status": "initiated", "message": "Model switch started"}
+    try:
+        # Run switch in background with error handling
+        async def switch_with_recovery():
+            try:
+                result = await switch_model(request.model_id)
+                # If switch failed, recovery is already attempted in switch_model
+                return result
+            except Exception as e:
+                logger.error(f"❌ Unhandled error in model switch: {e}\n{traceback.format_exc()}")
+                # Final fallback: try to recover to default
+                try:
+                    await recover_to_default_model()
+                except:
+                    pass
+                raise
+        
+        asyncio.create_task(switch_with_recovery())
+        return {"status": "initiated", "message": "Model switch started"}
+    except Exception as e:
+        logger.error(f"❌ Error initiating model switch: {e}")
+        # Try immediate recovery
+        try:
+            await recover_to_default_model()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Failed to initiate model switch: {str(e)}")
 
 class SelectModelRequest(BaseModel):
     model_id: str
@@ -4035,6 +4268,66 @@ async def get_conversations():
     except Exception as e:
         logger.error(f"Error getting conversations: {e}")
         return {'conversations': []}
+
+@app.post("/api/message/{message_id}/feedback")
+async def submit_feedback(message_id: int, request: dict):
+    """Submit feedback for a message (positive or negative)"""
+    feedback = request.get('feedback', '').strip()
+    if feedback not in ['positive', 'negative']:
+        raise HTTPException(status_code=400, detail="Feedback must be 'positive' or 'negative'")
+    
+    try:
+        update_message_feedback(message_id, feedback)
+        logger.info(f"📝 Feedback '{feedback}' submitted for message {message_id}")
+        return {"status": "success", "message": f"Feedback recorded: {feedback}"}
+    except Exception as e:
+        logger.error(f"Error submitting feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/message/{message_id}/retry")
+async def retry_message(message_id: int, request: dict):
+    """Retry generating a message with optional extended thinking"""
+    extended_thinking = request.get('extended_thinking', False)
+    
+    try:
+        # Get the message to retry
+        message = get_message_by_id(message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        if message['role'] != 'assistant':
+            raise HTTPException(status_code=400, detail="Can only retry assistant messages")
+        
+        # Get the user message that prompted this response
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''SELECT id, content FROM messages 
+                     WHERE conversation_id = ? AND role = 'user' AND id < ?
+                     ORDER BY id DESC LIMIT 1''', 
+                  (message['conversation_id'], message_id))
+        user_row = c.fetchone()
+        conn.close()
+        
+        if not user_row:
+            raise HTTPException(status_code=404, detail="Original user message not found")
+        
+        user_message_id, user_prompt = user_row
+        
+        # Create a new job for retry
+        # We'll need to create a WebSocket connection or use a different approach
+        # For now, return the prompt and let the client handle it
+        return {
+            "status": "ready",
+            "conversation_id": message['conversation_id'],
+            "prompt": user_prompt,
+            "extended_thinking": extended_thinking,
+            "message": "Ready to retry. Send this prompt again."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrying message: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
@@ -4325,13 +4618,93 @@ async def health():
     
     return status
 
+async def ensure_model_loaded():
+    """Ensure a model is loaded on startup or after errors"""
+    global current_model, client
+    
+    try:
+        # Check if current model is actually working
+        if client:
+            try:
+                client.models.list()
+                logger.info(f"✓ Model {current_model} is already loaded and working")
+                return True
+            except:
+                logger.warning(f"⚠️ Model {current_model} client exists but not responding")
+                client = None
+        
+        # Try to connect to see if any model is running
+        try:
+            test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
+            test_client.models.list()
+            client = test_client
+            logger.info(f"✓ Found working model at {VLLM_HOST}")
+            return True
+        except:
+            logger.warning(f"⚠️ No model responding at {VLLM_HOST}, will attempt to load default model")
+        
+        # No working model found, try to load default
+        logger.info(f"🔄 No working model found, attempting to load default model: {DEFAULT_MODEL}")
+        recovery_result = await recover_to_default_model()
+        
+        if recovery_result.get("success"):
+            logger.info("✅ Default model loaded successfully on startup")
+            return True
+        else:
+            logger.error(f"❌ Failed to load default model on startup: {recovery_result.get('error')}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Error ensuring model is loaded: {e}\n{traceback.format_exc()}")
+        return False
+
+async def model_health_monitor():
+    """Background task to monitor model health and recover if needed"""
+    global client, current_model
+    
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            # Check if model is still working
+            if client:
+                try:
+                    client.models.list()
+                    # Model is working
+                    continue
+                except Exception as e:
+                    logger.warning(f"⚠️ Model health check failed: {e}")
+                    client = None
+            
+            # Model not working, attempt recovery
+            if not client:
+                logger.warning("⚠️ Model not responding, attempting recovery...")
+                recovery_result = await recover_to_default_model()
+                if recovery_result.get("success"):
+                    logger.info("✅ Model recovered successfully")
+                else:
+                    logger.error(f"❌ Model recovery failed: {recovery_result.get('error')}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error in model health monitor: {e}")
+            await asyncio.sleep(60)  # Wait longer on error
+
 @app.on_event("startup")
 async def startup_event():
-    """Start the job queue processor on app startup"""
+    """Start the job queue processor and ensure model is loaded on app startup"""
     global queue_processor_task
+    
+    # Ensure a model is loaded
+    await ensure_model_loaded()
+    
+    # Start job queue processor
     if not queue_processor_running:
         queue_processor_task = asyncio.create_task(process_job_queue())
         logger.info("✅ Job queue processor task created")
+    
+    # Start model health monitor
+    asyncio.create_task(model_health_monitor())
+    logger.info("✅ Model health monitor started")
 
 if __name__ == "__main__":
     import uvicorn

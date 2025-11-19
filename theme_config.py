@@ -101,22 +101,22 @@ COLORS = COLORS_LIGHT
 
 # UI Dimensions
 DIMENSIONS = {
-    'sidebar_width': '240px',
-    'sidebar_collapsed_width': '60px',
-    'border_radius': '12px',
-    'border_radius_small': '8px',
-    'message_max_width': '900px',  # Wider for full-width feel
-    'input_padding': '12px 16px',
-    'header_padding': '16px 24px',
+    'sidebar_width': '200px',
+    'sidebar_collapsed_width': '50px',
+    'border_radius': '8px',
+    'border_radius_small': '6px',
+    'message_max_width': '700px',  # More compact on desktop
+    'input_padding': '10px 14px',
+    'header_padding': '12px 20px',
 }
 
 # Font Settings
 FONTS = {
     'family': "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    'size_base': '16px',
-    'size_small': '14px',
-    'size_large': '20px',
-    'size_message': '18px',  # Larger text for messages
+    'size_base': '14px',
+    'size_small': '12px',
+    'size_large': '18px',
+    'size_message': '14px',  # Same as base for compact UI
 }
 
 # Animation Settings
