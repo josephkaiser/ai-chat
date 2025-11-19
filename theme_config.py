@@ -69,9 +69,9 @@ COLORS_DARK = {
     'accent_secondary': '#91b461', # Secondary accent (green - same as light)
     
     # Message colors
-    'msg_user_bg': '#3a3a3a',     # User message background
+    'msg_user_bg': '#2d2d2d',     # User message background (darker than sidebar)
     'msg_user_text': '#67a2cb',   # User message text (blue)
-    'msg_assistant_bg': '#1a1a1a', # Assistant message background
+    'msg_assistant_bg': '#2d2d2d', # Assistant message background (dark, matches sidebar)
     'msg_assistant_text': '#e0e0e0', # Assistant message text (light)
     
     # Status colors
