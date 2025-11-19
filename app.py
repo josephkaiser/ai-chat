@@ -25,6 +25,7 @@ import docker
 import asyncio
 import subprocess
 import json
+import re
 from contextlib import redirect_stdout, redirect_stderr
 from threading import Lock
 
@@ -101,39 +102,29 @@ else:
 # Available models with their vLLM command configurations
 AVAILABLE_MODELS = [
     {
-        "id": "Qwen/Qwen2.5-Coder-3B-Instruct",
-        "name": "Qwen 2.5 Coder 3B",
-        "quantized": False,
-        "command": [
-            "--model", "Qwen/Qwen2.5-Coder-3B-Instruct",
-            "--host", "0.0.0.0",
-            "--port", "8000",
-            "--gpu-memory-utilization", "0.90",
-            "--max-model-len", "4096"
-        ]
-    },
-    {
-        "id": "meta-llama/Llama-3.2-3B-Instruct",
-        "name": "Llama 3.2 3B",
-        "quantized": False,
-        "command": [
-            "--model", "meta-llama/Llama-3.2-3B-Instruct",
-            "--host", "0.0.0.0",
-            "--port", "8000",
-            "--gpu-memory-utilization", "0.90",
-            "--max-model-len", "4096"
-        ]
-    },
-    {
-        "id": "meta-llama/Llama-3.2-1B-Instruct",
-        "name": "Llama 3.2 1B",
+        "id": "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ",
+        "name": "Qwen 2.5 Coder 72B (AWQ Quantized)",
         "quantized": True,
         "command": [
-            "--model", "meta-llama/Llama-3.2-1B-Instruct",
+            "--model", "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ",
             "--host", "0.0.0.0",
             "--port", "8000",
-            "--gpu-memory-utilization", "0.85",
-            "--max-model-len", "4096"
+            "--gpu-memory-utilization", "0.95",
+            "--max-model-len", "8192",
+            "--quantization", "awq"
+        ]
+    },
+    {
+        "id": "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+        "name": "Qwen 2.5 Coder 32B (AWQ Quantized)",
+        "quantized": True,
+        "command": [
+            "--model", "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.95",
+            "--max-model-len", "8192",
+            "--quantization", "awq"
         ]
     },
     {
@@ -145,25 +136,25 @@ AVAILABLE_MODELS = [
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.90",
-            "--max-model-len", "4096"
+            "--max-model-len", "8192"
         ]
     },
     {
-        "id": "mistralai/Mistral-7B-Instruct-v0.3",
-        "name": "Mistral 7B",
+        "id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+        "name": "Qwen 2.5 Coder 3B",
         "quantized": False,
         "command": [
-            "--model", "mistralai/Mistral-7B-Instruct-v0.3",
+            "--model", "Qwen/Qwen2.5-Coder-3B-Instruct",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--gpu-memory-utilization", "0.90",
-            "--max-model-len", "8192"
+            "--max-model-len", "4096"
         ]
     },
 ]
 
-# Default model
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-3B-Instruct"
+# Default model - Qwen 70B quantized (or closest available)
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-72B-Instruct-AWQ"
 
 # Current model state
 current_model = DEFAULT_MODEL
@@ -250,6 +241,40 @@ async def process_job_queue():
             logger.error(f"❌ Queue processor error: {e}\n{traceback.format_exc()}")
             await asyncio.sleep(1)  # Wait before retrying
 
+def estimate_tokens_needed(prompt: str) -> int:
+    """Estimate tokens needed based on user request"""
+    prompt_lower = prompt.lower()
+    
+    # Check for explicit length requests
+    
+    # Look for page counts
+    page_matches = re.findall(r'(\d+)\s*pages?', prompt_lower)
+    if page_matches:
+        pages = int(page_matches[0])
+        # Rough estimate: 1 page ≈ 500-800 tokens
+        return pages * 700
+    
+    # Look for word counts
+    word_matches = re.findall(r'(\d+)\s*words?', prompt_lower)
+    if word_matches:
+        words = int(word_matches[0])
+        # Rough estimate: 1 word ≈ 1.3 tokens
+        return int(words * 1.3)
+    
+    # Look for token counts
+    token_matches = re.findall(r'(\d+)\s*tokens?', prompt_lower)
+    if token_matches:
+        return int(token_matches[0])
+    
+    # Look for "long", "detailed", "comprehensive", "extensive"
+    if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
+        return 8000  # Default to high for detailed requests
+    
+    # Default based on prompt length
+    # Rough estimate: 1 character ≈ 0.25 tokens
+    estimated = len(prompt) * 0.25 * 10  # 10x multiplier for response
+    return min(max(int(estimated), 2048), 16384)  # Between 2k and 16k
+
 async def process_single_job(job: Job):
     """Process a single job with the current model"""
     global client
@@ -261,8 +286,38 @@ async def process_single_job(job: Job):
         # Get history
         history = get_conversation_history(job.conversation_id)
         
-        # Build messages
+        # Build messages with system prompt for reasoning
         messages = []
+        
+        # Add system prompt for problem-solving and chain-of-thought reasoning
+        system_prompt = """You are an expert problem-solving AI assistant. Your approach should be methodical, thorough, and solution-oriented.
+
+PROBLEM-SOLVING METHODOLOGY:
+1. **Understand the Problem**: First, clearly restate the problem in your own words to ensure you understand it correctly. Identify what is being asked, what constraints exist, and what the desired outcome is.
+
+2. **Break Down Complex Problems**: Decompose complex problems into smaller, manageable sub-problems. List each component and how they relate to each other.
+
+3. **Consider Multiple Approaches**: Before diving into a solution, consider 2-3 different approaches. Briefly evaluate the pros/cons of each approach, then select the most appropriate one.
+
+4. **Show Your Reasoning**: Use clear reasoning markers throughout your response:
+   - [Analysis: ...] for breaking down the problem
+   - [Approach: ...] for explaining your chosen method
+   - [Step 1/2/3: ...] for sequential problem-solving steps
+   - [Verification: ...] for checking your work
+   - [Conclusion: ...] for summarizing findings
+
+5. **Think Aloud**: Show intermediate calculations, considerations, and thought processes. Don't just present the final answer—show how you arrived at it.
+
+6. **Verify Solutions**: Always verify your solution makes sense. Check for edge cases, potential errors, or alternative interpretations.
+
+7. **For Long-Form Content**: Create a detailed outline first, then systematically expand each section. Ensure logical flow and completeness.
+
+8. **Meet Length Requirements**: If asked for a specific length (pages, words, etc.), ensure you meet or exceed that requirement with substantive content.
+
+Remember: Quality problem-solving is about the journey, not just the destination. Show your work, explain your reasoning, and demonstrate thorough analysis."""
+        
+        messages.append({'role': 'system', 'content': system_prompt})
+        
         for msg in history[-10:]:
             messages.append({'role': msg['role'], 'content': msg['content']})
         messages.append({'role': 'user', 'content': job.prompt})
@@ -286,16 +341,22 @@ async def process_single_job(job: Job):
             })
             return
         
+        # Calculate max_tokens based on user request
+        max_tokens = estimate_tokens_needed(job.prompt)
+        logger.info(f"📤 Processing job {job.id} with model: {current_model}, max_tokens: {max_tokens}")
+        
         # Stream from vLLM
         full_response = ""
-        logger.info(f"📤 Processing job {job.id} with model: {current_model}")
         
         stream = client.chat.completions.create(
             model=current_model,
             messages=messages,
             stream=True,
-            max_tokens=2048,
-            temperature=0.7,
+            max_tokens=max_tokens,
+            temperature=0.7,  # Balanced for creativity and coherence
+            top_p=0.9,  # Nucleus sampling for focused responses
+            frequency_penalty=0.1,  # Slight penalty to reduce repetition
+            presence_penalty=0.1,  # Encourages exploring new topics/concepts
         )
         
         for chunk in stream:
@@ -3205,17 +3266,18 @@ async def home():
             }}
         }});
         
-        // Check model availability on startup
+        // Check model availability on startup (boot menu disabled - using default model)
         async function checkModelAvailability() {{
             try {{
                 const response = await fetch('/health');
                 const health = await response.json();
                 if (!health.model_available) {{
-                    showBootMenu();
+                    // Don't show boot menu - just log the issue
+                    console.warn('Model not available, but continuing with default');
                 }}
             }} catch (e) {{
                 console.error('Failed to check model availability:', e);
-                showBootMenu();
+                // Don't show boot menu on error either
             }}
         }}
         
@@ -3223,7 +3285,7 @@ async def home():
         document.addEventListener('DOMContentLoaded', function() {{
             console.log('Page loaded, initializing...');
             
-            // Check model availability first
+            // Check model availability (but don't show boot menu)
             checkModelAvailability();
             
             // Load current model immediately
