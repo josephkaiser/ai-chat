@@ -103,6 +103,18 @@ else:
 # Note: With vLLM latest, AWQ quantization is supported via --quantization awq flag
 AVAILABLE_MODELS = [
     {
+        "id": "Qwen/Qwen2.5-14B-Instruct",
+        "name": "Qwen 2.5 14B Instruct",
+        "quantized": False,
+        "command": [
+            "--model", "Qwen/Qwen2.5-14B-Instruct",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+            "--gpu-memory-utilization", "0.85",
+            "--max-model-len", "8192"
+        ]
+    },
+    {
         "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
         "name": "Qwen 2.5 Coder 32B",
         "quantized": False,
@@ -153,9 +165,9 @@ AVAILABLE_MODELS = [
     },
 ]
 
-# Default model - Qwen 32B Coder (largest supported Coder model)
+# Default model - Qwen 7B Coder (AWQ Quantized) - fits in 24GB GPU
 # With latest vLLM, you can try quantized models by adding them above with --quantization awq
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-32B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
 
 # Current model state
 current_model = DEFAULT_MODEL
@@ -687,7 +699,7 @@ async def switch_model(new_model_id: str):
         logger.info("🔧 Finalizing model switch...")
         
         previous_model = current_model
-        client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
+    client = OpenAI(base_url=VLLM_HOST, api_key="dummy")
         current_model = new_model_id
         
         switch_duration = time.time() - switch_start_time
@@ -714,7 +726,7 @@ async def switch_model(new_model_id: str):
         logger.info(f"   Total switches recorded: {len(model_switch_history)}")
         logger.info("=" * 80)
         
-    except Exception as e:
+except Exception as e:
         switch_duration = time.time() - switch_start_time if 'switch_start_time' in locals() else 0
         
         # Record failed switch in history
@@ -1145,7 +1157,7 @@ def generate_css():
         
         .header h1 {{ 
             font-size: {FONTS['size_large']}; 
-            font-weight: 600; 
+            font-weight: 600;
             color: #8194b1;
             text-transform: uppercase;
             letter-spacing: 1px;
@@ -3481,7 +3493,7 @@ async def chat_websocket(websocket: WebSocket):
             model_id = selected_models.get(conv_id, DEFAULT_MODEL)
             
             logger.info(f"📥 Queuing message for model: {model_id} (conv: {conv_id})")
-            
+                
             # Create job and add to queue
             job = Job(
                 prompt=message,
@@ -3508,7 +3520,7 @@ async def logs_websocket(websocket: WebSocket):
         # Send existing logs
         existing_logs = log_capture.getvalue()
         if existing_logs:
-            await websocket.send_json({
+                        await websocket.send_json({
                 'type': 'log',
                 'content': existing_logs
             })
@@ -3549,7 +3561,7 @@ async def health():
             models = client.models.list()
             status["model_available"] = True
             status["status"] = "healthy"
-        except Exception as e:
+    except Exception as e:
             status["model_available"] = False
             status["status"] = "unhealthy"
             status["error"] = str(e)
