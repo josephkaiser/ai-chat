@@ -29,6 +29,8 @@ import re
 from contextlib import redirect_stdout, redirect_stderr
 from threading import Lock
 import httpx
+from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 
 # Import theme configuration
 try:
@@ -1666,35 +1668,38 @@ def generate_css(mode='light'):
         
         .message.assistant pre {{
             position: relative;
-            background: #e9eced;
+            background: {colors['bg_tertiary'] if mode == 'dark' else '#e9eced'};
             padding: 12px 16px;
             border-radius: 4px;
             overflow-x: auto;
             margin: 8px 0;
-            border: 2px solid #b0c9df;
+            border: 2px solid {colors['accent_primary']};
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            line-height: 1.4;
         }}
         
         .message.assistant code {{
-            background: #e9eced;
+            background: {colors['bg_tertiary'] if mode == 'dark' else '#e9eced'};
             padding: 2px 6px;
             border-radius: 3px;
-            font-family: {FONTS['family']};
+            font-family: 'Courier New', 'Consolas', 'Monaco', monospace;
             font-size: 0.9em;
-            border: 1px solid #b0c9df;
-            color: #8194b1;
+            border: 1px solid {colors['accent_primary']};
+            color: {colors['text_primary']};
         }}
         
         .message.assistant pre code {{
             background: transparent;
             padding: 0;
-            color: #8194b1;
+            color: {colors['text_primary']};
             border: none;
         }}
         
         /* Syntax highlighting styles */
         .message.assistant pre.hljs {{
-            background: #e9eced;
-            color: #8194b1;
+            background: {colors['bg_tertiary'] if mode == 'dark' else '#e9eced'};
+            color: {colors['text_primary']};
         }}
         
         .message.assistant .hljs-keyword {{ color: #8194b1; font-weight: 600; }}
@@ -2133,6 +2138,23 @@ def generate_css(mode='light'):
         }}
         
         /* Terminal Log Viewer */
+        .web-search-btn {{
+            padding: 8px 12px;
+            background: {colors['btn_secondary']};
+            color: {colors['text_primary']};
+            border: 2px solid {colors['accent_primary']};
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: {FONTS['size_small']};
+            transition: all {ANIMATIONS['transition_speed']};
+            font-family: {FONTS['family']};
+        }}
+        
+        .web-search-btn:hover {{
+            background: {colors['btn_secondary_hover']};
+            border-color: {colors['accent_hover']};
+        }}
+        
         .log-viewer-btn {{
             padding: 8px 12px;
             background: {colors['btn_secondary']};
@@ -2166,6 +2188,185 @@ def generate_css(mode='light'):
         }}
         
         .log-viewer.show {{ display: flex; }}
+        
+        /* Web Search Modal */
+        .web-search-modal {{
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 90%;
+            max-width: 800px;
+            max-height: 80vh;
+            background: {colors['modal_bg']};
+            border: 3px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            z-index: 1001;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            flex-direction: column;
+        }}
+        
+        .web-search-modal.show {{ display: flex; }}
+        
+        .web-search-header {{
+            padding: 16px 20px;
+            background: {colors['bg_secondary']};
+            border-bottom: 2px solid {colors['accent_primary']};
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .web-search-header h3 {{
+            font-size: {FONTS['size_large']};
+            font-weight: 600;
+            color: {colors['text_primary']};
+        }}
+        
+        .web-search-close {{
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: {colors['text_primary']};
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        
+        .web-search-close:hover {{
+            color: {colors['accent_primary']};
+        }}
+        
+        .web-search-content {{
+            padding: 20px;
+            overflow-y: auto;
+            flex: 1;
+        }}
+        
+        .web-search-form {{
+            margin-bottom: 20px;
+        }}
+        
+        .web-search-input-group {{
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }}
+        
+        .web-search-input {{
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+            font-size: {FONTS['size_base']};
+            font-family: {FONTS['family']};
+            background: {colors['bg_primary']};
+            color: {colors['text_primary']};
+        }}
+        
+        .web-search-input:focus {{
+            outline: none;
+            border-color: {colors['accent_hover']};
+        }}
+        
+        .web-search-btn-submit {{
+            padding: 12px 24px;
+            background: {colors['btn_primary']};
+            color: white;
+            border: 2px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+            cursor: pointer;
+            font-size: {FONTS['size_base']};
+            font-weight: 600;
+            transition: all {ANIMATIONS['transition_speed']};
+        }}
+        
+        .web-search-btn-submit:hover {{
+            background: {colors['btn_primary_hover']};
+        }}
+        
+        .web-search-sources {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 15px;
+        }}
+        
+        .web-search-source-checkbox {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 8px 12px;
+            background: {colors['bg_secondary']};
+            border: 1px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+            cursor: pointer;
+        }}
+        
+        .web-search-source-checkbox input {{
+            cursor: pointer;
+        }}
+        
+        .web-search-results {{
+            margin-top: 20px;
+        }}
+        
+        .web-search-result {{
+            padding: 15px;
+            margin-bottom: 15px;
+            background: {colors['bg_secondary']};
+            border: 1px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+        }}
+        
+        .web-search-result-title {{
+            font-size: {FONTS['size_base']};
+            font-weight: 600;
+            color: {colors['accent_primary']};
+            margin-bottom: 8px;
+        }}
+        
+        .web-search-result-title a {{
+            color: {colors['accent_primary']};
+            text-decoration: none;
+        }}
+        
+        .web-search-result-title a:hover {{
+            text-decoration: underline;
+        }}
+        
+        .web-search-result-url {{
+            font-size: {FONTS['size_small']};
+            color: {colors['text_secondary']};
+            margin-bottom: 8px;
+        }}
+        
+        .web-search-result-snippet {{
+            font-size: {FONTS['size_base']};
+            color: {colors['text_primary']};
+            line-height: 1.5;
+        }}
+        
+        .web-search-result-source {{
+            display: inline-block;
+            padding: 4px 8px;
+            background: {colors['accent_primary']};
+            color: white;
+            border-radius: 4px;
+            font-size: {FONTS['size_small']};
+            margin-top: 8px;
+        }}
+        
+        .web-search-loading {{
+            text-align: center;
+            padding: 20px;
+            color: {colors['text_secondary']};
+        }}
         
         .log-viewer-header {{
             padding: 12px 15px;
@@ -2957,6 +3158,7 @@ async def home(mode: str = "light"):
                 <h1>AI Chat</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
+                <button class="web-search-btn" onclick="toggleWebSearch()" title="Search the web">🔍 Web</button>
                 <button class="log-viewer-btn" onclick="toggleLogViewer()" title="View Terminal Logs">📋 Logs</button>
                 <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
                 <div class="model-toggle" style="position: relative;">
@@ -3022,6 +3224,45 @@ async def home(mode: str = "light"):
             <button class="log-viewer-close" onclick="toggleLogViewer()">×</button>
         </div>
         <div class="log-viewer-content" id="logContent"></div>
+    </div>
+    
+    <!-- Web Search Modal -->
+    <div class="web-search-modal" id="webSearchModal">
+        <div class="web-search-header">
+            <h3>🔍 Web Search</h3>
+            <button class="web-search-close" onclick="toggleWebSearch()">×</button>
+        </div>
+        <div class="web-search-content">
+            <div class="web-search-form">
+                <div class="web-search-input-group">
+                    <input type="text" class="web-search-input" id="webSearchInput" placeholder="Search the web..." />
+                    <button class="web-search-btn-submit" onclick="performWebSearch()">Search</button>
+                </div>
+                <div class="web-search-sources">
+                    <label class="web-search-source-checkbox">
+                        <input type="checkbox" value="google" checked />
+                        <span>Google</span>
+                    </label>
+                    <label class="web-search-source-checkbox">
+                        <input type="checkbox" value="wikipedia" checked />
+                        <span>Wikipedia</span>
+                    </label>
+                    <label class="web-search-source-checkbox">
+                        <input type="checkbox" value="reddit" checked />
+                        <span>Reddit</span>
+                    </label>
+                    <label class="web-search-source-checkbox">
+                        <input type="checkbox" value="github" />
+                        <span>GitHub</span>
+                    </label>
+                    <label class="web-search-source-checkbox">
+                        <input type="checkbox" value="stackoverflow" />
+                        <span>Stack Overflow</span>
+                    </label>
+                </div>
+            </div>
+            <div class="web-search-results" id="webSearchResults"></div>
+        </div>
     </div>
     
     <div class="modal" id="renameModal">
@@ -3272,6 +3513,84 @@ async def home(mode: str = "light"):
                 connectLogWS();
             }}
         }}
+        
+        function toggleWebSearch() {{
+            const modal = document.getElementById('webSearchModal');
+            modal.classList.toggle('show');
+            if (modal.classList.contains('show')) {{
+                document.getElementById('webSearchInput').focus();
+            }} else {{
+                document.getElementById('webSearchResults').innerHTML = '';
+            }}
+        }}
+        
+        async function performWebSearch() {{
+            const query = document.getElementById('webSearchInput').value.trim();
+            const resultsDiv = document.getElementById('webSearchResults');
+            
+            if (!query) {{
+                resultsDiv.innerHTML = '<div class="web-search-loading">Please enter a search query</div>';
+                return;
+            }}
+            
+            // Get selected sources
+            const checkboxes = document.querySelectorAll('.web-search-source-checkbox input:checked');
+            const sources = Array.from(checkboxes).map(cb => cb.value);
+            
+            if (sources.length === 0) {{
+                resultsDiv.innerHTML = '<div class="web-search-loading">Please select at least one source</div>';
+                return;
+            }}
+            
+            resultsDiv.innerHTML = '<div class="web-search-loading">Searching...</div>';
+            
+            try {{
+                const response = await fetch('/api/web-search', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        query: query,
+                        sources: sources,
+                        max_results: 10
+                    }})
+                }});
+                
+                const data = await response.json();
+                
+                if (data.results && data.results.length > 0) {{
+                    let html = `<div style="margin-bottom: 15px; color: {colors['text_secondary']};">Found ${{data.count}} results for "${{data.query}}"</div>`;
+                    data.results.forEach(result => {{
+                        html += `
+                            <div class="web-search-result">
+                                <div class="web-search-result-title">
+                                    <a href="${{result.url}}" target="_blank">${{result.title}}</a>
+                                </div>
+                                <div class="web-search-result-url">${{result.url}}</div>
+                                <div class="web-search-result-snippet">${{result.snippet}}</div>
+                                <span class="web-search-result-source">${{result.source}}</span>
+                            </div>
+                        `;
+                    }});
+                    resultsDiv.innerHTML = html;
+                }} else {{
+                    resultsDiv.innerHTML = '<div class="web-search-loading">No results found</div>';
+                }}
+            }} catch (error) {{
+                resultsDiv.innerHTML = `<div class="web-search-loading">Error: ${{error.message}}</div>`;
+            }}
+        }}
+        
+        // Allow Enter key to trigger search
+        document.addEventListener('DOMContentLoaded', () => {{
+            const searchInput = document.getElementById('webSearchInput');
+            if (searchInput) {{
+                searchInput.addEventListener('keypress', (e) => {{
+                    if (e.key === 'Enter') {{
+                        performWebSearch();
+                    }}
+                }});
+            }}
+        }});
         
         // Model switching functions
         let modelStatusPollInterval = null;
@@ -3974,6 +4293,13 @@ async def home(mode: str = "light"):
         // Escape key handler to close modals/popups
         document.addEventListener('keydown', function(event) {{
             if (event.key === 'Escape') {{
+                // Close web search modal if open
+                const webSearchModal = document.getElementById('webSearchModal');
+                if (webSearchModal && webSearchModal.classList.contains('show')) {{
+                    toggleWebSearch();
+                    return;
+                }}
+                
                 // Close rename modal if open
                 const renameModal = document.getElementById('renameModal');
                 if (renameModal && renameModal.classList.contains('show')) {{
@@ -4378,6 +4704,60 @@ async def search_chats(query: str):
     except Exception as e:
         logger.error(f"Error searching messages: {e}")
         return {'results': [], 'count': 0}
+
+@app.post("/api/web-search")
+async def web_search(request: dict):
+    """Search the web using DuckDuckGo"""
+    query = request.get('query', '').strip()
+    sources = request.get('sources', ['google', 'wikipedia', 'reddit'])  # Default to all sources
+    max_results = request.get('max_results', 10)
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    if max_results > 20:
+        max_results = 20  # Limit to 20 results
+    
+    results = []
+    
+    try:
+        with DDGS() as ddgs:
+            # Search with DuckDuckGo (searches across Google, Wikipedia, Reddit, etc.)
+            search_results = list(ddgs.text(query, max_results=max_results))
+            
+            for result in search_results:
+                source_type = 'general'
+                url = result.get('href', '')
+                
+                # Determine source type from URL
+                if 'wikipedia.org' in url.lower():
+                    source_type = 'wikipedia'
+                elif 'reddit.com' in url.lower():
+                    source_type = 'reddit'
+                elif 'github.com' in url.lower():
+                    source_type = 'github'
+                elif any(x in url.lower() for x in ['stackoverflow.com', 'stackexchange.com']):
+                    source_type = 'stackoverflow'
+                else:
+                    source_type = 'google'  # Default to Google for general web results
+                
+                # Only include if source is in requested sources, or if 'google' is requested and it's a general result
+                if source_type in sources or (source_type == 'general' and 'google' in sources):
+                    results.append({
+                        'title': result.get('title', ''),
+                        'url': url,
+                        'snippet': result.get('body', ''),
+                        'source': source_type
+                    })
+        
+        return {
+            'results': results,
+            'count': len(results),
+            'query': query
+        }
+    except Exception as e:
+        logger.error(f"Error performing web search: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 @app.post("/api/execute-code")
 async def execute_code(request: dict):
