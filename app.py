@@ -211,100 +211,61 @@ async def switch_model(new_model_id: str):
     try:
         logger.info(f"Switching model from {current_model} to {new_model_id}")
         
-        # Update status
-        model_switch_status["progress"] = 20
-        model_switch_status["message"] = "Stopping vLLM container..."
-        
-        # Stop the container using docker-compose
-        compose_dir = os.getenv("COMPOSE_DIR", "/app")
-        compose_file = os.getenv("COMPOSE_FILE", "docker-compose.yml")
+        if not docker_client:
+            raise Exception("Docker client not available")
         
         import time
         
-        # Step 1: Stop the vllm service
+        # Step 1: Stop the vllm container
+        model_switch_status["progress"] = 20
+        model_switch_status["message"] = "Stopping vLLM container..."
         try:
-            result = subprocess.run(
-                ["docker", "compose", "-f", compose_file, "stop", "vllm"],
-                cwd=compose_dir,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            if result.returncode != 0:
-                logger.warning(f"docker compose stop returned: {result.stderr}")
-            model_switch_status["progress"] = 30
-            model_switch_status["message"] = "Container stopped. Removing..."
+            container = docker_client.containers.get(VLLM_CONTAINER)
+            container.stop(timeout=10)
+            logger.info("Container stopped")
+        except docker.errors.NotFound:
+            logger.warning(f"Container {VLLM_CONTAINER} not found, may already be stopped")
         except Exception as e:
             logger.error(f"Error stopping container: {e}")
-            # Try alternative: docker stop
-            try:
-                subprocess.run(["docker", "stop", VLLM_CONTAINER], timeout=10, check=False)
-            except:
-                pass
+            raise
         
         # Step 2: Remove the container
         model_switch_status["progress"] = 40
         model_switch_status["message"] = "Removing old container..."
         try:
-            subprocess.run(
-                ["docker", "compose", "-f", compose_file, "rm", "-f", "vllm"],
-                cwd=compose_dir,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
+            container = docker_client.containers.get(VLLM_CONTAINER)
+            container.remove(force=True)
+            logger.info("Container removed")
+        except docker.errors.NotFound:
+            logger.info("Container already removed")
         except Exception as e:
             logger.warning(f"Error removing container: {e}")
-            try:
-                subprocess.run(["docker", "rm", "-f", VLLM_CONTAINER], timeout=10, check=False)
-            except:
-                pass
         
-        # Step 3: Create docker-compose override with new model
+        # Step 3: Start container with new model
         model_switch_status["progress"] = 50
-        model_switch_status["message"] = "Preparing new model configuration..."
-        
-        # Build command string for docker-compose
-        command_parts = model_config["command"]
-        command_str = " ".join(f'"{part}"' if " " in part else part for part in command_parts)
-        
-        # Create override file
-        override_content = f"""version: '3.8'
-
-services:
-  vllm:
-    command: {command_str}
-"""
-        override_file = os.path.join(compose_dir, "docker-compose.override.yml")
-        try:
-            with open(override_file, "w") as f:
-                f.write(override_content)
-            logger.info(f"Created override file: {override_file}")
-        except Exception as e:
-            logger.error(f"Error creating override file: {e}")
-            raise
-        
-        # Step 4: Start container with new model
-        model_switch_status["progress"] = 60
         model_switch_status["message"] = "Starting container with new model..."
         
         try:
-            result = subprocess.run(
-                ["docker", "compose", "-f", compose_file, "up", "-d", "vllm"],
-                cwd=compose_dir,
-                capture_output=True,
-                text=True,
-                timeout=60
+            # Start new container with new model command
+            container = docker_client.containers.run(
+                "vllm/vllm-openai:v0.5.4",
+                name=VLLM_CONTAINER,
+                command=model_config["command"],
+                ports={"8000/tcp": 8001},
+                detach=True,
+                remove=False,
+                device_requests=[
+                    docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])
+                ],
+                restart_policy={"Name": "unless-stopped"}
             )
-            if result.returncode != 0:
-                raise Exception(f"docker compose up failed: {result.stderr}")
-            logger.info(f"Container started: {result.stdout}")
+            logger.info(f"Container started: {container.id}")
         except Exception as e:
             logger.error(f"Error starting container: {e}")
             raise
         
-        # Step 5: Wait for model to load
-        model_switch_status["progress"] = 70
+        # Step 4: Wait for model to load
+        model_switch_status["progress"] = 60
         model_switch_status["message"] = "Loading new model (this may take a few minutes)..."
         
         max_wait = 300  # 5 minutes max
@@ -314,26 +275,24 @@ services:
             wait_time += 5
             try:
                 # Check if container is running
-                result = subprocess.run(
-                    ["docker", "ps", "--filter", f"name={VLLM_CONTAINER}", "--format", "{{{{.Status}}}}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if "Up" in result.stdout:
+                container.reload()
+                if container.status == "running":
                     # Try to connect to vLLM
                     try:
                         test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
                         test_client.models.list()
                         # Success!
+                        logger.info("Model is ready!")
                         break
                     except Exception as e:
-                        model_switch_status["progress"] = 70 + int((wait_time / max_wait) * 20)
+                        model_switch_status["progress"] = 60 + int((wait_time / max_wait) * 30)
                         model_switch_status["message"] = f"Model loading... ({wait_time}s)"
                         logger.info(f"Waiting for model to be ready... ({wait_time}s)")
                         continue
+                else:
+                    raise Exception(f"Container status: {container.status}")
             except Exception as e:
-                logger.warning(f"Error checking container status: {e}")
+                logger.warning(f"Error checking container: {e}")
         
         if wait_time >= max_wait:
             raise Exception("Model loading timeout after 5 minutes")
@@ -632,10 +591,10 @@ def generate_css():
         .messages {{
             flex: 1;
             overflow-y: auto;
-            padding: 40px 20px;
+            padding: 20px;
             display: flex;
             flex-direction: column;
-            gap: 32px;
+            gap: 8px;
             align-items: center;
             max-width: 100%;
         }}
@@ -643,46 +602,46 @@ def generate_css():
         .message {{
             width: 100%;
             max-width: {DIMENSIONS['message_max_width']};
-            padding: 24px 32px;
-            border-radius: {DIMENSIONS['border_radius']};
-            line-height: 1.8;
+            padding: 8px 0;
+            line-height: 1.6;
             animation: slideIn {ANIMATIONS['slide_duration']} ease-out;
             font-size: {FONTS['size_message']};
+            background: transparent;
+            border: none;
         }}
         
         @keyframes slideIn {{
-            from {{ opacity: 0; transform: translateY(10px); }}
+            from {{ opacity: 0; transform: translateY(5px); }}
             to {{ opacity: 1; transform: translateY(0); }}
         }}
         
         .message.user {{
-            background: {COLORS['msg_user_bg']};
-            color: {COLORS['msg_user_text']};
+            color: #366c9c;
             text-align: right;
             margin-left: auto;
         }}
         
         .message.assistant {{
-            background: {COLORS['msg_assistant_bg']};
-            color: {COLORS['msg_assistant_text']};
+            color: #1a1a1a;
             text-align: left;
             margin-right: auto;
-            border: 1px solid {COLORS['bg_tertiary']};
+            position: relative;
         }}
         
         .message.assistant pre {{
-            background: {COLORS['bg_secondary']};
-            padding: 16px;
+            position: relative;
+            background: #f5f5f5;
+            padding: 12px 16px;
             border-radius: {DIMENSIONS['border_radius_small']};
             overflow-x: auto;
-            margin: 16px 0;
-            border: 1px solid {COLORS['bg_tertiary']};
+            margin: 8px 0;
+            border: 1px solid #e0e0e0;
         }}
         
         .message.assistant code {{
-            background: {COLORS['bg_secondary']};
-            padding: 3px 6px;
-            border-radius: 4px;
+            background: #f5f5f5;
+            padding: 2px 4px;
+            border-radius: 3px;
             font-family: 'Courier New', monospace;
             font-size: 0.9em;
         }}
@@ -690,6 +649,55 @@ def generate_css():
         .message.assistant pre code {{
             background: transparent;
             padding: 0;
+            color: #1a1a1a;
+        }}
+        
+        /* Syntax highlighting styles */
+        .message.assistant pre.hljs {{
+            background: #f5f5f5;
+            color: #1a1a1a;
+        }}
+        
+        .message.assistant .hljs-keyword {{ color: #366c9c; }}
+        .message.assistant .hljs-string {{ color: #91b461; }}
+        .message.assistant .hljs-comment {{ color: #999999; font-style: italic; }}
+        .message.assistant .hljs-number {{ color: #fd7589; }}
+        .message.assistant .hljs-function {{ color: #67a2cb; }}
+        .message.assistant .hljs-variable {{ color: #5898b7; }}
+        .message.assistant .hljs-title {{ color: #67a2cb; }}
+        .message.assistant .hljs-type {{ color: #5898b7; }}
+        
+        /* Copy button styles */
+        .copy-btn {{
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: {COLORS['btn_secondary']};
+            border: none;
+            border-radius: 4px;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-size: 12px;
+            color: {COLORS['text_primary']};
+            opacity: 0;
+            transition: opacity 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        
+        .message.assistant:hover .copy-btn,
+        .message.assistant pre:hover .copy-btn {{
+            opacity: 1;
+        }}
+        
+        .copy-btn:hover {{
+            background: {COLORS['btn_secondary_hover']};
+        }}
+        
+        .copy-btn.copied {{
+            background: {COLORS['accent_secondary']};
+            color: white;
         }}
         
         .loading {{
@@ -698,10 +706,8 @@ def generate_css():
             gap: 10px;
             max-width: {DIMENSIONS['message_max_width']};
             width: 100%;
-            padding: 24px 32px;
-            background: {COLORS['msg_assistant_bg']};
-            border: 1px solid {COLORS['bg_tertiary']};
-            border-radius: {DIMENSIONS['border_radius']};
+            padding: 8px 0;
+            background: transparent;
             margin-right: auto;
         }}
         
@@ -1140,6 +1146,8 @@ async def home():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chat</title>
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         {css}
     </style>
@@ -1557,10 +1565,45 @@ async def home():
             msg.textContent = content;
             if (role === 'assistant') {{
                 msg.dataset.needsMarkdown = 'true';
+                msg.dataset.originalContent = content; // Store original content for copying
             }}
             document.getElementById('messages').appendChild(msg);
             scrollToBottom();
             return msg;
+        }}
+        
+        function copyToClipboard(text, button) {{
+            navigator.clipboard.writeText(text).then(() => {{
+                const originalText = button.innerHTML;
+                button.innerHTML = '✓ Copied';
+                button.classList.add('copied');
+                setTimeout(() => {{
+                    button.innerHTML = originalText;
+                    button.classList.remove('copied');
+                }}, 2000);
+            }}).catch(err => {{
+                console.error('Failed to copy:', err);
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.opacity = '0';
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {{
+                    document.execCommand('copy');
+                    const originalText = button.innerHTML;
+                    button.innerHTML = '✓ Copied';
+                    button.classList.add('copied');
+                    setTimeout(() => {{
+                        button.innerHTML = originalText;
+                        button.classList.remove('copied');
+                    }}, 2000);
+                }} catch (e) {{
+                    console.error('Fallback copy failed:', e);
+                }}
+                document.body.removeChild(textArea);
+            }});
         }}
         
         function renderMarkdown() {{
@@ -1578,9 +1621,47 @@ async def home():
                 try {{
                     if (typeof marked !== 'undefined') {{
                         const html = marked.parse(content);
+                        const originalContent = msg.dataset.originalContent || content;
                         msg.innerHTML = html;
                         msg.dataset.needsMarkdown = 'false';
                         msg.dataset.rendered = 'true';
+                        
+                        // Add copy button for the entire message
+                        if (!msg.querySelector('.copy-btn.message-copy-btn')) {{
+                            const copyBtn = document.createElement('button');
+                            copyBtn.className = 'copy-btn message-copy-btn';
+                            copyBtn.innerHTML = '📋 Copy';
+                            copyBtn.title = 'Copy to clipboard';
+                            copyBtn.onclick = (e) => {{
+                                e.stopPropagation();
+                                copyToClipboard(originalContent, copyBtn);
+                            }};
+                            msg.appendChild(copyBtn);
+                        }}
+                        
+                        // Apply syntax highlighting to code blocks
+                        if (typeof hljs !== 'undefined') {{
+                            msg.querySelectorAll('pre code').forEach(block => {{
+                                hljs.highlightElement(block);
+                            }});
+                        }}
+                        
+                        // Add copy buttons to code blocks
+                        msg.querySelectorAll('pre').forEach(preBlock => {{
+                            // Check if copy button already exists
+                            if (preBlock.querySelector('.copy-btn')) return;
+                            
+                            const codeText = preBlock.querySelector('code')?.textContent || preBlock.textContent;
+                            const copyBtn = document.createElement('button');
+                            copyBtn.className = 'copy-btn';
+                            copyBtn.innerHTML = '📋 Copy';
+                            copyBtn.title = 'Copy code to clipboard';
+                            copyBtn.onclick = (e) => {{
+                                e.stopPropagation();
+                                copyToClipboard(codeText, copyBtn);
+                            }};
+                            preBlock.appendChild(copyBtn);
+                        }});
                     }} else {{
                         console.error('Marked library not available');
                     }}
@@ -1717,6 +1798,40 @@ async def home():
                 loadConversations();
             }}
         }}
+        
+        // Escape key handler to close modals/popups
+        document.addEventListener('keydown', function(event) {{
+            if (event.key === 'Escape') {{
+                // Close rename modal if open
+                const renameModal = document.getElementById('renameModal');
+                if (renameModal && renameModal.classList.contains('show')) {{
+                    closeRenameModal();
+                    return;
+                }}
+                
+                // Close model status console if open
+                const modelStatusConsole = document.getElementById('modelStatusConsole');
+                if (modelStatusConsole && modelStatusConsole.classList.contains('show')) {{
+                    closeModelStatus();
+                    return;
+                }}
+                
+                // Close log viewer if open
+                const logViewer = document.getElementById('logViewer');
+                if (logViewer && logViewer.classList.contains('show')) {{
+                    toggleLogViewer();
+                    return;
+                }}
+                
+                // Close model dropdown if open
+                const modelDropdown = document.getElementById('modelDropdown');
+                if (modelDropdown && (modelDropdown.style.display === 'block' || modelDropdown.classList.contains('show'))) {{
+                    modelDropdown.style.display = 'none';
+                    modelDropdown.classList.remove('show');
+                    return;
+                }}
+            }}
+        }});
         
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {{
