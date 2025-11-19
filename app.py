@@ -3344,6 +3344,8 @@ async def home(mode: str = "light"):
     try:
         css = generate_css(mode)
         models_json = str(AVAILABLE_MODELS).replace("'", '"')
+        # Get colors for use in JavaScript code
+        colors = COLORS_DARK if mode == 'dark' else COLORS_LIGHT
     except Exception as e:
         logger.error(f"❌ Error generating home page: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error loading page: {str(e)}")
