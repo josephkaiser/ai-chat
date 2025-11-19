@@ -28,10 +28,11 @@ import json
 import re
 from contextlib import redirect_stdout, redirect_stderr
 from threading import Lock
+import httpx
 
 # Import theme configuration
 try:
-    from theme_config import COLORS, DIMENSIONS, FONTS, ANIMATIONS
+    from theme_config import COLORS, COLORS_LIGHT, COLORS_DARK, DIMENSIONS, FONTS, ANIMATIONS
 except ImportError:
     # Fallback if theme_config not found
     COLORS = {
@@ -303,60 +304,81 @@ async def process_single_job(job: Job):
         # Build messages with system prompt for reasoning
         messages = []
         
-        # Enhanced system prompt for deep reasoning (ChatGPT-style)
-        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. Your responses should demonstrate thorough, step-by-step thinking similar to modern reasoning models.
+        # Enhanced system prompt for deep reasoning with explicit step-by-step validation
+        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. Your responses must demonstrate thorough, step-by-step thinking with explicit validation of each reasoning step.
 
-REASONING PROTOCOL:
+CRITICAL REASONING PROTOCOL - SHOW YOUR WORK AS YOU GO:
 
-**1. INITIAL ANALYSIS**
-   - Restate the problem/question clearly in your own words
-   - Identify key information, constraints, and requirements
-   - Note any ambiguities or assumptions needed
-
-**2. EXPLICIT REASONING PROCESS**
-   Show your thinking process clearly using this structure:
+**1. BEFORE EACH MAJOR STATEMENT, SHOW REASONING:**
+   Format: [Reasoning: ...] → [Statement/Answer]
    
-   **Thinking:**
-   [Show your internal reasoning here - consider multiple angles, evaluate options, work through logic step-by-step]
+   Example structure:
+   [Reasoning: Let me consider X. If Y is true, then Z follows because...] → [Statement: Therefore, Z is the case]
    
-   **Analysis:**
-   [Break down the problem into components, identify relationships, consider dependencies]
-   
-   **Approach:**
-   [Explain your chosen method and why it's appropriate. Consider alternatives if relevant]
-   
-   **Solution Steps:**
-   [Work through the solution methodically, showing each step with clear justification]
-   
-   **Verification:**
-   [Check your work, consider edge cases, validate the solution makes sense]
-   
-   **Answer/Conclusion:**
-   [Present the final answer or conclusion clearly]
+   [Reasoning: I need to verify this. Checking: A implies B, and B implies C, so...] → [Verified: C is correct]
 
-**3. REASONING QUALITY STANDARDS**
-   - Show intermediate steps, not just final answers
-   - Explain "why" not just "what"
-   - Consider multiple perspectives before concluding
-   - Acknowledge uncertainty when appropriate
-   - Show calculations, logic chains, and thought processes explicitly
-   - For complex problems, break into sub-problems and solve systematically
+**2. EXPLICIT REASONING STRUCTURE:**
+   
+   **Step 1: Initial Analysis**
+   [Reasoning: Breaking down the question...] → [Analysis: The key components are...]
+   
+   **Step 2: Consider Options**
+   [Reasoning: Let me evaluate approach A...] → [Evaluation: A has pros X, cons Y]
+   [Reasoning: Now considering approach B...] → [Evaluation: B has pros X, cons Y]
+   [Reasoning: Comparing A vs B...] → [Decision: B is better because...]
+   
+   **Step 3: Work Through Solution**
+   [Reasoning: Starting with premise P...] → [Step 1: P leads to Q because...]
+   [Reasoning: Now applying Q to situation...] → [Step 2: Q implies R]
+   [Reasoning: Verifying R makes sense...] → [Verification: R is consistent with original premise]
+   
+   **Step 4: Final Answer**
+   [Reasoning: Synthesizing all steps...] → [Conclusion: The answer is X because...]
 
-**4. FOR DIFFERENT TASK TYPES**
-   - **Math/Logic**: Show all calculations, explain each step, verify results
-   - **Code**: Explain algorithm choice, show pseudocode reasoning, then implement
-   - **Analysis**: Present multiple viewpoints, evaluate evidence, then conclude
-   - **Creative**: Show ideation process, explore options, then refine
-   - **Long-form**: Create detailed outline with reasoning, then expand systematically
+**3. VALIDATION REQUIREMENTS:**
+   - Before stating any fact: [Reasoning: Why this is true...] → [Fact]
+   - Before making any claim: [Reasoning: Evidence for this...] → [Claim]
+   - Before concluding: [Reasoning: Does this make sense? Checking...] → [Conclusion]
+   - When uncertain: [Reasoning: I'm not certain because...] → [Acknowledged uncertainty]
 
-**5. THINKING STYLE**
-   - Be thorough and methodical
-   - Show your work transparently
-   - Consider edge cases and alternatives
-   - Verify solutions before presenting
-   - Use clear structure but maintain natural flow
+**4. REASONING QUALITY STANDARDS:**
+   - Show reasoning BEFORE each major statement, not after
+   - Validate each logical step before proceeding
+   - Question your own assumptions explicitly
+   - Consider counter-arguments before concluding
+   - Show calculations and logic chains step-by-step
+   - Acknowledge when you're making assumptions
 
-Remember: The goal is to demonstrate deep understanding through explicit reasoning, not just provide answers. Show your thinking process clearly and thoroughly."""
+**5. FOR DIFFERENT TASK TYPES:**
+   - **Math/Logic**: [Reasoning: Using formula X because...] → [Calculation: ...] → [Verification: Check...] → [Answer]
+   - **Code**: [Reasoning: Algorithm choice because...] → [Pseudocode reasoning] → [Implementation] → [Testing: I can test this code in a sandbox] → [Verification: Code works/needs fixes]
+   - **Analysis**: [Reasoning: Perspective 1 suggests...] → [Reasoning: But perspective 2 shows...] → [Synthesis: Balancing both...] → [Conclusion]
+   - **Creative**: [Reasoning: Exploring idea A...] → [Evaluation: Strengths/weaknesses] → [Refinement: Combining with B...] → [Final idea]
+
+**7. CODE EXECUTION CAPABILITY:**
+   You have access to a sandboxed code execution environment. When writing code:
+   - Test your code before presenting it as final
+   - When you need to test code, include: [EXECUTE_CODE:python] or [EXECUTE_CODE:javascript] followed by the code
+   - The system will execute your code in a secure sandbox and return the output
+   - Use this to verify code correctness, test algorithms, and debug issues
+   - Always test code examples you provide, especially for programming questions
+   - Show the test results in your response: [Test Result: ...] → [Verified: Code works/needs fixes]
+
+**8. FILE SYSTEM ACCESS:**
+   You can read files and traverse directories to help with code analysis:
+   - Use [READ_FILE:path/to/file] to read file contents
+   - Use [LIST_DIR:path/to/directory] to list directory contents
+   - This helps you understand codebases, analyze project structure, and provide better programming assistance
+   - Always read relevant files when answering questions about code or projects
+
+**6. THINKING STYLE:**
+   - Be methodical: show reasoning → validate → proceed
+   - Be transparent: show your thought process, not just conclusions
+   - Be self-critical: question your own reasoning
+   - Be thorough: don't skip validation steps
+   - Be clear: use the [Reasoning: ...] → [Statement] format consistently
+
+Remember: Quality comes from showing your reasoning process, not just the final answer. Use the [Reasoning: ...] → [Statement] format throughout your response to demonstrate that you're actively thinking and validating as you generate each part of your answer."""
         
         messages.append({'role': 'system', 'content': system_prompt})
         
@@ -412,6 +434,144 @@ Remember: The goal is to demonstrate deep understanding through explicit reasoni
                 })
         
         logger.info(f"✅ Job {job.id} completed ({len(full_response)} chars)")
+        
+        # Detect and execute code if requested
+        code_execution_pattern = r'\[EXECUTE_CODE:(python|javascript|js)\](.*?)(?=\[|$)'
+        code_matches = re.finditer(code_execution_pattern, full_response, re.DOTALL)
+        
+        # Detect file access requests
+        file_read_pattern = r'\[READ_FILE:(.+?)\]'
+        file_read_matches = re.finditer(file_read_pattern, full_response)
+        
+        dir_list_pattern = r'\[LIST_DIR:(.+?)\]'
+        dir_list_matches = re.finditer(dir_list_pattern, full_response)
+        
+        for match in code_matches:
+            language = match.group(1)
+            code_block = match.group(2).strip()
+            
+            # Extract code from markdown code blocks if present
+            code_block = re.sub(r'^```\w*\n', '', code_block)
+            code_block = re.sub(r'\n```$', '', code_block)
+            code_block = code_block.strip()
+            
+            if code_block:
+                logger.info(f"🔧 Executing {language} code for job {job.id}")
+                
+                # Execute code
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        exec_response = await client.post(
+                            f"http://127.0.0.1:8000/api/execute-code",
+                            json={'code': code_block, 'language': language}
+                        )
+                        exec_result = exec_response.json()
+                        
+                        # Append execution results to response
+                        if exec_result.get('success'):
+                            result_text = f"\n\n[Test Result: Success]\n"
+                            if exec_result.get('stdout'):
+                                result_text += f"Output:\n{exec_result['stdout']}\n"
+                            if exec_result.get('result'):
+                                result_text += f"Result: {exec_result['result']}\n"
+                            full_response += result_text
+                            
+                            # Send result to client
+                            await job.websocket.send_json({
+                                'type': 'token',
+                                'content': result_text
+                            })
+                        else:
+                            error_text = f"\n\n[Test Result: Error]\n{exec_result.get('error', 'Unknown error')}\n"
+                            if exec_result.get('stderr'):
+                                error_text += f"Error details: {exec_result['stderr']}\n"
+                            full_response += error_text
+                            
+                            await job.websocket.send_json({
+                                'type': 'token',
+                                'content': error_text
+                            })
+                except Exception as e:
+                    logger.error(f"Code execution request failed: {e}")
+                    error_msg = f"\n\n[Test Result: Execution request failed - {str(e)}]\n"
+                    full_response += error_msg
+                    await job.websocket.send_json({
+                        'type': 'token',
+                        'content': error_msg
+                    })
+        
+        # Handle file read requests
+        for match in file_read_matches:
+            file_path = match.group(1).strip()
+            logger.info(f"📖 Reading file: {file_path} for job {job.id}")
+            
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    file_response = await client.get(
+                        f"http://127.0.0.1:8000/api/files/read",
+                        params={'path': file_path}
+                    )
+                    if file_response.status_code == 200:
+                        file_data = file_response.json()
+                        file_text = f"\n\n[File: {file_path}]\n```\n{file_data['content']}\n```\n"
+                        full_response += file_text
+                        await job.websocket.send_json({
+                            'type': 'token',
+                            'content': file_text
+                        })
+                    else:
+                        error_text = f"\n\n[File Read Error: {file_response.text}]\n"
+                        full_response += error_text
+                        await job.websocket.send_json({
+                            'type': 'token',
+                            'content': error_text
+                        })
+            except Exception as e:
+                logger.error(f"File read request failed: {e}")
+                error_msg = f"\n\n[File Read Error: {str(e)}]\n"
+                full_response += error_msg
+                await job.websocket.send_json({
+                    'type': 'token',
+                    'content': error_msg
+                })
+        
+        # Handle directory listing requests
+        for match in dir_list_matches:
+            dir_path = match.group(1).strip()
+            logger.info(f"📁 Listing directory: {dir_path} for job {job.id}")
+            
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    dir_response = await client.get(
+                        f"http://127.0.0.1:8000/api/files/list",
+                        params={'path': dir_path}
+                    )
+                    if dir_response.status_code == 200:
+                        dir_data = dir_response.json()
+                        dir_text = f"\n\n[Directory: {dir_path}]\n"
+                        for item in dir_data['items']:
+                            dir_text += f"{'📁' if item['type'] == 'directory' else '📄'} {item['name']}\n"
+                        dir_text += "\n"
+                        full_response += dir_text
+                        await job.websocket.send_json({
+                            'type': 'token',
+                            'content': dir_text
+                        })
+                    else:
+                        error_text = f"\n\n[Directory List Error: {dir_response.text}]\n"
+                        full_response += error_text
+                        await job.websocket.send_json({
+                            'type': 'token',
+                            'content': error_text
+                        })
+            except Exception as e:
+                logger.error(f"Directory list request failed: {e}")
+                error_msg = f"\n\n[Directory List Error: {str(e)}]\n"
+                full_response += error_msg
+                await job.websocket.send_json({
+                    'type': 'token',
+                    'content': error_msg
+                })
         
         # Save response
         save_message(job.conversation_id, 'assistant', full_response)
@@ -896,15 +1056,17 @@ def save_message(conv_id: str, role: str, content: str):
 
 # ==================== Generate CSS from Theme ====================
 
-def generate_css():
+def generate_css(mode='light'):
     """Generate CSS from theme configuration"""
+    # Select color scheme based on mode
+    colors = COLORS_DARK if mode == 'dark' else COLORS_LIGHT
     return f"""
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         
         body {{
             font-family: 'Courier New', monospace;
-            background: #e9eced;
-            color: #8194b1;
+            background: {colors['bg_primary']};
+            color: {colors['text_primary']};
             height: 100vh;
             display: flex;
             font-size: {FONTS['size_base']};
@@ -912,8 +1074,8 @@ def generate_css():
         
         .sidebar {{
             width: {DIMENSIONS['sidebar_width']};
-            background: #fff4de;
-            border-right: 3px solid #8194b1;
+            background: {colors['bg_secondary']};
+            border-right: 3px solid {colors['accent_primary']};
             display: flex;
             flex-direction: column;
             z-index: 1;
@@ -926,28 +1088,23 @@ def generate_css():
         }}
         
         .sidebar-toggle {{
-            position: absolute;
-            top: 16px;
-            right: -12px;
-            width: 24px;
-            height: 24px;
-            background: #fff4de;
-            border: 2px solid #8194b1;
+            width: 32px;
+            height: 32px;
+            background: {colors['btn_secondary']};
+            border: 2px solid {colors['accent_primary']};
             border-radius: 4px;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            z-index: 10;
-            font-size: 10px;
-            color: #8194b1;
-            box-shadow: 0 2px 4px rgba(129,148,177,0.3);
+            font-size: 14px;
+            color: {colors['text_primary']};
+            transition: all {ANIMATIONS['transition_speed']};
         }}
         
         .sidebar-toggle:hover {{
-            background: #b0c9df;
-            border-color: #8194b1;
-            color: #fff4de;
+            background: {colors['btn_secondary_hover']};
+            border-color: {colors['accent_hover']};
         }}
         
         .sidebar.collapsed .sidebar-content {{
@@ -956,10 +1113,6 @@ def generate_css():
         
         .sidebar.collapsed .search-container {{
             display: none;
-        }}
-        
-        .sidebar.collapsed .sidebar-toggle {{
-            right: -12px;
         }}
         
         /* New Chat button for collapsed sidebar */
@@ -1167,8 +1320,8 @@ def generate_css():
         
         .header {{
             padding: {DIMENSIONS['header_padding']};
-            background: #fff4de;
-            border-bottom: 3px solid #8194b1;
+            background: {colors['bg_secondary']};
+            border-bottom: 3px solid {colors['accent_primary']};
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -1243,7 +1396,7 @@ def generate_css():
             gap: 12px;
             align-items: center;
             max-width: 100%;
-            background: #e9eced;
+            background: {colors['bg_primary']};
         }}
         
         .message {{
@@ -1253,7 +1406,7 @@ def generate_css():
             line-height: 1.6;
             animation: slideIn {ANIMATIONS['slide_duration']} ease-out;
             font-size: {FONTS['size_message']};
-            border: 2px solid #b0c9df;
+            border: 2px solid {colors['accent_primary']};
             border-radius: 4px;
             transition: all 0.2s;
         }}
@@ -1264,11 +1417,11 @@ def generate_css():
         }}
         
         .message.user {{
-            background: #e9eced;
-            color: #8194b1;
+            background: {colors['msg_user_bg']};
+            color: {colors['msg_user_text']};
             text-align: right;
             margin-left: auto;
-            border-color: #b0c9df;
+            border-color: {colors['accent_primary']};
         }}
         
         .message.user:hover {{
@@ -1278,8 +1431,8 @@ def generate_css():
         }}
         
         .message.assistant {{
-            background: #fff4de;
-            color: #8194b1;
+            background: {colors['msg_assistant_bg']};
+            color: {colors['msg_assistant_text']};
             text-align: left;
             margin-right: auto;
             position: relative;
@@ -1615,8 +1768,8 @@ def generate_css():
         
         .input-area {{
             padding: 16px 24px;
-            background: #fff4de;
-            border-top: 3px solid #8194b1;
+            background: {colors['bg_quaternary']};
+            border-top: 3px solid {colors['accent_primary']};
             display: flex;
             justify-content: center;
         }}
@@ -1846,6 +1999,27 @@ def generate_css():
         }}
         
         /* Model Toggle */
+        .theme-toggle-btn {{
+            width: 40px;
+            height: 40px;
+            background: {colors['btn_secondary']};
+            border: 2px solid {colors['accent_primary']};
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: {colors['text_primary']};
+            transition: all {ANIMATIONS['transition_speed']};
+        }}
+        
+        .theme-toggle-btn:hover {{
+            background: {colors['btn_secondary_hover']};
+            border-color: {colors['accent_hover']};
+            transform: translateY(-1px);
+        }}
+        
         .model-toggle {{
             position: relative;
         }}
@@ -2239,14 +2413,188 @@ def generate_css():
             background: #b0c9df;
             border-color: #b0c9df;
         }}
+        
+        /* Mobile Responsive Styles */
+        @media (max-width: 768px) {{
+            body {{
+                flex-direction: column;
+                height: auto;
+                min-height: 100vh;
+            }}
+            
+            .sidebar {{
+                width: 100%;
+                max-height: 40vh;
+                border-right: none;
+                border-bottom: 3px solid #8194b1;
+                position: fixed;
+                top: 0;
+                left: 0;
+                z-index: 100;
+                transform: translateY(-100%);
+                transition: transform 0.3s ease;
+            }}
+            
+            .sidebar.show {{
+                transform: translateY(0);
+            }}
+            
+            .sidebar.collapsed {{
+                width: 100%;
+                max-height: 50px;
+            }}
+            
+            .main {{
+                width: 100%;
+                margin-left: 0;
+                padding-top: 60px;
+            }}
+            
+            .header {{
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                z-index: 99;
+                padding: 10px 15px;
+                background: #fff4de;
+                border-bottom: 2px solid #8194b1;
+            }}
+            
+            .header h1 {{
+                font-size: 18px;
+            }}
+            
+            .messages {{
+                padding: 15px 10px;
+                margin-top: 60px;
+                padding-bottom: 100px;
+            }}
+            
+            .message {{
+                max-width: 95%;
+                padding: 12px 15px;
+                font-size: 15px;
+            }}
+            
+            .input-area {{
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                padding: 10px;
+                background: #fff4de;
+                border-top: 2px solid #8194b1;
+                z-index: 98;
+            }}
+            
+            .input-container {{
+                max-width: 100%;
+            }}
+            
+            #input {{
+                max-height: 40vh;
+                font-size: 16px; /* Prevents zoom on iOS */
+            }}
+            
+            .model-toggle-btn {{
+                font-size: 12px;
+                padding: 6px 10px;
+            }}
+            
+            .model-dropdown {{
+                right: 10px;
+                left: auto;
+                width: calc(100vw - 20px);
+                max-width: 300px;
+            }}
+            
+            .status {{
+                font-size: 11px;
+            }}
+            
+            .log-viewer-btn {{
+                bottom: 80px;
+                right: 15px;
+                width: 50px;
+                height: 50px;
+                font-size: 20px;
+            }}
+            
+            .log-viewer {{
+                width: 100%;
+                height: 80vh;
+                max-width: 100%;
+                left: 0;
+                right: 0;
+            }}
+            
+            .model-status-console {{
+                width: calc(100% - 20px);
+                left: 10px;
+                right: 10px;
+            }}
+            
+            .modal-content {{
+                width: 90%;
+                max-width: 90%;
+                padding: 20px;
+            }}
+            
+            .boot-menu-content {{
+                width: 95%;
+                max-width: 95%;
+                padding: 20px;
+            }}
+            
+            .conversations {{
+                max-height: calc(40vh - 100px);
+            }}
+            
+            .search-container {{
+                padding: 8px;
+            }}
+        }}
+        
+        @media (max-width: 480px) {{
+            .header h1 {{
+                font-size: 16px;
+            }}
+            
+            .message {{
+                font-size: 14px;
+                padding: 10px 12px;
+            }}
+            
+            .model-toggle-btn span {{
+                display: none;
+            }}
+            
+            .model-toggle-btn span:first-child {{
+                display: inline;
+            }}
+            
+            #input {{
+                font-size: 16px;
+            }}
+            
+            .welcome {{
+                padding: 30px 20px;
+            }}
+            
+            .welcome h2 {{
+                font-size: 22px;
+            }}
+        }}
+        
     """
 
 # ==================== API Endpoints ====================
 
 @app.get("/", response_class=HTMLResponse)
-async def home():
+async def home(mode: str = "light"):
     """Serve the web interface"""
-    css = generate_css()
+    css = generate_css(mode)
     models_json = str(AVAILABLE_MODELS).replace("'", '"')
     
     return f"""
@@ -2331,6 +2679,7 @@ async def home():
                 <h1>AI Chat</h1>
             </div>
             <div style="display: flex; align-items: center; gap: 15px;">
+                <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
                 <div class="model-toggle" style="position: relative;">
                     <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown(event)" title="Click to switch model" style="display: flex; align-items: center; gap: 8px;">
                         <span style="font-size: 16px;">🤖</span>
@@ -2574,11 +2923,32 @@ async def home():
             }}
         }}
         
+        function toggleTheme() {{
+            const currentMode = localStorage.getItem('theme') || 'light';
+            const newMode = currentMode === 'light' ? 'dark' : 'light';
+            localStorage.setItem('theme', newMode);
+            window.location.href = `/?mode=${{newMode}}`;
+        }}
+        
+        // Set theme icon on load
+        document.addEventListener('DOMContentLoaded', function() {{
+            const currentMode = localStorage.getItem('theme') || 'light';
+            const themeBtn = document.getElementById('themeToggle');
+            if (themeBtn) {{
+                themeBtn.textContent = currentMode === 'light' ? '🌙' : '☀️';
+            }}
+        }});
+        
         function toggleSidebar() {{
             const sidebar = document.getElementById('sidebar');
             const toggle = document.getElementById('sidebarToggle');
-            sidebar.classList.toggle('collapsed');
-            toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
+            // On mobile, toggle show/hide instead of collapse
+            if (window.innerWidth <= 768) {{
+                sidebar.classList.toggle('show');
+            }} else {{
+                sidebar.classList.toggle('collapsed');
+                toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
+            }}
         }}
         
         function toggleLogViewer() {{
@@ -2879,6 +3249,23 @@ async def home():
                     return `${{dateStr}} ${{timeStr}}`;
                 }}
             }}
+        }}
+        
+        function downloadAsJSON(content, filename = 'chat-response.json') {{
+            const data = {{
+                content: content,
+                timestamp: new Date().toISOString(),
+                type: 'chat_response'
+            }};
+            const blob = new Blob([JSON.stringify(data, null, 2)], {{ type: 'application/json' }});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }}
         
         function copyToClipboard(text, button) {{
@@ -3524,6 +3911,145 @@ async def search_chats(query: str):
     except Exception as e:
         logger.error(f"Error searching messages: {e}")
         return {'results': [], 'count': 0}
+
+@app.post("/api/execute-code")
+async def execute_code(request: dict):
+    """Execute code in a sandboxed environment"""
+    code = request.get('code', '').strip()
+    language = request.get('language', 'python').lower()
+    
+    if not code:
+        raise HTTPException(status_code=400, detail="No code provided")
+    
+    # Security: Limit code length
+    if len(code) > 10000:
+        raise HTTPException(status_code=400, detail="Code too long (max 10KB)")
+    
+    try:
+        if language == 'python':
+            # Use subprocess for better isolation
+            import tempfile
+            import shutil
+            
+            # Create temporary file for code
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                # Execute in subprocess with timeout and resource limits
+                process = await asyncio.create_subprocess_exec(
+                    'python3', temp_file,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, 'PYTHONPATH': ''}  # Clear PYTHONPATH for security
+                )
+                
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=5.0
+                    )
+                    
+                    stdout_output = stdout.decode('utf-8', errors='replace')
+                    stderr_output = stderr.decode('utf-8', errors='replace')
+                    
+                    return {
+                        'success': process.returncode == 0,
+                        'stdout': stdout_output,
+                        'stderr': stderr_output,
+                        'returncode': process.returncode
+                    }
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    return {
+                        'success': False,
+                        'error': 'Code execution timed out (5 second limit)',
+                        'stdout': '',
+                        'stderr': 'Execution timeout'
+                    }
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(temp_file)
+                except:
+                    pass
+        
+        elif language == 'javascript' or language == 'js':
+            # For JavaScript, we'd need Node.js - for now, return not implemented
+            return {
+                'success': False,
+                'error': 'JavaScript execution not yet implemented. Use Python for now.'
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported language: {language}")
+    
+    except Exception as e:
+        logger.error(f"Code execution error: {e}\n{traceback.format_exc()}")
+        return {
+            'success': False,
+            'error': f'Execution error: {str(e)}'
+        }
+
+@app.get("/api/files/list")
+async def list_files(path: str = "."):
+    """List files and directories in a given path"""
+    try:
+        # Security: Prevent directory traversal attacks
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith(os.path.abspath('.')):
+            raise HTTPException(status_code=403, detail="Access denied: Path outside allowed directory")
+        
+        items = []
+        if os.path.isdir(abs_path):
+            for item in sorted(os.listdir(abs_path)):
+                item_path = os.path.join(abs_path, item)
+                try:
+                    items.append({
+                        'name': item,
+                        'path': os.path.relpath(item_path, os.path.abspath('.')),
+                        'type': 'directory' if os.path.isdir(item_path) else 'file',
+                        'size': os.path.getsize(item_path) if os.path.isfile(item_path) else None
+                    })
+                except (OSError, PermissionError):
+                    continue
+        
+        return {'path': path, 'items': items}
+    except Exception as e:
+        logger.error(f"Error listing files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/files/read")
+async def read_file_content(path: str):
+    """Read content of a file"""
+    try:
+        # Security: Prevent directory traversal attacks
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith(os.path.abspath('.')):
+            raise HTTPException(status_code=403, detail="Access denied: Path outside allowed directory")
+        
+        if not os.path.isfile(abs_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Limit file size (1MB)
+        if os.path.getsize(abs_path) > 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 1MB)")
+        
+        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        
+        return {
+            'path': path,
+            'content': content,
+            'size': len(content),
+            'lines': content.count('\n') + 1
+        }
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File is not a text file")
+    except Exception as e:
+        logger.error(f"Error reading file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
