@@ -3,10 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies
-RUN pip install --no-cache-dir fastapi uvicorn[standard] websockets openai
+RUN pip install --no-cache-dir fastapi uvicorn[standard] websockets openai docker
 
-# Copy app
-COPY app.py .
+# Copy app and config
+COPY app.py theme_config.py .
 
 # Create data directory
 RUN mkdir -p /app/data
