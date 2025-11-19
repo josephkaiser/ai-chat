@@ -1824,6 +1824,12 @@ def generate_css(mode='light'):
             margin-right: 8px;
         }}
         
+        .header-right {{
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }}
+        
         .header h1 {{ 
             font-size: {FONTS['size_large']}; 
             font-weight: 600;
@@ -2371,7 +2377,117 @@ def generate_css(mode='light'):
             cursor: not-allowed;
         }}
         #send::before {{
-            content: '→';
+            content: '';
+        }}
+        
+        /* Settings Menu (Bottom Left) */
+        .settings-menu {{
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            z-index: 1000;
+        }}
+        
+        .settings-menu-toggle {{
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: {colors['accent_primary']};
+            color: {colors['bg_primary']};
+            border: 3px solid {colors['accent_primary']};
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            transition: all 0.3s ease;
+            z-index: 1001;
+        }}
+        
+        .settings-menu-toggle:hover {{
+            background: {colors['accent_hover']};
+            border-color: {colors['accent_hover']};
+            transform: scale(1.1);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+        }}
+        
+        .settings-menu-content {{
+            position: absolute;
+            bottom: 70px;
+            left: 0;
+            background: {colors['bg_secondary']};
+            border: 2px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            padding: 8px;
+            display: none;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+        }}
+        
+        .settings-menu-content.show {{
+            display: flex;
+            opacity: 1;
+            transform: translateY(0);
+        }}
+        
+        .settings-menu-item {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: {colors['bg_primary']};
+            border: 1px solid {colors['bg_tertiary']};
+            border-radius: {DIMENSIONS['border_radius_small']};
+            color: {colors['text_primary']};
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: {FONTS['size_base']};
+            width: 100%;
+            text-align: left;
+        }}
+        
+        .settings-menu-item:hover {{
+            background: {colors['btn_secondary']};
+            border-color: {colors['accent_primary']};
+            transform: translateX(4px);
+        }}
+        
+        .settings-icon {{
+            font-size: 20px;
+            width: 24px;
+            text-align: center;
+        }}
+        
+        .settings-label {{
+            flex: 1;
+            font-weight: 500;
+        }}
+        
+        .settings-model-name {{
+            font-size: {FONTS['size_small']};
+            color: {colors['text_secondary']};
+            font-weight: normal;
+        }}
+        
+        .settings-dropdown {{
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            margin-bottom: 8px;
+            background: {colors['bg_secondary']};
+            border: 2px solid {colors['accent_primary']};
+            border-radius: {DIMENSIONS['border_radius']};
+            padding: 8px;
+            min-width: 250px;
+            max-height: 300px;
+            overflow-y: auto;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }}
         
         ::-webkit-scrollbar {{ width: 8px; }}
@@ -3247,6 +3363,11 @@ def generate_css(mode='light'):
                 transition: transform 0.25s ease-out;
             }}
             
+            .settings-menu {{
+                z-index: 98;
+                bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+            }}
+            
             /* When keyboard is open, input area rises */
             @supports (-webkit-touch-callout: none) {{
                 .input-area {{
@@ -3360,6 +3481,22 @@ def generate_css(mode='light'):
             
             .search-container {{
                 padding: 8px;
+            }}
+            
+            .settings-menu {{
+                bottom: 15px;
+                left: 15px;
+            }}
+            
+            .settings-menu-toggle {{
+                width: 50px;
+                height: 50px;
+                font-size: 20px;
+            }}
+            
+            .settings-menu-content {{
+                bottom: 65px;
+                min-width: 180px;
             }}
         }}
         
@@ -3503,31 +3640,14 @@ async def home(mode: str = "light"):
                 <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" id="sidebarToggle">📖</button>
                 <h1>AI Chat</h1>
             </div>
-            <div style="display: flex; align-items: center; gap: 15px;">
-                <button class="web-search-btn" onclick="toggleWebSearch()" title="Search the web">🔍 Web</button>
-                <button class="log-viewer-btn" onclick="toggleLogViewer()" title="View Terminal Logs">📋 Logs</button>
-                <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">🌙</button>
-                <div class="model-toggle" style="position: relative;">
-                    <button class="model-toggle-btn" id="modelToggleBtn" onclick="toggleModelDropdown(event)" title="Click to switch model" style="display: flex; align-items: center; gap: 8px;">
-                        <span style="font-size: 16px;">🤖</span>
-                        <span id="currentModelName" style="font-weight: 500;">Loading...</span>
-                        <span style="font-size: 10px; margin-left: 5px;">▼</span>
-                    </button>
-                    <div class="model-dropdown" id="modelDropdown" style="display: none;">
-                        {''.join([f'''
-                        <div class="model-option" id="model-{m["id"]}" onclick="confirmModelSwitch('{m["id"]}', '{m["name"]}')">
-                            <span class="model-option-name">{m["name"]}</span>
-                            <span class="model-option-badge">{'Quantized' if m.get('quantized') else 'Standard'}</span>
-                        </div>
-                        ''' for m in AVAILABLE_MODELS])}
+            <div class="header-right">
+                <div class="status">
+                    <div class="status-dot booting" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                    <div class="status-progress-container" id="statusProgressContainer" style="display: block;">
+                        <div class="status-progress-bar" id="statusProgressBar"></div>
+                        <span class="status-progress-text" id="statusProgressText"></span>
                     </div>
-                </div>
-            <div class="status">
-                <div class="status-dot booting" id="statusDot"></div>
-                <span id="statusText">Connecting...</span>
-                <div class="status-progress-container" id="statusProgressContainer" style="display: block;">
-                    <div class="status-progress-bar" id="statusProgressBar"></div>
-                    <span class="status-progress-text" id="statusProgressText"></span>
                 </div>
             </div>
         </div>
@@ -3562,8 +3682,40 @@ async def home(mode: str = "light"):
                     onkeydown="handleKeyDown(event)"
                     oninput="autoResizeTextarea(this)"
                 ></textarea>
-                <button id="send" onclick="sendMessage()" title="Send message"></button>
+                <button id="send" onclick="sendMessage()" title="Send message">➤</button>
             </div>
+        </div>
+    </div>
+    
+    <!-- Settings Menu (Bottom Left) -->
+    <div class="settings-menu" id="settingsMenu">
+        <button class="settings-menu-toggle" onclick="toggleSettingsMenu()" title="Settings">⚙️</button>
+        <div class="settings-menu-content" id="settingsMenuContent">
+            <button class="settings-menu-item" onclick="toggleTheme()" title="Toggle theme" id="themeToggle">
+                <span class="settings-icon">🌙</span>
+                <span class="settings-label">Theme</span>
+            </button>
+            <button class="settings-menu-item" onclick="toggleWebSearch()" title="Web Search">
+                <span class="settings-icon">🔍</span>
+                <span class="settings-label">Web Search</span>
+            </button>
+            <button class="settings-menu-item" onclick="toggleLogViewer()" title="View Logs">
+                <span class="settings-icon">📋</span>
+                <span class="settings-label">Logs</span>
+            </button>
+            <button class="settings-menu-item" onclick="toggleModelDropdown(event)" title="Switch Model" id="modelToggleBtn">
+                <span class="settings-icon">🤖</span>
+                <span class="settings-label">Model</span>
+                <span id="currentModelName" class="settings-model-name">Loading...</span>
+            </button>
+        </div>
+        <div class="model-dropdown settings-dropdown" id="modelDropdown" style="display: none;">
+            {''.join([f'''
+            <div class="model-option" id="model-{m["id"]}" onclick="confirmModelSwitch('{m["id"]}', '{m["name"]}')">
+                <span class="model-option-name">{m["name"]}</span>
+                <span class="model-option-badge">{'Quantized' if m.get('quantized') else 'Standard'}</span>
+            </div>
+            ''' for m in AVAILABLE_MODELS])}
         </div>
     </div>
     
@@ -3914,6 +4066,8 @@ async def home(mode: str = "light"):
             const currentMode = localStorage.getItem('theme') || 'light';
             const newMode = currentMode === 'light' ? 'dark' : 'light';
             localStorage.setItem('theme', newMode);
+            // Close settings menu
+            document.getElementById('settingsMenuContent').classList.remove('show');
             window.location.href = `/?mode=${{newMode}}`;
         }}
         
@@ -3957,14 +4111,32 @@ async def home(mode: str = "light"):
         function toggleLogViewer() {{
             const viewer = document.getElementById('logViewer');
             viewer.classList.toggle('show');
+            // Close settings menu when opening log viewer
+            document.getElementById('settingsMenuContent').classList.remove('show');
             if (viewer.classList.contains('show') && !logWs) {{
                 connectLogWS();
             }}
         }}
         
+        function toggleSettingsMenu() {{
+            const menu = document.getElementById('settingsMenuContent');
+            menu.classList.toggle('show');
+        }}
+        
+        // Close settings menu when clicking outside
+        document.addEventListener('click', function(event) {{
+            const menu = document.getElementById('settingsMenu');
+            const menuContent = document.getElementById('settingsMenuContent');
+            if (menu && menuContent && !menu.contains(event.target)) {{
+                menuContent.classList.remove('show');
+            }}
+        }});
+        
         function toggleWebSearch() {{
             const modal = document.getElementById('webSearchModal');
             modal.classList.toggle('show');
+            // Close settings menu when opening web search
+            document.getElementById('settingsMenuContent').classList.remove('show');
             if (modal.classList.contains('show')) {{
                 document.getElementById('webSearchInput').focus();
             }} else {{
@@ -4060,6 +4232,7 @@ async def home(mode: str = "light"):
             }}
         }}
         
+        
         // Close dropdown when clicking outside
         document.addEventListener('click', function(event) {{
             const toggle = document.getElementById('modelToggleBtn');
@@ -4074,8 +4247,11 @@ async def home(mode: str = "light"):
         let pendingModelSwitch = null;
         
         function confirmModelSwitch(modelId, modelName) {{
-            // Close dropdown
+            // Close dropdown and settings menu
             document.getElementById('modelDropdown').classList.remove('show');
+            document.getElementById('modelDropdown').style.display = 'none';
+            const settingsMenu = document.getElementById('settingsMenuContent');
+            if (settingsMenu) settingsMenu.classList.remove('show');
             
             // Store pending switch
             pendingModelSwitch = modelId;
