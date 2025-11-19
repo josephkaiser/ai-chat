@@ -4338,6 +4338,10 @@ async def home(mode: str = "light"):
                         contentDiv.innerHTML = html;
                         msg.dataset.needsMarkdown = 'false';
                         msg.dataset.rendered = 'true';
+                    }} else {{
+                        console.warn('Marked library not available');
+                        return;
+                    }}
                         
                         // Restore timestamp if it was removed
                         if (timestampDiv && !msg.querySelector('.message-timestamp')) {{
@@ -4357,28 +4361,42 @@ async def home(mode: str = "light"):
                             msg.appendChild(copyBtn);
                         }}
                         
-                        // Apply syntax highlighting to code blocks
-                        if (typeof hljs !== 'undefined') {{
+                        // Apply syntax highlighting to code blocks (with error handling)
+                        if (typeof hljs !== 'undefined' && hljs.highlightElement) {{
                             msg.querySelectorAll('pre code').forEach(block => {{
-                                hljs.highlightElement(block);
+                                try {{
+                                    // Only highlight if block has content
+                                    if (block.textContent && block.textContent.trim()) {{
+                                        hljs.highlightElement(block);
+                                    }}
+                                }} catch (e) {{
+                                    // Silently fail - don't show errors to user
+                                    console.warn('Syntax highlighting skipped for block:', e.message || e);
+                                }}
                             }});
                         }}
                         
                         // Add copy buttons to code blocks
                         msg.querySelectorAll('pre').forEach(preBlock => {{
-                            // Check if copy button already exists
-                            if (preBlock.querySelector('.copy-btn')) return;
-                            
-                            const codeText = preBlock.querySelector('code')?.textContent || preBlock.textContent;
-                            const copyBtn = document.createElement('button');
-                            copyBtn.className = 'copy-btn';
-                            copyBtn.innerHTML = '📋 Copy';
-                            copyBtn.title = 'Copy code to clipboard';
-                            copyBtn.onclick = (e) => {{
-                                e.stopPropagation();
-                                copyToClipboard(codeText, copyBtn);
-                            }};
-                            preBlock.appendChild(copyBtn);
+                            try {{
+                                // Check if copy button already exists
+                                if (preBlock.querySelector('.copy-btn')) return;
+                                
+                                const codeText = preBlock.querySelector('code')?.textContent || preBlock.textContent;
+                                if (codeText) {{
+                                    const copyBtn = document.createElement('button');
+                                    copyBtn.className = 'copy-btn';
+                                    copyBtn.innerHTML = '📋 Copy';
+                                    copyBtn.title = 'Copy code to clipboard';
+                                    copyBtn.onclick = (e) => {{
+                                        e.stopPropagation();
+                                        copyToClipboard(codeText, copyBtn);
+                                    }};
+                                    preBlock.appendChild(copyBtn);
+                                }}
+                            }} catch (e) {{
+                                console.warn('Error adding copy button:', e);
+                            }}
                         }});
                     }} else {{
                         console.error('Marked library not available');
