@@ -1536,12 +1536,20 @@ def generate_css(mode='light'):
     return f"""
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         
+        html {{
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+        }}
+        
         body {{
             font-family: {FONTS['family']};
             background: {colors['bg_primary']};
             color: {colors['text_primary']};
             height: 100vh;
+            width: 100vw;
             display: flex;
+            overflow: hidden;
             font-size: {FONTS['size_base']};
         }}
         
@@ -1554,6 +1562,9 @@ def generate_css(mode='light'):
             z-index: 1;
             transition: width {ANIMATIONS['transition_speed']};
             position: relative;
+            flex-shrink: 0;
+            height: 100vh;
+            overflow: hidden;
         }}
         
         .sidebar.collapsed {{
@@ -1789,6 +1800,9 @@ def generate_css(mode='light'):
             display: flex;
             flex-direction: column;
             position: relative;
+            min-width: 0;
+            overflow: hidden;
+            height: 100vh;
         }}
         
         .header {{
@@ -1895,13 +1909,16 @@ def generate_css(mode='light'):
         .messages {{
             flex: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 12px;
             align-items: center;
             max-width: 100%;
+            width: 100%;
             background: {colors['bg_primary']};
+            min-height: 0;
         }}
         
         .message {{
@@ -2280,6 +2297,9 @@ def generate_css(mode='light'):
             border-top: 3px solid {colors['accent_primary']};
             display: flex;
             justify-content: center;
+            flex-shrink: 0;
+            width: 100%;
+            box-sizing: border-box;
         }}
         
         .input-container {{
@@ -2293,6 +2313,7 @@ def generate_css(mode='light'):
             border-radius: 4px;
             padding: 12px 16px;
             cursor: text;
+            box-sizing: border-box;
         }}
         
         .input-container:focus-within {{
@@ -2304,7 +2325,7 @@ def generate_css(mode='light'):
             flex: 1;
             padding: 0;
             background: transparent;
-            color: #8194b1;
+            color: {colors['text_primary']};
             border: none;
             border-radius: 0;
             font-size: {FONTS['size_base']};
@@ -2313,7 +2334,10 @@ def generate_css(mode='light'):
             min-height: 24px;
             max-height: 66vh;
             overflow-y: auto;
+            overflow-x: hidden;
             line-height: 1.5;
+            width: 100%;
+            box-sizing: border-box;
         }}
         
         #input:focus {{ outline: none; }}
@@ -3120,9 +3144,15 @@ def generate_css(mode='light'):
         
         /* Mobile Responsive Styles */
         @media (max-width: 768px) {{
+            html, body {{
+                height: 100%;
+                width: 100%;
+                overflow: hidden;
+            }}
+            
             body {{
                 flex-direction: column;
-                height: auto;
+                height: 100vh;
                 min-height: 100vh;
             }}
             
