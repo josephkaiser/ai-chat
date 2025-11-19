@@ -3062,7 +3062,7 @@ async def health():
             models = client.models.list()
             status["model_available"] = True
             status["status"] = "healthy"
-    except Exception as e:
+        except Exception as e:
             status["model_available"] = False
             status["status"] = "unhealthy"
             status["error"] = str(e)
