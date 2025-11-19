@@ -304,58 +304,35 @@ async def process_single_job(job: Job):
         # Build messages with system prompt for reasoning
         messages = []
         
-        # Enhanced system prompt for deep reasoning with explicit step-by-step validation
-        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. Your responses must demonstrate thorough, step-by-step thinking with explicit validation of each reasoning step.
+        # Enhanced system prompt for deep reasoning with internal validation
+        system_prompt = """You are an advanced AI assistant with deep reasoning capabilities. You must think through problems thoroughly and validate your reasoning internally, but only present final, polished conclusions to the user.
 
-CRITICAL REASONING PROTOCOL - SHOW YOUR WORK AS YOU GO:
+CRITICAL REASONING PROTOCOL - INTERNAL REASONING, POLISHED OUTPUT:
 
-**1. BEFORE EACH MAJOR STATEMENT, SHOW REASONING:**
-   Format: [Reasoning: ...] → [Statement/Answer]
-   
-   Example structure:
-   [Reasoning: Let me consider X. If Y is true, then Z follows because...] → [Statement: Therefore, Z is the case]
-   
-   [Reasoning: I need to verify this. Checking: A implies B, and B implies C, so...] → [Verified: C is correct]
-
-**2. EXPLICIT REASONING STRUCTURE:**
-   
-   **Step 1: Initial Analysis**
-   [Reasoning: Breaking down the question...] → [Analysis: The key components are...]
-   
-   **Step 2: Consider Options**
-   [Reasoning: Let me evaluate approach A...] → [Evaluation: A has pros X, cons Y]
-   [Reasoning: Now considering approach B...] → [Evaluation: B has pros X, cons Y]
-   [Reasoning: Comparing A vs B...] → [Decision: B is better because...]
-   
-   **Step 3: Work Through Solution**
-   [Reasoning: Starting with premise P...] → [Step 1: P leads to Q because...]
-   [Reasoning: Now applying Q to situation...] → [Step 2: Q implies R]
-   [Reasoning: Verifying R makes sense...] → [Verification: R is consistent with original premise]
-   
-   **Step 4: Final Answer**
-   [Reasoning: Synthesizing all steps...] → [Conclusion: The answer is X because...]
-
-**3. VALIDATION REQUIREMENTS:**
-   - Before stating any fact: [Reasoning: Why this is true...] → [Fact]
-   - Before making any claim: [Reasoning: Evidence for this...] → [Claim]
-   - Before concluding: [Reasoning: Does this make sense? Checking...] → [Conclusion]
-   - When uncertain: [Reasoning: I'm not certain because...] → [Acknowledged uncertainty]
-
-**4. REASONING QUALITY STANDARDS:**
-   - Show reasoning BEFORE each major statement, not after
+**1. INTERNAL REASONING PROCESS:**
+   - Think through problems step-by-step internally
    - Validate each logical step before proceeding
-   - Question your own assumptions explicitly
+   - Question your own assumptions
    - Consider counter-arguments before concluding
-   - Show calculations and logic chains step-by-step
+   - Verify calculations and logic chains
    - Acknowledge when you're making assumptions
+   
+   BUT: Do NOT show this reasoning process to the user. Only present final, validated conclusions.
 
-**5. FOR DIFFERENT TASK TYPES:**
-   - **Math/Logic**: [Reasoning: Using formula X because...] → [Calculation: ...] → [Verification: Check...] → [Answer]
-   - **Code**: [Reasoning: Algorithm choice because...] → [Pseudocode reasoning] → [Implementation] → [Testing: I can test this code in a sandbox] → [Verification: Code works/needs fixes]
-   - **Analysis**: [Reasoning: Perspective 1 suggests...] → [Reasoning: But perspective 2 shows...] → [Synthesis: Balancing both...] → [Conclusion]
-   - **Creative**: [Reasoning: Exploring idea A...] → [Evaluation: Strengths/weaknesses] → [Refinement: Combining with B...] → [Final idea]
+**2. OUTPUT QUALITY STANDARDS:**
+   - Only output statements that have passed your internal validation
+   - Present conclusions clearly and directly, without reasoning brackets
+   - Do not use phrases like "[Reasoning: ...]", "[Conclusion: ...]", "[Statement: ...]", "[Analysis: ...]", etc.
+   - Write naturally as if you've already completed the reasoning
+   - Be confident in your answers because they've been validated internally
 
-**7. CODE EXECUTION CAPABILITY:**
+**3. FOR DIFFERENT TASK TYPES:**
+   - **Math/Logic**: Calculate internally, verify, then present the answer with explanation
+   - **Code**: Think through algorithm choice, test internally, then present clean, working code
+   - **Analysis**: Consider multiple perspectives internally, then present a balanced conclusion
+   - **Creative**: Explore ideas internally, evaluate options, then present refined solutions
+
+**4. CODE EXECUTION CAPABILITY:**
    You have access to a sandboxed code execution environment. When writing code:
    - Test your code before presenting it as final
    - When you need to test code, include: [EXECUTE_CODE:python] or [EXECUTE_CODE:javascript] followed by the code
@@ -364,7 +341,7 @@ CRITICAL REASONING PROTOCOL - SHOW YOUR WORK AS YOU GO:
    - Always test code examples you provide, especially for programming questions
    - Show the test results in your response: [Test Result: ...] → [Verified: Code works/needs fixes]
 
-**8. FILE SYSTEM ACCESS:**
+**5. FILE SYSTEM ACCESS:**
    You can read files and traverse directories to help with code analysis:
    - Use [READ_FILE:path/to/file] to read file contents
    - Use [LIST_DIR:path/to/directory] to list directory contents
@@ -372,13 +349,13 @@ CRITICAL REASONING PROTOCOL - SHOW YOUR WORK AS YOU GO:
    - Always read relevant files when answering questions about code or projects
 
 **6. THINKING STYLE:**
-   - Be methodical: show reasoning → validate → proceed
-   - Be transparent: show your thought process, not just conclusions
-   - Be self-critical: question your own reasoning
-   - Be thorough: don't skip validation steps
-   - Be clear: use the [Reasoning: ...] → [Statement] format consistently
+   - Be methodical: reason internally → validate → present polished conclusion
+   - Be thorough: don't skip validation steps internally
+   - Be self-critical: question your own reasoning before presenting
+   - Be clear: write naturally without reasoning brackets or meta-commentary
+   - Be confident: present validated conclusions directly
 
-Remember: Quality comes from showing your reasoning process, not just the final answer. Use the [Reasoning: ...] → [Statement] format throughout your response to demonstrate that you're actively thinking and validating as you generate each part of your answer."""
+Remember: Do your reasoning internally for quality, but present only polished, final conclusions to the user. Never use reasoning brackets, conclusion markers, or other meta-commentary in your output."""
         
         messages.append({'role': 'system', 'content': system_prompt})
         
@@ -423,17 +400,61 @@ Remember: Quality comes from showing your reasoning process, not just the final 
             presence_penalty=0.15,  # Encourage exploring different aspects of the problem
         )
         
+        # Function to filter out reasoning brackets and meta-commentary
+        def filter_reasoning_text(text):
+            """Remove reasoning brackets and meta-commentary from text"""
+            if not text:
+                return text
+            # Remove [Reasoning: ...] → patterns (handles multi-line)
+            text = re.sub(r'\[Reasoning:[^\]]+\]\s*→\s*', '', text, flags=re.DOTALL)
+            # Remove standalone reasoning brackets
+            text = re.sub(r'\[Reasoning:[^\]]+\]', '', text, flags=re.DOTALL)
+            # Remove conclusion/statement/analysis brackets
+            text = re.sub(r'\[(?:Conclusion|Statement|Analysis|Evaluation|Decision|Verification|Step \d+|Fact|Claim|Acknowledged uncertainty|Verified|Test Result):[^\]]+\]', '', text, flags=re.DOTALL)
+            # Remove arrow-only patterns (leftover from reasoning)
+            text = re.sub(r'\s*→\s*', ' ', text)
+            # Remove any remaining bracket patterns that look like reasoning
+            text = re.sub(r'\[[A-Z][a-z]+(?::[^\]]+)?\]', '', text)
+            # Clean up extra spaces and newlines
+            text = re.sub(r'\s+', ' ', text)
+            text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+            text = re.sub(r'\n\s*\n+', '\n\n', text)  # Normalize multiple newlines
+            return text.strip()
+        
+        # Buffer for filtering multi-token patterns during streaming
+        stream_buffer = ""
+        sent_length = 0  # Track how much filtered content we've already sent
+        buffer_size = 300  # Keep last 300 chars for pattern matching
+        
         for chunk in stream:
             if chunk.choices[0].delta.content:
                 token = chunk.choices[0].delta.content
                 full_response += token
+                stream_buffer += token
                 
-                await job.websocket.send_json({
-                    'type': 'token',
-                    'content': token
-                })
+                # Keep buffer size manageable
+                if len(stream_buffer) > buffer_size:
+                    # Trim from front, but keep track of what we've sent
+                    trim_amount = len(stream_buffer) - buffer_size
+                    stream_buffer = stream_buffer[trim_amount:]
+                    sent_length = max(0, sent_length - trim_amount)
+                
+                # Filter the entire buffer to catch multi-token patterns
+                filtered_buffer = filter_reasoning_text(stream_buffer)
+                
+                # Send only the new filtered content that hasn't been sent yet
+                new_content = filtered_buffer[sent_length:]
+                if new_content:
+                    await job.websocket.send_json({
+                        'type': 'token',
+                        'content': new_content
+                    })
+                    sent_length = len(filtered_buffer)
         
         logger.info(f"✅ Job {job.id} completed ({len(full_response)} chars)")
+        
+        # Filter reasoning brackets from full response before processing
+        full_response = filter_reasoning_text(full_response)
         
         # Detect and execute code if requested
         code_execution_pattern = r'\[EXECUTE_CODE:(python|javascript|js)\](.*?)(?=\[|$)'
@@ -2423,31 +2444,50 @@ def generate_css(mode='light'):
             }}
             
             .sidebar {{
-                width: 100%;
-                max-height: 40vh;
-                border-right: none;
-                border-bottom: 3px solid #8194b1;
+                width: 66.67%;
+                max-width: 66.67%;
+                height: 100vh;
+                border-right: 3px solid {colors['accent_primary']};
+                border-bottom: none;
                 position: fixed;
                 top: 0;
                 left: 0;
                 z-index: 100;
-                transform: translateY(-100%);
+                transform: translateX(-100%);
                 transition: transform 0.3s ease;
+                overflow-y: auto;
             }}
             
             .sidebar.show {{
-                transform: translateY(0);
+                transform: translateX(0);
             }}
             
             .sidebar.collapsed {{
-                width: 100%;
-                max-height: 50px;
+                width: 66.67%;
+                transform: translateX(-100%);
+            }}
+            
+            /* Overlay when sidebar is open */
+            .sidebar-overlay {{
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 99;
+            }}
+            
+            .sidebar.show ~ .sidebar-overlay,
+            .sidebar.show + .main::before {{
+                display: block;
             }}
             
             .main {{
                 width: 100%;
                 margin-left: 0;
-                padding-top: 60px;
+                padding-top: 70px;
             }}
             
             .header {{
@@ -2455,26 +2495,28 @@ def generate_css(mode='light'):
                 top: 0;
                 left: 0;
                 right: 0;
-                z-index: 99;
-                padding: 10px 15px;
-                background: #fff4de;
-                border-bottom: 2px solid #8194b1;
+                z-index: 98;
+                padding: 12px 15px;
+                background: {colors['bg_secondary']};
+                border-bottom: 3px solid {colors['accent_primary']};
             }}
             
             .header h1 {{
-                font-size: 18px;
+                font-size: 20px;
             }}
             
             .messages {{
-                padding: 15px 10px;
-                margin-top: 60px;
-                padding-bottom: 100px;
+                padding: 20px 15px;
+                margin-top: 70px;
+                padding-bottom: env(safe-area-inset-bottom, 0px);
+                padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 120px);
             }}
             
             .message {{
                 max-width: 95%;
-                padding: 12px 15px;
-                font-size: 15px;
+                padding: 16px 18px;
+                font-size: 18px;
+                line-height: 1.6;
             }}
             
             .input-area {{
@@ -2482,10 +2524,22 @@ def generate_css(mode='light'):
                 bottom: 0;
                 left: 0;
                 right: 0;
-                padding: 10px;
-                background: #fff4de;
-                border-top: 2px solid #8194b1;
-                z-index: 98;
+                padding: 12px;
+                padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+                background: {colors['bg_quaternary']};
+                border-top: 3px solid {colors['accent_primary']};
+                z-index: 97;
+                /* Rise with keyboard */
+                transform: translateY(0);
+                transition: transform 0.25s ease-out;
+            }}
+            
+            /* When keyboard is open, input area rises */
+            @supports (-webkit-touch-callout: none) {{
+                .input-area {{
+                    position: -webkit-sticky;
+                    bottom: 0;
+                }}
             }}
             
             .input-container {{
@@ -2493,8 +2547,44 @@ def generate_css(mode='light'):
             }}
             
             #input {{
-                max-height: 40vh;
-                font-size: 16px; /* Prevents zoom on iOS */
+                max-height: 50vh;
+                font-size: 18px; /* Larger font, prevents zoom on iOS */
+                line-height: 1.5;
+                padding: 12px;
+            }}
+            
+            /* Swipe gestures for conversations */
+            .conversation-item {{
+                position: relative;
+                overflow: hidden;
+            }}
+            
+            .conversation-item .swipe-actions {{
+                position: absolute;
+                top: 0;
+                right: 0;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 0 16px;
+                background: {colors['btn_danger']};
+                transform: translateX(100%);
+                transition: transform 0.3s ease;
+            }}
+            
+            .conversation-item.swipe-left .swipe-actions {{
+                transform: translateX(0);
+            }}
+            
+            .conversation-item .swipe-actions button {{
+                padding: 8px 12px;
+                background: {colors['btn_primary']};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
             }}
             
             .model-toggle-btn {{
@@ -2602,7 +2692,7 @@ async def home(mode: str = "light"):
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>AI Chat</title>
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
@@ -2765,6 +2855,7 @@ async def home(mode: str = "light"):
         let isGenerating = false;
         let renameConvId = null;
         let currentModel = '{DEFAULT_MODEL}';
+        let modelAvailable = false;
         let markedReady = false;
         
         // Initialize marked library when ready
@@ -2806,6 +2897,21 @@ async def home(mode: str = "light"):
             const statusDot = document.getElementById('statusDot');
             const statusText = document.getElementById('statusText');
             
+            // Update modelAvailable based on status
+            if (status === true || status === 'connected') {{
+                modelAvailable = true;
+                document.getElementById('input').disabled = false;
+                document.getElementById('send').disabled = false;
+            }} else if (status === 'booting') {{
+                modelAvailable = false;
+                document.getElementById('input').disabled = true;
+                document.getElementById('send').disabled = true;
+            }} else {{
+                modelAvailable = false;
+                document.getElementById('input').disabled = true;
+                document.getElementById('send').disabled = true;
+            }}
+            
             // status can be: true (connected), false (disconnected), 'booting'
             if (status === 'booting') {{
                 statusDot.className = 'status-dot booting';
@@ -2828,9 +2934,14 @@ async def home(mode: str = "light"):
                     // Check if model is actually available (might be booting)
                     fetch('/health').then(r => r.json()).then(health => {{
                         if (health.model_available) {{
-                    updateStatus(true);
+                            modelAvailable = true;
+                            updateStatus(true);
                         }} else {{
+                            modelAvailable = false;
                             updateStatus('booting');
+                            // Disable input when model not available
+                            document.getElementById('input').disabled = true;
+                            document.getElementById('send').disabled = true;
                         }}
                     }}).catch(() => {{
                         updateStatus(true); // Default to connected if health check fails
@@ -2945,6 +3056,22 @@ async def home(mode: str = "light"):
             // On mobile, toggle show/hide instead of collapse
             if (window.innerWidth <= 768) {{
                 sidebar.classList.toggle('show');
+                // Add/remove overlay
+                let overlay = document.querySelector('.sidebar-overlay');
+                if (!overlay) {{
+                    overlay = document.createElement('div');
+                    overlay.className = 'sidebar-overlay';
+                    overlay.onclick = () => {{
+                        sidebar.classList.remove('show');
+                        overlay.remove();
+                    }};
+                    document.body.appendChild(overlay);
+                }}
+                if (sidebar.classList.contains('show')) {{
+                    overlay.style.display = 'block';
+                }} else {{
+                    overlay.style.display = 'none';
+                }}
             }} else {{
                 sidebar.classList.toggle('collapsed');
                 toggle.textContent = sidebar.classList.contains('collapsed') ? '📕' : '📖';
@@ -3177,6 +3304,12 @@ async def home(mode: str = "light"):
         function sendMessage() {{
             const input = document.getElementById('input');
             const message = input.value.trim();
+            
+            // Check if model is available
+            if (!modelAvailable) {{
+                // Silently prevent submission - don't show error
+                return;
+            }}
             
             if (!message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
             
@@ -3510,15 +3643,56 @@ async def home(mode: str = "light"):
             
             data.conversations.forEach(conv => {{
                 const item = document.createElement('div');
-                item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+                item.className = 'conv-item conversation-item' + (conv.id === currentConvId ? ' active' : '');
                 item.innerHTML = `
                     <div class="conv-title">${{conv.title}}</div>
-                    <div class="conv-actions">
-                        <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">✏️</button>
-                        <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${{conv.id}}')">🗑️</button>
+                    <div class="swipe-actions">
+                        <button onclick="event.stopPropagation(); renameConv('${{conv.id}}', '${{conv.title.replace(/'/g, "\\\\'")}}')">Rename</button>
+                        <button onclick="event.stopPropagation(); deleteConv('${{conv.id}}')" style="background: #fd7589;">Delete</button>
                     </div>
                 `;
                 item.onclick = () => loadConversation(conv.id);
+                
+                // Add swipe gesture handling for mobile
+                if (window.innerWidth <= 768) {{
+                    let startX = 0;
+                    let currentX = 0;
+                    let isDragging = false;
+                    
+                    item.addEventListener('touchstart', (e) => {{
+                        startX = e.touches[0].clientX;
+                        isDragging = false;
+                    }});
+                    
+                    item.addEventListener('touchmove', (e) => {{
+                        currentX = e.touches[0].clientX;
+                        const diff = startX - currentX;
+                        
+                        if (Math.abs(diff) > 10) {{
+                            isDragging = true;
+                        }}
+                        
+                        if (isDragging && diff > 0) {{
+                            e.preventDefault();
+                            item.style.transform = `translateX(-${{Math.min(diff, 150)}}px)`;
+                        }}
+                    }});
+                    
+                    item.addEventListener('touchend', (e) => {{
+                        const diff = startX - currentX;
+                        
+                        if (isDragging && diff > 50) {{
+                            item.classList.add('swipe-left');
+                            item.style.transform = 'translateX(-150px)';
+                        }} else {{
+                            item.classList.remove('swipe-left');
+                            item.style.transform = '';
+                        }}
+                        
+                        isDragging = false;
+                    }});
+                }}
+                
                 container.appendChild(item);
             }});
         }}
