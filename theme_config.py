@@ -1,52 +1,52 @@
 """
 Centralized theme and color configuration.
-Monochrome light theme with dark text on light background.
+Uses custom color palette with blues, beiges, and soft tones.
 """
 
-# Color Palette - Monochrome Light Theme
+# Color Palette - Custom Colors
 COLORS = {
     # Background colors
-    'bg_primary': '#ffffff',      # Main background (white)
-    'bg_secondary': '#f5f5f5',    # Sidebar, subtle backgrounds
-    'bg_tertiary': '#e0e0e0',     # Borders, dividers
-    'bg_quaternary': '#fafafa',   # Input area
+    'bg_primary': '#fffefb',      # Main background (almost white from palette 3)
+    'bg_secondary': '#ececdf',    # Sidebar, subtle backgrounds (from palette 2)
+    'bg_tertiary': '#e0e0e0',     # Borders, dividers (neutral gray)
+    'bg_quaternary': '#ffeae7',   # Input area (very light pink from palette 3)
     
     # Text colors
-    'text_primary': '#1a1a1a',    # Main text (dark)
-    'text_secondary': '#666666',   # Secondary text
-    'text_tertiary': '#999999',   # Placeholders, muted text
+    'text_primary': '#366c9c',    # Main text (dark blue from palette 1)
+    'text_secondary': '#5898b7',  # Secondary text (blue from palette 2)
+    'text_tertiary': '#9dceda',   # Placeholders, muted text (light blue from palette 2)
     
-    # Accent colors (subtle grays)
-    'accent_primary': '#333333',  # Primary accent (dark gray)
-    'accent_hover': '#000000',    # Accent hover state (black)
-    'accent_secondary': '#4a4a4a', # Secondary accent
+    # Accent colors
+    'accent_primary': '#67a2cb',  # Primary accent (medium blue from palette 1)
+    'accent_hover': '#5898b7',    # Accent hover state (blue from palette 2)
+    'accent_secondary': '#91b461', # Secondary accent (green from palette 2)
     
     # Message colors
-    'msg_user_bg': '#f0f0f0',     # User message background (light gray)
-    'msg_user_text': '#1a1a1a',   # User message text (dark)
-    'msg_assistant_bg': '#ffffff', # Assistant message background (white)
-    'msg_assistant_text': '#1a1a1a', # Assistant message text (dark)
+    'msg_user_bg': '#f5e3d3',     # User message background (light beige from palette 1)
+    'msg_user_text': '#366c9c',   # User message text (dark blue)
+    'msg_assistant_bg': '#fffefb', # Assistant message background (almost white)
+    'msg_assistant_text': '#366c9c', # Assistant message text (dark blue)
     
     # Status colors
-    'status_connected': '#4a4a4a', # Connected status
-    'status_disconnected': '#999999', # Disconnected status
+    'status_connected': '#91b461', # Connected status (green from palette 2)
+    'status_disconnected': '#e0556a', # Disconnected status (red from palette 3)
     
     # Button colors
-    'btn_primary': '#1a1a1a',     # Primary button (dark)
-    'btn_primary_hover': '#000000', # Primary button hover (black)
-    'btn_danger': '#666666',      # Danger button
-    'btn_danger_hover': '#4a4a4a', # Danger button hover
-    'btn_secondary': '#e0e0e0',   # Secondary button
-    'btn_secondary_hover': '#d0d0d0', # Secondary button hover
+    'btn_primary': '#67a2cb',     # Primary button (medium blue)
+    'btn_primary_hover': '#5898b7', # Primary button hover
+    'btn_danger': '#fd7589',      # Danger button (pink/red from palette 3)
+    'btn_danger_hover': '#e0556a', # Danger button hover (red)
+    'btn_secondary': '#a6d4f2',   # Secondary button (light blue from palette 1)
+    'btn_secondary_hover': '#9dceda', # Secondary button hover (light blue from palette 2)
     
     # Modal/overlay
-    'modal_overlay': 'rgba(0,0,0,0.5)', # Modal backdrop
-    'modal_bg': '#ffffff',        # Modal background
+    'modal_overlay': 'rgba(54,108,156,0.5)', # Modal backdrop (dark blue with transparency)
+    'modal_bg': '#fffefb',        # Modal background
     
     # Scrollbar
-    'scrollbar_track': '#f5f5f5', # Scrollbar track
-    'scrollbar_thumb': '#d0d0d0', # Scrollbar thumb
-    'scrollbar_thumb_hover': '#b0b0b0', # Scrollbar thumb hover
+    'scrollbar_track': '#ececdf', # Scrollbar track (light beige from palette 2)
+    'scrollbar_thumb': '#a6d4f2', # Scrollbar thumb (light blue)
+    'scrollbar_thumb_hover': '#9dceda', # Scrollbar thumb hover
 }
 
 # UI Dimensions

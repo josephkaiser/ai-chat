@@ -9,14 +9,16 @@ AI chat web server that can be run on a single GPU server (e.g. a desktop PC) us
 
 ```bash
 # One command - everything auto-configured for GPU
-docker-compose up -d
+docker compose up -d
 
 # Wait for model download (first time, ~2GB)
-docker-compose logs -f vllm
+docker compose logs -f vllm
 
 # When ready, open:
 # http://localhost:8000
 ```
+
+**Note:** Uses Docker Compose v2 (`docker compose`). For v1, use `docker-compose` instead.
 
 vLLM will auto-detect your GPU and optimize its settings accordingly.
 
@@ -153,10 +155,10 @@ Created automatically:
 ## First Run
 
 ```bash
-docker-compose up -d
+docker compose up -d
 
 # Watch vLLM startup (shows GPU detection)
-docker-compose logs -f vllm
+docker compose logs -f vllm
 ```
 
 **You'll see:**
@@ -191,13 +193,13 @@ curl http://localhost:8001/metrics
 ### View Logs
 ```bash
 # All services
-docker-compose logs -f
+docker compose logs -f
 
 # Just vLLM
-docker-compose logs -f vllm
+docker compose logs -f vllm
 
 # Just chat app
-docker-compose logs -f chat-app
+docker compose logs -f chat-app
 ```
 
 ## Troubleshooting
@@ -224,7 +226,7 @@ docker run --gpus all -v vllm_cache:/root/.cache/huggingface \
 nvidia-smi
 
 # Check vLLM detected GPU
-docker-compose logs vllm | grep GPU
+docker compose logs vllm | grep GPU
 ```
 
 ### Port Already in Use
