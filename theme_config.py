@@ -6,13 +6,13 @@ Modify these values to customize the appearance across the entire application.
 # Color Palette
 COLORS = {
     # Background colors
-    'bg_primary': '#0f172a',      # Main background
-    'bg_secondary': '#1e293b',     # Sidebar, header, input area
-    'bg_tertiary': '#334155',      # Borders, hover states
+    'bg_primary': '#366c9c',      # Main background
+    'bg_secondary': '#a6d4f2',     # Sidebar, header, input area
+    'bg_tertiary': '#eccabe',      # Borders, hover states
     
     # Text colors
-    'text_primary': '#f1f5f9',     # Main text
-    'text_secondary': '#94a3b8',    # Secondary text, placeholders
+    'text_primary': '#f5e3d3',     # Main text
+    'text_secondary': '#eccabe',    # Secondary text, placeholders
     
     # Accent colors
     'accent_primary': '#10b981',   # Primary accent (green)
