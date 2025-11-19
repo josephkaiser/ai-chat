@@ -6160,16 +6160,36 @@ async def ensure_model_loaded():
                 client = None
         
         # Try to connect to see if any model is running
+        # First check if vLLM server is up (health endpoint)
         try:
-            logger.info(f"🔌 Attempting to connect to vLLM server at {VLLM_HOST}...")
-            test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=5)
-            test_client.models.list()
-            client = test_client
-            logger.info(f"✅ Found working model at {VLLM_HOST}")
-            logger.info("🎉 Ready to chat! The model is available.")
-            return True
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                health_url = VLLM_HOST.replace('/v1', '') + '/health'
+                logger.info(f"🔌 Checking vLLM server health at {health_url}...")
+                health_response = await http_client.get(health_url)
+                if health_response.status_code == 200:
+                    logger.info("✅ vLLM server is responding")
+                    # Now try the models endpoint
+                    logger.info(f"🔌 Attempting to connect to vLLM API at {VLLM_HOST}...")
+                    test_client = OpenAI(base_url=VLLM_HOST, api_key="dummy", timeout=10)
+                    test_client.models.list()
+                    client = test_client
+                    logger.info(f"✅ Found working model at {VLLM_HOST}")
+                    logger.info("🎉 Ready to chat! The model is available.")
+                    return True
+                else:
+                    logger.warning(f"⚠️ vLLM server health check returned {health_response.status_code}")
+        except httpx.TimeoutException:
+            logger.warning(f"⚠️ vLLM server not responding yet (timeout). Model may still be loading...")
+            logger.info("🔄 Will attempt to load default model...")
         except Exception as e:
-            logger.warning(f"⚠️ No model responding at {VLLM_HOST}: {str(e)}")
+            error_msg = str(e)
+            if "Connection" in error_msg or "timeout" in error_msg.lower():
+                logger.warning(f"⚠️ Cannot connect to vLLM server yet: {error_msg[:100]}")
+                logger.info("💡 The vLLM server may have started but the model is still loading.")
+                logger.info("💡 This can take 2-5 minutes. Check vLLM logs: docker logs vllm -f")
+            else:
+                logger.warning(f"⚠️ No model responding at {VLLM_HOST}: {error_msg[:100]}")
             logger.info("🔄 Will attempt to load default model...")
         
         # No working model found, try to load default with timeout
