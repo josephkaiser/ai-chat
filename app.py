@@ -8,9 +8,9 @@ AI Chat with vLLM - Simplified UI with Customizations
 - Future: Search feature for Google, Wikipedia, Reddit, etc.
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import sqlite3
@@ -1188,43 +1188,53 @@ async def recover_to_default_model():
 
 def init_db():
     """Initialize database"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS conversations
-                 (id TEXT PRIMARY KEY,
-                  title TEXT,
-                  created_at TEXT,
-                  updated_at TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS messages
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  conversation_id TEXT,
-                  role TEXT,
-                  content TEXT,
-                  timestamp TEXT,
-                  feedback TEXT,
-                  FOREIGN KEY(conversation_id) REFERENCES conversations(id))''')
-    
-    # Add feedback column if it doesn't exist (for existing databases)
     try:
-        c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    # Create indexes for faster queries (especially for conversation history)
-    try:
-        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
-    except sqlite3.OperationalError:
-        pass  # Indexes might already exist
-    
-    conn.commit()
-    conn.close()
-    logger.info("✓ Database initialized with indexes")
+        # Ensure data directory exists
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS conversations
+                     (id TEXT PRIMARY KEY,
+                      title TEXT,
+                      created_at TEXT,
+                      updated_at TEXT)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS messages
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      conversation_id TEXT,
+                      role TEXT,
+                      content TEXT,
+                      timestamp TEXT,
+                      feedback TEXT,
+                      FOREIGN KEY(conversation_id) REFERENCES conversations(id))''')
+        
+        # Add feedback column if it doesn't exist (for existing databases)
+        try:
+            c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        
+        # Create indexes for faster queries (especially for conversation history)
+        try:
+            c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
+        except sqlite3.OperationalError:
+            pass  # Indexes might already exist
+        
+        conn.commit()
+        conn.close()
+        logger.info("✓ Database initialized with indexes")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}\n{traceback.format_exc()}")
+        raise
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    logger.error(f"❌ Critical: Failed to initialize database: {e}")
+    # Continue anyway - some endpoints might still work
 
 # ==================== Models ====================
 
@@ -3316,11 +3326,27 @@ def generate_css(mode='light'):
 
 # ==================== API Endpoints ====================
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler for unhandled errors"""
+    logger.error(f"❌ Unhandled exception: {exc}\n{traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "detail": str(exc) if os.getenv("DEBUG", "false").lower() == "true" else "An error occurred"
+        }
+    )
+
 @app.get("/", response_class=HTMLResponse)
 async def home(mode: str = "light"):
     """Serve the web interface"""
-    css = generate_css(mode)
-    models_json = str(AVAILABLE_MODELS).replace("'", '"')
+    try:
+        css = generate_css(mode)
+        models_json = str(AVAILABLE_MODELS).replace("'", '"')
+    except Exception as e:
+        logger.error(f"❌ Error generating home page: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error loading page: {str(e)}")
     
     return f"""
 <!DOCTYPE html>
