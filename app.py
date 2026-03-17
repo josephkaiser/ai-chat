@@ -721,11 +721,12 @@ def should_web_search(message: str) -> bool:
 
     # Factual lookup patterns
     lookup_patterns = [
-        r'\b(who|what|when|where) (is|was|are|were) (the |a )?\w+.{5,}',
+        r'\b(who|what|when|where|how) (is|was|are|were|do|does|did|to|can|should) (the |a |i |you )?\w+.{5,}',
         r'how (much|many) (does|do|did|is|are|will)',
         r'(latest|current|recent|new) .{3,} (version|release|update|price|status|news)',
         r'(compare|difference between|vs\.?|versus) .+ (and|vs)',
         r'(best|top|recommended) .{3,} (for|in|of) \d{4}',
+        r'\b(why) (is|was|are|were|does|do|did|can|would|should) .{10,}',
     ]
     if any(re.search(pat, msg) for pat in lookup_patterns):
         return True

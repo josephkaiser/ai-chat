@@ -24,9 +24,8 @@
                 <button onclick="closeMenu()">&times;</button>
             </div>
             <div class="menu-actions">
-                <button onclick="newChat(); closeMenu()">+ New Chat</button>
-                <button onclick="closeMenu(); showDashboard()">Dashboard</button>
-                <button onclick="closeMenu(); showSettings()">Settings</button>
+                <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
+                <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
             </div>
             <div class="menu-search">
                 <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
