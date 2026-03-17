@@ -27,7 +27,6 @@ import re
 import httpx
 import shutil
 from duckduckgo_search import DDGS
-from bs4 import BeautifulSoup
 
 # Theme colors
 COLORS_LIGHT = {
@@ -416,45 +415,22 @@ app.mount("/static", StaticFiles(directory=str(_base_dir / "static")), name="sta
 templates = Jinja2Templates(directory=str(_base_dir / "static"))
 
 # Default system prompt
-DEFAULT_SYSTEM_PROMPT = """You are an advanced AI assistant with deep reasoning capabilities. You must think through problems thoroughly and validate your reasoning internally, but only present final, polished conclusions to the user.
+DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise and direct. Match the complexity of your response to the complexity of the question — simple questions get short answers, complex questions get thorough answers.
 
-CRITICAL REASONING PROTOCOL - INTERNAL REASONING, POLISHED OUTPUT:
+Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer.
 
-**1. INTERNAL REASONING PROCESS:**
-   - Think through problems step-by-step internally
-   - Validate each logical step before proceeding
-   - Question your own assumptions
-   - Consider counter-arguments before concluding
-   - Verify calculations and logic chains
-
-   BUT: Do NOT show this reasoning process to the user. Only present final, validated conclusions.
-
-**2. OUTPUT QUALITY STANDARDS:**
-   - Only output statements that have passed your internal validation
-   - Present conclusions clearly and directly, without reasoning brackets
-   - Do not use phrases like "[Reasoning: ...]", "[Conclusion: ...]", "[Statement: ...]", "[Analysis: ...]", etc.
-   - Write naturally as if you've already completed the reasoning
-   - Be confident in your answers because they've been validated internally
-
-**3. FOR DIFFERENT TASK TYPES:**
-   - **Math/Logic**: Calculate internally, verify, then present the answer with explanation
-   - **Code**: Think through algorithm choice, test internally, then present clean, working code
-   - **Analysis**: Consider multiple perspectives internally, then present a balanced conclusion
-   - **Creative**: Explore ideas internally, evaluate options, then present refined solutions
-
-**4. THINKING STYLE:**
-   - Be methodical: reason internally -> validate -> present polished conclusion
-   - Be thorough: don't skip validation steps internally
-   - Be self-critical: question your own reasoning before presenting
-   - Be clear: write naturally without reasoning brackets or meta-commentary
-   - Be confident: present validated conclusions directly
-
-Remember: Do your reasoning internally for quality, but present only polished, final conclusions to the user."""
+When web search results are provided, use them for accuracy and cite sources naturally."""
 
 def filter_reasoning_text(text):
-    """Remove reasoning brackets and meta-commentary from text"""
+    """Remove <think> blocks, reasoning brackets, and meta-commentary from text"""
     if not text:
         return text
+    # Strip model special tokens (<|eot_id|>, <|im_end|>, etc.)
+    text = re.sub(r'<\|[^|]*\|>', '', text)
+    # Strip <think>...</think> blocks (Qwen thinking mode)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Strip unclosed <think> blocks (model cut off mid-thought)
+    text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
     text = re.sub(r'\[Reasoning:[^\]]+\]\s*->\s*', '', text, flags=re.DOTALL)
     text = re.sub(r'\[Reasoning:[^\]]+\]', '', text, flags=re.DOTALL)
     text = re.sub(r'\[(?:Conclusion|Statement|Analysis|Evaluation|Decision|Verification|Step \d+|Fact|Claim|Acknowledged uncertainty|Verified|Test Result):[^\]]+\]', '', text, flags=re.DOTALL)
@@ -604,43 +580,6 @@ async def search_chats(query: str):
     except Exception as e:
         return {'results': [], 'count': 0}
 
-@app.post("/api/web-search")
-async def web_search(request: dict):
-    query = request.get('query', '').strip()
-    sources = request.get('sources', ['google', 'wikipedia', 'reddit'])
-    max_results = min(request.get('max_results', 10), 20)
-
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
-
-    results = []
-    try:
-        with DDGS() as ddgs:
-            search_results = list(ddgs.text(query, max_results=max_results))
-
-            for result in search_results:
-                url = result.get('href', '')
-                if 'wikipedia.org' in url.lower():
-                    source_type = 'wikipedia'
-                elif 'reddit.com' in url.lower():
-                    source_type = 'reddit'
-                elif 'github.com' in url.lower():
-                    source_type = 'github'
-                elif any(x in url.lower() for x in ['stackoverflow.com', 'stackexchange.com']):
-                    source_type = 'stackoverflow'
-                else:
-                    source_type = 'google'
-
-                if source_type in sources or (source_type == 'general' and 'google' in sources):
-                    results.append({
-                        'title': result.get('title', ''), 'url': url,
-                        'snippet': result.get('body', ''), 'source': source_type
-                    })
-
-        return {'results': results, 'count': len(results), 'query': query}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
 @app.post("/api/execute-code")
 async def execute_code(request: dict):
     code = request.get('code', '').strip()
@@ -734,6 +673,65 @@ async def read_file_content(path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ==================== Web Search Logic ====================
+
+def should_web_search(message: str) -> bool:
+    """Decide if a query would benefit from web search results."""
+    msg = message.lower().strip()
+
+    # Too short to need search
+    if len(msg) < 15:
+        return False
+
+    # Skip greetings, thanks, simple instructions
+    skip_starts = ['hello', 'hi ', 'hey', 'thanks', 'thank you', 'bye', 'please ', 'ok', 'sure', 'yes', 'no']
+    if any(msg.startswith(s) for s in skip_starts) and len(msg) < 40:
+        return False
+
+    # Skip coding/math/creative tasks — these don't need web search
+    code_signals = [
+        'write a function', 'write code', 'write a script', 'fix this', 'debug',
+        'refactor', 'implement', 'def ', 'class ', 'function(', 'calculate',
+        'solve', 'write a poem', 'write a story', 'explain this code',
+        'convert this', 'translate this code', 'optimize this', 'review this',
+        '```', 'import ', 'print(', 'return ', 'for i in', 'console.log',
+    ]
+    if any(sig in msg for sig in code_signals):
+        return False
+
+    # Temporal markers — strong signal for needing current info
+    temporal = [
+        'today', 'yesterday', 'this week', 'this month', 'this year',
+        'right now', 'currently', 'latest', 'recent', 'newest',
+        'last week', 'last month', 'last year', 'upcoming', 'schedule',
+    ]
+    # Also match year references 2024+
+    if any(t in msg for t in temporal) or re.search(r'\b20(2[4-9]|[3-9]\d)\b', msg):
+        return True
+
+    # Current events / real-world lookups
+    current_signals = [
+        'news', 'election', 'stock', 'price of', 'weather', 'score',
+        'release date', 'announced', 'launched', 'worth', 'net worth',
+        'ceo of', 'president of', 'population of', 'capital of',
+        'happening', 'update on', 'status of', 'reviews of',
+    ]
+    if any(sig in msg for sig in current_signals):
+        return True
+
+    # Factual lookup patterns
+    lookup_patterns = [
+        r'\b(who|what|when|where) (is|was|are|were) (the |a )?\w+.{5,}',
+        r'how (much|many) (does|do|did|is|are|will)',
+        r'(latest|current|recent|new) .{3,} (version|release|update|price|status|news)',
+        r'(compare|difference between|vs\.?|versus) .+ (and|vs)',
+        r'(best|top|recommended) .{3,} (for|in|of) \d{4}',
+    ]
+    if any(re.search(pat, msg) for pat in lookup_patterns):
+        return True
+
+    return False
+
 # ==================== WebSocket Handlers ====================
 
 @app.websocket("/ws/chat")
@@ -763,26 +761,31 @@ async def chat_websocket(websocket: WebSocket):
 
                 # Build messages
                 system_prompt = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
+                # For simple/short queries, tell Qwen to skip extended thinking
+                msg_lower = message.lower().strip()
+                is_simple = len(message.split()) < 10 or any(
+                    msg_lower.startswith(s) for s in ['hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'ok', 'yes', 'no']
+                )
+                if is_simple:
+                    system_prompt = "/no_think\n" + system_prompt
                 messages = [{'role': 'system', 'content': system_prompt}]
 
                 for msg in history:
                     messages.append({'role': msg['role'], 'content': msg['content']})
 
-                # Auto web search for queries that might need current info
-                search_keywords = ['current', 'recent', 'latest', 'today', 'now', '2024', '2025', '2026', 'news', 'update', 'happening']
-                query_lower = message.lower()
-                if any(kw in query_lower for kw in search_keywords):
+                # Auto web search when the query likely needs current/factual info
+                if should_web_search(message):
                     try:
-                        await websocket.send_json({'type': 'token', 'content': 'Searching for up-to-date information...\n\n'})
+                        await websocket.send_json({'type': 'token', 'content': 'Searching the web...\n\n'})
                         with DDGS() as ddgs:
-                            search_results = list(ddgs.text(message, max_results=3))
+                            search_results = list(ddgs.text(message, region='us-en', max_results=5))
                             if search_results:
                                 search_context = "\n\nWeb search results:\n"
                                 for i, r in enumerate(search_results, 1):
-                                    search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:300]}\n"
+                                    search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:500]}\n"
                                 messages.append({
                                     'role': 'system',
-                                    'content': f'Web search results for the user\'s query:\n{search_context}\n\nUse this information to provide accurate responses.'
+                                    'content': f'Web search results for the user\'s query:\n{search_context}\n\nUse these search results to provide an accurate, up-to-date response. Cite sources when relevant.'
                                 })
                     except Exception as e:
                         logger.warning(f"Web search failed: {e}")
@@ -794,12 +797,52 @@ async def chat_websocket(websocket: WebSocket):
                 max_tokens = estimate_tokens_needed(message)
                 logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
 
-                # Stream from vLLM — send tokens directly, filter only the final saved response
+                # Stream from vLLM — filter <think> blocks before sending to user
                 full_response = ""
+                in_think_block = False
+                think_buffer = ""
 
                 async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
+                    # Strip leaked model special tokens
+                    token = re.sub(r'<\|[^|]*\|>', '', token)
+                    if not token:
+                        continue
                     full_response += token
-                    await websocket.send_json({'type': 'token', 'content': token})
+
+                    # Buffer tokens to detect and skip <think>...</think> blocks
+                    think_buffer += token
+
+                    if not in_think_block:
+                        # Check if we're entering a think block
+                        if '<think>' in think_buffer:
+                            # Send everything before the <think> tag
+                            before = think_buffer.split('<think>')[0]
+                            if before:
+                                await websocket.send_json({'type': 'token', 'content': before})
+                            in_think_block = True
+                            think_buffer = think_buffer.split('<think>', 1)[1]
+                        elif '<think' in think_buffer and '>' not in think_buffer.split('<think')[-1]:
+                            # Partial <think tag, keep buffering
+                            pass
+                        else:
+                            # No think tag, flush buffer
+                            await websocket.send_json({'type': 'token', 'content': think_buffer})
+                            think_buffer = ""
+                    else:
+                        # Inside think block — check for closing tag
+                        if '</think>' in think_buffer:
+                            # Discard everything up to and including </think>
+                            after = think_buffer.split('</think>', 1)[1]
+                            think_buffer = after
+                            in_think_block = False
+                            # Flush any remaining content after the close tag
+                            if think_buffer:
+                                await websocket.send_json({'type': 'token', 'content': think_buffer})
+                                think_buffer = ""
+
+                # Flush any remaining buffer (shouldn't happen normally)
+                if think_buffer and not in_think_block:
+                    await websocket.send_json({'type': 'token', 'content': think_buffer})
 
                 # Filter full response for saving (preserves <think> tags and markdown)
                 full_response = filter_reasoning_text(full_response)
