@@ -520,6 +520,70 @@ pre:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { background: var(--accent_primary); color: #fff; }
 .copy-btn.copied { background: var(--status_connected); color: #fff; opacity: 1; }
 
+/* === Thinking Block (collapsible <think> tags) === */
+.thinking-block {
+    margin: 8px 0;
+    border: 1px solid var(--bg_tertiary);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.thinking-block summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text_secondary);
+    background: var(--bg_tertiary);
+    user-select: none;
+    list-style: none;
+}
+.thinking-block summary::before {
+    content: '\25B6';
+    display: inline-block;
+    margin-right: 6px;
+    font-size: 10px;
+    transition: transform 0.2s;
+}
+.thinking-block[open] summary::before {
+    transform: rotate(90deg);
+}
+.thinking-block summary:hover {
+    color: var(--text_primary);
+}
+.thinking-content {
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--text_secondary);
+    line-height: 1.5;
+    max-height: 400px;
+    overflow-y: auto;
+    border-top: 1px solid var(--bg_tertiary);
+}
+.thinking-content p { margin-bottom: 6px; }
+.thinking-content p:last-child { margin-bottom: 0; }
+
+/* Streaming state — thinking in progress */
+.thinking-block.streaming {
+    border-color: var(--accent_primary);
+}
+.thinking-block.streaming .thinking-header {
+    padding: 8px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent_primary);
+    background: var(--bg_tertiary);
+    animation: pulse 1.5s infinite;
+}
+.thinking-block.streaming .thinking-content {
+    white-space: pre-wrap;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-size: 12px;
+}
+.streaming-text {
+    white-space: pre-wrap;
+    line-height: 1.5;
+}
+
 .message-content table {
     border-collapse: collapse;
     margin: 8px 0;

@@ -72,6 +72,12 @@ if (document.readyState === 'loading') {
 
 // ==================== Utilities ====================
 
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function generateId() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random() * 16 | 0;
@@ -468,17 +474,48 @@ function addMessage(content, role, timestamp = null) {
 function appendToLastMessage(content) {
     const messages = document.getElementById('messages');
     const lastMsg = messages.lastElementChild;
-    if (lastMsg?.classList.contains('assistant')) {
-        const contentDiv = lastMsg.querySelector('.message-content');
-        if (contentDiv) {
-            const currentText = contentDiv.textContent || '';
-            contentDiv.textContent = currentText + content;
-            if (lastMsg.dataset.originalContent !== undefined) {
-                lastMsg.dataset.originalContent = currentText + content;
+    if (!lastMsg?.classList.contains('assistant')) return;
+
+    const contentDiv = lastMsg.querySelector('.message-content');
+    if (!contentDiv) return;
+
+    // Accumulate raw content in data attribute (source of truth)
+    const rawContent = (lastMsg.dataset.originalContent || '') + content;
+    lastMsg.dataset.originalContent = rawContent;
+
+    // Display based on <think> tag state
+    const hasThinkOpen = rawContent.includes('<think>');
+    const hasThinkClose = rawContent.includes('</think>');
+
+    if (hasThinkOpen && !hasThinkClose) {
+        // Still inside thinking block — show thinking indicator
+        const thinkStart = rawContent.indexOf('<think>') + 7;
+        const thinkText = rawContent.substring(thinkStart);
+        contentDiv.innerHTML =
+            '<div class="thinking-block streaming">' +
+            '<div class="thinking-header">Thinking...</div>' +
+            '<div class="thinking-content">' + escapeHtml(thinkText) + '</div>' +
+            '</div>';
+    } else if (hasThinkOpen && hasThinkClose) {
+        // Think block complete — show collapsed think + streaming response
+        const thinkMatch = rawContent.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/);
+        if (thinkMatch) {
+            let html = '<details class="thinking-block"><summary>Thinking</summary>' +
+                '<div class="thinking-content">' + escapeHtml(thinkMatch[1].trim()) + '</div></details>';
+            const afterThink = thinkMatch[2];
+            if (afterThink.trim()) {
+                html += '<div class="streaming-text">' + escapeHtml(afterThink) + '</div>';
             }
+            contentDiv.innerHTML = html;
+        } else {
+            contentDiv.textContent = rawContent;
         }
-        scrollToBottom();
+    } else {
+        // No think tags — show raw text
+        contentDiv.textContent = rawContent;
     }
+
+    scrollToBottom();
 }
 
 function showLoading() {
@@ -521,12 +558,39 @@ function renderMarkdown() {
     document.querySelectorAll('.message.assistant[data-needs-markdown="true"]').forEach(msg => {
         const contentDiv = msg.querySelector('.message-content');
         if (!contentDiv) return;
-        const content = contentDiv.textContent || contentDiv.innerText;
+        // Read raw content from data attribute (source of truth), fallback to textContent
+        const content = msg.dataset.originalContent || contentDiv.textContent || contentDiv.innerText;
         if (!content || !content.trim()) return;
 
         const tsDiv = msg.querySelector('.message-timestamp');
         try {
-            const html = marked.parse(content);
+            let html = '';
+
+            // Handle <think> blocks — extract and render as collapsible sections
+            const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
+            let lastIndex = 0;
+            let match;
+            let hasThinkBlocks = false;
+
+            while ((match = thinkRegex.exec(content)) !== null) {
+                hasThinkBlocks = true;
+                // Render content before the think block
+                const before = content.substring(lastIndex, match.index);
+                if (before.trim()) html += marked.parse(before);
+                // Render think block as collapsible section with markdown inside
+                const thinkHtml = marked.parse(match[1].trim());
+                html += '<details class="thinking-block"><summary>Thinking</summary>' +
+                    '<div class="thinking-content">' + thinkHtml + '</div></details>';
+                lastIndex = match.index + match[0].length;
+            }
+
+            // Render remaining content after last think block
+            const remaining = content.substring(lastIndex);
+            if (remaining.trim()) html += marked.parse(remaining);
+
+            // If no think blocks, just parse everything as markdown
+            if (!hasThinkBlocks) html = marked.parse(content);
+
             const originalContent = msg.dataset.originalContent || content;
             contentDiv.innerHTML = html;
             msg.dataset.needsMarkdown = 'false';
@@ -534,12 +598,13 @@ function renderMarkdown() {
 
             if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
 
-            // Message copy button
+            // Message copy button (copies raw text without think blocks)
             if (!msg.querySelector('.message-copy-btn')) {
+                const copyText = originalContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'copy-btn message-copy-btn';
                 copyBtn.innerHTML = '&#128203; Copy';
-                copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(originalContent, copyBtn); };
+                copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(copyText, copyBtn); };
                 msg.appendChild(copyBtn);
             }
 
