@@ -111,20 +111,18 @@ function updateStatus(status) {
     if (status === 'connected') {
         dot.className = 'status-dot connected';
         modelAvailable = true;
-        const input = document.getElementById('input');
         const send = document.getElementById('send');
-        if (input) input.disabled = false;
         if (send) send.disabled = false;
     } else if (status === 'loading') {
         dot.className = 'status-dot loading';
         modelAvailable = false;
-        const input = document.getElementById('input');
         const send = document.getElementById('send');
-        if (input) input.disabled = true;
         if (send) send.disabled = true;
     } else {
         dot.className = 'status-dot';
         modelAvailable = false;
+        const send = document.getElementById('send');
+        if (send) send.disabled = true;
     }
 }
 
@@ -177,7 +175,6 @@ function connectWS() {
         } else if (data.type === 'done') {
             isGenerating = false;
             document.getElementById('send').disabled = false;
-            document.getElementById('input').disabled = false;
             document.getElementById('input').focus();
             renderMarkdown();
             loadConversations();
@@ -185,7 +182,6 @@ function connectWS() {
             removeLoading();
             isGenerating = false;
             document.getElementById('send').disabled = false;
-            document.getElementById('input').disabled = false;
             const errorMsg = document.createElement('div');
             errorMsg.className = 'message assistant';
             errorMsg.innerHTML = `<div class="message-content" style="color:#ef4444;">${data.content}</div>`;
@@ -416,14 +412,32 @@ async function performWebSearch() {
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
+    if (document.getElementById('inputArea')?.classList.contains('welcome-mode')) return;
     textarea.style.height = 'auto';
     const maxH = window.innerHeight * 0.5;
     textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 24), maxH) + 'px';
 }
 
+function exitWelcomeMode() {
+    const area = document.getElementById('inputArea');
+    if (area) area.classList.remove('welcome-mode');
+    const input = document.getElementById('input');
+    if (input) {
+        input.style.height = '';
+        autoResizeTextarea(input);
+    }
+}
+
+function enterWelcomeMode() {
+    const area = document.getElementById('inputArea');
+    if (area) area.classList.add('welcome-mode');
+    const input = document.getElementById('input');
+    if (input) input.style.height = '';
+}
+
 function focusInput() {
     const input = document.getElementById('input');
-    if (input && !input.disabled) input.focus();
+    if (input) input.focus();
 }
 
 function sendMessage() {
@@ -432,6 +446,7 @@ function sendMessage() {
     if (!modelAvailable || !message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
 
     document.querySelector('.welcome')?.remove();
+    exitWelcomeMode();
     addMessage(message, 'user');
     input.value = '';
     autoResizeTextarea(input);
@@ -439,7 +454,6 @@ function sendMessage() {
 
     isGenerating = true;
     document.getElementById('send').disabled = true;
-    document.getElementById('input').disabled = true;
 
     ws.send(JSON.stringify({
         message: message,
@@ -746,6 +760,7 @@ async function loadConversation(id) {
     const data = await resp.json();
     const messages = document.getElementById('messages');
     messages.innerHTML = '';
+    exitWelcomeMode();
     data.messages.forEach(msg => addMessage(msg.content, msg.role, msg.timestamp));
     setTimeout(() => renderMarkdown(), 100);
     loadConversations();
@@ -754,6 +769,7 @@ async function loadConversation(id) {
 function newChat() {
     currentConvId = generateId();
     document.getElementById('messages').innerHTML = '<div class="welcome"><h2>New Conversation</h2><p>Start chatting!</p></div>';
+    enterWelcomeMode();
     loadConversations();
 }
 

@@ -424,7 +424,20 @@ body {
     max-height: 200px;
 }
 .input-container textarea::placeholder { color: var(--text_tertiary); }
-.input-container textarea:disabled { opacity: 0.5; }
+
+/* Welcome mode: large input area taking bottom 1/3 of screen */
+.input-area.welcome-mode {
+    display: flex;
+    flex-direction: column;
+    height: 33vh;
+}
+.input-area.welcome-mode .input-container {
+    flex: 1;
+}
+.input-area.welcome-mode .input-container textarea {
+    height: 100%;
+    max-height: none;
+}
 #send {
     border: none;
     background: var(--accent_primary);

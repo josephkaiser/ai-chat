@@ -786,8 +786,6 @@ async def chat_websocket(websocket: WebSocket):
                     except Exception as e:
                         logger.warning(f"Web search failed: {e}")
 
-                messages.append({'role': 'user', 'content': message})
-
                 # Signal start
                 await websocket.send_json({'type': 'start'})
 
