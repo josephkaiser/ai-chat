@@ -101,6 +101,7 @@
     <div class="chat welcome-layout">
         <div class="messages" id="messages">
             <div class="welcome">
+                <h1 style="font-weight:700; margin:0 0 0.25em;">{{ model_name }}</h1>
                 <h2>Welcome</h2>
                 <p>Start a conversation</p>
             </div>
@@ -140,6 +141,7 @@
 
     <script>
         window.THEMES = {{ themes_json|safe }};
+        window.MODEL_NAME = "{{ model_name }}";
     </script>
     <script src="/static/app.js"></script>
 </body>

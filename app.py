@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-8B")
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-27B")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {MODEL_NAME}")
@@ -481,6 +481,7 @@ async def home(request: Request):
         return templates.TemplateResponse("index.html", {
             "request": request,
             "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
+            "model_name": MODEL_NAME,
         })
     except Exception as e:
         logger.error(f"Error generating home page: {e}\n{traceback.format_exc()}")
