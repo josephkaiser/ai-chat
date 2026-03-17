@@ -5,7 +5,7 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model Qwen/Qwen3-8B
+      --model qwen/qwen3.5-9B
       --host 0.0.0.0
       --port 8000
       --gpu-memory-utilization 0.90
@@ -36,7 +36,7 @@ services:
       - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - MODEL_NAME=Qwen/Qwen3-8B
+      - MODEL_NAME=qwen/qwen3.5-9B
       - HF_CACHE_PATH=/cache/huggingface
     depends_on:
       - vllm
