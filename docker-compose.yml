@@ -1,26 +1,20 @@
 services:
-  # Single vLLM instance - model can be switched dynamically
   vllm:
-    # Using latest tag for CUDA 12.8+ support
-    # For CUDA 12.1-12.7, use: cu121
-    # For CUDA 11.8, use: cu118
     image: vllm/vllm-openai:latest
     container_name: vllm
     ports:
       - "8001:8000"
     command: >
-      --model Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+      --model Qwen/Qwen3-8B
       --host 0.0.0.0
       --port 8000
-      --gpu-memory-utilization 0.95
+      --gpu-memory-utilization 0.90
       --max-model-len 32768
-      --quantization awq_marlin
       --swap-space 8
       --enable-prefix-caching
       --max-num-seqs 256
       --enable-chunked-prefill
     volumes:
-      # Cache models to avoid re-downloading on restart
       - ~/.cache/huggingface:/root/.cache/huggingface
     deploy:
       resources:
@@ -38,16 +32,9 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for model switching
-      - .:/app/compose  # Mount docker-compose directory
-    env_file:
-      - .env  # Load environment variables from .env file (gitignored)
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - VLLM_CONTAINER=vllm
-      - COMPOSE_DIR=/app/compose
-      - COMPOSE_FILE=docker-compose.yml
-      - HF_TOKEN=${HF_TOKEN:-}  # Hugging Face token for gated models (optional, from .env)
+      - MODEL_NAME=Qwen/Qwen3-8B
     depends_on:
       - vllm
     restart: unless-stopped
