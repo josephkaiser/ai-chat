@@ -5,172 +5,141 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>AI Chat</title>
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <link rel="stylesheet" href="/api/css?mode={{ mode }}">
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="sidebar" id="sidebar">
-        <button class="new-chat-icon-btn" onclick="newChat()" title="New Chat">+</button>
-        <div class="sidebar-content">
-        <div class="sidebar-header">
-            <button class="new-chat-btn" onclick="newChat()">+ New Chat</button>
-        </div>
-            <div class="search-container">
-                <input type="text" class="search-input" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)" />
-                <div class="search-results" id="searchResults" style="display: none;"></div>
-        </div>
-        <div class="conversations" id="conversations"></div>
+    <!-- Menu button with status dot -->
+    <button class="menu-btn" id="menuBtn" onclick="toggleMenu()">
+        &#9776;
+        <span class="status-dot loading" id="statusDot"></span>
+    </button>
+
+    <!-- Menu overlay -->
+    <div class="overlay" id="menuOverlay" onclick="closeMenu()">
+        <div class="menu-panel" onclick="event.stopPropagation()">
+            <div class="panel-header">
+                <span>AI Chat</span>
+                <button onclick="closeMenu()">&times;</button>
+            </div>
+            <div class="menu-actions">
+                <button onclick="newChat(); closeMenu()">+ New Chat</button>
+                <button onclick="closeMenu(); showDashboard()">Dashboard</button>
+                <button onclick="closeMenu(); showSettings()">Settings</button>
+            </div>
+            <div class="menu-search">
+                <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
+                <div class="search-results" id="searchResults"></div>
+            </div>
+            <div class="menu-chats" id="conversations"></div>
         </div>
     </div>
 
-    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
-
-    <div class="main">
-        <div class="header">
-            <div class="header-left">
-                <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" id="sidebarToggle">&#128214;</button>
-                <h1>AI Chat</h1>
+    <!-- Dashboard overlay -->
+    <div class="overlay" id="dashboardOverlay" onclick="closeDashboard()">
+        <div class="dashboard-panel" onclick="event.stopPropagation()">
+            <div class="panel-header">
+                <span>Dashboard</span>
+                <button onclick="closeDashboard()">&times;</button>
             </div>
-            <div class="header-right">
-                <div class="status">
-                    <div class="status-dot booting" id="statusDot"></div>
-                    <span id="statusText">Connecting...</span>
-                    <div class="status-progress-container" id="statusProgressContainer" style="display: block;">
-                        <div class="status-progress-bar" id="statusProgressBar"></div>
-                        <span class="status-progress-text" id="statusProgressText"></span>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="messages" id="messages">
-            <div class="welcome">
-                <h2>Welcome!</h2>
-                <p>Start a conversation with AI</p>
-            </div>
-        </div>
-
-        <div class="input-area">
-            <div class="input-container" onclick="focusInput()">
-                <textarea
-                    id="input"
-                    placeholder="Type your message..."
-                    rows="2"
-                    onkeydown="handleKeyDown(event)"
-                    oninput="autoResizeTextarea(this)"
-                ></textarea>
-                <button id="send" onclick="sendMessage()" title="Send message">&#10148;</button>
+            <div class="dashboard-content" id="dashboardContent">
+                <div style="text-align:center; padding:30px; color:var(--text_secondary)">Loading...</div>
             </div>
         </div>
     </div>
 
-    <!-- Settings Menu (Bottom Left) -->
-    <div class="settings-menu" id="settingsMenu">
-        <button class="settings-menu-toggle" onclick="toggleSettingsMenu(event)" title="Settings">
-            <svg class="gear-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M12 1v6m0 6v6m11-7h-6m-6 0H1m16.364-5.636l-4.243 4.243m0 4.243l4.243 4.243M6.636 6.636l4.243 4.243m0 4.243l-4.243 4.243"/>
-            </svg>
-        </button>
-        <div class="settings-menu-content" id="settingsMenuContent">
-            <button class="settings-menu-item" onclick="toggleTheme()" title="Toggle theme" id="themeToggleBtn">
-                <span class="settings-icon" id="themeIcon">&#127769;</span>
-                <span class="settings-label">Theme</span>
-            </button>
-            <button class="settings-menu-item" onclick="toggleWebSearch()" title="Web Search">
-                <span class="settings-icon">&#128269;</span>
-                <span class="settings-label">Web Search</span>
-            </button>
-            <button class="settings-menu-item" onclick="toggleLogViewer()" title="View Logs">
-                <span class="settings-icon">&#128203;</span>
-                <span class="settings-label">Logs</span>
-            </button>
-            <button class="settings-menu-item" onclick="openSystemPromptEditor()" title="Edit System Prompt">
-                <span class="settings-icon">&#9881;</span>
-                <span class="settings-label">System Prompt</span>
-            </button>
+    <!-- Settings overlay -->
+    <div class="overlay" id="settingsOverlay" onclick="closeSettings()">
+        <div class="settings-panel" onclick="event.stopPropagation()">
+            <div class="panel-header">
+                <span>Settings</span>
+                <button onclick="closeSettings()">&times;</button>
+            </div>
+            <div class="settings-content">
+                <button onclick="toggleTheme()">
+                    <span class="settings-icon" id="themeIcon">&#127769;</span>
+                    <span>Toggle Theme</span>
+                </button>
+                <button onclick="closeSettings(); openSystemPromptEditor()">
+                    <span class="settings-icon">&#9881;</span>
+                    <span>System Prompt</span>
+                </button>
+                <button onclick="closeSettings(); showWebSearch()">
+                    <span class="settings-icon">&#128269;</span>
+                    <span>Web Search</span>
+                </button>
+            </div>
         </div>
     </div>
 
-    <div class="log-viewer" id="logViewer">
-        <div class="log-viewer-header">
-            <h3>Terminal Output</h3>
-            <button class="log-viewer-close" onclick="toggleLogViewer()">x</button>
-        </div>
-        <div class="log-viewer-content" id="logContent"></div>
-    </div>
-
-    <!-- Web Search Modal -->
-    <div class="web-search-modal" id="webSearchModal">
-        <div class="web-search-header">
-            <h3>Web Search</h3>
-            <button class="web-search-close" onclick="toggleWebSearch()">x</button>
-        </div>
-        <div class="web-search-content">
+    <!-- Web Search overlay -->
+    <div class="overlay" id="webSearchOverlay" onclick="closeWebSearch()">
+        <div class="web-search-panel" onclick="event.stopPropagation()">
+            <div class="panel-header">
+                <span>Web Search</span>
+                <button onclick="closeWebSearch()">&times;</button>
+            </div>
             <div class="web-search-form">
                 <div class="web-search-input-group">
-                    <input type="text" class="web-search-input" id="webSearchInput" placeholder="Search the web..." />
-                    <button class="web-search-btn-submit" onclick="performWebSearch()">Search</button>
+                    <input type="text" id="webSearchInput" placeholder="Search the web..." onkeydown="if(event.key==='Enter'){event.preventDefault();performWebSearch()}">
+                    <button onclick="performWebSearch()">Search</button>
                 </div>
                 <div class="web-search-sources">
-                    <label class="web-search-source-checkbox">
-                        <input type="checkbox" value="google" checked />
-                        <span>Google</span>
-                    </label>
-                    <label class="web-search-source-checkbox">
-                        <input type="checkbox" value="wikipedia" checked />
-                        <span>Wikipedia</span>
-                    </label>
-                    <label class="web-search-source-checkbox">
-                        <input type="checkbox" value="reddit" checked />
-                        <span>Reddit</span>
-                    </label>
-                    <label class="web-search-source-checkbox">
-                        <input type="checkbox" value="github" />
-                        <span>GitHub</span>
-                    </label>
-                    <label class="web-search-source-checkbox">
-                        <input type="checkbox" value="stackoverflow" />
-                        <span>Stack Overflow</span>
-                    </label>
+                    <label class="web-search-source-checkbox"><input type="checkbox" value="google" checked><span>Google</span></label>
+                    <label class="web-search-source-checkbox"><input type="checkbox" value="wikipedia" checked><span>Wikipedia</span></label>
+                    <label class="web-search-source-checkbox"><input type="checkbox" value="reddit" checked><span>Reddit</span></label>
+                    <label class="web-search-source-checkbox"><input type="checkbox" value="github"><span>GitHub</span></label>
+                    <label class="web-search-source-checkbox"><input type="checkbox" value="stackoverflow"><span>Stack Overflow</span></label>
                 </div>
             </div>
             <div class="web-search-results" id="webSearchResults"></div>
         </div>
     </div>
 
-    <div class="modal" id="renameModal">
-        <div class="modal-content">
-            <h3>Rename Conversation</h3>
-            <input type="text" id="renameInput" placeholder="Enter new title...">
-            <div class="modal-buttons">
-                <button class="modal-btn cancel" onclick="closeRenameModal()">Cancel</button>
-                <button class="modal-btn confirm" onclick="confirmRename()">Rename</button>
+    <!-- Main chat area -->
+    <div class="chat">
+        <div class="messages" id="messages">
+            <div class="welcome">
+                <h2>Welcome</h2>
+                <p>Start a conversation</p>
+            </div>
+        </div>
+        <div class="input-area">
+            <div class="input-container" onclick="focusInput()">
+                <textarea id="input" placeholder="Type your message..." rows="1" onkeydown="handleKeyDown(event)" oninput="autoResizeTextarea(this)"></textarea>
+                <button id="send" onclick="sendMessage()">&#10148;</button>
             </div>
         </div>
     </div>
 
-    <!-- System Prompt Editor Modal -->
-    <div class="modal" id="systemPromptModal">
-        <div class="modal-content" style="max-width: 800px; max-height: 80vh; display: flex; flex-direction: column;">
-            <h3>Edit System Prompt</h3>
-            <textarea id="systemPromptInput" placeholder="Enter system prompt..." style="flex: 1; min-height: 300px; padding: 12px; font-family: monospace; font-size: 13px; resize: vertical; background: {{ theme_colors.bg_tertiary }}; color: {{ theme_colors.text_primary }}; border: none; border-radius: 4px; margin-bottom: 15px;"></textarea>
-            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
-                <button class="modal-btn" onclick="resetSystemPrompt()" style="background: {{ theme_colors.btn_secondary }}; color: {{ theme_colors.text_primary }};">Reset to Default</button>
-                <span style="font-size: 12px; color: {{ theme_colors.text_secondary }}; flex: 1;">Leave empty to use default prompt</span>
-            </div>
+    <!-- Rename modal -->
+    <div class="modal" id="renameModal">
+        <div class="modal-content">
+            <h3>Rename Conversation</h3>
+            <input type="text" id="renameInput" placeholder="Enter new title..." onkeydown="if(event.key==='Enter'){event.preventDefault();confirmRename()}">
             <div class="modal-buttons">
-                <button class="modal-btn cancel" onclick="closeSystemPromptModal()">Cancel</button>
-                <button class="modal-btn confirm" onclick="saveSystemPrompt()">Save</button>
+                <button onclick="closeRenameModal()">Cancel</button>
+                <button class="primary" onclick="confirmRename()">Rename</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Prompt modal -->
+    <div class="modal" id="systemPromptModal">
+        <div class="modal-content" style="max-width:600px;">
+            <h3>System Prompt</h3>
+            <textarea id="systemPromptInput" placeholder="Enter system prompt... (leave empty for default)"></textarea>
+            <div class="modal-buttons">
+                <button onclick="resetSystemPrompt()">Reset</button>
+                <button onclick="closeSystemPromptModal()">Cancel</button>
+                <button class="primary" onclick="saveSystemPrompt()">Save</button>
             </div>
         </div>
     </div>
 
     <script>
-        window.APP_CONFIG = {
-            colors: {{ colors_json|safe }}
-        };
+        window.THEMES = {{ themes_json|safe }};
     </script>
     <script src="/static/app.js"></script>
 </body>

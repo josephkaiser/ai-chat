@@ -1,7 +1,6 @@
-// AI Chat Application - Main JavaScript
-// Simplified single-model setup (vLLM + Qwen)
+// AI Chat Application
 
-const CONFIG = window.APP_CONFIG || {};
+// ==================== State ====================
 
 let ws = null;
 let logWs = null;
@@ -12,21 +11,53 @@ let modelAvailable = false;
 let markedReady = false;
 let healthPollInterval = null;
 
-// Initialize marked library when ready
+// ==================== Theme ====================
+
+function applyTheme(mode) {
+    const themes = window.THEMES || {};
+    const colors = themes[mode] || themes.light || {};
+    const root = document.documentElement;
+    for (const [key, value] of Object.entries(colors)) {
+        root.style.setProperty('--' + key, value);
+    }
+    localStorage.setItem('theme', mode);
+
+    // Update highlight.js theme
+    const hljsLink = document.getElementById('hljs-theme');
+    if (hljsLink) {
+        hljsLink.href = mode === 'dark'
+            ? 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css'
+            : 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+    }
+
+    // Update theme icon
+    const icon = document.getElementById('themeIcon');
+    if (icon) icon.innerHTML = mode === 'dark' ? '&#9728;' : '&#127769;';
+}
+
+function toggleTheme() {
+    const current = localStorage.getItem('theme') || 'light';
+    applyTheme(current === 'light' ? 'dark' : 'light');
+    // Re-render markdown for new theme
+    document.querySelectorAll('.message.assistant[data-rendered="true"]').forEach(msg => {
+        msg.dataset.needsMarkdown = 'true';
+        msg.dataset.rendered = 'false';
+    });
+    renderMarkdown();
+}
+
+// Apply theme immediately
+applyTheme(localStorage.getItem('theme') || 'light');
+
+// ==================== Marked Init ====================
+
 function initMarked() {
     if (typeof marked !== 'undefined') {
         markedReady = true;
         marked.setOptions({
-            breaks: true,
-            gfm: true,
-            headerIds: false,
-            mangle: false,
-            pedantic: false,
-            sanitize: false,
-            smartLists: true,
-            smartypants: true
+            breaks: true, gfm: true, headerIds: false, mangle: false,
+            pedantic: false, sanitize: false, smartLists: true, smartypants: true
         });
-        console.log('Marked library loaded');
         renderMarkdown();
     } else {
         setTimeout(initMarked, 50);
@@ -39,69 +70,73 @@ if (document.readyState === 'loading') {
     initMarked();
 }
 
+// ==================== Utilities ====================
+
 function generateId() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random() * 16 | 0;
-        return (c == 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
     });
 }
 
-function updateStatus(status, progress = null, message = null) {
-    const statusDot = document.getElementById('statusDot');
-    const statusText = document.getElementById('statusText');
-    const progressContainer = document.getElementById('statusProgressContainer');
-    const progressBar = document.getElementById('statusProgressBar');
-    const progressText = document.getElementById('statusProgressText');
+function formatTimestamp(isoString) {
+    const date = new Date(isoString);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const msgDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    if (msgDate.getTime() === today.getTime()) return timeStr;
+    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+    if (msgDate.getTime() === yesterday.getTime()) return `Yesterday ${timeStr}`;
+    return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${timeStr}`;
+}
 
-    if (!statusDot || !statusText) return;
+function formatFullTimestamp(isoString) {
+    const date = new Date(isoString);
+    return `${date.toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })} ${date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`;
+}
 
-    if (status === true || status === 'connected') {
-        statusDot.className = 'status-dot';
-        statusText.textContent = 'Connected';
-        if (progressContainer) progressContainer.style.display = 'none';
+// ==================== Status ====================
+
+function updateStatus(status) {
+    const dot = document.getElementById('statusDot');
+    if (!dot) return;
+
+    if (status === 'connected') {
+        dot.className = 'status-dot connected';
         modelAvailable = true;
         const input = document.getElementById('input');
         const send = document.getElementById('send');
         if (input) input.disabled = false;
         if (send) send.disabled = false;
-    } else if (status === false || status === 'disconnected') {
-        statusDot.className = 'status-dot disconnected';
-        statusText.textContent = message || 'Disconnected';
-        modelAvailable = false;
     } else if (status === 'loading') {
-        statusDot.className = 'status-dot booting';
-        statusText.textContent = message || 'Loading model...';
-        if (progressContainer && progress !== null) {
-            progressContainer.style.display = 'block';
-            if (progressBar) progressBar.style.setProperty('--progress', progress + '%');
-            if (progressText) progressText.textContent = message || '';
-        }
+        dot.className = 'status-dot loading';
         modelAvailable = false;
         const input = document.getElementById('input');
         const send = document.getElementById('send');
         if (input) input.disabled = true;
         if (send) send.disabled = true;
+    } else {
+        dot.className = 'status-dot';
+        modelAvailable = false;
     }
 }
 
-// Poll /health until model is available
 function startHealthPolling() {
     if (healthPollInterval) return;
-
     healthPollInterval = setInterval(async () => {
         try {
             const resp = await fetch('/health');
             const health = await resp.json();
             if (health.model_available) {
-                modelAvailable = true;
-                updateStatus(true);
+                updateStatus('connected');
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
             } else {
-                updateStatus('loading', null, health.message || 'Loading model...');
+                updateStatus('loading');
             }
         } catch (e) {
-            updateStatus('loading', null, 'Connecting...');
+            updateStatus('loading');
         }
     }, 3000);
 }
@@ -113,32 +148,26 @@ function connectWS() {
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
 
     ws.onopen = () => {
-        console.log('WebSocket connected');
-        // Check health on connect
         fetch('/health').then(r => r.json()).then(health => {
             if (health.model_available) {
-                modelAvailable = true;
-                updateStatus(true);
+                updateStatus('connected');
             } else {
-                updateStatus('loading', null, health.message || 'Model loading...');
+                updateStatus('loading');
                 startHealthPolling();
             }
         }).catch(() => {
-            updateStatus('loading', null, 'Checking model...');
+            updateStatus('loading');
             startHealthPolling();
         });
     };
 
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-
         if (data.type === 'start') {
             removeLoading();
             addMessage('', 'assistant');
         } else if (data.type === 'token') {
             appendToLastMessage(data.content);
-        } else if (data.type === 'message_id') {
-            // Could store for feedback
         } else if (data.type === 'done') {
             isGenerating = false;
             document.getElementById('send').disabled = false;
@@ -151,136 +180,192 @@ function connectWS() {
             isGenerating = false;
             document.getElementById('send').disabled = false;
             document.getElementById('input').disabled = false;
-
             const errorMsg = document.createElement('div');
             errorMsg.className = 'message assistant';
-            errorMsg.innerHTML = `<div class="message-content" style="color: #ef4444;">${data.content}</div>`;
+            errorMsg.innerHTML = `<div class="message-content" style="color:#ef4444;">${data.content}</div>`;
             document.getElementById('messages').appendChild(errorMsg);
             scrollToBottom();
         }
     };
 
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        updateStatus(false, null, 'Connection error');
-    };
-
+    ws.onerror = () => updateStatus('disconnected');
     ws.onclose = () => {
-        console.log('WebSocket closed, reconnecting...');
-        updateStatus(false, null, 'Reconnecting...');
+        updateStatus('disconnected');
         setTimeout(connectWS, 2000);
     };
 }
 
 function connectLogWS() {
+    if (logWs && logWs.readyState === WebSocket.OPEN) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     logWs = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
-
     logWs.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'log') {
-            const logContent = document.getElementById('logContent');
-            if (logContent) {
-                logContent.textContent += data.content;
-                logContent.scrollTop = logContent.scrollHeight;
+            const el = document.getElementById('dashLogs');
+            if (el) {
+                el.textContent += data.content;
+                el.scrollTop = el.scrollHeight;
             }
         }
     };
-
     logWs.onerror = () => { logWs = null; };
     logWs.onclose = () => { logWs = null; };
 }
 
-// ==================== Theme & Settings ====================
+// ==================== Menu ====================
 
-function toggleTheme() {
-    const currentMode = localStorage.getItem('theme') || 'light';
-    const newMode = currentMode === 'light' ? 'dark' : 'light';
-    localStorage.setItem('theme', newMode);
-    document.getElementById('settingsMenuContent').classList.remove('show');
-    window.location.href = `/?mode=${newMode}`;
+function toggleMenu() {
+    document.getElementById('menuOverlay').classList.toggle('show');
+}
+function closeMenu() {
+    document.getElementById('menuOverlay').classList.remove('show');
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-    const currentMode = localStorage.getItem('theme') || 'light';
-    const themeIcon = document.getElementById('themeIcon');
-    if (themeIcon) {
-        themeIcon.textContent = currentMode === 'light' ? '\ud83c\udf19' : '\u2600\ufe0f';
+// ==================== Dashboard ====================
+
+function showDashboard() {
+    document.getElementById('dashboardOverlay').classList.add('show');
+    loadDashboard();
+    connectLogWS();
+}
+function closeDashboard() {
+    document.getElementById('dashboardOverlay').classList.remove('show');
+}
+
+async function loadDashboard() {
+    const el = document.getElementById('dashboardContent');
+    try {
+        const resp = await fetch('/api/dashboard');
+        const data = await resp.json();
+
+        const statusClass = data.model_available ? 'connected' : 'loading';
+        const statusText = data.model_available ? 'Connected' : 'Loading / Unavailable';
+        const containerStatus = data.container ? (data.container.running ? 'Running' : data.container.status || 'Stopped') : 'Unknown';
+        const cache = data.cache || {};
+        const cacheStatus = cache.status || 'unknown';
+        const cacheSize = cache.size_display || '--';
+        const cacheDate = cache.last_modified ? new Date(cache.last_modified).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '--';
+
+        el.innerHTML = `
+            <div class="dash-section">
+                <h4>Model</h4>
+                <div class="dash-card">
+                    <div class="dash-row"><span class="label">Name</span><span class="value">${data.model_name}</span></div>
+                    <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
+                    <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
+                </div>
+            </div>
+            <div class="dash-section">
+                <h4>Cache</h4>
+                <div class="dash-card">
+                    <div class="dash-row"><span class="label">Status</span><span class="value">${cacheStatus}</span></div>
+                    <div class="dash-row"><span class="label">Size</span><span class="value">${cacheSize}</span></div>
+                    <div class="dash-row"><span class="label">Last Updated</span><span class="value">${cacheDate}</span></div>
+                </div>
+            </div>
+            <div class="dash-section">
+                <h4>Actions</h4>
+                <div class="dash-actions">
+                    <button class="dash-btn" onclick="dashValidate()">
+                        Validate Cache
+                        <div class="btn-desc">Check model files are present and complete</div>
+                    </button>
+                    <button class="dash-btn" onclick="dashRestart()">
+                        Restart vLLM
+                        <div class="btn-desc">Restart the inference server (keeps cached model)</div>
+                    </button>
+                    <button class="dash-btn danger" onclick="dashRedownload()">
+                        Redownload Model
+                        <div class="btn-desc">Delete cache and re-download from HuggingFace</div>
+                    </button>
+                </div>
+            </div>
+            <div class="dash-section">
+                <h4>Logs</h4>
+                <div class="dash-logs" id="dashLogs"></div>
+            </div>
+        `;
+    } catch (e) {
+        el.innerHTML = `<div style="padding:20px;color:var(--text_secondary)">Failed to load dashboard: ${e.message}</div>`;
     }
-});
+}
 
-function toggleSidebar() {
-    const sidebar = document.getElementById('sidebar');
-    const toggle = document.getElementById('sidebarToggle');
-    const overlay = document.getElementById('sidebarOverlay');
-
-    if (window.innerWidth <= 768) {
-        sidebar.classList.toggle('show');
-        if (sidebar.classList.contains('show')) {
-            if (overlay) { overlay.style.display = 'block'; overlay.classList.add('show'); }
+async function dashValidate() {
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Validating...';
+    try {
+        const resp = await fetch('/api/dashboard');
+        const data = await resp.json();
+        const cache = data.cache || {};
+        if (cache.status === 'valid') {
+            btn.textContent = 'Cache is valid';
+            btn.style.borderColor = 'var(--status_connected)';
+        } else if (cache.status === 'incomplete') {
+            btn.textContent = 'Cache incomplete — try redownloading';
+            btn.style.borderColor = '#f59e0b';
         } else {
-            if (overlay) { overlay.style.display = 'none'; overlay.classList.remove('show'); }
+            btn.textContent = 'No cache found — try redownloading';
+            btn.style.borderColor = 'var(--status_disconnected)';
         }
-    } else {
-        sidebar.classList.toggle('collapsed');
-        if (toggle) {
-            toggle.textContent = sidebar.classList.contains('collapsed') ? '\ud83d\udcd5' : '\ud83d\udcd6';
-        }
-        if (sidebar.classList.contains('collapsed')) {
-            if (overlay) { overlay.style.display = 'none'; overlay.classList.remove('show'); }
-        } else {
-            if (overlay) { overlay.style.display = 'block'; overlay.classList.add('show'); }
-        }
+    } catch (e) {
+        btn.textContent = 'Validation failed: ' + e.message;
     }
+    setTimeout(() => { btn.disabled = false; loadDashboard(); }, 3000);
 }
 
-// Start collapsed on desktop
-document.addEventListener('DOMContentLoaded', function() {
-    const sidebar = document.getElementById('sidebar');
-    const overlay = document.getElementById('sidebarOverlay');
-    const toggle = document.getElementById('sidebarToggle');
-
-    if (window.innerWidth > 768) {
-        sidebar.classList.add('collapsed');
-        if (overlay) { overlay.style.display = 'none'; overlay.classList.remove('show'); }
-        if (toggle) toggle.textContent = '\ud83d\udcd5';
+async function dashRestart() {
+    if (!confirm('Restart vLLM? The model will reload (takes a few minutes).')) return;
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Restarting...';
+    try {
+        const resp = await fetch('/api/vllm/restart', { method: 'POST' });
+        const data = await resp.json();
+        btn.textContent = data.message || 'Restarting...';
+        updateStatus('loading');
+        startHealthPolling();
+    } catch (e) {
+        btn.textContent = 'Restart failed: ' + e.message;
     }
-});
-
-function toggleLogViewer() {
-    const viewer = document.getElementById('logViewer');
-    viewer.classList.toggle('show');
-    document.getElementById('settingsMenuContent').classList.remove('show');
-    if (viewer.classList.contains('show') && !logWs) {
-        connectLogWS();
-    }
+    setTimeout(() => { btn.disabled = false; }, 5000);
 }
 
-function toggleSettingsMenu(event) {
-    event.stopPropagation();
-    const content = document.getElementById('settingsMenuContent');
-    content.classList.toggle('show');
+async function dashRedownload() {
+    if (!confirm('This will delete the cached model and re-download it from HuggingFace. This may take a while. Continue?')) return;
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Clearing cache and restarting...';
+    try {
+        const resp = await fetch('/api/model/redownload', { method: 'POST' });
+        const data = await resp.json();
+        btn.textContent = data.message || 'Redownloading...';
+        updateStatus('loading');
+        startHealthPolling();
+    } catch (e) {
+        btn.textContent = 'Failed: ' + e.message;
+    }
+    setTimeout(() => { btn.disabled = false; }, 10000);
 }
 
-document.addEventListener('click', function(event) {
-    const settingsMenu = document.getElementById('settingsMenu');
-    const settingsContent = document.getElementById('settingsMenuContent');
-    if (settingsContent && settingsContent.classList.contains('show')) {
-        if (!settingsMenu.contains(event.target)) {
-            settingsContent.classList.remove('show');
-        }
-    }
-});
+// ==================== Settings ====================
+
+function showSettings() {
+    document.getElementById('settingsOverlay').classList.add('show');
+}
+function closeSettings() {
+    document.getElementById('settingsOverlay').classList.remove('show');
+}
 
 // ==================== Web Search ====================
 
-function toggleWebSearch() {
-    const modal = document.getElementById('webSearchModal');
-    modal.classList.toggle('show');
-    document.getElementById('settingsMenuContent').classList.remove('show');
-    if (modal.classList.contains('show')) {
-        document.getElementById('webSearchInput').focus();
-    }
+function showWebSearch() {
+    document.getElementById('webSearchOverlay').classList.add('show');
+    document.getElementById('webSearchInput').focus();
+}
+function closeWebSearch() {
+    document.getElementById('webSearchOverlay').classList.remove('show');
 }
 
 async function performWebSearch() {
@@ -288,30 +373,26 @@ async function performWebSearch() {
     if (!query) return;
 
     const resultsDiv = document.getElementById('webSearchResults');
-    resultsDiv.innerHTML = '<div style="text-align: center; padding: 20px;">Searching...</div>';
+    resultsDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text_secondary)">Searching...</div>';
 
     const sources = [];
-    document.querySelectorAll('.web-search-source-checkbox input:checked').forEach(cb => {
-        sources.push(cb.value);
-    });
+    document.querySelectorAll('.web-search-source-checkbox input:checked').forEach(cb => sources.push(cb.value));
 
     try {
         const resp = await fetch('/api/web-search', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query, sources, max_results: 10 })
         });
         const data = await resp.json();
-
         resultsDiv.innerHTML = '';
+
         if (data.results && data.results.length > 0) {
             data.results.forEach(result => {
                 const item = document.createElement('div');
                 item.className = 'web-search-result';
                 item.innerHTML = `
-                    <div class="web-search-result-title">
-                        <a href="${result.url}" target="_blank">${result.title}</a>
-                    </div>
+                    <div class="web-search-result-title"><a href="${result.url}" target="_blank">${result.title}</a></div>
                     <div class="web-search-result-url">${result.url}</div>
                     <div class="web-search-result-snippet">${result.snippet}</div>
                     <div class="web-search-result-source">${result.source}</div>
@@ -319,68 +400,45 @@ async function performWebSearch() {
                 resultsDiv.appendChild(item);
             });
         } else {
-            resultsDiv.innerHTML = '<div style="text-align: center; padding: 20px;">No results found</div>';
+            resultsDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text_secondary)">No results found</div>';
         }
     } catch (e) {
-        resultsDiv.innerHTML = `<div style="text-align: center; padding: 20px; color: #ef4444;">Search failed: ${e.message}</div>`;
+        resultsDiv.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444">Search failed: ${e.message}</div>`;
     }
 }
-
-document.addEventListener('DOMContentLoaded', function() {
-    const searchInput = document.getElementById('webSearchInput');
-    if (searchInput) {
-        searchInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                performWebSearch();
-            }
-        });
-    }
-});
 
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
     textarea.style.height = 'auto';
-    const maxHeight = window.innerHeight * 0.66;
-    const newHeight = Math.min(Math.max(textarea.scrollHeight, 24), maxHeight);
-    textarea.style.height = newHeight + 'px';
+    const maxH = window.innerHeight * 0.5;
+    textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 24), maxH) + 'px';
 }
 
 function focusInput() {
     const input = document.getElementById('input');
-    if (input && !input.disabled) {
-        input.focus();
-        const len = input.value.length;
-        input.setSelectionRange(len, len);
-    }
+    if (input && !input.disabled) input.focus();
 }
 
 function sendMessage() {
     const input = document.getElementById('input');
     const message = input.value.trim();
-
-    if (!modelAvailable) return;
-    if (!message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+    if (!modelAvailable || !message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
 
     document.querySelector('.welcome')?.remove();
-
     addMessage(message, 'user');
     input.value = '';
     autoResizeTextarea(input);
-
     showLoading();
 
     isGenerating = true;
     document.getElementById('send').disabled = true;
     document.getElementById('input').disabled = true;
 
-    const customSystemPrompt = localStorage.getItem('customSystemPrompt') || '';
-
     ws.send(JSON.stringify({
         message: message,
         conversation_id: currentConvId,
-        system_prompt: customSystemPrompt || null
+        system_prompt: localStorage.getItem('customSystemPrompt') || null
     }));
 }
 
@@ -393,10 +451,10 @@ function addMessage(content, role, timestamp = null) {
     contentDiv.textContent = content;
     msg.appendChild(contentDiv);
 
-    const timestampDiv = document.createElement('div');
-    timestampDiv.className = 'message-timestamp';
-    timestampDiv.textContent = formatTimestamp(timestamp || new Date().toISOString());
-    msg.appendChild(timestampDiv);
+    const tsDiv = document.createElement('div');
+    tsDiv.className = 'message-timestamp';
+    tsDiv.textContent = formatTimestamp(timestamp || new Date().toISOString());
+    msg.appendChild(tsDiv);
 
     if (role === 'assistant') {
         msg.dataset.needsMarkdown = 'true';
@@ -405,182 +463,6 @@ function addMessage(content, role, timestamp = null) {
     document.getElementById('messages').appendChild(msg);
     scrollToBottom();
     return msg;
-}
-
-function formatTimestamp(isoString) {
-    const date = new Date(isoString);
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-
-    const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-
-    if (messageDate.getTime() === today.getTime()) {
-        return timeStr;
-    } else {
-        const yesterday = new Date(today);
-        yesterday.setDate(yesterday.getDate() - 1);
-        if (messageDate.getTime() === yesterday.getTime()) {
-            return `Yesterday ${timeStr}`;
-        } else {
-            const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            return `${dateStr} ${timeStr}`;
-        }
-    }
-}
-
-function formatFullTimestamp(isoString) {
-    const date = new Date(isoString);
-    const dateStr = date.toLocaleDateString('en-US', {
-        weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'
-    });
-    const timeStr = date.toLocaleTimeString('en-US', {
-        hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true
-    });
-    return `${dateStr} ${timeStr}`;
-}
-
-function downloadAsJSON(content, filename = 'chat-response.json') {
-    const data = { content, timestamp: new Date().toISOString(), type: 'chat_response' };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-function copyToClipboard(text, button) {
-    navigator.clipboard.writeText(text).then(() => {
-        const originalText = button.innerHTML;
-        button.innerHTML = '\u2713 Copied';
-        button.classList.add('copied');
-        setTimeout(() => {
-            button.innerHTML = originalText;
-            button.classList.remove('copied');
-        }, 2000);
-    }).catch(err => {
-        console.error('Failed to copy:', err);
-        const textArea = document.createElement('textarea');
-        textArea.value = text;
-        textArea.style.position = 'fixed';
-        textArea.style.opacity = '0';
-        document.body.appendChild(textArea);
-        textArea.select();
-        try {
-            document.execCommand('copy');
-            const originalText = button.innerHTML;
-            button.innerHTML = '\u2713 Copied';
-            button.classList.add('copied');
-            setTimeout(() => {
-                button.innerHTML = originalText;
-                button.classList.remove('copied');
-            }, 2000);
-        } catch (e) {
-            console.error('Fallback copy failed:', e);
-        }
-        document.body.removeChild(textArea);
-    });
-}
-
-function renderMarkdown() {
-    if (!markedReady || typeof marked === 'undefined') {
-        setTimeout(renderMarkdown, 100);
-        return;
-    }
-
-    const messages = document.querySelectorAll('.message.assistant[data-needs-markdown="true"]');
-    messages.forEach(msg => {
-        const contentDiv = msg.querySelector('.message-content');
-        if (!contentDiv) return;
-
-        const content = contentDiv.textContent || contentDiv.innerText;
-        if (!content || content.trim() === '') return;
-
-        const timestampDiv = msg.querySelector('.message-timestamp');
-
-        try {
-            const html = marked.parse(content);
-            const originalContent = msg.dataset.originalContent || content;
-            contentDiv.innerHTML = html;
-            msg.dataset.needsMarkdown = 'false';
-            msg.dataset.rendered = 'true';
-
-            if (timestampDiv && !msg.querySelector('.message-timestamp')) {
-                msg.appendChild(timestampDiv);
-            }
-
-            if (!msg.querySelector('.copy-btn.message-copy-btn')) {
-                const copyBtn = document.createElement('button');
-                copyBtn.className = 'copy-btn message-copy-btn';
-                copyBtn.innerHTML = '\ud83d\udccb Copy';
-                copyBtn.title = 'Copy to clipboard';
-                copyBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    copyToClipboard(originalContent, copyBtn);
-                };
-                msg.appendChild(copyBtn);
-            }
-
-            if (typeof hljs !== 'undefined' && hljs.highlightElement) {
-                msg.querySelectorAll('pre code').forEach(block => {
-                    try {
-                        if (block.textContent && block.textContent.trim()) {
-                            hljs.highlightElement(block);
-                        }
-                    } catch (e) {
-                        console.warn('Syntax highlighting skipped:', e.message || e);
-                    }
-                });
-            }
-
-            msg.querySelectorAll('pre').forEach(preBlock => {
-                try {
-                    if (preBlock.querySelector('.copy-btn')) return;
-                    const codeText = preBlock.querySelector('code')?.textContent || preBlock.textContent;
-                    if (codeText) {
-                        const copyBtn = document.createElement('button');
-                        copyBtn.className = 'copy-btn';
-                        copyBtn.innerHTML = '\ud83d\udccb Copy';
-                        copyBtn.title = 'Copy code to clipboard';
-                        copyBtn.onclick = (e) => {
-                            e.stopPropagation();
-                            copyToClipboard(codeText, copyBtn);
-                        };
-                        preBlock.appendChild(copyBtn);
-                    }
-                } catch (e) {
-                    console.warn('Error adding copy button:', e);
-                }
-            });
-        } catch (e) {
-            console.error('Markdown render error:', e);
-            contentDiv.textContent = content;
-        }
-    });
-}
-
-function showLoading() {
-    const loading = document.createElement('div');
-    loading.className = 'loading';
-    loading.id = 'loadingIndicator';
-    loading.innerHTML = `
-        <div class="loading-spinner">
-            <div class="loading-dot"></div>
-            <div class="loading-dot"></div>
-            <div class="loading-dot"></div>
-        </div>
-        <div class="loading-text">Thinking...</div>
-    `;
-    document.getElementById('messages').appendChild(loading);
-    scrollToBottom();
-}
-
-function removeLoading() {
-    document.getElementById('loadingIndicator')?.remove();
 }
 
 function appendToLastMessage(content) {
@@ -599,6 +481,24 @@ function appendToLastMessage(content) {
     }
 }
 
+function showLoading() {
+    const loading = document.createElement('div');
+    loading.className = 'loading';
+    loading.id = 'loadingIndicator';
+    loading.innerHTML = `
+        <div class="loading-spinner">
+            <div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div>
+        </div>
+        <div class="loading-text">Thinking...</div>
+    `;
+    document.getElementById('messages').appendChild(loading);
+    scrollToBottom();
+}
+
+function removeLoading() {
+    document.getElementById('loadingIndicator')?.remove();
+}
+
 function scrollToBottom() {
     const messages = document.getElementById('messages');
     messages.scrollTop = messages.scrollHeight;
@@ -611,6 +511,76 @@ function handleKeyDown(event) {
     }
 }
 
+// ==================== Markdown ====================
+
+function renderMarkdown() {
+    if (!markedReady || typeof marked === 'undefined') {
+        setTimeout(renderMarkdown, 100);
+        return;
+    }
+    document.querySelectorAll('.message.assistant[data-needs-markdown="true"]').forEach(msg => {
+        const contentDiv = msg.querySelector('.message-content');
+        if (!contentDiv) return;
+        const content = contentDiv.textContent || contentDiv.innerText;
+        if (!content || !content.trim()) return;
+
+        const tsDiv = msg.querySelector('.message-timestamp');
+        try {
+            const html = marked.parse(content);
+            const originalContent = msg.dataset.originalContent || content;
+            contentDiv.innerHTML = html;
+            msg.dataset.needsMarkdown = 'false';
+            msg.dataset.rendered = 'true';
+
+            if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
+
+            // Message copy button
+            if (!msg.querySelector('.message-copy-btn')) {
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-btn message-copy-btn';
+                copyBtn.innerHTML = '&#128203; Copy';
+                copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(originalContent, copyBtn); };
+                msg.appendChild(copyBtn);
+            }
+
+            // Syntax highlighting + code copy buttons
+            if (typeof hljs !== 'undefined') {
+                msg.querySelectorAll('pre code').forEach(block => {
+                    try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
+                });
+            }
+            msg.querySelectorAll('pre').forEach(pre => {
+                if (pre.querySelector('.copy-btn')) return;
+                const codeText = pre.querySelector('code')?.textContent || pre.textContent;
+                if (!codeText) return;
+                const btn = document.createElement('button');
+                btn.className = 'copy-btn';
+                btn.innerHTML = '&#128203; Copy';
+                btn.onclick = (e) => { e.stopPropagation(); copyToClipboard(codeText, btn); };
+                pre.appendChild(btn);
+            });
+        } catch (e) {
+            contentDiv.textContent = content;
+        }
+    });
+}
+
+function copyToClipboard(text, button) {
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = button.innerHTML;
+        button.innerHTML = '&#10003; Copied';
+        button.classList.add('copied');
+        setTimeout(() => { button.innerHTML = orig; button.classList.remove('copied'); }, 2000);
+    }).catch(() => {
+        // Fallback
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); } catch (e) {}
+        document.body.removeChild(ta);
+    });
+}
+
 // ==================== Search ====================
 
 let searchTimeout = null;
@@ -618,11 +588,11 @@ let searchTimeout = null;
 async function handleSearch(query) {
     const searchResults = document.getElementById('searchResults');
     const conversations = document.getElementById('conversations');
-
     if (searchTimeout) clearTimeout(searchTimeout);
 
     if (!query || query.trim().length < 2) {
         searchResults.style.display = 'none';
+        searchResults.innerHTML = '';
         conversations.style.display = 'block';
         return;
     }
@@ -631,22 +601,19 @@ async function handleSearch(query) {
         try {
             const resp = await fetch(`/api/search?query=${encodeURIComponent(query.trim())}`);
             const data = await resp.json();
-
             conversations.style.display = 'none';
             searchResults.style.display = 'block';
             searchResults.innerHTML = '';
 
             if (data.results && data.results.length > 0) {
                 const grouped = {};
-                data.results.forEach(result => {
-                    if (!grouped[result.conversation_id]) grouped[result.conversation_id] = [];
-                    grouped[result.conversation_id].push(result);
+                data.results.forEach(r => {
+                    if (!grouped[r.conversation_id]) grouped[r.conversation_id] = [];
+                    grouped[r.conversation_id].push(r);
                 });
-
                 Object.keys(grouped).forEach(convId => {
                     const results = grouped[convId];
-                    const firstResult = results[0];
-
+                    const first = results[0];
                     const item = document.createElement('div');
                     item.className = 'search-result-item';
                     item.onclick = () => {
@@ -654,25 +621,21 @@ async function handleSearch(query) {
                         document.getElementById('searchInput').value = '';
                         searchResults.style.display = 'none';
                         conversations.style.display = 'block';
+                        closeMenu();
                     };
-
-                    const preview = firstResult.content.substring(0, 100);
-                    const timestamp = formatTimestamp(firstResult.timestamp);
-
+                    const preview = first.content.substring(0, 100);
                     item.innerHTML = `
-                        <div class="search-result-title">${firstResult.conversation_title}</div>
-                        <div class="search-result-preview">${preview}${firstResult.content.length > 100 ? '...' : ''}</div>
-                        <div class="search-result-meta">${results.length} match${results.length > 1 ? 'es' : ''} \u2022 ${timestamp}</div>
+                        <div class="search-result-title">${first.conversation_title}</div>
+                        <div class="search-result-preview">${preview}${first.content.length > 100 ? '...' : ''}</div>
+                        <div class="search-result-meta">${results.length} match${results.length > 1 ? 'es' : ''}</div>
                     `;
-
                     searchResults.appendChild(item);
                 });
             } else {
                 searchResults.innerHTML = '<div class="search-no-results">No results found</div>';
             }
         } catch (e) {
-            console.error('Search error:', e);
-            searchResults.innerHTML = '<div class="search-no-results">Error searching</div>';
+            searchResults.innerHTML = '<div class="search-no-results">Search error</div>';
         }
     }, 300);
 }
@@ -680,105 +643,56 @@ async function handleSearch(query) {
 // ==================== Conversations ====================
 
 async function loadConversations() {
-    const resp = await fetch('/api/conversations');
-    const data = await resp.json();
+    try {
+        const resp = await fetch('/api/conversations');
+        const data = await resp.json();
+        const container = document.getElementById('conversations');
+        container.innerHTML = '';
 
-    const container = document.getElementById('conversations');
-    container.innerHTML = '';
+        data.conversations.forEach(conv => {
+            const item = document.createElement('div');
+            item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
 
-    data.conversations.forEach(conv => {
-        const item = document.createElement('div');
-        item.className = 'conv-item conversation-item' + (conv.id === currentConvId ? ' active' : '');
+            let preview = (conv.last_message || '').replace(/[#*_`\[\]]/g, '').replace(/\n/g, ' ').trim();
+            if (preview.length > 80) preview = preview.substring(0, 80) + '...';
 
-        const lastTimestamp = conv.last_message_timestamp || conv.updated_at;
-        const formattedTimestamp = formatFullTimestamp(lastTimestamp);
+            const ts = formatTimestamp(conv.last_message_timestamp || conv.updated_at);
 
-        let previewText = conv.last_message || '';
-        previewText = previewText.replace(/[#*_`\[\]]/g, '').replace(/\n/g, ' ').trim();
-        const maxPreviewLength = 150;
-        const shortPreview = previewText.length > maxPreviewLength
-            ? previewText.substring(0, maxPreviewLength) + '...'
-            : previewText;
-
-        if (window.innerWidth <= 768) {
             item.innerHTML = `
-                <div class="conv-content">
-                    <div class="conv-title">${conv.title}</div>
-                    <div class="conv-preview">${shortPreview || 'No messages yet'}</div>
-                    <div class="conv-timestamp">${formattedTimestamp}</div>
-                </div>
-                <div class="swipe-actions">
-                    <button onclick="event.stopPropagation(); renameConv('${conv.id}', '${conv.title.replace(/'/g, "\\'")}')">Rename</button>
-                    <button onclick="event.stopPropagation(); deleteConv('${conv.id}')" style="background: #fd7589;">Delete</button>
-                </div>
-            `;
-        } else {
-            item.innerHTML = `
-                <div class="conv-content">
-                    <div class="conv-title">${conv.title}</div>
-                    <div class="conv-preview" data-full-preview="${previewText.replace(/"/g, '&quot;')}">${shortPreview || 'No messages yet'}</div>
-                    <div class="conv-timestamp">${formattedTimestamp}</div>
-                </div>
+                <div class="conv-title">${conv.title}</div>
+                <div class="conv-preview">${preview || 'No messages yet'}</div>
+                <div class="conv-timestamp">${ts}</div>
                 <div class="conv-actions">
-                    <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${conv.id}', '${conv.title.replace(/'/g, "\\'")}')">&#9998;</button>
-                    <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${conv.id}')">&#128465;</button>
+                    <button class="conv-btn" onclick="event.stopPropagation(); renameConv('${conv.id}', '${conv.title.replace(/'/g, "\\'")}')" title="Rename">&#9998;</button>
+                    <button class="conv-btn delete" onclick="event.stopPropagation(); deleteConv('${conv.id}')" title="Delete">&#128465;</button>
                 </div>
             `;
-        }
-
-        item.onclick = () => loadConversation(conv.id);
-
-        if (window.innerWidth <= 768) {
-            let startX = 0, currentX = 0, isDragging = false;
-
-            item.addEventListener('touchstart', (e) => { startX = e.touches[0].clientX; isDragging = false; });
-            item.addEventListener('touchmove', (e) => {
-                currentX = e.touches[0].clientX;
-                const diff = startX - currentX;
-                if (Math.abs(diff) > 10) isDragging = true;
-                if (isDragging && diff > 0) {
-                    e.preventDefault();
-                    item.style.transform = `translateX(-${Math.min(diff, 150)}px)`;
-                }
-            });
-            item.addEventListener('touchend', () => {
-                const diff = startX - currentX;
-                if (isDragging && diff > 50) {
-                    item.classList.add('swipe-left');
-                    item.style.transform = 'translateX(-150px)';
-                } else {
-                    item.classList.remove('swipe-left');
-                    item.style.transform = '';
-                }
-                isDragging = false;
-            });
-        }
-
-        container.appendChild(item);
-    });
+            item.onclick = () => { loadConversation(conv.id); closeMenu(); };
+            container.appendChild(item);
+        });
+    } catch (e) {
+        console.error('Failed to load conversations:', e);
+    }
 }
 
 async function loadConversation(id) {
     currentConvId = id;
     const resp = await fetch(`/api/conversation/${id}`);
     const data = await resp.json();
-
     const messages = document.getElementById('messages');
     messages.innerHTML = '';
-
-    data.messages.forEach(msg => {
-        addMessage(msg.content, msg.role, msg.timestamp);
-    });
+    data.messages.forEach(msg => addMessage(msg.content, msg.role, msg.timestamp));
     setTimeout(() => renderMarkdown(), 100);
     loadConversations();
 }
 
 function newChat() {
     currentConvId = generateId();
-    document.getElementById('messages').innerHTML =
-        '<div class="welcome"><h2>New Conversation</h2><p>Start chatting!</p></div>';
+    document.getElementById('messages').innerHTML = '<div class="welcome"><h2>New Conversation</h2><p>Start chatting!</p></div>';
     loadConversations();
 }
+
+// ==================== Modals ====================
 
 function renameConv(id, currentTitle) {
     renameConvId = id;
@@ -786,63 +700,43 @@ function renameConv(id, currentTitle) {
     document.getElementById('renameModal').classList.add('show');
     document.getElementById('renameInput').focus();
 }
-
 function closeRenameModal() {
     document.getElementById('renameModal').classList.remove('show');
     renameConvId = null;
 }
-
 async function confirmRename() {
     const newTitle = document.getElementById('renameInput').value.trim();
     if (!newTitle || !renameConvId) return;
-
     await fetch(`/api/conversation/${renameConvId}/rename`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({title: newTitle})
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle })
     });
-
     closeRenameModal();
     loadConversations();
 }
 
 async function deleteConv(id) {
     if (!confirm('Delete this conversation?')) return;
-
-    await fetch(`/api/conversation/${id}`, {method: 'DELETE'});
-
-    if (id === currentConvId) {
-        newChat();
-    } else {
-        loadConversations();
-    }
+    await fetch(`/api/conversation/${id}`, { method: 'DELETE' });
+    if (id === currentConvId) newChat(); else loadConversations();
 }
 
-// ==================== System Prompt ====================
-
+// System Prompt
 function openSystemPromptEditor() {
-    const modal = document.getElementById('systemPromptModal');
-    const textarea = document.getElementById('systemPromptInput');
-    textarea.value = localStorage.getItem('customSystemPrompt') || '';
-    modal.classList.add('show');
-    textarea.focus();
-    document.getElementById('settingsMenuContent').classList.remove('show');
+    document.getElementById('systemPromptInput').value = localStorage.getItem('customSystemPrompt') || '';
+    document.getElementById('systemPromptModal').classList.add('show');
+    document.getElementById('systemPromptInput').focus();
 }
-
 function closeSystemPromptModal() {
     document.getElementById('systemPromptModal').classList.remove('show');
 }
-
 function saveSystemPrompt() {
     const prompt = document.getElementById('systemPromptInput').value.trim();
-    if (prompt) {
-        localStorage.setItem('customSystemPrompt', prompt);
-    } else {
-        localStorage.removeItem('customSystemPrompt');
-    }
+    if (prompt) localStorage.setItem('customSystemPrompt', prompt);
+    else localStorage.removeItem('customSystemPrompt');
     closeSystemPromptModal();
 }
-
 function resetSystemPrompt() {
     document.getElementById('systemPromptInput').value = '';
     localStorage.removeItem('customSystemPrompt');
@@ -850,49 +744,32 @@ function resetSystemPrompt() {
 
 // ==================== Escape Key ====================
 
-document.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape') {
-        const webSearchModal = document.getElementById('webSearchModal');
-        if (webSearchModal && webSearchModal.classList.contains('show')) { toggleWebSearch(); return; }
-
-        const renameModal = document.getElementById('renameModal');
-        if (renameModal && renameModal.classList.contains('show')) { closeRenameModal(); return; }
-
-        const systemPromptModal = document.getElementById('systemPromptModal');
-        if (systemPromptModal && systemPromptModal.classList.contains('show')) { closeSystemPromptModal(); return; }
-
-        const logViewer = document.getElementById('logViewer');
-        if (logViewer && logViewer.classList.contains('show')) { toggleLogViewer(); return; }
-    }
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (document.getElementById('webSearchOverlay').classList.contains('show')) { closeWebSearch(); return; }
+    if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
+    if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
+    if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
+    if (document.getElementById('dashboardOverlay').classList.contains('show')) { closeDashboard(); return; }
+    if (document.getElementById('menuOverlay').classList.contains('show')) { closeMenu(); return; }
 });
 
-// ==================== Initialization ====================
+// ==================== Init ====================
 
-updateStatus('loading', null, 'Connecting...');
+updateStatus('loading');
 connectWS();
 loadConversations();
 
-// Initial health check
 setTimeout(() => {
     fetch('/health').then(r => r.json()).then(health => {
-        if (health.model_available) {
-            modelAvailable = true;
-            updateStatus(true);
-        } else {
-            updateStatus('loading', null, health.message || 'Loading model...');
-            startHealthPolling();
-        }
-    }).catch(() => {
-        updateStatus('loading', null, 'Checking connection...');
-        startHealthPolling();
-    });
+        if (health.model_available) updateStatus('connected');
+        else { updateStatus('loading'); startHealthPolling(); }
+    }).catch(() => { updateStatus('loading'); startHealthPolling(); });
 }, 1000);
 
-// Auto-resize textarea
-const input = document.getElementById('input');
-if (input) {
-    autoResizeTextarea(input);
-    window.addEventListener('resize', () => autoResizeTextarea(input));
+const _input = document.getElementById('input');
+if (_input) {
+    autoResizeTextarea(_input);
+    window.addEventListener('resize', () => autoResizeTextarea(_input));
+    _input.focus();
 }
-
-document.getElementById('input').focus();

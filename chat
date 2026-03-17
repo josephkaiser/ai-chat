@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+cd "$PROJECT_DIR"
+
+# Get the LAN IP address of the host
+lan_ip() {
+    hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"
+}
+
+usage() {
+    echo "Usage: ./chat {install|start|stop|restart|status|logs}"
+    echo ""
+    echo "Commands:"
+    echo "  install   Build images and pull dependencies"
+    echo "  start     Start all services (idempotent)"
+    echo "  stop      Stop all services and clean up (idempotent)"
+    echo "  restart   Stop then start"
+    echo "  status    Show running containers"
+    echo "  logs      Tail logs from all services"
+}
+
+do_install() {
+    echo "Pulling vLLM image..."
+    docker compose pull vllm
+    echo ""
+    echo "Building chat-app image..."
+    docker compose build chat-app
+    echo ""
+    echo "Install complete. Run './chat start' to launch."
+}
+
+do_start() {
+    # Check if already fully running
+    local vllm_running chat_running
+    vllm_running=$(docker inspect -f '{{.State.Running}}' vllm 2>/dev/null || echo "false")
+    chat_running=$(docker inspect -f '{{.State.Running}}' ai-chat-vllm 2>/dev/null || echo "false")
+
+    if [[ "$vllm_running" == "true" && "$chat_running" == "true" ]]; then
+        echo "Already running."
+        echo "  Local:    http://localhost:8000"
+        echo "  LAN:      http://$(lan_ip):8000"
+        return 0
+    fi
+
+    # Clean up any stopped/broken containers before starting
+    docker compose down --remove-orphans 2>/dev/null || true
+
+    echo "Starting services..."
+    docker compose up -d
+
+    echo ""
+    echo "Started."
+    echo "  Local:    http://localhost:8000"
+    echo "  LAN:      http://$(lan_ip):8000"
+    echo ""
+    echo "Note: vLLM may take a few minutes to load the model on first run."
+    echo "Run './chat logs' to watch progress."
+}
+
+do_stop() {
+    echo "Stopping services..."
+    docker compose down --remove-orphans 2>/dev/null || true
+    echo "Stopped."
+}
+
+do_status() {
+    local vllm_state chat_state
+    vllm_state=$(docker inspect -f '{{.State.Status}}' vllm 2>/dev/null || echo "not found")
+    chat_state=$(docker inspect -f '{{.State.Status}}' ai-chat-vllm 2>/dev/null || echo "not found")
+    echo "  vLLM:       $vllm_state"
+    echo "  chat-app:   $chat_state"
+}
+
+case "${1:-}" in
+    install)  do_install ;;
+    start)    do_start ;;
+    stop)     do_stop ;;
+    restart)  do_stop; echo ""; do_start ;;
+    status)   do_status ;;
+    logs)     docker compose logs -f ;;
+    *)        usage; exit 1 ;;
+esac

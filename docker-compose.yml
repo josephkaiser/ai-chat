@@ -32,9 +32,12 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
       - MODEL_NAME=Qwen/Qwen3-8B
+      - HF_CACHE_PATH=/cache/huggingface
     depends_on:
       - vllm
     restart: unless-stopped
