@@ -771,7 +771,8 @@ async function loadConversation(id) {
 
 function newChat() {
     currentConvId = generateId();
-    document.getElementById('messages').innerHTML = '<div class="welcome"><h2>New Conversation</h2><p>Start chatting!</p></div>';
+    const modelName = window.MODEL_NAME || '';
+    document.getElementById('messages').innerHTML = '<div class="welcome">' + (modelName ? '<h1 style="font-weight:700; margin:0 0 0.25em;">' + modelName + '</h1>' : '') + '<h2>Welcome</h2><p>Start a conversation</p></div>';
     enterWelcomeMode();
     loadConversations();
 }
