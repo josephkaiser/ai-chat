@@ -432,7 +432,12 @@ def filter_reasoning_text(text):
     # Strip unclosed <think> blocks (model cut off mid-thought)
     text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
     # Strip text-based reasoning blocks (e.g., "Thinking Process: ...")
-    _reasoning_headers = ['thinking process', 'thought process', 'internal reasoning', 'my reasoning']
+    _reasoning_headers = ['thinking process', 'thought process', 'internal reasoning',
+                          'my reasoning', 'wait,', 'wait -', 'let me think',
+                          'let me check', 'let me verify', 'let me consider',
+                          'hmm,', 'okay so', 'okay let', 'decision:',
+                          'correction:', 'drafting', 'first, let me',
+                          'i need to think', 'i need to consider']
     _first_line = text.lstrip().split('\n')[0].lower().replace('*', '').strip().rstrip(':')
     if any(_first_line.startswith(h) for h in _reasoning_headers):
         paragraphs = re.split(r'\n\s*\n', text)
@@ -908,76 +913,149 @@ async def chat_websocket(websocket: WebSocket):
                 reasoning_detected = False
                 reasoning_check_done = False
                 REASONING_PREFIXES = ['thinking process', 'thought process', 'internal reasoning',
-                                      'my reasoning', 'reasoning:']
+                                      'my reasoning', 'reasoning:', 'wait,', 'wait -',
+                                      'let me think', 'let me check', 'let me verify',
+                                      'let me consider', 'let me re-read',
+                                      'i need to think', 'i need to consider',
+                                      'hmm,', 'okay so', 'okay let',
+                                      'decision:', 'correction:', 'drafting',
+                                      'final plan:', 'first, let me']
+                # Broader reasoning indicators (regex fallback for first ~50 chars)
+                _REASONING_INDICATORS = re.compile(
+                    r'(?:re-reading|system (?:instruction|prompt)|'
+                    r'I (?:must|should|need to|will|cannot|can\'t|don\'t) |'
+                    r'drafting|refining|final plan|fact[\s-]?check|'
+                    r'let me (?:recall|verify|think|check|re-read)|'
+                    r'wait.*(?:re-read|check|one more|actually)|'
+                    r'this (?:means|implies|suggests)|'
+                    r'looking at (?:the|this)|'
+                    r'acknowledge|limitation|browsing capabilit)',
+                    re.IGNORECASE
+                )
+                ws_disconnected = False
+                next_rep_check = 300  # first repetition check at 300 chars
 
-                async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
-                    # Strip leaked model special tokens
-                    token = re.sub(r'<\|[^|]*\|>', '', token)
-                    if not token:
-                        continue
-                    full_response += token
+                stream_gen = vllm_chat_stream(messages, max_tokens=max_tokens)
+                try:
+                    async for token in stream_gen:
+                        # Strip leaked model special tokens
+                        token = re.sub(r'<\|[^|]*\|>', '', token)
+                        if not token:
+                            continue
+                        full_response += token
 
-                    # If text-based reasoning was detected, suppress all streaming output
-                    if reasoning_detected:
-                        continue
+                        # Repetition loop detection — stop if model is repeating itself
+                        if len(full_response) >= next_rep_check:
+                            next_rep_check = len(full_response) + 200
+                            window = full_response[-150:]
+                            if window in full_response[:-150]:
+                                logger.warning(f"Repetition loop detected in conv {conv_id}, stopping generation")
+                                break
 
-                    # Buffer tokens to detect and skip reasoning blocks
-                    think_buffer += token
+                        # If text-based reasoning was detected, suppress all streaming output
+                        if reasoning_detected:
+                            continue
 
-                    # Check for text-based reasoning at the start of response
-                    if not reasoning_check_done:
-                        check = think_buffer.lower().lstrip().replace('*', '')
-                        if len(check) < 20:
-                            # Could still be a reasoning prefix, keep buffering
-                            if any(p.startswith(check) for p in REASONING_PREFIXES):
-                                continue
-                            # Check if buffer already matches (prefix + extra chars like ":")
-                            if any(check.startswith(p) for p in REASONING_PREFIXES):
-                                reasoning_detected = True
+                        # Buffer tokens to detect and skip reasoning blocks
+                        think_buffer += token
+
+                        # Check for text-based reasoning at the start of response
+                        if not reasoning_check_done:
+                            check = think_buffer.lower().lstrip().replace('*', '')
+                            if len(check) < 50:
+                                # Could still be a reasoning prefix, keep buffering
+                                if any(p.startswith(check) for p in REASONING_PREFIXES):
+                                    continue
+                                # Check if buffer already matches (prefix + extra chars like ":")
+                                if any(check.startswith(p) for p in REASONING_PREFIXES):
+                                    reasoning_detected = True
+                                    reasoning_check_done = True
+                                    think_buffer = ""
+                                    logger.info(f"Reasoning suppressed (prefix) in conv {conv_id}")
+                                    continue
+                                # Secondary: broader reasoning indicators
+                                if len(check) > 15 and _REASONING_INDICATORS.search(check):
+                                    reasoning_detected = True
+                                    reasoning_check_done = True
+                                    think_buffer = ""
+                                    logger.info(f"Reasoning suppressed (indicator) in conv {conv_id}")
+                                    continue
+                                # Not enough chars yet, keep buffering
+                                if len(check) < 30:
+                                    continue
+                                # Doesn't match any prefix or indicator, proceed normally
                                 reasoning_check_done = True
-                                think_buffer = ""
-                                continue
-                            # Doesn't match any prefix, proceed normally
-                            reasoning_check_done = True
-                        else:
-                            if any(check.startswith(p) for p in REASONING_PREFIXES):
-                                reasoning_detected = True
+                            else:
+                                if any(check.startswith(p) for p in REASONING_PREFIXES):
+                                    reasoning_detected = True
+                                    reasoning_check_done = True
+                                    think_buffer = ""
+                                    logger.info(f"Reasoning suppressed (prefix) in conv {conv_id}")
+                                    continue
+                                if _REASONING_INDICATORS.search(check):
+                                    reasoning_detected = True
+                                    reasoning_check_done = True
+                                    think_buffer = ""
+                                    logger.info(f"Reasoning suppressed (indicator) in conv {conv_id}")
+                                    continue
                                 reasoning_check_done = True
-                                think_buffer = ""
-                                continue
-                            reasoning_check_done = True
 
-                    if not in_think_block:
-                        # Check if we're entering a think block
-                        if '<think>' in think_buffer:
-                            # Send everything before the <think> tag
-                            before = think_buffer.split('<think>')[0]
-                            if before:
-                                await websocket.send_json({'type': 'token', 'content': before})
-                            in_think_block = True
-                            think_buffer = think_buffer.split('<think>', 1)[1]
-                        elif '<think' in think_buffer and '>' not in think_buffer.split('<think')[-1]:
-                            # Partial <think tag, keep buffering
-                            pass
-                        else:
-                            # No think tag, flush buffer
-                            await websocket.send_json({'type': 'token', 'content': think_buffer})
-                            think_buffer = ""
-                    else:
-                        # Inside think block — check for closing tag
-                        if '</think>' in think_buffer:
-                            # Discard everything up to and including </think>
-                            after = think_buffer.split('</think>', 1)[1]
-                            think_buffer = after
-                            in_think_block = False
-                            # Flush any remaining content after the close tag
-                            if think_buffer:
-                                await websocket.send_json({'type': 'token', 'content': think_buffer})
+                        if not in_think_block:
+                            # Check if we're entering a think block
+                            if '<think>' in think_buffer:
+                                # Send everything before the <think> tag
+                                before = think_buffer.split('<think>')[0]
+                                if before:
+                                    try:
+                                        await websocket.send_json({'type': 'token', 'content': before})
+                                    except Exception:
+                                        ws_disconnected = True
+                                        break
+                                in_think_block = True
+                                think_buffer = think_buffer.split('<think>', 1)[1]
+                            elif '<think' in think_buffer and '>' not in think_buffer.split('<think')[-1]:
+                                # Partial <think tag, keep buffering
+                                pass
+                            else:
+                                # No think tag, flush buffer
+                                try:
+                                    await websocket.send_json({'type': 'token', 'content': think_buffer})
+                                except Exception:
+                                    ws_disconnected = True
+                                    break
                                 think_buffer = ""
+                        else:
+                            # Inside think block — check for closing tag
+                            if '</think>' in think_buffer:
+                                # Discard everything up to and including </think>
+                                after = think_buffer.split('</think>', 1)[1]
+                                think_buffer = after
+                                in_think_block = False
+                                # Flush any remaining content after the close tag
+                                if think_buffer:
+                                    try:
+                                        await websocket.send_json({'type': 'token', 'content': think_buffer})
+                                    except Exception:
+                                        ws_disconnected = True
+                                        break
+                                    think_buffer = ""
+                finally:
+                    # Always close the stream — stops vLLM generation on disconnect/loop
+                    await stream_gen.aclose()
+
+                if ws_disconnected:
+                    logger.info(f"Client disconnected during streaming for conv {conv_id}")
+                    full_response = filter_reasoning_text(full_response)
+                    if full_response:
+                        save_message(conv_id, 'assistant', full_response)
+                    break  # exit the while True WebSocket loop
 
                 # Flush any remaining buffer (shouldn't happen normally)
                 if think_buffer and not in_think_block and not reasoning_detected:
-                    await websocket.send_json({'type': 'token', 'content': think_buffer})
+                    try:
+                        await websocket.send_json({'type': 'token', 'content': think_buffer})
+                    except Exception:
+                        break
 
                 # If reasoning was suppressed during streaming, filter and send cleaned response
                 if reasoning_detected:
