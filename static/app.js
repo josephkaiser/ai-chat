@@ -360,55 +360,6 @@ function closeSettings() {
     document.getElementById('settingsOverlay').classList.remove('show');
 }
 
-// ==================== Web Search ====================
-
-function showWebSearch() {
-    document.getElementById('webSearchOverlay').classList.add('show');
-    document.getElementById('webSearchInput').focus();
-}
-function closeWebSearch() {
-    document.getElementById('webSearchOverlay').classList.remove('show');
-}
-
-async function performWebSearch() {
-    const query = document.getElementById('webSearchInput').value.trim();
-    if (!query) return;
-
-    const resultsDiv = document.getElementById('webSearchResults');
-    resultsDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text_secondary)">Searching...</div>';
-
-    const sources = [];
-    document.querySelectorAll('.web-search-source-checkbox input:checked').forEach(cb => sources.push(cb.value));
-
-    try {
-        const resp = await fetch('/api/web-search', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query, sources, max_results: 10 })
-        });
-        const data = await resp.json();
-        resultsDiv.innerHTML = '';
-
-        if (data.results && data.results.length > 0) {
-            data.results.forEach(result => {
-                const item = document.createElement('div');
-                item.className = 'web-search-result';
-                item.innerHTML = `
-                    <div class="web-search-result-title"><a href="${result.url}" target="_blank">${result.title}</a></div>
-                    <div class="web-search-result-url">${result.url}</div>
-                    <div class="web-search-result-snippet">${result.snippet}</div>
-                    <div class="web-search-result-source">${result.source}</div>
-                `;
-                resultsDiv.appendChild(item);
-            });
-        } else {
-            resultsDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text_secondary)">No results found</div>';
-        }
-    } catch (e) {
-        resultsDiv.innerHTML = `<div style="text-align:center;padding:20px;color:#ef4444">Search failed: ${e.message}</div>`;
-    }
-}
-
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
@@ -615,14 +566,21 @@ function renderMarkdown() {
 
             if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
 
-            // Message copy button (copies raw text without think blocks)
-            if (!msg.querySelector('.message-copy-btn')) {
+            // Action bar below assistant message (like Claude)
+            if (!msg.querySelector('.message-actions')) {
                 const copyText = originalContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+                const actions = document.createElement('div');
+                actions.className = 'message-actions';
+
                 const copyBtn = document.createElement('button');
-                copyBtn.className = 'copy-btn message-copy-btn';
+                copyBtn.className = 'action-btn';
                 copyBtn.innerHTML = '&#128203; Copy';
                 copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(copyText, copyBtn); };
-                msg.appendChild(copyBtn);
+                actions.appendChild(copyBtn);
+
+                const tsDiv = msg.querySelector('.message-timestamp');
+                if (tsDiv) msg.insertBefore(actions, tsDiv);
+                else msg.appendChild(actions);
             }
 
             // Syntax highlighting + code copy buttons
@@ -648,19 +606,30 @@ function renderMarkdown() {
 }
 
 function copyToClipboard(text, button) {
-    navigator.clipboard.writeText(text).then(() => {
+    const onSuccess = () => {
         const orig = button.innerHTML;
         button.innerHTML = '&#10003; Copied';
         button.classList.add('copied');
         setTimeout(() => { button.innerHTML = orig; button.classList.remove('copied'); }, 2000);
-    }).catch(() => {
-        // Fallback
-        const ta = document.createElement('textarea');
-        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-        document.body.appendChild(ta); ta.select();
-        try { document.execCommand('copy'); } catch (e) {}
-        document.body.removeChild(ta);
-    });
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(onSuccess).catch(() => fallbackCopy(text, onSuccess));
+    } else {
+        fallbackCopy(text, onSuccess);
+    }
+}
+
+function fallbackCopy(text, onSuccess) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { if (document.execCommand('copy')) onSuccess(); } catch (e) {}
+    document.body.removeChild(ta);
 }
 
 // ==================== Search ====================
@@ -831,7 +800,6 @@ function resetSystemPrompt() {
 
 document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (document.getElementById('webSearchOverlay').classList.contains('show')) { closeWebSearch(); return; }
     if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
     if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }

@@ -5,15 +5,18 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model qwen/qwen3.5-27B
+      --model QuantTrio/Qwen3.5-27B-AWQ
       --host 0.0.0.0
       --port 8000
-      --gpu-memory-utilization 0.90
-      --max-model-len 32768
-      --swap-space 8
+      --gpu-memory-utilization 0.95
+      --max-model-len 8192
+      --swap-space 16
       --enable-prefix-caching
-      --max-num-seqs 256
+      --max-num-seqs 16
       --enable-chunked-prefill
+      --quantization awq_marlin
+      --trust-remote-code
+      --enforce-eager
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     deploy:
@@ -36,7 +39,7 @@ services:
       - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - MODEL_NAME=qwen/qwen3.5-27B
+      - MODEL_NAME=QuantTrio/Qwen3.5-27B-AWQ
       - HF_CACHE_PATH=/cache/huggingface
     depends_on:
       - vllm

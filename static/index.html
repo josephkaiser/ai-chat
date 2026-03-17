@@ -65,35 +65,7 @@
                     <span class="settings-icon">&#9881;</span>
                     <span>System Prompt</span>
                 </button>
-                <button onclick="closeSettings(); showWebSearch()">
-                    <span class="settings-icon">&#128269;</span>
-                    <span>Web Search</span>
-                </button>
             </div>
-        </div>
-    </div>
-
-    <!-- Web Search overlay -->
-    <div class="overlay" id="webSearchOverlay" onclick="closeWebSearch()">
-        <div class="web-search-panel" onclick="event.stopPropagation()">
-            <div class="panel-header">
-                <span>Web Search</span>
-                <button onclick="closeWebSearch()">&times;</button>
-            </div>
-            <div class="web-search-form">
-                <div class="web-search-input-group">
-                    <input type="text" id="webSearchInput" placeholder="Search the web..." onkeydown="if(event.key==='Enter'){event.preventDefault();performWebSearch()}">
-                    <button onclick="performWebSearch()">Search</button>
-                </div>
-                <div class="web-search-sources">
-                    <label class="web-search-source-checkbox"><input type="checkbox" value="google" checked><span>Google</span></label>
-                    <label class="web-search-source-checkbox"><input type="checkbox" value="wikipedia" checked><span>Wikipedia</span></label>
-                    <label class="web-search-source-checkbox"><input type="checkbox" value="reddit" checked><span>Reddit</span></label>
-                    <label class="web-search-source-checkbox"><input type="checkbox" value="github"><span>GitHub</span></label>
-                    <label class="web-search-source-checkbox"><input type="checkbox" value="stackoverflow"><span>Stack Overflow</span></label>
-                </div>
-            </div>
-            <div class="web-search-results" id="webSearchResults"></div>
         </div>
     </div>
 
