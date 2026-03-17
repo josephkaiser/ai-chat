@@ -431,6 +431,34 @@ def filter_reasoning_text(text):
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     # Strip unclosed <think> blocks (model cut off mid-thought)
     text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
+    # Strip text-based reasoning blocks (e.g., "Thinking Process: ...")
+    _reasoning_headers = ['thinking process', 'thought process', 'internal reasoning', 'my reasoning']
+    _first_line = text.lstrip().split('\n')[0].lower().replace('*', '').strip().rstrip(':')
+    if any(_first_line.startswith(h) for h in _reasoning_headers):
+        paragraphs = re.split(r'\n\s*\n', text)
+        result_parts = []
+        found_content = False
+        for i, para in enumerate(paragraphs):
+            if found_content:
+                result_parts.append(para)
+                continue
+            if i == 0:
+                continue
+            stripped = para.strip()
+            if not stripped:
+                continue
+            first_para_line = stripped.split('\n')[0]
+            looks_like_reasoning = bool(re.match(
+                r'^\s*(?:\d+[\.\):]|\*\*[A-Z]|\*\s|[-•]|#{1,3}\s)',
+                first_para_line
+            )) or bool(re.match(
+                r'^\s*(?:Wait|Hmm|Actually,|Let me |Re-evaluat|Decision:|Safest|Correction:|Draft:)',
+                first_para_line, re.IGNORECASE
+            ))
+            if not looks_like_reasoning and len(stripped) > 20:
+                found_content = True
+                result_parts.append(para)
+        text = '\n\n'.join(result_parts) if result_parts else ""
     text = re.sub(r'\[Reasoning:[^\]]+\]\s*->\s*', '', text, flags=re.DOTALL)
     text = re.sub(r'\[Reasoning:[^\]]+\]', '', text, flags=re.DOTALL)
     text = re.sub(r'\[(?:Conclusion|Statement|Analysis|Evaluation|Decision|Verification|Step \d+|Fact|Claim|Acknowledged uncertainty|Verified|Test Result):[^\]]+\]', '', text, flags=re.DOTALL)
@@ -688,6 +716,13 @@ def should_web_search(message: str) -> bool:
     if any(msg.startswith(s) for s in skip_starts) and len(msg) < 40:
         return False
 
+    # Explicit search requests — user is directly asking for a web search
+    search_triggers = ['search online', 'search the web', 'search the internet',
+                       'look up', 'look online', 'google ', 'find online',
+                       'web search', 'browse for', 'search for ']
+    if any(s in msg for s in search_triggers):
+        return True
+
     # Skip coding/math/creative tasks — these don't need web search
     code_signals = [
         'write a function', 'write code', 'write a script', 'fix this', 'debug',
@@ -798,10 +833,15 @@ async def chat_websocket(websocket: WebSocket):
                 max_tokens = estimate_tokens_needed(message)
                 logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
 
-                # Stream from vLLM — filter <think> blocks before sending to user
+                # Stream from vLLM — filter <think> blocks and text-based reasoning before sending to user
                 full_response = ""
                 in_think_block = False
                 think_buffer = ""
+                # Text-based reasoning detection (e.g., "Thinking Process: ...")
+                reasoning_detected = False
+                reasoning_check_done = False
+                REASONING_PREFIXES = ['thinking process', 'thought process', 'internal reasoning',
+                                      'my reasoning', 'reasoning:']
 
                 async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
                     # Strip leaked model special tokens
@@ -810,8 +850,29 @@ async def chat_websocket(websocket: WebSocket):
                         continue
                     full_response += token
 
-                    # Buffer tokens to detect and skip <think>...</think> blocks
+                    # If text-based reasoning was detected, suppress all streaming output
+                    if reasoning_detected:
+                        continue
+
+                    # Buffer tokens to detect and skip reasoning blocks
                     think_buffer += token
+
+                    # Check for text-based reasoning at the start of response
+                    if not reasoning_check_done:
+                        check = think_buffer.lower().lstrip().replace('*', '')
+                        if len(check) < 20:
+                            # Could still be a reasoning prefix, keep buffering
+                            if any(p.startswith(check) for p in REASONING_PREFIXES):
+                                continue
+                            # Doesn't match any prefix, proceed normally
+                            reasoning_check_done = True
+                        else:
+                            if any(check.startswith(p) for p in REASONING_PREFIXES):
+                                reasoning_detected = True
+                                reasoning_check_done = True
+                                think_buffer = ""
+                                continue
+                            reasoning_check_done = True
 
                     if not in_think_block:
                         # Check if we're entering a think block
@@ -842,8 +903,14 @@ async def chat_websocket(websocket: WebSocket):
                                 think_buffer = ""
 
                 # Flush any remaining buffer (shouldn't happen normally)
-                if think_buffer and not in_think_block:
+                if think_buffer and not in_think_block and not reasoning_detected:
                     await websocket.send_json({'type': 'token', 'content': think_buffer})
+
+                # If reasoning was suppressed during streaming, filter and send cleaned response
+                if reasoning_detected:
+                    cleaned = filter_reasoning_text(full_response)
+                    if cleaned:
+                        await websocket.send_json({'type': 'token', 'content': cleaned})
 
                 # Filter full response for saving (preserves <think> tags and markdown)
                 full_response = filter_reasoning_text(full_response)
