@@ -220,10 +220,10 @@ def estimate_tokens_needed(prompt: str) -> int:
         return int(token_matches[0])
 
     if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
-        return 20000
+        return 30000
 
     estimated = len(prompt) * 0.25 * 10
-    return min(max(int(estimated), 2048), 24000)
+    return min(max(int(estimated), 4096), 30000)
 
 def calculate_message_relevance_score(msg: Dict, current_query: str, message_index: int, total_messages: int) -> float:
     """Calculate relevance and quality score for a message"""
@@ -460,9 +460,9 @@ def filter_reasoning_text(text):
     text = re.sub(r'\[(?:Conclusion|Statement|Analysis|Evaluation|Decision|Verification|Step \d+|Fact|Claim|Acknowledged uncertainty|Verified|Test Result):[^\]]+\]', '', text, flags=re.DOTALL)
     text = re.sub(r'\s*->\s*', ' ', text)
     text = re.sub(r'\[[A-Z][a-z]+(?::[^\]]+)?\]', '', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\S\n]+', ' ', text)  # Collapse horizontal whitespace only, preserve newlines
     text = re.sub(r'\s+([.,!?;:])', r'\1', text)
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 # ==================== API Endpoints ====================
@@ -795,28 +795,14 @@ async def chat_websocket(websocket: WebSocket):
                 max_tokens = estimate_tokens_needed(message)
                 logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
 
-                # Stream from vLLM
+                # Stream from vLLM — send tokens directly, filter only the final saved response
                 full_response = ""
-                stream_buffer = ""
-                sent_length = 0
-                buffer_size = 300
 
                 async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
                     full_response += token
-                    stream_buffer += token
+                    await websocket.send_json({'type': 'token', 'content': token})
 
-                    if len(stream_buffer) > buffer_size:
-                        trim_amount = len(stream_buffer) - buffer_size
-                        stream_buffer = stream_buffer[trim_amount:]
-                        sent_length = max(0, sent_length - trim_amount)
-
-                    filtered_buffer = filter_reasoning_text(stream_buffer)
-                    new_content = filtered_buffer[sent_length:]
-                    if new_content:
-                        await websocket.send_json({'type': 'token', 'content': new_content})
-                        sent_length = len(filtered_buffer)
-
-                # Filter full response
+                # Filter full response for saving (preserves <think> tags and markdown)
                 full_response = filter_reasoning_text(full_response)
 
                 # Save and send completion
