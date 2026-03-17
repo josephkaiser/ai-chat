@@ -21,7 +21,7 @@ ai-chat/
 
 - **Backend:** Python 3.11, FastAPI, Uvicorn, httpx
 - **Frontend:** Vanilla JS, Marked.js, highlight.js
-- **LLM:** vLLM serving Qwen 3 8B (OpenAI-compatible API, streamed via httpx)
+- **LLM:** vLLM serving Apriel 1.6 15B Thinker (OpenAI-compatible API, streamed via httpx)
 - **Database:** SQLite (conversations, messages with feedback)
 - **Streaming:** WebSocket for real-time token delivery
 - **Search:** DuckDuckGo (auto-triggered for queries about current events)

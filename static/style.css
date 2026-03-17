@@ -64,6 +64,7 @@ body {
     background: var(--status_disconnected);
     display: block;
     aspect-ratio: 1;
+    cursor: pointer;
 }
 .menu-btn .status-dot.connected { background: var(--status_connected); }
 .menu-btn .status-dot.loading {

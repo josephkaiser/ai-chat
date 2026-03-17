@@ -13,7 +13,7 @@
     <!-- Menu button with status dot -->
     <button class="menu-btn" id="menuBtn" onclick="toggleMenu()">
         &#9776;
-        <span class="status-dot loading" id="statusDot"></span>
+        <span class="status-dot loading" id="statusDot" onclick="event.stopPropagation(); showDashboard()"></span>
     </button>
 
     <!-- Menu overlay -->
@@ -25,6 +25,7 @@
             </div>
             <div class="menu-actions">
                 <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
+                <button onclick="closeMenu(); showDashboard()"><span>Dashboard</span><kbd class="shortcut-hint"></kbd></button>
                 <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
             </div>
             <div class="menu-search">

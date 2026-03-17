@@ -5,7 +5,7 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model QuantTrio/Qwen3.5-27B-AWQ
+      --model ServiceNow-AI/Apriel-1.6-15b-Thinker
       --host 0.0.0.0
       --port 8000
       --gpu-memory-utilization 0.95
@@ -14,7 +14,7 @@ services:
       --enable-prefix-caching
       --max-num-seqs 16
       --enable-chunked-prefill
-      --quantization awq_marlin
+
       --trust-remote-code
       --enforce-eager
     volumes:
@@ -39,7 +39,7 @@ services:
       - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - MODEL_NAME=QuantTrio/Qwen3.5-27B-AWQ
+      - MODEL_NAME=ServiceNow-AI/Apriel-1.6-15b-Thinker
       - HF_CACHE_PATH=/cache/huggingface
     depends_on:
       - vllm

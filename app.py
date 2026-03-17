@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Chat with vLLM - Simplified single-model setup
-- Uses vLLM with Qwen 3.5 via httpx (no OpenAI SDK)
+- Uses vLLM with Apriel 1.6 15B via httpx (no OpenAI SDK)
 - Markdown support for code and formatted text
 - Web search, code execution, file browsing
 - Theme support (light/dark)
@@ -27,6 +27,7 @@ import re
 import httpx
 import shutil
 from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 
 # Theme colors
 COLORS_LIGHT = {
@@ -92,7 +93,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-27B")
+MODEL_NAME = os.getenv("MODEL_NAME", "ServiceNow-AI/Apriel-1.6-15b-Thinker")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {MODEL_NAME}")
@@ -419,7 +420,12 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise and direct
 
 Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer.
 
-You have automatic web search capability. When web search results are provided in this prompt, you MUST use them to answer the user's question. Summarise the results directly, cite URLs where helpful, and do NOT discuss whether you can or cannot search the web."""
+You have automatic web search capability. When WEB SEARCH RESULTS appear below, you MUST:
+- Use the provided data to answer the question accurately with specific facts, numbers, dates, and details
+- Cite sources inline using [Source Name](URL) markdown links
+- Synthesize information from multiple results when relevant
+- Do NOT say "according to search results" — just present the information naturally
+- Do NOT discuss whether you can or cannot search the web"""
 
 def filter_reasoning_text(text):
     """Remove <think> blocks, reasoning brackets, and meta-commentary from text"""
@@ -427,7 +433,7 @@ def filter_reasoning_text(text):
         return text
     # Strip model special tokens (<|eot_id|>, <|im_end|>, etc.)
     text = re.sub(r'<\|[^|]*\|>', '', text)
-    # Strip <think>...</think> blocks (Qwen thinking mode)
+    # Strip <think>...</think> blocks (thinking mode)
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     # Strip unclosed <think> blocks (model cut off mid-thought)
     text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
@@ -830,6 +836,242 @@ def clean_search_query(message: str, history: list = None) -> str:
 
     return q
 
+# ==================== Enhanced Web Search with Content Extraction ====================
+
+async def fetch_page_content(url: str, max_chars: int = 1500) -> str:
+    """Fetch a URL and extract clean text content using BeautifulSoup.
+
+    Uses source-specific extractors for Wikipedia, Reddit, GitHub,
+    StackOverflow, and falls back to generic main-content extraction.
+    """
+    try:
+        # Wikipedia: use their REST API for clean structured content
+        wiki_match = re.match(r'https?://(\w+)\.wikipedia\.org/wiki/(.+)', url)
+        if wiki_match:
+            lang, title = wiki_match.group(1), wiki_match.group(2)
+            api_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(api_url, headers={'Accept': 'application/json'})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    extract = data.get('extract', '')
+                    desc = data.get('description', '')
+                    result = f"{desc}\n\n{extract}" if desc else extract
+                    return result[:max_chars] if result else ""
+
+        # Reddit: rewrite to old.reddit.com (new Reddit is JS-rendered)
+        fetch_url = url
+        if 'reddit.com' in url and 'old.reddit.com' not in url:
+            fetch_url = url.replace('www.reddit.com', 'old.reddit.com').replace('://reddit.com', '://old.reddit.com')
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml',
+        }
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True, headers=headers) as client:
+            resp = await client.get(fetch_url)
+            if resp.status_code != 200:
+                return ""
+            content_type = resp.headers.get('content-type', '')
+            if 'text/html' not in content_type and 'application/xhtml' not in content_type:
+                return ""
+
+            soup = BeautifulSoup(resp.text, 'html.parser')
+
+            # Strip non-content tags
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header',
+                             'aside', 'form', 'iframe', 'noscript', 'svg', 'button']):
+                tag.decompose()
+
+            # --- Reddit ---
+            if 'reddit.com' in url:
+                parts = []
+                # Post title
+                title_el = soup.find('a', class_='title')
+                if title_el:
+                    parts.append(title_el.get_text(strip=True))
+                # Self-text (post body)
+                selftext = soup.find('div', class_='usertext-body')
+                if selftext:
+                    parts.append(selftext.get_text(separator='\n', strip=True)[:600])
+                # Top comments
+                comments = soup.find_all('div', class_='usertext-body')
+                for c in comments[1:6]:  # skip first (post body), get top 5 comments
+                    ct = c.get_text(separator=' ', strip=True)[:250]
+                    if ct and len(ct) > 30:
+                        parts.append(f"Comment: {ct}")
+                if parts:
+                    return '\n---\n'.join(parts)[:max_chars]
+
+            # --- GitHub ---
+            if 'github.com' in url:
+                # Try README article
+                readme = soup.find('article', class_='markdown-body')
+                if readme:
+                    return readme.get_text(separator='\n', strip=True)[:max_chars]
+                # Repo about/description
+                about = soup.find('p', class_='f4') or soup.find('p', {'itemprop': 'description'})
+                if about:
+                    desc = about.get_text(strip=True)
+                    # Also grab topic tags
+                    topics = soup.find_all('a', class_='topic-tag')
+                    tags = ', '.join(t.get_text(strip=True) for t in topics[:10])
+                    result = desc
+                    if tags:
+                        result += f"\nTopics: {tags}"
+                    return result[:max_chars]
+
+            # --- StackOverflow / StackExchange ---
+            if 'stackoverflow.com' in url or 'stackexchange.com' in url:
+                parts = []
+                # Question
+                q_div = soup.find('div', class_='s-prose')
+                if q_div:
+                    parts.append("Q: " + q_div.get_text(separator=' ', strip=True)[:500])
+                # Answers (accepted first, then top-voted)
+                answer_divs = soup.find_all('div', class_='s-prose')
+                for a in answer_divs[1:3]:  # top 2 answers
+                    parts.append("A: " + a.get_text(separator=' ', strip=True)[:500])
+                if parts:
+                    return '\n---\n'.join(parts)[:max_chars]
+
+            # --- Generic extraction ---
+            main = soup.find('main') or soup.find('article') or soup.find('div', role='main') or soup.find('body')
+            if main:
+                text = main.get_text(separator='\n', strip=True)
+                lines = [l.strip() for l in text.split('\n') if l.strip() and len(l.strip()) > 20]
+                return '\n'.join(lines)[:max_chars]
+
+            return ""
+    except Exception as e:
+        logger.debug(f"Failed to fetch {url}: {e}")
+        return ""
+
+
+def _source_priority(url: str) -> int:
+    """Score a URL by source quality for content-fetch prioritization."""
+    url_lower = url.lower()
+    for domain, score in [
+        ('wikipedia.org', 10), ('stackoverflow.com', 9), ('stackexchange.com', 8),
+        ('github.com', 7), ('reddit.com', 7), ('arxiv.org', 7),
+        ('.gov', 6), ('.edu', 6),
+    ]:
+        if domain in url_lower:
+            return score
+    return 3
+
+
+async def enhanced_web_search(query: str, original_message: str) -> str:
+    """Multi-source web search with page content extraction.
+
+    1. Runs DDG text search (+ news search for temporal queries) in parallel
+    2. Prioritizes high-value sources (Wikipedia, SO, GitHub, Reddit)
+    3. Fetches full page content from top 3 URLs in parallel
+    4. Formats everything within a ~6000-char budget for the context window
+    """
+    msg_lower = original_message.lower()
+    is_news = any(w in msg_lower for w in [
+        'news', 'latest', 'recent', 'announced', 'launched', 'update',
+        'happening', 'today', 'yesterday', 'this week',
+    ])
+
+    # --- DDG searches in parallel ---
+    def _ddg_text(q):
+        with DDGS() as ddgs:
+            return list(ddgs.text(q, region='us-en', max_results=8))
+
+    def _ddg_news(q):
+        try:
+            with DDGS() as ddgs:
+                return list(ddgs.news(q, region='us-en', max_results=5))
+        except Exception:
+            return []
+
+    tasks = [asyncio.to_thread(_ddg_text, query)]
+    if is_news:
+        tasks.append(asyncio.to_thread(_ddg_news, query))
+
+    search_outputs = await asyncio.gather(*tasks, return_exceptions=True)
+
+    text_results = search_outputs[0] if not isinstance(search_outputs[0], Exception) else []
+    news_results = []
+    if is_news and len(search_outputs) > 1:
+        news_results = search_outputs[1] if not isinstance(search_outputs[1], Exception) else []
+
+    if not text_results and not news_results:
+        return ""
+
+    # --- Prioritize and pick top 3 unique domains to fetch content from ---
+    text_results.sort(key=lambda r: _source_priority(r.get('href', '')), reverse=True)
+
+    fetch_urls = []
+    seen_domains = set()
+    for r in text_results:
+        url = r.get('href', '')
+        if not url:
+            continue
+        m = re.search(r'://([^/]+)', url)
+        base = '.'.join(m.group(1).split('.')[-2:]) if m else url
+        if base not in seen_domains:
+            seen_domains.add(base)
+            fetch_urls.append(url)
+        if len(fetch_urls) >= 3:
+            break
+
+    # --- Fetch page content in parallel ---
+    page_contents = {}
+    if fetch_urls:
+        fetch_results = await asyncio.gather(
+            *[fetch_page_content(u) for u in fetch_urls],
+            return_exceptions=True,
+        )
+        for url, content in zip(fetch_urls, fetch_results):
+            if isinstance(content, str) and content.strip():
+                page_contents[url] = content
+
+    # --- Format results within budget ---
+    BUDGET = 6000  # chars — leaves room for system prompt + history + response tokens
+    used = 0
+    parts = []
+
+    # News results first (most timely)
+    if news_results:
+        parts.append("RECENT NEWS:")
+        for n in news_results[:4]:
+            entry = f"- {n.get('title', '')} ({n.get('date', '')})\n  {n.get('body', '')[:200]}\n  {n.get('url', '')}"
+            if used + len(entry) > BUDGET:
+                break
+            parts.append(entry)
+            used += len(entry)
+        parts.append("")
+
+    # Text results with fetched content where available
+    parts.append("SEARCH RESULTS:")
+    for i, r in enumerate(text_results, 1):
+        title = r.get('title', '')
+        url = r.get('href', '')
+        snippet = r.get('body', '')[:300]
+        fetched = page_contents.get(url, '')
+
+        if fetched:
+            entry = f"\n[{i}] {title}\nURL: {url}\n{fetched}"
+        else:
+            entry = f"\n[{i}] {title}\nURL: {url}\n{snippet}"
+
+        if used + len(entry) > BUDGET:
+            remaining = BUDGET - used
+            if remaining > 150:
+                entry = entry[:remaining]
+                parts.append(entry)
+                used += len(entry)
+            break
+
+        parts.append(entry)
+        used += len(entry)
+
+    return '\n'.join(parts)
+
+
 # ==================== WebSocket Handlers ====================
 
 @app.websocket("/ws/chat")
@@ -859,7 +1101,7 @@ async def chat_websocket(websocket: WebSocket):
 
                 # Build messages
                 system_prompt = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
-                # For simple/short queries, tell Qwen to skip extended thinking
+                # For simple/short queries, skip extended thinking
                 msg_lower = message.lower().strip()
                 is_simple = len(message.split()) < 10 or any(
                     msg_lower.startswith(s) for s in ['hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'ok', 'yes', 'no']
@@ -880,19 +1122,11 @@ async def chat_websocket(websocket: WebSocket):
                         messages[0] = {'role': 'system', 'content': system_prompt}
                     try:
                         search_query = clean_search_query(message, history=history)
-                        await websocket.send_json({'type': 'token', 'content': f'Searching the web...\n\n'})
-                        def _ddg_search(q):
-                            with DDGS() as ddgs:
-                                return list(ddgs.text(q, region='us-en', max_results=5))
-                        search_results = await asyncio.to_thread(_ddg_search, search_query)
-                        if search_results:
-                            search_context = "\n\nWeb search results:\n"
-                            for i, r in enumerate(search_results, 1):
-                                search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:500]}\n"
-                            # Inject into the system prompt (not a separate message)
-                            # so the model reliably sees and uses the results
-                            messages[0]['content'] += f'\n\n---\nWEB SEARCH RESULTS (use these to answer):\n{search_context}'
-                            logger.info(f"Search results injected: {len(search_results)} results for query: {search_query}")
+                        await websocket.send_json({'type': 'token', 'content': 'Searching the web...\n\n'})
+                        search_context = await enhanced_web_search(search_query, message)
+                        if search_context:
+                            messages[0]['content'] += f'\n\n---\nWEB SEARCH RESULTS (use these to answer the user — cite sources with URLs):\n{search_context}'
+                            logger.info(f"Enhanced search injected ({len(search_context)} chars) for query: {search_query}")
                         else:
                             logger.warning(f"Search returned no results for query: {search_query}")
                     except Exception as e:

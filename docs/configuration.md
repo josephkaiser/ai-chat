@@ -5,7 +5,7 @@ Edit `docker-compose.yml` to change the model or vLLM settings:
 ```yaml
 vllm:
   command: >
-    --model Qwen/Qwen3-8B
+    --model ServiceNow-AI/Apriel-1.6-15b-Thinker
     --gpu-memory-utilization 0.90
     --max-model-len 32768
     --swap-space 8

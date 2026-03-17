@@ -1,6 +1,6 @@
 # AI Chat with vLLM
 
-A self-hosted chat application running Qwen 3 8B on vLLM with a single GPU.
+A self-hosted chat application running Apriel 1.6 15B Thinker on vLLM with a single GPU.
 
 ## Features
 
