@@ -419,7 +419,7 @@ DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise and direct
 
 Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer.
 
-When web search results are provided, use them for accuracy and cite sources naturally."""
+You have automatic web search capability. When web search results are provided in this prompt, you MUST use them to answer the user's question. Summarise the results directly, cite URLs where helpful, and do NOT discuss whether you can or cannot search the web."""
 
 def filter_reasoning_text(text):
     """Remove <think> blocks, reasoning brackets, and meta-commentary from text"""
@@ -707,7 +707,16 @@ def should_web_search(message: str) -> bool:
     """Decide if a query would benefit from web search results."""
     msg = message.lower().strip()
 
-    # Too short to need search
+    # Explicit search requests — always honour, no length/greeting gate
+    search_triggers = ['search online', 'search the web', 'search the internet',
+                       'look up', 'look online', 'google ', 'find online',
+                       'web search', 'browse for', 'search for ',
+                       'look it up', 'look this up', 'search this',
+                       'search that', 'look that up', 'look them up']
+    if any(s in msg for s in search_triggers):
+        return True
+
+    # Too short to need search (only checked AFTER explicit triggers)
     if len(msg) < 15:
         return False
 
@@ -715,13 +724,6 @@ def should_web_search(message: str) -> bool:
     skip_starts = ['hello', 'hi ', 'hey', 'thanks', 'thank you', 'bye', 'please ', 'ok', 'sure', 'yes', 'no']
     if any(msg.startswith(s) for s in skip_starts) and len(msg) < 40:
         return False
-
-    # Explicit search requests — user is directly asking for a web search
-    search_triggers = ['search online', 'search the web', 'search the internet',
-                       'look up', 'look online', 'google ', 'find online',
-                       'web search', 'browse for', 'search for ']
-    if any(s in msg for s in search_triggers):
-        return True
 
     # Skip coding/math/creative tasks — these don't need web search
     code_signals = [
@@ -733,6 +735,21 @@ def should_web_search(message: str) -> bool:
     ]
     if any(sig in msg for sig in code_signals):
         return False
+
+    # Shopping / product / buying queries
+    shopping_patterns = [
+        r'\b(buy|purchase|shop for|shopping for|order)\b',
+        r'\b(find me|get me|show me|recommend)\b.{3,}',
+        r'\$\d+',                                       # dollar amounts
+        r'\b\d+\s*dollars\b',
+        r'\b(cheap|affordable|budget|expensive|price|pricing|cost of)\b',
+        r'\b(best|top|good)\b.{1,30}\b(under|around|for|near)\b',
+        r'\b(where (can|do|to) (i |we )?(buy|get|find|order))\b',
+        r'\b(in stock|available|for sale|deal on|deals on|discount)\b',
+        r'\b(review|reviews|rating|ratings|comparison)\b.{1,20}\b(of|for|on)\b',
+    ]
+    if any(re.search(pat, msg) for pat in shopping_patterns):
+        return True
 
     # Temporal markers — strong signal for needing current info
     temporal = [
@@ -767,6 +784,46 @@ def should_web_search(message: str) -> bool:
         return True
 
     return False
+
+def clean_search_query(message: str, history: list = None) -> str:
+    """Strip conversational fluff to produce a better search engine query.
+
+    If the cleaned query is too vague (pronouns / short references like "one",
+    "it", "that"), fall back to the last assistant reply to build context.
+    """
+    q = message.strip()
+    # Remove common prefixes that confuse search engines
+    prefixes = [
+        r'^(can you |could you |please |hey,? |hi,? )',
+        r'^(search online for |search the web for |search the internet for )',
+        r'^(search for |look up |look online for |google |find online )',
+        r'^(web search |browse for |find me |find )',
+        r'^(search online |search this|search that|look it up|look this up|look that up|look them up)',
+        r'^(tell me about |what is |what are |who is |where can i )',
+    ]
+    lower = q.lower()
+    for pat in prefixes:
+        m = re.match(pat, lower)
+        if m:
+            q = q[m.end():]
+            lower = q.lower()
+    q = q.strip() or message.strip()
+
+    # If the cleaned query is just a pronoun / too vague, use conversation context
+    vague_tokens = {'one', 'it', 'that', 'this', 'them', 'those', 'these', 'some', 'any'}
+    words = set(q.lower().split())
+    if words and words.issubset(vague_tokens | {'a', 'the', 'an', 'for', 'me', 'please'}):
+        if history:
+            # Walk backwards to find the last user message (the one before this)
+            for msg in reversed(history):
+                if msg.get('role') == 'user':
+                    prev = msg['content'].strip()
+                    # Use the previous user query as context
+                    return clean_search_query(prev)
+        # If no usable history, return the original message
+        return message.strip()
+
+    return q
 
 # ==================== WebSocket Handlers ====================
 
@@ -810,21 +867,31 @@ async def chat_websocket(websocket: WebSocket):
                     messages.append({'role': msg['role'], 'content': msg['content']})
 
                 # Auto web search when the query likely needs current/factual info
-                if should_web_search(message):
+                do_search = should_web_search(message)
+                if do_search:
+                    # Force no-think mode — the model just needs to summarise results
+                    if not system_prompt.startswith('/no_think'):
+                        system_prompt = "/no_think\n" + system_prompt
+                        messages[0] = {'role': 'system', 'content': system_prompt}
                     try:
-                        await websocket.send_json({'type': 'token', 'content': 'Searching the web...\n\n'})
-                        with DDGS() as ddgs:
-                            search_results = list(ddgs.text(message, region='us-en', max_results=5))
-                            if search_results:
-                                search_context = "\n\nWeb search results:\n"
-                                for i, r in enumerate(search_results, 1):
-                                    search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:500]}\n"
-                                messages.append({
-                                    'role': 'system',
-                                    'content': f'Web search results for the user\'s query:\n{search_context}\n\nUse these search results to provide an accurate, up-to-date response. Cite sources when relevant.'
-                                })
+                        search_query = clean_search_query(message, history=history)
+                        await websocket.send_json({'type': 'token', 'content': f'Searching the web...\n\n'})
+                        def _ddg_search(q):
+                            with DDGS() as ddgs:
+                                return list(ddgs.text(q, region='us-en', max_results=5))
+                        search_results = await asyncio.to_thread(_ddg_search, search_query)
+                        if search_results:
+                            search_context = "\n\nWeb search results:\n"
+                            for i, r in enumerate(search_results, 1):
+                                search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:500]}\n"
+                            # Inject into the system prompt (not a separate message)
+                            # so the model reliably sees and uses the results
+                            messages[0]['content'] += f'\n\n---\nWEB SEARCH RESULTS (use these to answer):\n{search_context}'
+                            logger.info(f"Search results injected: {len(search_results)} results for query: {search_query}")
+                        else:
+                            logger.warning(f"Search returned no results for query: {search_query}")
                     except Exception as e:
-                        logger.warning(f"Web search failed: {e}")
+                        logger.warning(f"Web search failed for query '{search_query}': {e}", exc_info=True)
 
                 # Signal start
                 await websocket.send_json({'type': 'start'})
@@ -863,6 +930,12 @@ async def chat_websocket(websocket: WebSocket):
                         if len(check) < 20:
                             # Could still be a reasoning prefix, keep buffering
                             if any(p.startswith(check) for p in REASONING_PREFIXES):
+                                continue
+                            # Check if buffer already matches (prefix + extra chars like ":")
+                            if any(check.startswith(p) for p in REASONING_PREFIXES):
+                                reasoning_detected = True
+                                reasoning_check_done = True
+                                think_buffer = ""
                                 continue
                             # Doesn't match any prefix, proceed normally
                             reasoning_check_done = True

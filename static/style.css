@@ -58,8 +58,12 @@ body {
     right: 6px;
     width: 8px;
     height: 8px;
+    min-width: 8px;
+    min-height: 8px;
     border-radius: 50%;
     background: var(--status_disconnected);
+    display: block;
+    aspect-ratio: 1;
 }
 .menu-btn .status-dot.connected { background: var(--status_connected); }
 .menu-btn .status-dot.loading {
