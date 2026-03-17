@@ -1,19 +1,21 @@
 # AI Chat with vLLM
 
-A chat application with a web UI, running Qwen 3 8B on vLLM with a single GPU.
+A self-hosted chat application running Qwen 3 8B on vLLM with a single GPU.
 
 ## Features
 
-- **Web UI** — Responsive interface with light/dark mode
 - **Streaming Responses** — Real-time token streaming via WebSocket
-- **32K Context Window** — Smart history management
-- **Web Search** — Automatic and manual web search via DuckDuckGo
+- **32K Context** — Smart history management with relevance scoring
+- **Web Search** — Automatic and manual search via DuckDuckGo
 - **Code Execution** — Sandboxed Python execution
 - **File Browsing** — Read files and list directories
 - **Chat Search** — Full-text search across all conversations
-- **Markdown** — Full markdown rendering with syntax highlighting
-- **System Prompt** — Customizable system prompt per session
-- **Log Viewer** — Real-time terminal logs
+- **Markdown** — Full rendering with syntax highlighting
+- **System Prompt** — Customizable per session
+- **Light/Dark Mode** — Theme support
+- **Dashboard** — Model status, cache info, vLLM restart controls
+- **Message Feedback** — Thumbs up/down on responses, used for context ranking
+- **Log Viewer** — Real-time terminal logs via WebSocket
 
 ## Prerequisites
 
@@ -31,14 +33,14 @@ This pulls the vLLM image and builds the chat app container.
 ## Usage
 
 ```bash
-./chat start     # Start the app (idempotent — safe to run if already running)
-./chat stop      # Stop the app  (idempotent — safe to run if already stopped)
+./chat start     # Start the app (idempotent)
+./chat stop      # Stop the app (idempotent)
 ./chat restart   # Stop then start
 ./chat status    # Check what's running
 ./chat logs      # Tail logs from all services
 ```
 
-Once started, open **http://localhost:8000**. The web UI loads immediately — the model loads in the background on first run.
+Once started, open **http://localhost:8000**. The model loads in the background on first run.
 
 ## Documentation
 
