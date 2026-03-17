@@ -26,10 +26,10 @@ body {
 }
 .welcome {
     text-align: center;
-    padding: 80px 20px;
+    padding: 40px 20px 20px;
     color: var(--text_secondary);
 }
-.welcome h2 { font-weight: 400; margin-bottom: 8px; }
+.welcome h2 { font-weight: 300; margin-bottom: 8px; font-size: 28px; }
 
 /* === Menu Button === */
 .menu-btn {
@@ -395,67 +395,69 @@ body {
 
 /* === Input Area === */
 .input-area {
-    padding: 12px 20px 20px;
+    padding: 0 16px 24px;
     background: var(--bg_primary);
 }
 .input-container {
     display: flex;
     align-items: flex-end;
-    max-width: 700px;
+    max-width: 768px;
     margin: 0 auto;
     background: var(--bg_secondary);
-    border-radius: 12px;
+    border-radius: 24px;
     border: 1px solid var(--bg_tertiary);
-    overflow: hidden;
-    transition: border-color 0.2s;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    transition: border-color 0.2s, box-shadow 0.2s;
 }
-.input-container:focus-within { border-color: var(--accent_primary); }
+.input-container:focus-within {
+    border-color: var(--accent_primary);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+}
 .input-container textarea {
     flex: 1;
     border: none;
     outline: none;
-    padding: 14px 16px;
+    padding: 14px 0 14px 20px;
     background: transparent;
     color: var(--text_primary);
     font-family: inherit;
-    font-size: 14px;
+    font-size: 15px;
     resize: none;
     line-height: 1.5;
     max-height: 200px;
 }
 .input-container textarea::placeholder { color: var(--text_tertiary); }
 
-/* Welcome mode: large input area taking bottom 1/3 of screen */
-.input-area.welcome-mode {
-    display: flex;
-    flex-direction: column;
-    height: 33vh;
+/* Welcome mode: vertically center content on page */
+.chat.welcome-layout {
+    justify-content: center;
 }
-.input-area.welcome-mode .input-container {
-    flex: 1;
+.chat.welcome-layout .messages {
+    flex: none;
+    overflow: visible;
+    padding: 0 20px 16px;
 }
-.input-area.welcome-mode .input-container textarea {
-    height: 100%;
-    max-height: none;
+.chat.welcome-layout .input-area {
+    padding-bottom: 20vh;
 }
 #send {
     border: none;
     background: var(--accent_primary);
     color: #fff;
-    width: 42px;
-    height: 42px;
-    margin: 4px;
-    border-radius: 8px;
+    width: 36px;
+    height: 36px;
+    margin: 5px 6px 5px 8px;
+    border-radius: 50%;
     cursor: pointer;
-    font-size: 18px;
+    font-size: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s;
+    transition: background 0.15s, transform 0.1s;
 }
-#send:hover { background: var(--accent_hover); }
-#send:disabled { opacity: 0.4; cursor: not-allowed; }
+#send:hover { background: var(--accent_hover); transform: scale(1.05); }
+#send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
 /* === Loading Animation === */
 .loading {
@@ -747,10 +749,13 @@ pre:hover .copy-btn { opacity: 1; }
 /* === Mobile === */
 @media (max-width: 600px) {
     .messages { padding: 50px 12px 12px; }
-    .input-area { padding: 8px 12px 12px; }
+    .input-area { padding: 0 8px 16px; }
+    .input-container { border-radius: 20px; }
+    .input-container textarea { padding-left: 16px; font-size: 16px; }
     .message-content { max-width: 85vw; }
     .menu-panel { width: 85vw; }
     .dashboard-panel { width: 95vw; border-radius: 8px; }
     .settings-panel { width: 95vw; }
     .modal-content { width: 95vw; }
+    .chat.welcome-layout .input-area { padding-bottom: 10vh; }
 }

@@ -412,7 +412,6 @@ async function performWebSearch() {
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
-    if (document.getElementById('inputArea')?.classList.contains('welcome-mode')) return;
     textarea.style.height = 'auto';
     const maxH = window.innerHeight * 0.5;
     textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 24), maxH) + 'px';
@@ -421,6 +420,8 @@ function autoResizeTextarea(textarea) {
 function exitWelcomeMode() {
     const area = document.getElementById('inputArea');
     if (area) area.classList.remove('welcome-mode');
+    const chat = document.querySelector('.chat');
+    if (chat) chat.classList.remove('welcome-layout');
     const input = document.getElementById('input');
     if (input) {
         input.style.height = '';
@@ -431,6 +432,8 @@ function exitWelcomeMode() {
 function enterWelcomeMode() {
     const area = document.getElementById('inputArea');
     if (area) area.classList.add('welcome-mode');
+    const chat = document.querySelector('.chat');
+    if (chat) chat.classList.add('welcome-layout');
     const input = document.getElementById('input');
     if (input) input.style.height = '';
 }
