@@ -418,14 +418,18 @@ templates = Jinja2Templates(directory=str(_base_dir / "static"))
 # Default system prompt
 DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise and direct. Match the complexity of your response to the complexity of the question — simple questions get short answers, complex questions get thorough answers.
 
-Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer.
+Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer."""
 
-You have automatic web search capability. When WEB SEARCH RESULTS appear below, you MUST:
+SEARCH_ADDENDUM = """
+---
+WEB SEARCH RESULTS (use these to answer the user — cite sources with URLs):
+{results}
+
+Instructions for using search results:
 - Use the provided data to answer the question accurately with specific facts, numbers, dates, and details
 - Cite sources inline using [Source Name](URL) markdown links
 - Synthesize information from multiple results when relevant
-- Do NOT say "according to search results" — just present the information naturally
-- Do NOT discuss whether you can or cannot search the web"""
+- Do NOT say "according to search results" — just present the information naturally"""
 
 def filter_reasoning_text(text):
     """Remove <think> blocks, reasoning brackets, and meta-commentary from text"""
@@ -725,6 +729,9 @@ def should_web_search(message: str) -> bool:
                        'look it up', 'look this up', 'search this',
                        'search that', 'look that up', 'look them up']
     if any(s in msg for s in search_triggers):
+        return True
+    # "search <something>" at the start of the message (e.g. "search ebay for legos")
+    if msg.startswith('search '):
         return True
 
     # Too short to need search (only checked AFTER explicit triggers)
@@ -1092,6 +1099,101 @@ async def chat_websocket(websocket: WebSocket):
 
             custom_system_prompt = data.get('system_prompt')
 
+            # ── Slash commands ──────────────────────────────────────
+            if message.startswith('/'):
+                cmd_parts = message.split(None, 1)
+                cmd = cmd_parts[0].lower()
+                cmd_arg = cmd_parts[1].strip() if len(cmd_parts) > 1 else ''
+                handled = True
+
+                if cmd == '/help':
+                    help_text = (
+                        "**Available commands:**\n"
+                        "| Command | Description |\n"
+                        "|---------|-------------|\n"
+                        "| `/help` | Show this help |\n"
+                        "| `/search <query>` | Force a web search |\n"
+                        "| `/think <message>` | Force extended thinking |\n"
+                        "| `/system <prompt>` | Set custom system prompt |\n"
+                        "| `/reset` | Reset system prompt to default |\n"
+                        "| `/model` | Show current model info |\n"
+                        "| `/temp <0.0–1.0>` | Set temperature for next message |\n"
+                        "| `/clear` | Clear conversation history |"
+                    )
+                    await websocket.send_json({'type': 'start'})
+                    await websocket.send_json({'type': 'token', 'content': help_text})
+                    await websocket.send_json({'type': 'done'})
+
+                elif cmd == '/model':
+                    healthy = await vllm_health_check()
+                    status = "online" if healthy else "offline"
+                    await websocket.send_json({'type': 'start'})
+                    await websocket.send_json({'type': 'token', 'content': f'**Model:** `{MODEL_NAME}`\n**Status:** {status}'})
+                    await websocket.send_json({'type': 'done'})
+
+                elif cmd == '/system':
+                    if not cmd_arg:
+                        current = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
+                        await websocket.send_json({'type': 'start'})
+                        await websocket.send_json({'type': 'token', 'content': f'**Current system prompt:**\n\n{current}'})
+                        await websocket.send_json({'type': 'done'})
+                    else:
+                        await websocket.send_json({'type': 'set_system_prompt', 'content': cmd_arg})
+                        await websocket.send_json({'type': 'start'})
+                        await websocket.send_json({'type': 'token', 'content': f'System prompt updated.'})
+                        await websocket.send_json({'type': 'done'})
+
+                elif cmd == '/reset':
+                    await websocket.send_json({'type': 'set_system_prompt', 'content': ''})
+                    await websocket.send_json({'type': 'start'})
+                    await websocket.send_json({'type': 'token', 'content': 'System prompt reset to default.'})
+                    await websocket.send_json({'type': 'done'})
+
+                elif cmd == '/clear':
+                    if conv_id:
+                        conn = sqlite3.connect(DB_PATH)
+                        conn.execute('DELETE FROM messages WHERE conversation_id = ?', (conv_id,))
+                        conn.commit()
+                        conn.close()
+                    await websocket.send_json({'type': 'start'})
+                    await websocket.send_json({'type': 'token', 'content': 'Conversation history cleared.'})
+                    await websocket.send_json({'type': 'done'})
+
+                elif cmd == '/temp':
+                    try:
+                        val = float(cmd_arg) if cmd_arg else -1
+                        if not (0.0 <= val <= 2.0):
+                            raise ValueError
+                        await websocket.send_json({'type': 'set_temperature', 'value': val})
+                        await websocket.send_json({'type': 'start'})
+                        await websocket.send_json({'type': 'token', 'content': f'Temperature set to **{val}**.'})
+                        await websocket.send_json({'type': 'done'})
+                    except ValueError:
+                        await websocket.send_json({'type': 'error', 'content': 'Usage: `/temp 0.7` (range 0.0–2.0)'})
+
+                elif cmd == '/search':
+                    if not cmd_arg:
+                        await websocket.send_json({'type': 'error', 'content': 'Usage: `/search <query>`'})
+                    else:
+                        # Force search then send to model — fall through to normal flow
+                        message = cmd_arg
+                        data['_force_search'] = True
+                        handled = False
+
+                elif cmd == '/think':
+                    if not cmd_arg:
+                        await websocket.send_json({'type': 'error', 'content': 'Usage: `/think <message>`'})
+                    else:
+                        message = cmd_arg
+                        data['_force_think'] = True
+                        handled = False
+
+                else:
+                    await websocket.send_json({'type': 'error', 'content': f'Unknown command: `{cmd}`. Type `/help` for available commands.'})
+
+                if handled:
+                    continue
+
             try:
                 # Save user message
                 save_message(conv_id, 'user', message)
@@ -1101,10 +1203,13 @@ async def chat_websocket(websocket: WebSocket):
 
                 # Build messages
                 system_prompt = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
-                # For simple/short queries, skip extended thinking
+                # Thinking mode: /think forces it on, simple queries turn it off
+                force_think = data.get('_force_think', False)
                 msg_lower = message.lower().strip()
-                is_simple = len(message.split()) < 10 or any(
-                    msg_lower.startswith(s) for s in ['hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'ok', 'yes', 'no']
+                is_simple = not force_think and (
+                    len(message.split()) < 10 or any(
+                        msg_lower.startswith(s) for s in ['hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'ok', 'yes', 'no']
+                    )
                 )
                 if is_simple:
                     system_prompt = "/no_think\n" + system_prompt
@@ -1114,7 +1219,7 @@ async def chat_websocket(websocket: WebSocket):
                     messages.append({'role': msg['role'], 'content': msg['content']})
 
                 # Auto web search when the query likely needs current/factual info
-                do_search = should_web_search(message)
+                do_search = data.get('_force_search', False) or should_web_search(message)
                 if do_search:
                     # Force no-think mode — the model just needs to summarise results
                     if not system_prompt.startswith('/no_think'):
@@ -1125,7 +1230,7 @@ async def chat_websocket(websocket: WebSocket):
                         await websocket.send_json({'type': 'token', 'content': 'Searching the web...\n\n'})
                         search_context = await enhanced_web_search(search_query, message)
                         if search_context:
-                            messages[0]['content'] += f'\n\n---\nWEB SEARCH RESULTS (use these to answer the user — cite sources with URLs):\n{search_context}'
+                            messages[0]['content'] += SEARCH_ADDENDUM.format(results=search_context)
                             logger.info(f"Enhanced search injected ({len(search_context)} chars) for query: {search_query}")
                         else:
                             logger.warning(f"Search returned no results for query: {search_query}")
@@ -1169,7 +1274,8 @@ async def chat_websocket(websocket: WebSocket):
                 ws_disconnected = False
                 next_rep_check = 300  # first repetition check at 300 chars
 
-                stream_gen = vllm_chat_stream(messages, max_tokens=max_tokens)
+                temperature = data.get('temperature', 0.3)
+                stream_gen = vllm_chat_stream(messages, max_tokens=max_tokens, temperature=temperature)
                 try:
                     async for token in stream_gen:
                         # Strip leaked model special tokens

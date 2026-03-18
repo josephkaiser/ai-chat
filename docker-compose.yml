@@ -5,18 +5,15 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model ServiceNow-AI/Apriel-1.6-15b-Thinker
+      --model qwen/qwen3.5-9B
       --host 0.0.0.0
       --port 8000
-      --gpu-memory-utilization 0.95
+      --gpu-memory-utilization 0.90
       --max-model-len 8192
       --swap-space 16
       --enable-prefix-caching
       --max-num-seqs 16
       --enable-chunked-prefill
-
-      --trust-remote-code
-      --enforce-eager
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     deploy:
@@ -39,7 +36,7 @@ services:
       - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - MODEL_NAME=ServiceNow-AI/Apriel-1.6-15b-Thinker
+      - MODEL_NAME=qwen/qwen3.5-9B
       - HF_CACHE_PATH=/cache/huggingface
     depends_on:
       - vllm

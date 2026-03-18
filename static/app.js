@@ -178,6 +178,14 @@ function connectWS() {
             document.getElementById('input').focus();
             renderMarkdown();
             loadConversations();
+        } else if (data.type === 'set_system_prompt') {
+            if (data.content) {
+                localStorage.setItem('customSystemPrompt', data.content);
+            } else {
+                localStorage.removeItem('customSystemPrompt');
+            }
+        } else if (data.type === 'set_temperature') {
+            localStorage.setItem('temperature', data.value);
         } else if (data.type === 'error') {
             removeLoading();
             isGenerating = false;
@@ -409,11 +417,14 @@ function sendMessage() {
     isGenerating = true;
     document.getElementById('send').disabled = true;
 
-    ws.send(JSON.stringify({
+    const payload = {
         message: message,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null
-    }));
+    };
+    const temp = localStorage.getItem('temperature');
+    if (temp !== null) payload.temperature = parseFloat(temp);
+    ws.send(JSON.stringify(payload));
 }
 
 function addMessage(content, role, timestamp = null) {
