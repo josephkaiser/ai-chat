@@ -1272,7 +1272,23 @@ async def chat_websocket(websocket: WebSocket):
                     re.IGNORECASE
                 )
                 ws_disconnected = False
-                next_rep_check = 300  # first repetition check at 300 chars
+                next_rep_check = 200  # first repetition check at 200 chars
+                next_mid_check = 300  # mid-response reasoning checks start at 300 chars
+                mid_reasoning_truncated = False
+                # Mid-response reasoning indicators (strong signals that model is leaking internal monologue)
+                _MID_REASONING_RE = re.compile(
+                    r'(?:'
+                    r'(?:Final|Revised|Updated)\s+(?:Polish|Output|Check|Answer\s*Structure|Plan|Version|Draft)|'
+                    r'(?:Check|Verify)\s+Constraints|'
+                    r'(?:Okay|Ok)[\.\s]*(?:go|ready)\b|'
+                    r'\.cw|cw\s*cw\s*cw|'
+                    r'(?:Draft(?:ing)?|Refin(?:ing)?)\s+(?:response|answer|reply|output)|'
+                    r'One more (?:thing|nuance|check)\s*:|'
+                    r'Constraints.*?Yes.*?Yes.*?Yes|'
+                    r'\.go\.cw|\.go\.\s*$'
+                    r')',
+                    re.IGNORECASE
+                )
 
                 temperature = data.get('temperature', 0.3)
                 stream_gen = vllm_chat_stream(messages, max_tokens=max_tokens, temperature=temperature)
@@ -1286,10 +1302,32 @@ async def chat_websocket(websocket: WebSocket):
 
                         # Repetition loop detection — stop if model is repeating itself
                         if len(full_response) >= next_rep_check:
-                            next_rep_check = len(full_response) + 200
+                            next_rep_check = len(full_response) + 100
+                            # Long-window check (catches repeated paragraphs/blocks)
                             window = full_response[-150:]
                             if window in full_response[:-150]:
                                 logger.warning(f"Repetition loop detected in conv {conv_id}, stopping generation")
+                                break
+                            # Short-window check (catches short degenerate patterns like "cw cw cw...")
+                            if len(full_response) > 120:
+                                short_window = full_response[-30:]
+                                if short_window in full_response[:-30]:
+                                    logger.warning(f"Short-pattern repetition detected in conv {conv_id}, stopping generation")
+                                    break
+
+                        # Mid-response reasoning detection (catches reasoning that leaks after clean opening)
+                        if reasoning_check_done and not reasoning_detected and len(full_response) >= next_mid_check:
+                            next_mid_check = len(full_response) + 150
+                            recent = full_response[max(0, len(full_response) - 300):]
+                            if _MID_REASONING_RE.search(recent):
+                                logger.warning(f"Mid-response reasoning detected in conv {conv_id}, stopping generation")
+                                # Truncate full_response to before the reasoning started
+                                match = _MID_REASONING_RE.search(full_response)
+                                if match:
+                                    cut = full_response.rfind('\n\n', 0, match.start())
+                                    if cut > 50:
+                                        full_response = full_response[:cut].rstrip()
+                                mid_reasoning_truncated = True
                                 break
 
                         # If text-based reasoning was detected, suppress all streaming output
@@ -1391,14 +1429,22 @@ async def chat_websocket(websocket: WebSocket):
                     break  # exit the while True WebSocket loop
 
                 # Flush any remaining buffer (shouldn't happen normally)
-                if think_buffer and not in_think_block and not reasoning_detected:
+                if think_buffer and not in_think_block and not reasoning_detected and not mid_reasoning_truncated:
                     try:
                         await websocket.send_json({'type': 'token', 'content': think_buffer})
                     except Exception:
                         break
 
+                # If mid-response reasoning was detected, send cleaned replacement
+                if mid_reasoning_truncated:
+                    full_response = filter_reasoning_text(full_response)
+                    try:
+                        await websocket.send_json({'type': 'replace', 'content': full_response})
+                    except Exception:
+                        pass
+
                 # If reasoning was suppressed during streaming, filter and send cleaned response
-                if reasoning_detected:
+                elif reasoning_detected:
                     cleaned = filter_reasoning_text(full_response)
                     if cleaned:
                         await websocket.send_json({'type': 'token', 'content': cleaned})

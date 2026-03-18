@@ -172,6 +172,17 @@ function connectWS() {
             addMessage('', 'assistant');
         } else if (data.type === 'token') {
             appendToLastMessage(data.content);
+        } else if (data.type === 'replace') {
+            // Server detected mid-response reasoning — replace streamed content with clean version
+            const msgs = document.getElementById('messages');
+            const lastMsg = msgs.lastElementChild;
+            if (lastMsg?.classList.contains('assistant')) {
+                const contentDiv = lastMsg.querySelector('.message-content');
+                if (contentDiv) {
+                    lastMsg.dataset.originalContent = data.content;
+                    contentDiv.textContent = data.content;
+                }
+            }
         } else if (data.type === 'done') {
             isGenerating = false;
             document.getElementById('send').disabled = false;
