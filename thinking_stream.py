@@ -30,10 +30,15 @@ def _strip_incomplete_tag_suffix(buffer: str, *needles: str) -> Tuple[str, str]:
 
 
 def strip_stream_special_tokens(text: str) -> str:
-    """Remove chat-template special tokens like <|xxx|>; keep thinking tags and body text."""
+    """Remove chat-template special tokens and thinking blocks from saved text."""
     if not text:
         return text
-    return re.sub(r"<\|[^|]*\|>", "", text)
+    # Remove <|xxx|> template tokens
+    text = re.sub(r"<\|[^|]*\|>", "", text)
+    # Remove <think>...</think> and <redacted_thinking>...</redacted_thinking> blocks
+    text = re.sub(r"<redacted_thinking>.*?</redacted_thinking>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 def _strip_template_noise(raw: str) -> str:

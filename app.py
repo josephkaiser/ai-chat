@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 # --- Runtime configuration (override with env vars; see docs/configuration.md) ---
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-27B")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B-AWQ")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {MODEL_NAME}")
@@ -387,11 +387,14 @@ async def global_exception_handler(request, exc):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     try:
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
-            "model_name": MODEL_NAME,
-        })
+        return templates.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={
+                "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
+                "model_name": MODEL_NAME,
+            },
+        )
     except Exception as e:
         logger.error(f"Error generating home page: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error loading page: {str(e)}")

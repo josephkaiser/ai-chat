@@ -60,7 +60,7 @@ def _dark_tokens() -> dict[str, str]:
     border = "#333333"
     ink = "#e0e0e0"
     muted = "#a0a0a0"
-    faint = "#666666"
+    faint = "#808080"
     accent = "#4a9eff"
     cool = "#8194b1"
     cool_hi = "#b0c9df"
