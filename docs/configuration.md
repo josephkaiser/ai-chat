@@ -16,6 +16,21 @@ vllm:
 
 Set `MODEL_NAME` in the `chat-app` environment to match.
 
+## Chat application behavior
+
+These are **code defaults** (no extra env vars required):
+
+- **Default system prompt** — Edit `prompts.py` (`DEFAULT_SYSTEM_PROMPT`).
+- **Light/dark UI colors** — Edit `themes.py` (named palettes at the top of `_light_tokens()` / `_dark_tokens()`). Variable names must stay aligned with `static/style.css`.
+- **Thinking tags in the stream** — `thinking_stream.py` (`THINK_TAG_PAIRS`) must match `THINK_TAG_PAIRS` in `static/app.js`.
+
+Other tunables in **`app.py`** (module-level constants / env):
+
+- `MAX_COMPLETION_TOKENS` — From env `MAX_COMPLETION_TOKENS` (default `4096`).
+- `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — See comments near the top of `app.py`.
+
+The Docker image copies **`app.py`**, **`themes.py`**, **`prompts.py`**, and **`thinking_stream.py`** together (see `Dockerfile`).
+
 ## GPU Configurations
 
 **24GB (RTX 3090/4090):** Default config works well.

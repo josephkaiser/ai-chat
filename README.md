@@ -1,15 +1,14 @@
 # AI Chat with vLLM
 
-A self-hosted chat application running Qwen 3 8B on vLLM with a single GPU.
+A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small FastAPI + vanilla JS front end.
 
 ## Features
 
-- **Streaming Responses** — Real-time token streaming via WebSocket
-- **32K Context** — Smart history management with relevance scoring
-- **Web Search** — Automatic and manual search via DuckDuckGo
+- **Streaming Responses** — Real-time token streaming via WebSocket (including optional “thinking” regions for supported models)
+- **Context window** — History trimming with relevance scoring (tune model length in Compose / vLLM)
+- **Chat search** — Search past messages in SQLite
 - **Code Execution** — Sandboxed Python execution
 - **File Browsing** — Read files and list directories
-- **Chat Search** — Full-text search across all conversations
 - **Markdown** — Full rendering with syntax highlighting
 - **System Prompt** — Customizable per session
 - **Light/Dark Mode** — Theme support
@@ -44,6 +43,6 @@ Once started, open **http://localhost:8000**. The model loads in the background 
 
 ## Documentation
 
-- [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services
-- [API](docs/api.md) — REST and WebSocket endpoints
-- [Architecture](docs/architecture.md) — Project structure and tech stack
+- [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services, where to edit prompts/themes
+- [API](docs/api.md) — REST and WebSocket payloads
+- [Architecture](docs/architecture.md) — Modules (`themes.py`, `prompts.py`, `thinking_stream.py`) and data flow

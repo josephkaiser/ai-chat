@@ -11,6 +11,12 @@ let modelAvailable = false;
 let markedReady = false;
 let healthPollInterval = null;
 
+// Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
+const THINK_TAG_PAIRS = Object.freeze([
+    ['<' + 'redacted_thinking' + '>', '</' + 'redacted_thinking' + '>'],
+    ['<' + 'think' + '>', '</' + 'think' + '>'],
+]);
+
 // ==================== Theme ====================
 
 function applyTheme(mode) {
@@ -170,8 +176,14 @@ function connectWS() {
         if (data.type === 'start') {
             removeLoading();
             addMessage('', 'assistant');
+        } else if (data.type === 'think_start') {
+            onAssistantThinkStart();
+        } else if (data.type === 'think_token') {
+            onAssistantThinkToken(data.content);
+        } else if (data.type === 'think_end') {
+            onAssistantThinkEnd();
         } else if (data.type === 'token') {
-            appendToLastMessage(data.content);
+            appendAssistantAnswerToken(data.content);
         } else if (data.type === 'done') {
             isGenerating = false;
             document.getElementById('send').disabled = false;
@@ -416,76 +428,165 @@ function sendMessage() {
     }));
 }
 
+function parseAssistantRaw(raw) {
+    const segments = [];
+    let i = 0;
+    while (i < raw.length) {
+        let nextIdx = -1;
+        let openTag = '';
+        let closeTag = '';
+        for (const [o, c] of THINK_TAG_PAIRS) {
+            const idx = raw.indexOf(o, i);
+            if (idx !== -1 && (nextIdx === -1 || idx < nextIdx)) {
+                nextIdx = idx;
+                openTag = o;
+                closeTag = c;
+            }
+        }
+        if (nextIdx === -1) {
+            if (i < raw.length) segments.push({ t: 'a', s: raw.slice(i) });
+            break;
+        }
+        if (nextIdx > i) segments.push({ t: 'a', s: raw.slice(i, nextIdx) });
+        const startInner = nextIdx + openTag.length;
+        const closeIdx = raw.indexOf(closeTag, startInner);
+        if (closeIdx === -1) {
+            segments.push({ t: 'k', s: raw.slice(startInner) });
+            break;
+        }
+        segments.push({ t: 'k', s: raw.slice(startInner, closeIdx) });
+        i = closeIdx + closeTag.length;
+    }
+    return segments;
+}
+
+function attachThinkToolbarHandlers(box, toolbar) {
+    const chevron = toolbar.querySelector('.think-chevron');
+    toolbar.addEventListener('click', () => {
+        box.classList.toggle('think-box--expanded');
+        if (chevron) chevron.textContent = box.classList.contains('think-box--expanded') ? '\u25b4' : '\u25be';
+    });
+}
+
+function buildThinkBoxCollapsed(text) {
+    const box = document.createElement('div');
+    box.className = 'think-box';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'think-toolbar';
+    toolbar.innerHTML = '<span class="think-label">Reasoning</span><span class="think-chevron" aria-hidden="true">\u25be</span>';
+    const body = document.createElement('div');
+    body.className = 'think-body think-body--collapsed';
+    body.textContent = text;
+    box.appendChild(toolbar);
+    box.appendChild(body);
+    attachThinkToolbarHandlers(box, toolbar);
+    return box;
+}
+
+function hydrateAssistantFromRaw(msg, raw) {
+    const stack = msg.querySelector('.think-stack');
+    if (!stack) return;
+    const segments = parseAssistantRaw(raw);
+    let answer = '';
+    for (const seg of segments) {
+        if (seg.t === 'k' && seg.s) stack.appendChild(buildThinkBoxCollapsed(seg.s));
+        else if (seg.t === 'a') answer += seg.s;
+    }
+    const trimmed = answer.trim();
+    msg.dataset.originalContent = trimmed;
+    const contentDiv = msg.querySelector('.message-content');
+    if (contentDiv) contentDiv.textContent = trimmed;
+}
+
+function latestAssistantMessage() {
+    const messages = document.getElementById('messages');
+    const nodes = messages.querySelectorAll('.message.assistant');
+    return nodes.length ? nodes[nodes.length - 1] : null;
+}
+
+function onAssistantThinkStart() {
+    const msg = latestAssistantMessage();
+    if (!msg) return;
+    const stack = msg.querySelector('.think-stack');
+    if (!stack) return;
+    const box = document.createElement('div');
+    box.className = 'think-box think-box--streaming';
+    const toolbar = document.createElement('div');
+    toolbar.className = 'think-toolbar';
+    toolbar.innerHTML = '<span class="think-label">Reasoning\u2026</span><span class="think-chevron" aria-hidden="true">\u25be</span>';
+    const body = document.createElement('div');
+    body.className = 'think-body think-body--peek';
+    box.appendChild(toolbar);
+    box.appendChild(body);
+    attachThinkToolbarHandlers(box, toolbar);
+    stack.appendChild(box);
+    scrollToBottom();
+}
+
+function onAssistantThinkToken(text) {
+    const msg = latestAssistantMessage();
+    const box = msg?.querySelector('.think-box--streaming');
+    const body = box?.querySelector('.think-body');
+    if (!body) return;
+    body.appendChild(document.createTextNode(text));
+    scrollToBottom();
+}
+
+function onAssistantThinkEnd() {
+    const msg = latestAssistantMessage();
+    const box = msg?.querySelector('.think-box--streaming');
+    if (!box) return;
+    box.classList.remove('think-box--streaming');
+    const label = box.querySelector('.think-label');
+    if (label) label.textContent = 'Reasoning';
+    const body = box.querySelector('.think-body');
+    if (body) {
+        body.classList.remove('think-body--peek');
+        body.classList.add('think-body--collapsed');
+    }
+    scrollToBottom();
+}
+
+function appendAssistantAnswerToken(text) {
+    const msg = latestAssistantMessage();
+    if (!msg) return;
+    const contentDiv = msg.querySelector('.message-content');
+    if (!contentDiv) return;
+    msg.dataset.originalContent = (msg.dataset.originalContent || '') + text;
+    contentDiv.textContent = msg.dataset.originalContent;
+    scrollToBottom();
+}
+
 function addMessage(content, role, timestamp = null) {
     const msg = document.createElement('div');
     msg.className = `message ${role}`;
 
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    contentDiv.textContent = content;
-    msg.appendChild(contentDiv);
+    if (role === 'assistant') {
+        const stack = document.createElement('div');
+        stack.className = 'think-stack';
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        msg.appendChild(stack);
+        msg.appendChild(contentDiv);
+        msg.dataset.needsMarkdown = 'true';
+        msg.dataset.originalContent = '';
+        if (content && content.trim()) hydrateAssistantFromRaw(msg, content);
+    } else {
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.textContent = content;
+        msg.appendChild(contentDiv);
+    }
 
     const tsDiv = document.createElement('div');
     tsDiv.className = 'message-timestamp';
     tsDiv.textContent = formatTimestamp(timestamp || new Date().toISOString());
     msg.appendChild(tsDiv);
 
-    if (role === 'assistant') {
-        msg.dataset.needsMarkdown = 'true';
-        msg.dataset.originalContent = content;
-    }
     document.getElementById('messages').appendChild(msg);
     scrollToBottom();
     return msg;
 }
-
-function appendToLastMessage(content) {
-    const messages = document.getElementById('messages');
-    const lastMsg = messages.lastElementChild;
-    if (!lastMsg?.classList.contains('assistant')) return;
-
-    const contentDiv = lastMsg.querySelector('.message-content');
-    if (!contentDiv) return;
-
-    // Accumulate raw content in data attribute (source of truth)
-    const rawContent = (lastMsg.dataset.originalContent || '') + content;
-    lastMsg.dataset.originalContent = rawContent;
-
-    // Display based on <think> tag state
-    const hasThinkOpen = rawContent.includes('<think>');
-    const hasThinkClose = rawContent.includes('</think>');
-
-    if (hasThinkOpen && !hasThinkClose) {
-        // Still inside thinking block — show thinking indicator
-        const thinkStart = rawContent.indexOf('<think>') + 7;
-        const thinkText = rawContent.substring(thinkStart);
-        contentDiv.innerHTML =
-            '<div class="thinking-block streaming">' +
-            '<div class="thinking-header">Thinking...</div>' +
-            '<div class="thinking-content">' + escapeHtml(thinkText) + '</div>' +
-            '</div>';
-    } else if (hasThinkOpen && hasThinkClose) {
-        // Think block complete — show collapsed think + streaming response
-        const thinkMatch = rawContent.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/);
-        if (thinkMatch) {
-            let html = '<details class="thinking-block"><summary>Thinking</summary>' +
-                '<div class="thinking-content">' + escapeHtml(thinkMatch[1].trim()) + '</div></details>';
-            const afterThink = thinkMatch[2];
-            if (afterThink.trim()) {
-                html += '<div class="streaming-text">' + escapeHtml(afterThink) + '</div>';
-            }
-            contentDiv.innerHTML = html;
-        } else {
-            contentDiv.textContent = rawContent;
-        }
-    } else {
-        // No think tags — show raw text
-        contentDiv.textContent = rawContent;
-    }
-
-    scrollToBottom();
-}
-
 function showLoading() {
     const loading = document.createElement('div');
     loading.className = 'loading';
@@ -526,40 +627,15 @@ function renderMarkdown() {
     document.querySelectorAll('.message.assistant[data-needs-markdown="true"]').forEach(msg => {
         const contentDiv = msg.querySelector('.message-content');
         if (!contentDiv) return;
-        // Read raw content from data attribute (source of truth), fallback to textContent
+        // Read raw content from data attribute (answer only); thinking lives in .think-stack
         const content = msg.dataset.originalContent || contentDiv.textContent || contentDiv.innerText;
-        if (!content || !content.trim()) return;
+        const hasThink = msg.querySelector('.think-stack .think-box');
+        if ((!content || !content.trim()) && !hasThink) return;
 
         const tsDiv = msg.querySelector('.message-timestamp');
         try {
-            let html = '';
-
-            // Handle <think> blocks — extract and render as collapsible sections
-            const thinkRegex = /<think>([\s\S]*?)<\/think>/g;
-            let lastIndex = 0;
-            let match;
-            let hasThinkBlocks = false;
-
-            while ((match = thinkRegex.exec(content)) !== null) {
-                hasThinkBlocks = true;
-                // Render content before the think block
-                const before = content.substring(lastIndex, match.index);
-                if (before.trim()) html += marked.parse(before);
-                // Render think block as collapsible section with markdown inside
-                const thinkHtml = marked.parse(match[1].trim());
-                html += '<details class="thinking-block"><summary>Thinking</summary>' +
-                    '<div class="thinking-content">' + thinkHtml + '</div></details>';
-                lastIndex = match.index + match[0].length;
-            }
-
-            // Render remaining content after last think block
-            const remaining = content.substring(lastIndex);
-            if (remaining.trim()) html += marked.parse(remaining);
-
-            // If no think blocks, just parse everything as markdown
-            if (!hasThinkBlocks) html = marked.parse(content);
-
             const originalContent = msg.dataset.originalContent || content;
+            const html = (content && content.trim()) ? marked.parse(content) : '';
             contentDiv.innerHTML = html;
             msg.dataset.needsMarkdown = 'false';
             msg.dataset.rendered = 'true';
@@ -568,7 +644,7 @@ function renderMarkdown() {
 
             // Action bar below assistant message (like Claude)
             if (!msg.querySelector('.message-actions')) {
-                const copyText = originalContent.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+                const copyText = (originalContent || '').trim();
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
 

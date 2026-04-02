@@ -8,13 +8,12 @@ RUN pip install --no-cache-dir \
     uvicorn[standard] \
     websockets \
     httpx \
-    duckduckgo-search \
     beautifulsoup4 \
     jinja2 \
     aiofiles
 
-# Copy app and static files
-COPY app.py .
+# Copy application (app imports themes, prompts, thinking_stream)
+COPY app.py themes.py prompts.py thinking_stream.py .
 COPY static/ static/
 
 # Create data directory
