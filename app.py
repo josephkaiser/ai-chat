@@ -19,6 +19,7 @@ import logging
 import os
 import pathlib
 import shutil
+import socket
 import sqlite3
 import sys
 import traceback
@@ -33,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from prompts import DEFAULT_SYSTEM_PROMPT
+from prompts import DEFAULT_SYSTEM_PROMPT, DECOMPOSE_SYSTEM_PROMPT, REVIEW_SYSTEM_PROMPT
 from themes import COLORS_DARK, COLORS_LIGHT
 from thinking_stream import ThinkingStreamSplitter, strip_stream_special_tokens
 
@@ -76,6 +77,8 @@ HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {MODEL_NAME}")
 
+APP_TITLE = socket.gethostname() or "localhost"
+
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
 MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
@@ -113,6 +116,23 @@ async def vllm_chat_stream(messages: list, max_tokens: int = 4096, temperature: 
                             yield content
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+
+async def vllm_chat_complete(messages: list, max_tokens: int = 4096, temperature: float = 0.25) -> str:
+    """Non-streaming chat completion from vLLM."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        resp = await client.post(
+            f"{VLLM_HOST}/chat/completions",
+            json={
+                "model": MODEL_NAME,
+                "messages": messages,
+                "stream": False,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": 0.95,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
 
 async def vllm_health_check() -> bool:
     """Check if vLLM is healthy and model is loaded"""
@@ -360,7 +380,7 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
 
 # ==================== FastAPI App ====================
 
-app = FastAPI(title="Coding companion")
+app = FastAPI(title=APP_TITLE)
 
 app.add_middleware(
     CORSMiddleware,
@@ -393,6 +413,7 @@ async def home(request: Request):
             context={
                 "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
                 "model_name": MODEL_NAME,
+                "app_title": APP_TITLE,
             },
         )
     except Exception as e:
@@ -611,6 +632,91 @@ async def read_file_content(path: str):
 
 # ==================== WebSocket Handlers ====================
 
+async def orchestrated_chat(
+    websocket: WebSocket,
+    message: str,
+    history: list,
+    system_prompt: str,
+    max_tokens: int,
+) -> str:
+    """Decompose -> parallel agents -> review. Returns final response text."""
+    await websocket.send_json({"type": "status", "content": "Analyzing query..."})
+
+    context = ""
+    if history:
+        recent = history[-6:]
+        context = "\n".join(f"{m['role']}: {m['content'][:500]}" for m in recent)
+
+    decompose_messages = [
+        {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Conversation context:\n{context}\n\nUser's new query:\n{message}"},
+    ]
+
+    raw = await vllm_chat_complete(decompose_messages, max_tokens=1024, temperature=0.1)
+    cleaned = strip_stream_special_tokens(raw)
+
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError:
+        import re as _re
+
+        match = _re.search(r"\{.*\}", cleaned, _re.DOTALL)
+        if not match:
+            raise ValueError("Decompose did not produce valid JSON")
+        plan = json.loads(match.group())
+
+    strategy = plan.get("strategy", "parallel subtasks")
+    agent_a = plan["agent_a"]
+    agent_b = plan["agent_b"]
+    agent_a_role = agent_a["role"]
+    agent_b_role = agent_b["role"]
+    agent_a_prompt = agent_a["prompt"]
+    agent_b_prompt = agent_b["prompt"]
+
+    logger.info("Deep mode strategy: %s", strategy)
+
+    await websocket.send_json({"type": "status", "content": f"Working in parallel: {strategy}"})
+
+    agent_a_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": agent_a_prompt},
+    ]
+    agent_b_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": agent_b_prompt},
+    ]
+
+    output_a, output_b = await asyncio.gather(
+        vllm_chat_complete(agent_a_messages, max_tokens=max_tokens),
+        vllm_chat_complete(agent_b_messages, max_tokens=max_tokens),
+    )
+
+    output_a = strip_stream_special_tokens(output_a)
+    output_b = strip_stream_special_tokens(output_b)
+
+    await websocket.send_json({"type": "status", "content": "Reviewing and combining..."})
+
+    review_user_content = (
+        f"User's question:\n{message}\n\n"
+        f"Response A ({agent_a_role}):\n{output_a}\n\n"
+        f"Response B ({agent_b_role}):\n{output_b}"
+    )
+    review_messages = [
+        {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+        {"role": "user", "content": review_user_content},
+    ]
+
+    await websocket.send_json({"type": "start"})
+
+    splitter = ThinkingStreamSplitter()
+    async for token in vllm_chat_stream(review_messages, max_tokens=max_tokens):
+        for payload in splitter.feed(token):
+            await websocket.send_json(payload)
+    for payload in splitter.finalize():
+        await websocket.send_json(payload)
+
+    return strip_stream_special_tokens(splitter.full_response)
+
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -628,41 +734,51 @@ async def chat_websocket(websocket: WebSocket):
                 continue
 
             custom_system_prompt = data.get('system_prompt')
+            mode = data.get('mode', 'normal')
 
             try:
-                # Save user message
                 save_message(conv_id, 'user', message)
-
-                # Get history
                 history = get_conversation_history(conv_id, current_query=None)
-
-                # Build messages (thinking enabled — no /no_think)
                 system_prompt = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
-                messages = [{'role': 'system', 'content': system_prompt}]
-
-                for msg in history:
-                    messages.append({'role': msg['role'], 'content': msg['content']})
-
-                # Signal start
-                await websocket.send_json({'type': 'start'})
-
                 max_tokens = MAX_COMPLETION_TOKENS
-                logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
+                deep_succeeded = False
 
-                # Stream: split "thinking" vs visible answer (see thinking_stream.py)
-                splitter = ThinkingStreamSplitter()
-                async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
-                    for payload in splitter.feed(token):
+                if mode == 'deep':
+                    try:
+                        full_response = await orchestrated_chat(
+                            websocket, message, history, system_prompt, max_tokens
+                        )
+                        assistant_message_id = save_message(conv_id, 'assistant', full_response)
+                        await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
+                        await websocket.send_json({'type': 'done'})
+                        deep_succeeded = True
+                    except Exception as e:
+                        logger.warning("Deep mode failed, falling back: %s", e)
+                        await websocket.send_json({
+                            'type': 'status',
+                            'content': 'Deep mode failed, using normal mode...',
+                        })
+
+                if not deep_succeeded:
+                    messages = [{'role': 'system', 'content': system_prompt}]
+                    for msg in history:
+                        messages.append({'role': msg['role'], 'content': msg['content']})
+
+                    await websocket.send_json({'type': 'start'})
+
+                    logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
+
+                    splitter = ThinkingStreamSplitter()
+                    async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
+                        for payload in splitter.feed(token):
+                            await websocket.send_json(payload)
+                    for payload in splitter.finalize():
                         await websocket.send_json(payload)
-                for payload in splitter.finalize():
-                    await websocket.send_json(payload)
 
-                full_response = strip_stream_special_tokens(splitter.full_response)
-
-                # Save and send completion
-                assistant_message_id = save_message(conv_id, 'assistant', full_response)
-                await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
-                await websocket.send_json({'type': 'done'})
+                    full_response = strip_stream_special_tokens(splitter.full_response)
+                    assistant_message_id = save_message(conv_id, 'assistant', full_response)
+                    await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
+                    await websocket.send_json({'type': 'done'})
 
             except httpx.HTTPStatusError as e:
                 logger.error(f"vLLM API error: {e}")

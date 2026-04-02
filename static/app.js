@@ -11,6 +11,7 @@ let modelAvailable = false;
 let markedReady = false;
 let healthPollInterval = null;
 let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
+let deepMode = localStorage.getItem('deepMode') === 'true';
 
 // Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
 const THINK_TAG_PAIRS = Object.freeze([
@@ -185,6 +186,9 @@ function connectWS() {
             onAssistantThinkEnd();
         } else if (data.type === 'token') {
             appendAssistantAnswerToken(data.content);
+        } else if (data.type === 'status') {
+            const loadingText = document.querySelector('.loading-text');
+            if (loadingText) loadingText.textContent = data.content;
         } else if (data.type === 'done') {
             isGenerating = false;
             document.getElementById('send').disabled = false;
@@ -401,6 +405,13 @@ function enterWelcomeMode() {
     if (input) input.style.height = '';
 }
 
+function toggleDeepMode() {
+    deepMode = !deepMode;
+    localStorage.setItem('deepMode', deepMode);
+    const btn = document.getElementById('deepToggle');
+    if (btn) btn.classList.toggle('active', deepMode);
+}
+
 function focusInput() {
     const input = document.getElementById('input');
     if (input) input.focus();
@@ -431,7 +442,8 @@ function sendMessage() {
     ws.send(JSON.stringify({
         message: message,
         conversation_id: currentConvId,
-        system_prompt: localStorage.getItem('customSystemPrompt') || null
+        system_prompt: localStorage.getItem('customSystemPrompt') || null,
+        mode: deepMode ? 'deep' : 'normal'
     }));
 }
 
@@ -823,8 +835,8 @@ async function loadConversation(id) {
 
 function newChat() {
     currentConvId = generateId();
-    const modelName = window.MODEL_NAME || '';
-    document.getElementById('messages').innerHTML = '<div class="welcome">' + (modelName ? '<h1 style="font-weight:700; margin:0 0 0.25em;">' + modelName + '</h1>' : '') + '<h2>Welcome</h2><p>Start a conversation</p></div>';
+    document.getElementById('messages').innerHTML =
+        `<div class="welcome"><h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1></div>`;
     enterWelcomeMode();
     loadConversations();
 }
@@ -928,3 +940,6 @@ if (_input) {
         }
     });
 }
+
+const _deepBtn = document.getElementById('deepToggle');
+if (_deepBtn) _deepBtn.classList.toggle('active', deepMode);

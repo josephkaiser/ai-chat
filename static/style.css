@@ -30,10 +30,29 @@ body {
 }
 .welcome {
     text-align: center;
-    padding: 40px 20px 20px;
-    color: var(--text_secondary);
+    padding: 24px 20px 12px;
+    color: var(--text_primary);
 }
-.welcome h2 { font-weight: 300; margin-bottom: 8px; font-size: 28px; }
+.welcome-title {
+    font-weight: 600;
+    font-size: clamp(1.5rem, 4vw, 1.75rem);
+    margin: 0;
+    letter-spacing: -0.02em;
+}
+
+.input-area-stack {
+    max-width: 768px;
+    margin: 0 auto;
+    width: 100%;
+}
+.model-note {
+    margin: 10px 0 0;
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text_tertiary);
+    text-align: center;
+}
 
 /* === Menu Button === */
 .menu-btn {
@@ -473,6 +492,31 @@ body {
 }
 #send:hover { background: var(--accent_hover); transform: scale(1.05); }
 #send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+/* === Deep Mode Toggle === */
+.deep-toggle {
+    background: transparent;
+    border: 1px solid var(--bg_tertiary);
+    border-radius: 14px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text_tertiary);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin: 7px 0 7px 8px;
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+.deep-toggle:hover {
+    color: var(--text_secondary);
+    border-color: var(--text_tertiary);
+}
+.deep-toggle.active {
+    background: var(--accent_primary);
+    color: #fff;
+    border-color: var(--accent_primary);
+}
 
 /* === Loading Animation === */
 .loading {
