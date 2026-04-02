@@ -6,8 +6,33 @@
 
 ## WebSocket
 
-- `WebSocket /ws/chat` — Streaming chat (JSON: start, token, done, error, message_id)
-- `WebSocket /ws/logs` — Real-time terminal logs
+### `/ws/chat` (client → server)
+
+Send JSON objects, for example:
+
+- `message` — User text (required)
+- `conversation_id` — Conversation UUID
+- `system_prompt` — Optional override for the default in `prompts.py`
+
+### `/ws/chat` (server → client)
+
+JSON messages use a `type` field. Common values:
+
+| `type`        | Purpose |
+|---------------|---------|
+| `start`       | Assistant turn beginning |
+| `token`       | Visible answer text chunk |
+| `think_start` | Beginning of model “thinking” region (collapsible in UI) |
+| `think_token` | Thinking region text chunk |
+| `think_end`   | End of thinking region |
+| `message_id`  | SQLite id of the saved assistant message (`message_id` field) |
+| `done`        | Turn complete |
+| `error`       | Error (`content` has message text) |
+
+### `/ws/logs`
+
+- `WebSocket /ws/logs` — Log tail; messages use `type: log` and `content` (text).
+
 
 ## Conversations
 
@@ -23,8 +48,7 @@
 
 ## Search
 
-- `GET /api/search?query=...` — Search chat history
-- `POST /api/web-search` — Search the web via DuckDuckGo
+- `GET /api/search?query=...` — Search chat history (message content)
 
 ## Tools
 

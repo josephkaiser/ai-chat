@@ -1,3 +1,7 @@
+/*
+ * Layout and components. Colors come from CSS variables (--bg_primary, etc.).
+ * Light/dark values are injected from themes.py when the page loads (see app.js applyTheme).
+ */
 /* === Reset & Base === */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html { height: 100%; overflow: hidden; }
@@ -544,68 +548,79 @@ pre:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { background: var(--accent_primary); color: #fff; }
 .copy-btn.copied { background: var(--status_connected); color: #fff; opacity: 1; }
 
-/* === Thinking Block (collapsible <think> tags) === */
-.thinking-block {
-    margin: 8px 0;
+/* === Model reasoning (streaming + collapsed + expandable) === */
+.think-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+    width: 100%;
+}
+.think-box {
     border: 1px solid var(--bg_tertiary);
     border-radius: 8px;
+    background: var(--bg_quaternary);
     overflow: hidden;
-}
-.thinking-block summary {
-    padding: 8px 12px;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text_secondary);
-    background: var(--bg_tertiary);
-    user-select: none;
-    list-style: none;
-}
-.thinking-block summary::before {
-    content: '\25B6';
-    display: inline-block;
-    margin-right: 6px;
-    font-size: 10px;
-    transition: transform 0.2s;
-}
-.thinking-block[open] summary::before {
-    transform: rotate(90deg);
-}
-.thinking-block summary:hover {
-    color: var(--text_primary);
-}
-.thinking-content {
-    padding: 10px 14px;
-    font-size: 13px;
-    color: var(--text_secondary);
-    line-height: 1.5;
-    max-height: 400px;
-    overflow-y: auto;
-    border-top: 1px solid var(--bg_tertiary);
-}
-.thinking-content p { margin-bottom: 6px; }
-.thinking-content p:last-child { margin-bottom: 0; }
-
-/* Streaming state — thinking in progress */
-.thinking-block.streaming {
-    border-color: var(--accent_primary);
-}
-.thinking-block.streaming .thinking-header {
-    padding: 8px 12px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--accent_primary);
-    background: var(--bg_tertiary);
-    animation: pulse 1.5s infinite;
-}
-.thinking-block.streaming .thinking-content {
-    white-space: pre-wrap;
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
     font-size: 12px;
 }
-.streaming-text {
+.think-box--streaming {
+    border-color: var(--accent_primary);
+}
+.think-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg_tertiary);
+    color: var(--text_tertiary);
+    font-weight: 500;
+}
+.think-toolbar:hover {
+    color: var(--text_secondary);
+}
+.think-box--streaming .think-label {
+    color: var(--accent_primary);
+    animation: pulse 1.5s infinite;
+}
+.think-body {
+    padding: 8px 12px 10px;
+    margin: 0;
+    color: var(--text_tertiary);
+    line-height: 1.45;
     white-space: pre-wrap;
-    line-height: 1.5;
+    word-break: break-word;
+    overflow: hidden;
+    font-family: ui-monospace, 'SF Mono', Monaco, 'Cascadia Code', monospace;
+}
+.think-body--peek {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+}
+.think-body--collapsed {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+}
+.think-box--expanded .think-body {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+    max-height: min(70vh, 520px);
+    overflow-y: auto;
+}
+.think-chevron {
+    font-size: 11px;
+    opacity: 0.85;
+}
+
+.message.assistant .think-stack {
+    max-width: 700px;
+    width: 100%;
 }
 
 .message-content table {

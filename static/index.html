@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI Chat</title>
+    <title>Coding companion</title>
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -20,7 +20,7 @@
     <div class="overlay" id="menuOverlay" onclick="closeMenu()">
         <div class="menu-panel" onclick="event.stopPropagation()">
             <div class="panel-header">
-                <span>AI Chat</span>
+                <span>Coding companion</span>
                 <button onclick="closeMenu()">&times;</button>
             </div>
             <div class="menu-actions">
@@ -73,13 +73,13 @@
         <div class="messages" id="messages">
             <div class="welcome">
                 <h1 style="font-weight:700; margin:0 0 0.25em;">{{ model_name }}</h1>
-                <h2>Welcome</h2>
-                <p>Start a conversation</p>
+                <h2>Coding companion</h2>
+                <p>Paste a snippet and ask one focused question — you’ll get a short explanation and the smallest useful bit of code.</p>
             </div>
         </div>
         <div class="input-area welcome-mode" id="inputArea">
             <div class="input-container" onclick="focusInput()">
-                <textarea id="input" placeholder="Type your message..." rows="1" onkeydown="handleKeyDown(event)" oninput="autoResizeTextarea(this)"></textarea>
+                <textarea id="input" placeholder="Paste code and your question (one main idea)…" rows="1" onkeydown="handleKeyDown(event)" oninput="autoResizeTextarea(this)"></textarea>
                 <button id="send" onclick="sendMessage()">&#10148;</button>
             </div>
         </div>

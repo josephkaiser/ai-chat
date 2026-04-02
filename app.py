@@ -1,62 +1,41 @@
 #!/usr/bin/env python3
 """
-AI Chat with vLLM - Simplified single-model setup
-- Uses vLLM with Qwen 3.5 via httpx (no OpenAI SDK)
-- Markdown support for code and formatted text
-- Web search, code execution, file browsing
-- Theme support (light/dark)
+Coding companion with vLLM — short technical answers with code.
+
+Repo map (start here if you are new):
+  app.py           — FastAPI routes, WebSockets, SQLite helpers, vLLM httpx client
+  themes.py        — Light/dark palettes → CSS variables for static/style.css
+  prompts.py       — Default system prompt text
+  thinking_stream.py — Split model output into "thinking" vs visible answer for the UI
+  static/          — index.html, app.js, style.css (vanilla front end)
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import logging
+import os
+import pathlib
+import shutil
+import sqlite3
+import sys
+import traceback
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from typing import List, Dict, Optional
-import sqlite3
-from datetime import datetime
-import logging
-import traceback
-import io
-import sys
-import os
-import asyncio
-import json
-import re
-import httpx
-import shutil
-from duckduckgo_search import DDGS
 
-# Theme colors
-COLORS_LIGHT = {
-    'bg_primary': '#fffefb', 'bg_secondary': '#f5f0e8', 'bg_tertiary': '#e9eced',
-    'bg_quaternary': '#f5f0e8',
-    'text_primary': '#366c9c', 'text_secondary': '#8194b1', 'text_tertiary': '#b0c9df',
-    'accent_primary': '#8194b1', 'accent_hover': '#366c9c', 'accent_secondary': '#2563eb',
-    'msg_user_bg': '#e9eced', 'msg_user_text': '#366c9c',
-    'msg_assistant_bg': '#fffefb', 'msg_assistant_text': '#366c9c',
-    'status_connected': '#10b981', 'status_disconnected': '#ef4444',
-    'btn_primary': '#8194b1', 'btn_primary_hover': '#366c9c',
-    'btn_danger': '#ef4444', 'btn_danger_hover': '#dc2626',
-    'btn_secondary': '#e9eced', 'btn_secondary_hover': '#b0c9df',
-    'modal_overlay': 'rgba(0,0,0,0.5)', 'modal_bg': '#fffefb',
-    'scrollbar_track': '#f5f0e8', 'scrollbar_thumb': '#b0c9df', 'scrollbar_thumb_hover': '#8194b1',
-}
-COLORS_DARK = {
-    'bg_primary': '#1a1a1a', 'bg_secondary': '#242424', 'bg_tertiary': '#333333',
-    'bg_quaternary': '#242424',
-    'text_primary': '#e0e0e0', 'text_secondary': '#a0a0a0', 'text_tertiary': '#666666',
-    'accent_primary': '#8194b1', 'accent_hover': '#b0c9df', 'accent_secondary': '#4a9eff',
-    'msg_user_bg': '#333333', 'msg_user_text': '#e0e0e0',
-    'msg_assistant_bg': '#242424', 'msg_assistant_text': '#e0e0e0',
-    'status_connected': '#10b981', 'status_disconnected': '#ef4444',
-    'btn_primary': '#8194b1', 'btn_primary_hover': '#b0c9df',
-    'btn_danger': '#ef4444', 'btn_danger_hover': '#dc2626',
-    'btn_secondary': '#333333', 'btn_secondary_hover': '#444444',
-    'modal_overlay': 'rgba(0,0,0,0.8)', 'modal_bg': '#242424',
-    'scrollbar_track': '#242424', 'scrollbar_thumb': '#333333', 'scrollbar_thumb_hover': '#444444',
-}
+from prompts import DEFAULT_SYSTEM_PROMPT
+from themes import COLORS_DARK, COLORS_LIGHT
+from thinking_stream import ThinkingStreamSplitter, strip_stream_special_tokens
 
 # Setup logging with capture
 log_capture = io.StringIO()
@@ -89,7 +68,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
+# --- Runtime configuration (override with env vars; see docs/configuration.md) ---
 DB_PATH = "/app/data/chat.db"
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-27B")
@@ -97,9 +76,13 @@ HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {MODEL_NAME}")
 
+# Completion budget: ceiling only. The model still ends the stream when it predicts EOS
+# (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
+MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
+
 # ==================== vLLM Client (httpx) ====================
 
-async def vllm_chat_stream(messages: list, max_tokens: int = 4096, temperature: float = 0.3):
+async def vllm_chat_stream(messages: list, max_tokens: int = 4096, temperature: float = 0.25):
     """Stream chat completions from vLLM using httpx"""
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
         async with client.stream(
@@ -143,10 +126,10 @@ async def vllm_health_check() -> bool:
         pass
     return False
 
-# ==================== Database ====================
+# ==================== Database (SQLite file at DB_PATH) ====================
 
 def init_db():
-    """Initialize database"""
+    """Create tables and indexes if missing; safe to call on every startup."""
     try:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
@@ -200,29 +183,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: str
 
-# ==================== Helper Functions ====================
-
-def estimate_tokens_needed(prompt: str) -> int:
-    """Estimate tokens needed based on user request"""
-    prompt_lower = prompt.lower()
-
-    page_matches = re.findall(r'(\d+)\s*pages?', prompt_lower)
-    if page_matches:
-        return int(page_matches[0]) * 700
-
-    word_matches = re.findall(r'(\d+)\s*words?', prompt_lower)
-    if word_matches:
-        return int(int(word_matches[0]) * 1.3)
-
-    token_matches = re.findall(r'(\d+)\s*tokens?', prompt_lower)
-    if token_matches:
-        return int(token_matches[0])
-
-    if any(word in prompt_lower for word in ['long', 'detailed', 'comprehensive', 'extensive', 'thorough', 'complete']):
-        return 30000
-
-    estimated = len(prompt) * 0.25 * 10
-    return min(max(int(estimated), 4096), 30000)
+# ==================== History selection (token budget for vLLM context) ====================
 
 def calculate_message_relevance_score(msg: Dict, current_query: str, message_index: int, total_messages: int) -> float:
     """Calculate relevance and quality score for a message"""
@@ -399,7 +360,7 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
 
 # ==================== FastAPI App ====================
 
-app = FastAPI(title="AI Chat")
+app = FastAPI(title="Coding companion")
 
 app.add_middleware(
     CORSMiddleware,
@@ -409,37 +370,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import pathlib
 _base_dir = pathlib.Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(_base_dir / "static")), name="static")
 templates = Jinja2Templates(directory=str(_base_dir / "static"))
-
-# Default system prompt
-DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise and direct. Match the complexity of your response to the complexity of the question — simple questions get short answers, complex questions get thorough answers.
-
-Never show your internal reasoning, thinking process, drafts, or self-corrections. Just give the final answer.
-
-When web search results are provided, use them for accuracy and cite sources naturally."""
-
-def filter_reasoning_text(text):
-    """Remove <think> blocks, reasoning brackets, and meta-commentary from text"""
-    if not text:
-        return text
-    # Strip model special tokens (<|eot_id|>, <|im_end|>, etc.)
-    text = re.sub(r'<\|[^|]*\|>', '', text)
-    # Strip <think>...</think> blocks (Qwen thinking mode)
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    # Strip unclosed <think> blocks (model cut off mid-thought)
-    text = re.sub(r'<think>.*', '', text, flags=re.DOTALL)
-    text = re.sub(r'\[Reasoning:[^\]]+\]\s*->\s*', '', text, flags=re.DOTALL)
-    text = re.sub(r'\[Reasoning:[^\]]+\]', '', text, flags=re.DOTALL)
-    text = re.sub(r'\[(?:Conclusion|Statement|Analysis|Evaluation|Decision|Verification|Step \d+|Fact|Claim|Acknowledged uncertainty|Verified|Test Result):[^\]]+\]', '', text, flags=re.DOTALL)
-    text = re.sub(r'\s*->\s*', ' ', text)
-    text = re.sub(r'\[[A-Z][a-z]+(?::[^\]]+)?\]', '', text)
-    text = re.sub(r'[^\S\n]+', ' ', text)  # Collapse horizontal whitespace only, preserve newlines
-    text = re.sub(r'\s+([.,!?;:])', r'\1', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
 
 # ==================== API Endpoints ====================
 
@@ -673,66 +606,6 @@ async def read_file_content(path: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== Web Search Logic ====================
-
-def should_web_search(message: str) -> bool:
-    """Decide if a query would benefit from web search results."""
-    msg = message.lower().strip()
-
-    # Too short to need search
-    if len(msg) < 15:
-        return False
-
-    # Skip greetings, thanks, simple instructions
-    skip_starts = ['hello', 'hi ', 'hey', 'thanks', 'thank you', 'bye', 'please ', 'ok', 'sure', 'yes', 'no']
-    if any(msg.startswith(s) for s in skip_starts) and len(msg) < 40:
-        return False
-
-    # Skip coding/math/creative tasks — these don't need web search
-    code_signals = [
-        'write a function', 'write code', 'write a script', 'fix this', 'debug',
-        'refactor', 'implement', 'def ', 'class ', 'function(', 'calculate',
-        'solve', 'write a poem', 'write a story', 'explain this code',
-        'convert this', 'translate this code', 'optimize this', 'review this',
-        '```', 'import ', 'print(', 'return ', 'for i in', 'console.log',
-    ]
-    if any(sig in msg for sig in code_signals):
-        return False
-
-    # Temporal markers — strong signal for needing current info
-    temporal = [
-        'today', 'yesterday', 'this week', 'this month', 'this year',
-        'right now', 'currently', 'latest', 'recent', 'newest',
-        'last week', 'last month', 'last year', 'upcoming', 'schedule',
-    ]
-    # Also match year references 2024+
-    if any(t in msg for t in temporal) or re.search(r'\b20(2[4-9]|[3-9]\d)\b', msg):
-        return True
-
-    # Current events / real-world lookups
-    current_signals = [
-        'news', 'election', 'stock', 'price of', 'weather', 'score',
-        'release date', 'announced', 'launched', 'worth', 'net worth',
-        'ceo of', 'president of', 'population of', 'capital of',
-        'happening', 'update on', 'status of', 'reviews of',
-    ]
-    if any(sig in msg for sig in current_signals):
-        return True
-
-    # Factual lookup patterns
-    lookup_patterns = [
-        r'\b(who|what|when|where|how) (is|was|are|were|do|does|did|to|can|should) (the |a |i |you )?\w+.{5,}',
-        r'how (much|many) (does|do|did|is|are|will)',
-        r'(latest|current|recent|new) .{3,} (version|release|update|price|status|news)',
-        r'(compare|difference between|vs\.?|versus) .+ (and|vs)',
-        r'(best|top|recommended) .{3,} (for|in|of) \d{4}',
-        r'\b(why) (is|was|are|were|does|do|did|can|would|should) .{10,}',
-    ]
-    if any(re.search(pat, msg) for pat in lookup_patterns):
-        return True
-
-    return False
-
 # ==================== WebSocket Handlers ====================
 
 @app.websocket("/ws/chat")
@@ -758,95 +631,30 @@ async def chat_websocket(websocket: WebSocket):
                 save_message(conv_id, 'user', message)
 
                 # Get history
-                history = get_conversation_history(conv_id, current_query=message)
+                history = get_conversation_history(conv_id, current_query=None)
 
-                # Build messages
+                # Build messages (thinking enabled — no /no_think)
                 system_prompt = custom_system_prompt or DEFAULT_SYSTEM_PROMPT
-                # For simple/short queries, tell Qwen to skip extended thinking
-                msg_lower = message.lower().strip()
-                is_simple = len(message.split()) < 10 or any(
-                    msg_lower.startswith(s) for s in ['hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'ok', 'yes', 'no']
-                )
-                if is_simple:
-                    system_prompt = "/no_think\n" + system_prompt
                 messages = [{'role': 'system', 'content': system_prompt}]
 
                 for msg in history:
                     messages.append({'role': msg['role'], 'content': msg['content']})
 
-                # Auto web search when the query likely needs current/factual info
-                if should_web_search(message):
-                    try:
-                        await websocket.send_json({'type': 'token', 'content': 'Searching the web...\n\n'})
-                        with DDGS() as ddgs:
-                            search_results = list(ddgs.text(message, region='us-en', max_results=5))
-                            if search_results:
-                                search_context = "\n\nWeb search results:\n"
-                                for i, r in enumerate(search_results, 1):
-                                    search_context += f"\n[{i}] {r.get('title', '')}\nURL: {r.get('href', '')}\n{r.get('body', '')[:500]}\n"
-                                messages.append({
-                                    'role': 'system',
-                                    'content': f'Web search results for the user\'s query:\n{search_context}\n\nUse these search results to provide an accurate, up-to-date response. Cite sources when relevant.'
-                                })
-                    except Exception as e:
-                        logger.warning(f"Web search failed: {e}")
-
                 # Signal start
                 await websocket.send_json({'type': 'start'})
 
-                # Calculate max tokens
-                max_tokens = estimate_tokens_needed(message)
+                max_tokens = MAX_COMPLETION_TOKENS
                 logger.info(f"Processing message for conv {conv_id}, max_tokens: {max_tokens}")
 
-                # Stream from vLLM — filter <think> blocks before sending to user
-                full_response = ""
-                in_think_block = False
-                think_buffer = ""
-
+                # Stream: split "thinking" vs visible answer (see thinking_stream.py)
+                splitter = ThinkingStreamSplitter()
                 async for token in vllm_chat_stream(messages, max_tokens=max_tokens):
-                    # Strip leaked model special tokens
-                    token = re.sub(r'<\|[^|]*\|>', '', token)
-                    if not token:
-                        continue
-                    full_response += token
+                    for payload in splitter.feed(token):
+                        await websocket.send_json(payload)
+                for payload in splitter.finalize():
+                    await websocket.send_json(payload)
 
-                    # Buffer tokens to detect and skip <think>...</think> blocks
-                    think_buffer += token
-
-                    if not in_think_block:
-                        # Check if we're entering a think block
-                        if '<think>' in think_buffer:
-                            # Send everything before the <think> tag
-                            before = think_buffer.split('<think>')[0]
-                            if before:
-                                await websocket.send_json({'type': 'token', 'content': before})
-                            in_think_block = True
-                            think_buffer = think_buffer.split('<think>', 1)[1]
-                        elif '<think' in think_buffer and '>' not in think_buffer.split('<think')[-1]:
-                            # Partial <think tag, keep buffering
-                            pass
-                        else:
-                            # No think tag, flush buffer
-                            await websocket.send_json({'type': 'token', 'content': think_buffer})
-                            think_buffer = ""
-                    else:
-                        # Inside think block — check for closing tag
-                        if '</think>' in think_buffer:
-                            # Discard everything up to and including </think>
-                            after = think_buffer.split('</think>', 1)[1]
-                            think_buffer = after
-                            in_think_block = False
-                            # Flush any remaining content after the close tag
-                            if think_buffer:
-                                await websocket.send_json({'type': 'token', 'content': think_buffer})
-                                think_buffer = ""
-
-                # Flush any remaining buffer (shouldn't happen normally)
-                if think_buffer and not in_think_block:
-                    await websocket.send_json({'type': 'token', 'content': think_buffer})
-
-                # Filter full response for saving (preserves <think> tags and markdown)
-                full_response = filter_reasoning_text(full_response)
+                full_response = strip_stream_special_tokens(splitter.full_response)
 
                 # Save and send completion
                 assistant_message_id = save_message(conv_id, 'assistant', full_response)
