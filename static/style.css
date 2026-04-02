@@ -64,6 +64,8 @@ body {
     height: 8px;
     border-radius: 50%;
     background: var(--status_disconnected);
+    display: block;
+    aspect-ratio: 1;
 }
 .menu-btn .status-dot.connected { background: var(--status_connected); }
 .menu-btn .status-dot.loading {
@@ -301,7 +303,7 @@ body {
     color: #ccc;
     border-radius: 8px;
     padding: 12px;
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-family: 'Courier New', Courier, monospace;
     font-size: 11px;
     max-height: 200px;
     overflow-y: auto;
@@ -437,7 +439,7 @@ body {
     font-size: 15px;
     resize: none;
     line-height: 1.5;
-    max-height: 200px;
+    overflow: hidden;
 }
 .input-container textarea::placeholder { color: var(--text_tertiary); }
 
@@ -510,7 +512,7 @@ body {
     color: var(--text_secondary);
 }
 .message-content code {
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-family: 'Courier New', Courier, monospace;
     font-size: 0.9em;
     background: var(--bg_tertiary);
     padding: 2px 5px;
@@ -592,7 +594,7 @@ pre:hover .copy-btn { opacity: 1; }
     white-space: pre-wrap;
     word-break: break-word;
     overflow: hidden;
-    font-family: ui-monospace, 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-family: 'Courier New', Courier, monospace;
 }
 .think-body--peek {
     display: -webkit-box;
@@ -672,7 +674,7 @@ pre:hover .copy-btn { opacity: 1; }
     margin-bottom: 16px;
 }
 .modal-content textarea {
-    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    font-family: 'Courier New', Courier, monospace;
     font-size: 13px;
     resize: vertical;
     min-height: 200px;

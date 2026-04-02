@@ -10,6 +10,7 @@ let renameConvId = null;
 let modelAvailable = false;
 let markedReady = false;
 let healthPollInterval = null;
+let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
 
 // Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
 const THINK_TAG_PAIRS = Object.freeze([
@@ -376,8 +377,7 @@ function closeSettings() {
 
 function autoResizeTextarea(textarea) {
     textarea.style.height = 'auto';
-    const maxH = window.innerHeight * 0.5;
-    textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 24), maxH) + 'px';
+    textarea.style.height = Math.max(textarea.scrollHeight, 24) + 'px';
 }
 
 function exitWelcomeMode() {
@@ -408,13 +408,20 @@ function focusInput() {
 
 function sendMessage() {
     const input = document.getElementById('input');
-    const message = input.value.trim();
-    if (!modelAvailable || !message || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+    const displayText = input.value.trim();
+    if (!modelAvailable || !displayText || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+
+    // Resolve any collapsed paste placeholders to actual content
+    let message = displayText;
+    for (const block of pastedBlocks) {
+        message = message.replace(block.placeholder, block.actual);
+    }
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    addMessage(message, 'user');
+    addMessage(displayText, 'user');
     input.value = '';
+    pastedBlocks = [];
     autoResizeTextarea(input);
     showLoading();
 
@@ -901,4 +908,23 @@ if (_input) {
     autoResizeTextarea(_input);
     window.addEventListener('resize', () => autoResizeTextarea(_input));
     _input.focus();
+
+    // Collapse long pastes (>10 lines) into a placeholder; actual text is sent on submit
+    _input.addEventListener('paste', (e) => {
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        const lines = text.split('\n');
+        if (lines.length > 10) {
+            e.preventDefault();
+            const placeholder = `[${lines.length} lines pasted]`;
+            pastedBlocks.push({ placeholder, actual: text });
+
+            const start = _input.selectionStart;
+            const end = _input.selectionEnd;
+            const before = _input.value.substring(0, start);
+            const after = _input.value.substring(end);
+            _input.value = before + placeholder + after;
+            _input.selectionStart = _input.selectionEnd = start + placeholder.length;
+            autoResizeTextarea(_input);
+        }
+    });
 }
