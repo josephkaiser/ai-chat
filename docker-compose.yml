@@ -35,6 +35,7 @@ services:
     volumes:
       - ./data:/app/data
       - ~/.cache/huggingface:/cache/huggingface
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - VLLM_HOST=http://vllm:8000/v1
       - MODEL_NAME=Qwen/Qwen3-14B-AWQ
@@ -42,9 +43,11 @@ services:
       - MODEL_14B_ARGS=--gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager
       - MODEL_8B_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
       - MODEL_8B_ARGS=--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --enforce-eager
+      - MODEL_GEMMA_4_NAME=google/gemma-4-E4B-it
+      - MODEL_GEMMA_4_ARGS=--gpu-memory-utilization 0.85 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 12 --enable-chunked-prefill --enforce-eager
       - DEFAULT_MODEL_PROFILE=14b
       - HF_CACHE_PATH=/cache/huggingface
-      - DOCKER_CONTROL_ENABLED=false
+      - DOCKER_CONTROL_ENABLED=true
       - INTERACTIVE_TERMINAL_ENABLED=false
       - EXECUTE_CODE_ENABLED=false
       - STRICT_WORKSPACE_COMMAND_PATHS=true

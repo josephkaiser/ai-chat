@@ -30,12 +30,13 @@ import struct
 import sys
 import signal
 import tempfile
+import time
 import traceback
 import uuid
 import zipfile
 from html import unescape
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
@@ -130,6 +131,12 @@ MODEL_8B_ARGS = os.getenv(
     "--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching "
     "--max-num-seqs 16 --enable-chunked-prefill --enforce-eager",
 )
+MODEL_GEMMA_4_NAME = os.getenv("MODEL_GEMMA_4_NAME", "google/gemma-4-E4B-it")
+MODEL_GEMMA_4_ARGS = os.getenv(
+    "MODEL_GEMMA_4_ARGS",
+    "--gpu-memory-utilization 0.85 --max-model-len 8192 --enable-prefix-caching "
+    "--max-num-seqs 12 --enable-chunked-prefill --enforce-eager",
+)
 CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -144,6 +151,8 @@ COMMAND_OUTPUT_LIMIT = int(os.getenv("COMMAND_OUTPUT_LIMIT", "12000"))
 TOOL_RESULT_TEXT_LIMIT = int(os.getenv("TOOL_RESULT_TEXT_LIMIT", "40000"))
 WEB_PAGE_TEXT_LIMIT = int(os.getenv("WEB_PAGE_TEXT_LIMIT", "16000"))
 WEB_FETCH_PAGE_MAX_PER_TURN = max(1, int(os.getenv("WEB_FETCH_PAGE_MAX_PER_TURN", "3")))
+CURATED_SOURCE_FAILURE_THRESHOLD = max(1, int(os.getenv("CURATED_SOURCE_FAILURE_THRESHOLD", "2")))
+CURATED_SOURCE_DISABLE_MINUTES = max(1, int(os.getenv("CURATED_SOURCE_DISABLE_MINUTES", "240")))
 UPLOAD_FILE_SIZE_LIMIT = 10 * 1024 * 1024
 VOICE_INPUT_SIZE_LIMIT = int(os.getenv("VOICE_INPUT_SIZE_LIMIT", str(15 * 1024 * 1024)))
 VOICE_COMMAND_TIMEOUT_SECONDS = float(os.getenv("VOICE_COMMAND_TIMEOUT_SECONDS", "180"))
@@ -151,6 +160,8 @@ VOICE_TTS_COMMAND = os.getenv("VOICE_TTS_COMMAND", "").strip()
 VOICE_STT_COMMAND = os.getenv("VOICE_STT_COMMAND", "").strip()
 VOICE_STT_LANGUAGE = os.getenv("VOICE_STT_LANGUAGE", "en").strip() or "en"
 VOICE_TTS_VOICE = os.getenv("VOICE_TTS_VOICE", "Samantha").strip() or "Samantha"
+VOICE_STORAGE_LIMIT_BYTES = max(0, int(os.getenv("VOICE_STORAGE_LIMIT_BYTES", str(3 * 1024 * 1024 * 1024))))
+VOICE_EPHEMERAL_KINDS = ("input", "transcripts", "tts-text", "tts-audio")
 MAX_ATTACHMENTS_PER_MESSAGE = 8
 SPREADSHEET_PREVIEW_ROWS = 8
 SPREADSHEET_MAX_COLUMNS = 40
@@ -174,7 +185,7 @@ WORKSPACE_SIGNAL_VERBS = {
     "inspect", "read", "open", "show", "list", "search", "find", "grep",
     "edit", "change", "update", "patch", "refactor", "create", "write", "add",
     "delete", "remove", "rename", "run", "execute", "test", "build", "compile",
-    "debug", "fix", "implement",
+    "debug", "fix", "implement", "tweak", "adjust", "modify", "improve", "revise",
 }
 WORKSPACE_SIGNAL_NOUNS = {
     "workspace", "repo", "repository", "codebase", "project", "folder", "directory",
@@ -199,20 +210,87 @@ INTERACTIVE_TERMINAL_ENABLED = env_flag("INTERACTIVE_TERMINAL_ENABLED", False)
 EXECUTE_CODE_ENABLED = env_flag("EXECUTE_CODE_ENABLED", False)
 STRICT_WORKSPACE_COMMAND_PATHS = env_flag("STRICT_WORKSPACE_COMMAND_PATHS", True)
 
-MODEL_PROFILES: Dict[str, Dict[str, str]] = {
-    "14b": {
-        "key": "14b",
-        "label": "14B",
-        "name": MODEL_14B_NAME,
-        "args": MODEL_14B_ARGS,
-    },
-    "8b": {
-        "key": "8b",
-        "label": "8B",
-        "name": MODEL_8B_NAME,
-        "args": MODEL_8B_ARGS,
-    },
-}
+
+def infer_model_provider(model_name: str) -> str:
+    """Infer a friendly provider/vendor label from a model identifier."""
+    model_name = (model_name or "").strip()
+    namespace = model_name.split("/", 1)[0].strip().lower()
+    namespace_map = {
+        "qwen": "Qwen",
+        "qwenlm": "Qwen",
+        "meta-llama": "Meta",
+        "google": "Google",
+        "mistralai": "Mistral",
+        "microsoft": "Microsoft",
+        "deepseek-ai": "DeepSeek",
+        "moonshotai": "Moonshot",
+        "tiiuae": "TII",
+    }
+    if namespace:
+        return namespace_map.get(namespace, namespace.replace("-", " ").title())
+
+    lowered = model_name.lower()
+    if "gemma" in lowered:
+        return "Google"
+    if "llama" in lowered:
+        return "Meta"
+    if "qwen" in lowered:
+        return "Qwen"
+    return "Unknown"
+
+
+def build_profile_display_label(label: str, provider: str) -> str:
+    """Build a concise profile label that keeps the provider visible."""
+    normalized_label = (label or "").strip()
+    normalized_provider = (provider or "").strip()
+    if not normalized_label:
+        return normalized_provider or "Model"
+    if not normalized_provider:
+        return normalized_label
+    if normalized_provider.lower() in normalized_label.lower():
+        return normalized_label
+    return f"{normalized_label} ({normalized_provider})"
+
+
+def build_model_profile(
+    key: str,
+    name: str,
+    args: str,
+    label: Optional[str] = None,
+    *,
+    fast_path: bool = False,
+) -> Dict[str, Any]:
+    """Create a model profile dictionary."""
+    base_label = label or key.upper()
+    provider = infer_model_provider(name)
+    return {
+        "key": key,
+        "label": base_label,
+        "display_label": build_profile_display_label(base_label, provider),
+        "provider": provider,
+        "name": name,
+        "args": args,
+        "fast_path": fast_path,
+    }
+
+
+def build_configured_model_profiles() -> Dict[str, Dict[str, Any]]:
+    """Build the configured model profile table from environment defaults."""
+    configured = [
+        ("14b", MODEL_14B_NAME, MODEL_14B_ARGS, "14B", False),
+        ("8b", MODEL_8B_NAME, MODEL_8B_ARGS, "8B", True),
+        ("gemma4", MODEL_GEMMA_4_NAME, MODEL_GEMMA_4_ARGS, "Gemma 4 E4B", True),
+    ]
+    profiles: Dict[str, Dict[str, Any]] = {}
+    for key, name, args, label, fast_path in configured:
+        normalized_name = (name or "").strip()
+        if not normalized_name:
+            continue
+        profiles[key] = build_model_profile(key, normalized_name, args, label=label, fast_path=fast_path)
+    return profiles
+
+
+MODEL_PROFILES: Dict[str, Dict[str, Any]] = build_configured_model_profiles()
 if DEFAULT_MODEL_PROFILE not in MODEL_PROFILES:
     DEFAULT_MODEL_PROFILE = "14b"
 
@@ -257,19 +335,23 @@ TERMINAL_LOCKS: Dict[str, asyncio.Lock] = {}
 MODEL_DOWNLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
 MODEL_DOWNLOAD_LOCK: asyncio.Lock | None = None
 COMMAND_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
+CURATED_SOURCE_HEALTH: Dict[str, Dict[str, Any]] = {}
 
 
-def build_model_profile(key: str, name: str, args: str, label: Optional[str] = None) -> Dict[str, str]:
-    """Create a model profile dictionary."""
+def serialize_model_profile(profile: Dict[str, Any], *, active: bool = False, selected: bool = False) -> Dict[str, Any]:
+    """Return the UI-safe subset of a model profile."""
     return {
-        "key": key,
-        "label": label or key.upper(),
-        "name": name,
-        "args": args,
+        "key": profile["key"],
+        "label": profile["label"],
+        "display_label": profile.get("display_label") or profile["label"],
+        "provider": profile.get("provider") or "",
+        "name": profile["name"],
+        "active": active,
+        "selected": selected,
     }
 
 
-def get_active_model_profile() -> Dict[str, str]:
+def get_active_model_profile() -> Dict[str, Any]:
     """Return the selected profile metadata."""
     profile = MODEL_PROFILES.get(ACTIVE_MODEL_PROFILE)
     if profile:
@@ -286,7 +368,7 @@ def get_active_model_name() -> str:
 
 def is_fast_profile_active() -> bool:
     """Return whether the lighter-weight model profile is active."""
-    return get_active_model_profile()["key"] == "8b"
+    return bool(get_active_model_profile().get("fast_path"))
 
 
 def persist_model_state():
@@ -606,6 +688,223 @@ def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Pat
     return get_run_workspace_root(run["id"], create=create)
 
 
+WORKFLOW_LIBRARY_VERSION = "workflow-lib-v1"
+WORKFLOW_ROUTER_VERSION = "workflow-router-v1"
+
+
+@dataclass
+class WorkflowExecutionContext:
+    """Per-turn workflow execution state persisted for later review."""
+    execution_id: str
+    conversation_id: str
+    run_id: str
+    user_message_id: int
+    workflow_name: str
+    workflow_version: str
+    router_version: str
+    route_metadata: Dict[str, Any] = field(default_factory=dict)
+    step_index: int = 0
+    tool_count: int = 0
+    artifact_paths: List[str] = field(default_factory=list)
+
+    def next_step_index(self) -> int:
+        """Allocate the next 1-based step index for this execution."""
+        self.step_index += 1
+        return self.step_index
+
+
+def safe_json_dumps(value: Any, default: str = "{}") -> str:
+    """Serialize workflow metadata without letting odd values break persistence."""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return default
+
+
+def build_workflow_execution_id(conversation_id: str) -> str:
+    """Return a unique workflow execution id scoped to the conversation."""
+    return f"wf-{sanitize_conversation_id(conversation_id)}-{uuid.uuid4().hex[:12]}"
+
+
+def create_workflow_execution(
+    conversation_id: str,
+    user_message_id: int,
+    workflow_name: str,
+    route_metadata: Optional[Dict[str, Any]] = None,
+) -> WorkflowExecutionContext:
+    """Create a turn-level workflow execution row."""
+    run = ensure_run_for_conversation(conversation_id)
+    execution = WorkflowExecutionContext(
+        execution_id=build_workflow_execution_id(conversation_id),
+        conversation_id=conversation_id,
+        run_id=str(run.get("id") or build_run_id(conversation_id)),
+        user_message_id=int(user_message_id),
+        workflow_name=str(workflow_name or "direct_answer"),
+        workflow_version=WORKFLOW_LIBRARY_VERSION,
+        router_version=WORKFLOW_ROUTER_VERSION,
+        route_metadata=dict(route_metadata or {}),
+    )
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''INSERT INTO workflow_executions
+           (id, conversation_id, run_id, user_message_id, assistant_message_id,
+            workflow_name, workflow_version, router_version, status, started_at, ended_at,
+            final_outcome, error_text, user_feedback, tool_count, artifact_paths_json, route_metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            execution.execution_id,
+            execution.conversation_id,
+            execution.run_id,
+            execution.user_message_id,
+            None,
+            execution.workflow_name,
+            execution.workflow_version,
+            execution.router_version,
+            "running",
+            utcnow_iso(),
+            None,
+            "",
+            "",
+            "neutral",
+            0,
+            "[]",
+            safe_json_dumps(execution.route_metadata, default="{}"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return execution
+
+
+def persist_workflow_execution_route(execution: WorkflowExecutionContext) -> None:
+    """Persist route-name or metadata changes for an in-flight execution."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''UPDATE workflow_executions
+           SET workflow_name = ?, route_metadata_json = ?
+           WHERE id = ?''',
+        (
+            str(execution.workflow_name or "direct_answer"),
+            safe_json_dumps(execution.route_metadata, default="{}"),
+            execution.execution_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_workflow_step(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    step_name: str,
+    call: Dict[str, Any],
+    result: Dict[str, Any],
+    latency_ms: int = 0,
+    auto_generated: bool = False,
+) -> None:
+    """Append one tool step to a workflow execution."""
+    if not execution:
+        return
+
+    tool_name = str(call.get("name", "")).strip()
+    if not tool_name:
+        return
+
+    result_payload = result.get("result", {})
+    if result.get("ok"):
+        payload = result_payload if isinstance(result_payload, dict) else {}
+        path = str(payload.get("path", "")).strip() if isinstance(payload, dict) else ""
+        if path and path not in execution.artifact_paths:
+            execution.artifact_paths.append(path)
+    execution.tool_count += 1
+    step_index = execution.next_step_index()
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''INSERT INTO workflow_steps
+           (execution_id, step_index, step_name, tool_name, arguments_json, result_ok,
+            result_summary, result_json, latency_ms, auto_generated, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            execution.execution_id,
+            step_index,
+            str(step_name or tool_name),
+            tool_name,
+            safe_json_dumps(call.get("arguments", {}), default="{}"),
+            1 if result.get("ok") else 0,
+            truncate_output(tool_result_preview(result, tool_name, call.get("arguments", {})), limit=500),
+            safe_json_dumps(result, default="{}"),
+            max(0, int(latency_ms or 0)),
+            1 if auto_generated else 0,
+            utcnow_iso(),
+        ),
+    )
+    conn.execute(
+        '''UPDATE workflow_executions
+           SET tool_count = ?, artifact_paths_json = ?
+           WHERE id = ?''',
+        (
+            execution.tool_count,
+            safe_json_dumps(execution.artifact_paths, default="[]"),
+            execution.execution_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def finalize_workflow_execution(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    assistant_message_id: Optional[int] = None,
+    final_outcome: str = "",
+    status: str = "completed",
+    error_text: str = "",
+) -> None:
+    """Close a workflow execution row after the assistant turn finishes."""
+    if not execution:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''UPDATE workflow_executions
+           SET assistant_message_id = COALESCE(?, assistant_message_id),
+               status = ?,
+               ended_at = ?,
+               final_outcome = ?,
+               error_text = ?,
+               tool_count = ?,
+               artifact_paths_json = ?,
+               route_metadata_json = ?
+           WHERE id = ?''',
+        (
+            assistant_message_id,
+            str(status or "completed"),
+            utcnow_iso(),
+            str(final_outcome or status or "completed"),
+            truncate_output(str(error_text or ""), limit=1000),
+            execution.tool_count,
+            safe_json_dumps(execution.artifact_paths, default="[]"),
+            safe_json_dumps(execution.route_metadata, default="{}"),
+            execution.execution_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sync_workflow_feedback_for_message(assistant_message_id: int, feedback: str) -> None:
+    """Mirror thumbs feedback onto the matching workflow execution row."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''UPDATE workflow_executions
+           SET user_feedback = ?
+           WHERE assistant_message_id = ?''',
+        (normalize_feedback_label(feedback), int(assistant_message_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_voice_dir(kind: str, create: bool = True) -> pathlib.Path:
     """Return a server-owned directory for transient voice artifacts."""
     safe_kind = re.sub(r"[^A-Za-z0-9._-]+", "_", (kind or "misc").strip()) or "misc"
@@ -615,6 +914,123 @@ def get_voice_dir(kind: str, create: bool = True) -> pathlib.Path:
     if create:
         target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def build_voice_artifact_prefix(conversation_id: Optional[str] = None) -> str:
+    """Return a stable filename prefix for chat-scoped voice artifacts."""
+    raw_conversation_id = (conversation_id or "").strip()
+    if not raw_conversation_id:
+        return ""
+    cleaned = sanitize_conversation_id(raw_conversation_id)
+    return f"conv-{cleaned}-"
+
+
+def build_voice_artifact_id(conversation_id: Optional[str] = None) -> str:
+    """Generate a unique artifact id that optionally ties the file to a conversation."""
+    return f"{build_voice_artifact_prefix(conversation_id)}{uuid.uuid4().hex}"
+
+
+def delete_voice_file(path: pathlib.Path) -> bool:
+    """Best-effort delete for voice artifacts."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        logger.warning("Failed to delete voice artifact %s: %s", path, exc)
+        return False
+    return True
+
+
+def list_voice_cache_files() -> List[Dict[str, Any]]:
+    """Collect removable files inside the app-owned voice cache."""
+    files: List[Dict[str, Any]] = []
+    for kind in VOICE_EPHEMERAL_KINDS:
+        root = get_voice_dir(kind, create=False)
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    continue
+                stat = child.stat()
+            except FileNotFoundError:
+                continue
+            files.append({
+                "path": child,
+                "size": max(0, int(stat.st_size)),
+                "mtime": float(stat.st_mtime),
+            })
+    return files
+
+
+def prune_voice_storage_if_needed(protected_paths: Optional[List[pathlib.Path]] = None) -> Dict[str, int]:
+    """Prune the oldest cached voice artifacts when the cache exceeds its size budget."""
+    cache_files = list_voice_cache_files()
+    total_bytes = sum(item["size"] for item in cache_files)
+    if VOICE_STORAGE_LIMIT_BYTES <= 0 or total_bytes <= VOICE_STORAGE_LIMIT_BYTES:
+        return {
+            "total_bytes": total_bytes,
+            "limit_bytes": VOICE_STORAGE_LIMIT_BYTES,
+            "removed_files": 0,
+            "removed_bytes": 0,
+        }
+
+    protected = {
+        path.resolve(strict=False)
+        for path in (protected_paths or [])
+    }
+    removed_files = 0
+    removed_bytes = 0
+
+    for item in sorted(cache_files, key=lambda entry: (entry["mtime"], entry["path"].name)):
+        if total_bytes - removed_bytes <= VOICE_STORAGE_LIMIT_BYTES:
+            break
+        target = item["path"].resolve(strict=False)
+        if target in protected:
+            continue
+        if delete_voice_file(item["path"]):
+            removed_files += 1
+            removed_bytes += item["size"]
+
+    if removed_files:
+        logger.info(
+            "Pruned %s voice artifacts (%s bytes) to enforce the %s-byte cache limit",
+            removed_files,
+            removed_bytes,
+            VOICE_STORAGE_LIMIT_BYTES,
+        )
+
+    return {
+        "total_bytes": max(0, total_bytes - removed_bytes),
+        "limit_bytes": VOICE_STORAGE_LIMIT_BYTES,
+        "removed_files": removed_files,
+        "removed_bytes": removed_bytes,
+    }
+
+
+def delete_voice_artifacts_for_conversation(conversation_id: str) -> int:
+    """Remove any cached voice artifacts previously generated for a conversation."""
+    prefix = build_voice_artifact_prefix(conversation_id)
+    if not prefix:
+        return 0
+
+    removed_files = 0
+    for kind in VOICE_EPHEMERAL_KINDS:
+        root = get_voice_dir(kind, create=False)
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            if not child.name.startswith(prefix):
+                continue
+            if child.is_dir() and not child.is_symlink():
+                continue
+            if delete_voice_file(child):
+                removed_files += 1
+
+    if removed_files:
+        logger.info("Deleted %s voice artifacts for conversation %s", removed_files, conversation_id)
+    return removed_files
 
 
 def build_voice_command(
@@ -1614,6 +2030,39 @@ def reset_directory_contents(root: pathlib.Path) -> None:
             continue
 
 
+RESET_DB_REBUILD_MARKERS = (
+    "database disk image is malformed",
+    "file is not a database",
+    "file is encrypted or is not a database",
+    "malformed database schema",
+    "database schema is corrupt",
+    "no such table",
+)
+
+
+def reset_error_requires_database_rebuild(error: BaseException) -> bool:
+    """Return whether a reset failure should recreate the SQLite file from scratch."""
+    if not isinstance(error, sqlite3.DatabaseError):
+        return False
+    message = str(error).strip().lower()
+    if not message:
+        return False
+    return any(marker in message for marker in RESET_DB_REBUILD_MARKERS)
+
+
+def recreate_database_file_for_reset(reason: BaseException) -> None:
+    """Delete the SQLite database and sidecars, then rebuild an empty schema."""
+    logger.warning("Reset is recreating the SQLite database after error: %s", reason)
+    db_path = pathlib.Path(DB_PATH)
+    os.makedirs(db_path.parent, exist_ok=True)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            pathlib.Path(f"{DB_PATH}{suffix}").unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
+    init_db()
+
+
 async def reset_application_state() -> None:
     """Wipe persisted chat data, workspaces, pet artifacts, and transient runtime state."""
     sessions = list(TERMINAL_SESSIONS.values())
@@ -1628,8 +2077,9 @@ async def reset_application_state() -> None:
             future.cancel()
     COMMAND_APPROVAL_WAITERS.clear()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn: Optional[sqlite3.Connection] = None
     try:
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('DELETE FROM conversation_summaries')
         c.execute('DELETE FROM messages')
@@ -1657,13 +2107,21 @@ async def reset_application_state() -> None:
             except sqlite3.OperationalError:
                 pass
         conn.commit()
+    except sqlite3.DatabaseError as exc:
+        if conn is not None:
+            conn.close()
+            conn = None
+        if not reset_error_requires_database_rebuild(exc):
+            raise
+        recreate_database_file_for_reset(exc)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     reset_directory_contents(RUNS_ROOT_PATH)
     reset_directory_contents(WORKSPACE_ROOT_PATH)
     reset_directory_contents(PET_ROOT_PATH)
-    for kind in ("input", "transcripts", "tts-text", "tts-audio"):
+    for kind in VOICE_EPHEMERAL_KINDS:
         reset_directory_contents(get_voice_dir(kind, create=True))
 
     ensure_pet_dirs()
@@ -2739,6 +3197,100 @@ def extract_workspace_path_references(message: str) -> List[str]:
     return refs
 
 
+WORKSPACE_RESPONSE_TRUTHFULNESS_RULES = """Workspace and tool truthfulness rules:
+- Never claim a workspace file was created, saved, or updated unless this turn actually completed a successful `workspace.patch_file` call.
+- If no workspace file was written, provide the result inline and optionally offer to save it.
+- Never claim you searched the web, looked something up, or added sourced citations unless this turn actually used the web tools.
+- If the prompt already includes extracted attachment context, treat that content as available instead of claiming you cannot read the attachment.
+- If the user asks to render or preview HTML and a render tool is available, prefer using it over claiming you cannot display pages.
+- If the user asks about earlier chat context and conversation search is available, prefer using it over guessing from memory."""
+
+
+WORKSPACE_WRITE_CLAIM_PATTERN = re.compile(
+    r"\b(created?|saved?|wrote|written|updated?|patched?|added|put|placed)\b",
+    re.IGNORECASE,
+)
+WORKSPACE_WRITE_CLAIM_HINT_PATTERN = re.compile(
+    r"\b(workspace|file|folder|directory|artifact|draft)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_workspace_reference_path(path_value: str) -> str:
+    """Normalize a workspace-relative path so user-visible claims can be checked safely."""
+    return str(path_value or "").strip().replace("\\", "/").strip("./").lower()
+
+
+def successful_workspace_write_paths(tool_results: List[Dict[str, Any]]) -> set[str]:
+    """Collect workspace paths that were actually written during the current turn."""
+    written_paths: set[str] = set()
+    for entry in tool_results:
+        call = entry.get("call", {})
+        result = entry.get("result", {})
+        if call.get("name") != "workspace.patch_file" or not result.get("ok"):
+            continue
+        payload = result.get("result", {})
+        if not isinstance(payload, dict):
+            continue
+        normalized = normalize_workspace_reference_path(str(payload.get("path", "")))
+        if normalized:
+            written_paths.add(normalized)
+    return written_paths
+
+
+def strip_unverified_workspace_write_claims(message: str, tool_results: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Remove file-write claims that are not backed by a successful workspace write tool result."""
+    cleaned = str(message or "").strip()
+    if not cleaned:
+        return ""
+
+    written_paths = successful_workspace_write_paths(tool_results or [])
+    filtered_lines: List[str] = []
+    removed_any = False
+
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line or not WORKSPACE_WRITE_CLAIM_PATTERN.search(line):
+            filtered_lines.append(raw_line)
+            continue
+
+        line_paths = {
+            normalize_workspace_reference_path(path_ref)
+            for path_ref in extract_workspace_path_references(line)
+        }
+        line_paths.discard("")
+        has_workspace_claim_hint = bool(line_paths) or bool(WORKSPACE_WRITE_CLAIM_HINT_PATTERN.search(line))
+
+        if not has_workspace_claim_hint:
+            filtered_lines.append(raw_line)
+            continue
+
+        if line_paths:
+            if written_paths.intersection(line_paths):
+                filtered_lines.append(raw_line)
+                continue
+            removed_any = True
+            continue
+
+        if written_paths:
+            filtered_lines.append(raw_line)
+            continue
+
+        removed_any = True
+
+    if not removed_any:
+        return cleaned
+
+    repaired = "\n".join(filtered_lines)
+    repaired = re.sub(r"\n{3,}", "\n\n", repaired).strip()
+    if repaired:
+        return repaired
+    return (
+        "I didn't actually create a workspace file in this turn. "
+        "If you want, I can save the result once workspace editing is enabled."
+    )
+
+
 def truncate_output(text: str, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
     """Trim long command output while making truncation explicit."""
     if len(text) <= limit:
@@ -2756,6 +3308,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.patch_file {"path":"src/app.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
+- workspace.render {"html":"<html><body><h1>Dashboard</h1></body></html>","title":"dashboard"}
 - spreadsheet.describe {"path":"model.xlsx","sheet":"Assumptions"}
 - conversation.search_history {"query":"retry logic","limit":5}
 - web.search {"query":"python async docs","limit":5}
@@ -2767,9 +3320,10 @@ Constraints:
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
+- workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
-- web.search is for fresh or explicitly web-based questions, supports optional domain filters, and returns ordered results with normalized domains.
+- web.search is for fresh or explicitly web-based questions, supports optional domain filters, and by default checks the general web plus Wikipedia and Reddit result sets.
 - web.fetch_page reads a web page after search and returns normalized domain/content metadata for citation-ready summaries.
 - Write reusable artifacts to the workspace and mention the path briefly.
 - Ask for another tool only when needed; otherwise answer."""
@@ -2789,9 +3343,10 @@ def build_filtered_tool_system_prompt(base_system_prompt: str, allowed_tools: Li
 def build_effective_system_prompt(base_system_prompt: str, user_message: str) -> str:
     """Attach pet identity and long-term context to the active system prompt."""
     pet_block = build_pet_prompt_block(user_message)
-    if not pet_block:
-        return base_system_prompt
-    return f"{base_system_prompt.strip()}\n\n{pet_block}"
+    parts = [base_system_prompt.strip(), WORKSPACE_RESPONSE_TRUTHFULNESS_RULES]
+    if pet_block:
+        parts.append(pet_block)
+    return "\n\n".join(part for part in parts if part)
 
 
 @dataclass
@@ -2804,6 +3359,7 @@ class DeepSession:
     system_prompt: str
     max_tokens: int
     features: "FeatureFlags"
+    task_request: str = ""
     context: str = ""
     workspace_enabled: bool = False
     workspace_facts: str = ""
@@ -2822,7 +3378,10 @@ class DeepSession:
     scope_audit_summary: str = ""
     draft_response: str = ""
     final_response: str = ""
+    execution_requested: bool = False
+    auto_execute: bool = False
     resumed: bool = False
+    workflow_execution: Optional[WorkflowExecutionContext] = None
 
     def history_messages(self) -> List[Dict[str, str]]:
         return [{"role": msg["role"], "content": msg["content"]} for msg in self.history]
@@ -2833,6 +3392,14 @@ class ToolLoopOutcome:
     """Result of a server-side tool loop."""
     final_text: str
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class DeepBuildResult:
+    """State returned after attempting the planned build steps."""
+    summary: str
+    needs_user_confirmation: bool = False
+    build_complete: bool = False
 
 
 def fetched_web_sources(tool_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -2952,6 +3519,7 @@ async def finalize_tool_loop_answer(
     leaked_call = extract_leaked_tool_call(cleaned)
     if leaked_call:
         cleaned = format_leaked_tool_call_message(leaked_call, features or FeatureFlags())
+    cleaned = strip_unverified_workspace_write_claims(cleaned, tool_results)
     return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
 
 
@@ -3202,6 +3770,60 @@ def workspace_is_effectively_empty(snapshot: Dict[str, Any]) -> bool:
     return int(snapshot.get("user_file_count", 0) or 0) == 0
 
 
+def request_is_repo_scaffold(message: str) -> bool:
+    """Return whether the user is asking for a starter repo or scaffold to be created."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    repo_scope_terms = {"repo", "repository", "codebase", "project", "app", "service", "api"}
+    return bool(words & WORKSPACE_TEMPLATE_TERMS) and bool(words & repo_scope_terms)
+
+
+def build_empty_workspace_steps(message: str) -> List[str]:
+    """Choose concrete builder steps when starting from an empty workspace."""
+    if request_is_repo_scaffold(message):
+        return [
+            "Create the requested repo structure and essential top-level files directly in the workspace.",
+            "Implement the first useful working slice so the scaffold is immediately usable and reviewable.",
+            "Tighten obvious gaps, wiring, and docs before verification.",
+        ]
+    return [
+        "Create the requested files directly in the empty workspace and add any needed top-level structure.",
+        "Implement the first useful working slice instead of stopping at placeholders.",
+        "Tighten obvious gaps before verification.",
+    ]
+
+
+def build_empty_workspace_strategy(message: str) -> str:
+    """Describe the execution approach for empty-workspace build requests."""
+    if request_is_repo_scaffold(message):
+        return "Scaffold the requested repo directly into the empty workspace, then implement the first useful slice and verify it."
+    return "Start creating the requested files in the empty workspace immediately, then implement the first useful slice and verify it."
+
+
+def build_empty_workspace_deliverable(message: str) -> str:
+    """Describe the expected deliverable for empty-workspace build requests."""
+    if request_is_repo_scaffold(message):
+        return "A usable starter repo scaffold written into the workspace and ready to inspect or download."
+    return "A concrete workspace artifact written into the empty workspace and grounded in the user's request."
+
+
+def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> List[str]:
+    """Choose concrete verification checks when starting from an empty workspace."""
+    if request_is_repo_scaffold(message):
+        return [
+            "Confirm the workspace now contains the requested scaffold and key entry-point files.",
+            "Run the narrowest useful startup, syntax, or smoke check for the created repo.",
+            audit_check,
+        ]
+    return [
+        "Confirm the new files now exist in the workspace and match the request.",
+        "Run the narrowest useful syntax or smoke check for the created slice.",
+        audit_check,
+    ]
+
+
 def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Dict[str, Any]:
     """Ground deep-mode plans in the inspected workspace and required audits."""
     normalized = normalize_deep_plan(plan)
@@ -3231,17 +3853,10 @@ def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Di
     if session.workspace_enabled and workspace_is_effectively_empty(session.workspace_snapshot):
         intent = classify_workspace_intent(session.message)
         if intent in {"focused_write", "broad_write"} or is_explicit_plan_execution_request(session.message):
-            normalized["strategy"] = "Inspect the empty workspace, scaffold the smallest useful starting point, then verify before claiming broader scope."
-            normalized["builder_steps"] = [
-                "Align the requested deliverable with the current empty workspace and update the task board accordingly.",
-                "Create the minimum file structure needed for the first working slice.",
-                "Implement the first working slice and tighten obvious gaps before verification.",
-            ]
-            normalized["verifier_checks"] = [
-                "Confirm the new files now exist in the workspace and match the revised plan.",
-                "Run the narrowest useful startup, syntax, or smoke check for the created slice.",
-                audit_check,
-            ]
+            normalized["strategy"] = build_empty_workspace_strategy(session.message)
+            normalized["deliverable"] = build_empty_workspace_deliverable(session.message)
+            normalized["builder_steps"] = build_empty_workspace_steps(session.message)
+            normalized["verifier_checks"] = build_empty_workspace_verifier_checks(session.message, audit_check)
     return normalize_deep_plan(normalized)
 
 
@@ -3302,28 +3917,89 @@ def render_deep_confirmation(message: str, workspace_enabled: bool) -> str:
     return f"I’m working on: {request or 'the current request'}. I’ll {next_step} and then respond with the best verified answer I can."
 
 
+PLAN_EXECUTION_MARKERS = (
+    "execute approved plan",
+    "execute this approved plan",
+    "execute the approved plan",
+    "execute plan now",
+    "execute this plan",
+    "run this plan",
+    "run the plan",
+)
+
+PLAN_APPROVAL_REPLY_MARKERS = {
+    "yes",
+    "yes please",
+    "yes do it",
+    "yes do that",
+    "yes go ahead",
+    "yes start",
+    "yep",
+    "sure",
+    "ok",
+    "okay",
+    "approve",
+    "approve this plan",
+    "approve the plan",
+    "approve and run",
+    "run",
+    "run it",
+    "run this plan",
+    "execute",
+    "execute it",
+    "execute this plan",
+    "go ahead",
+    "go ahead please",
+    "go ahead and run it",
+    "do it",
+    "please do",
+    "sounds good",
+    "looks good",
+    "that works",
+    "lets do it",
+    "let's do it",
+    "start",
+    "start it",
+    "start with step 1",
+    "start with the first step",
+}
+
+
+def normalize_turn_message(message: str) -> str:
+    """Normalize a user message for short command-style intent checks."""
+    return " ".join((message or "").strip().lower().split())
+
+
+def normalize_approval_reply_text(message: str) -> str:
+    """Normalize a short approval reply while tolerating light punctuation."""
+    text = normalize_turn_message(message)
+    if text.startswith("/plan "):
+        text = text[6:].strip()
+    text = re.sub(r"[.!?,;:]+", " ", text)
+    return " ".join(text.split())
+
+
 def is_explicit_plan_execution_request(message: str) -> bool:
     """Return whether the user is clearly asking to execute an already proposed plan."""
-    text = " ".join((message or "").strip().lower().split())
+    text = normalize_turn_message(message)
     if not text:
         return False
-    markers = (
-        "execute approved plan",
-        "execute this approved plan",
-        "execute the approved plan",
-        "execute plan now",
-        "execute this plan",
-        "run this plan",
-        "run the plan",
-    )
-    return any(marker in text for marker in markers)
+    return any(marker in text for marker in PLAN_EXECUTION_MARKERS)
+
+
+def is_plan_approval_reply(message: str) -> bool:
+    """Return whether the user is approving a pending saved plan in short-form text."""
+    text = normalize_approval_reply_text(message)
+    if not text:
+        return False
+    return text in PLAN_APPROVAL_REPLY_MARKERS
 
 
 def is_bare_plan_execution_request(message: str) -> bool:
     """Detect short approval-style plan execution requests without an edited inline draft."""
     if not is_explicit_plan_execution_request(message):
         return False
-    text = " ".join((message or "").strip().lower().split())
+    text = normalize_turn_message(message)
     if not text:
         return False
     structural_markers = (
@@ -3416,9 +4092,20 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
     """Use a separate plan/approval step only for deep workspace execution requests."""
     if not session.workspace_enabled:
         return False
-    if is_explicit_plan_execution_request(session.message):
+    if session.execution_requested or session.auto_execute:
         return False
     return classify_workspace_intent(session.message) in {"focused_write", "broad_write"}
+
+
+def should_auto_execute_workspace_task(message: str, features: "FeatureFlags") -> bool:
+    """Auto-upgrade broad write requests into the full inspect/plan/build/verify workflow."""
+    if not features.agent_tools or not features.workspace_write:
+        return False
+    if request_is_about_limitations(message):
+        return False
+    if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
+        return False
+    return classify_workspace_intent(message) == "broad_write"
 
 
 def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
@@ -3442,6 +4129,8 @@ def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
         lines.extend(f"{idx}. {step}" for idx, step in enumerate(checks, start=1))
     lines.extend([
         "",
+        "Run the plan end-to-end in this turn when possible. Update the task board as you go, verify important checkpoints, and stop early only if you are blocked or waiting on a permission gate.",
+        "",
         "You can adjust the plan if needed while executing it, but keep the scope aligned with this request.",
     ])
     return "\n".join(lines)
@@ -3454,9 +4143,18 @@ def render_deep_plan_preview(plan: Dict[str, Any]) -> str:
         "",
         format_deep_plan_note(plan),
         "",
-        "Use the plan card to approve and run it, or copy the draft into the composer if you want to edit it first.",
+        "If this looks right, say yes and I'll run it in the workspace and verify the result. If not, tell me what to change. You can also use the plan card above the composer to start or copy the draft into the prompt box.",
     ]
     return "\n".join(lines)
+
+
+def render_saved_plan_write_access_message(plan: Dict[str, Any]) -> str:
+    """Explain that a saved plan exists but this turn was not approved to edit the workspace."""
+    return (
+        "I found the saved plan, but write access was not granted for this turn.\n\n"
+        f"{format_deep_plan_note(plan)}\n\n"
+        "Approve workspace edits for the next turn, then say yes and I'll run the plan in the workspace. If you want to reshape the plan first, tell me what to change."
+    )
 
 
 def write_workspace_text(conversation_id: str, rel_path: str, content: str) -> str:
@@ -3513,7 +4211,7 @@ def format_task_board(session: DeepSession, active_build_step: Optional[int] = N
         "# Task Board",
         "",
         "## Request",
-        session.message or "(none)",
+        session.task_request or session.message or "(none)",
         "",
         "## Strategy",
         session.plan.get("strategy", "(none)"),
@@ -3572,7 +4270,7 @@ async def persist_task_board(
 def format_task_state_payload(session: DeepSession) -> Dict[str, Any]:
     """Return a machine-readable snapshot of the current deep-mode task state."""
     return {
-        "request": session.message,
+        "request": session.task_request or session.message,
         "workspace_facts": session.workspace_facts,
         "workspace_snapshot": session.workspace_snapshot,
         "plan": session.plan,
@@ -3612,6 +4310,93 @@ def load_task_state(conversation_id: str, rel_path: str = ".ai/task-state.json")
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def load_pending_execution_plan(conversation_id: str) -> Optional[Dict[str, str]]:
+    """Return a pending plan preview for UI rehydration when one is saved in the workspace."""
+    payload = load_task_state(conversation_id)
+    if not payload or not bool(payload.get("plan_preview_pending")):
+        return None
+    plan = payload.get("plan")
+    if not isinstance(plan, dict) or not plan:
+        return None
+    return {
+        "summary": format_deep_plan_note(plan),
+        "execute_prompt": format_deep_execution_prompt(plan),
+    }
+
+
+def task_state_has_remaining_build_steps(payload: Dict[str, Any]) -> bool:
+    """Return whether a saved task state still has unchecked build steps."""
+    plan = payload.get("plan")
+    if not isinstance(plan, dict):
+        return False
+    steps = [
+        str(step).strip()
+        for step in plan.get("builder_steps", [])
+        if str(step).strip()
+    ]
+    completed = [
+        str(item).strip()
+        for item in payload.get("build_step_summaries", [])
+        if str(item).strip()
+    ]
+    return bool(steps) and len(completed) < len(steps)
+
+
+def task_state_has_pending_follow_up(payload: Dict[str, Any]) -> bool:
+    """Return whether a saved task state is waiting for the next explicit user confirmation."""
+    if task_state_has_remaining_build_steps(payload):
+        return True
+    plan = payload.get("plan")
+    if not isinstance(plan, dict):
+        return False
+    steps = [
+        str(step).strip()
+        for step in plan.get("builder_steps", [])
+        if str(step).strip()
+    ]
+    completed = [
+        str(item).strip()
+        for item in payload.get("build_step_summaries", [])
+        if str(item).strip()
+    ]
+    verification_summary = str(payload.get("verification_summary", "")).strip()
+    return bool(steps) and len(completed) >= len(steps) and not verification_summary
+
+
+def render_step_checkpoint_message(session: DeepSession, step_index: int, step_summary: str) -> str:
+    """Create the user-facing pause message after a build step finishes."""
+    steps = [
+        str(step).strip()
+        for step in session.plan.get("builder_steps", [])
+        if str(step).strip()
+    ]
+    total_steps = len(steps)
+    current_step = steps[step_index] if 0 <= step_index < total_steps else ""
+    summary = step_summary.strip() or f"Completed build step {step_index + 1}."
+
+    lines = [
+        f"Completed step {step_index + 1} of {total_steps}: {current_step or 'Current plan step'}",
+        "",
+        summary,
+        "",
+    ]
+    if step_index + 1 < total_steps:
+        lines.extend([
+            f"Next step: {steps[step_index + 1]}",
+            "",
+            "Would you like me to continue to the next step? Say yes to continue, or say no and tell me what you'd like to change.",
+        ])
+    else:
+        lines.extend([
+            "Build steps are complete.",
+            "",
+            "Next step: run verification and prepare the final answer.",
+            "",
+            "Would you like me to continue to verification and the final answer? Say yes to continue, or say no and tell me what you'd like to change.",
+        ])
+    return "\n".join(lines)
 
 
 def build_scope_audit(session: DeepSession) -> Dict[str, Any]:
@@ -3655,9 +4440,9 @@ def build_scope_audit(session: DeepSession) -> Dict[str, Any]:
     ]
 
     gaps: List[str] = []
-    if session.workspace_enabled and not changed_files and is_explicit_plan_execution_request(session.message):
+    if session.workspace_enabled and not changed_files and session.execution_requested:
         gaps.append("No workspace files were changed during an execution request.")
-    if session.workspace_enabled and successful_tool_steps == 0 and is_explicit_plan_execution_request(session.message):
+    if session.workspace_enabled and successful_tool_steps == 0 and session.execution_requested:
         gaps.append("No successful tool actions were recorded for the build steps.")
     if not verification_present and session.workspace_enabled:
         gaps.append("Verification did not produce a summary grounded in the workspace.")
@@ -3689,7 +4474,8 @@ def build_scope_audit(session: DeepSession) -> Dict[str, Any]:
 
 RESUME_HINTS = {
     "continue", "resume", "keep going", "pick up", "carry on", "go on", "finish that",
-    "finish it", "proceed", "keep working",
+    "finish it", "proceed", "keep working", "next", "next step", "do the next step",
+    "keep going with the plan", "move to the next step",
 }
 
 
@@ -3708,11 +4494,20 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
 
     resume_requested = should_resume_task_state(session.message)
     execute_saved_plan = is_bare_plan_execution_request(session.message)
-    if not resume_requested and not execute_saved_plan:
+    approval_reply = is_plan_approval_reply(session.message)
+    if not resume_requested and not execute_saved_plan and not approval_reply:
         return False
     payload = load_task_state(session.conversation_id, session.task_state_path)
     if not payload:
         return False
+    pending_follow_up = task_state_has_pending_follow_up(payload)
+    if approval_reply:
+        if bool(payload.get("plan_preview_pending")):
+            execute_saved_plan = True
+        elif pending_follow_up:
+            resume_requested = True
+        else:
+            return False
     if execute_saved_plan and not bool(payload.get("plan_preview_pending")):
         return False
 
@@ -3744,6 +4539,9 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
     session.scope_audit_summary = str(payload.get("scope_audit_summary", "")).strip()
     session.draft_response = str(payload.get("draft_response", "")).strip()
     previous_request = str(payload.get("request", "")).strip()
+    if previous_request and (execute_saved_plan or pending_follow_up or resume_requested or not session.task_request):
+        session.task_request = previous_request
+    session.execution_requested = bool(session.execution_requested or execute_saved_plan or pending_follow_up)
     session.resumed = True
     await send_assistant_note(
         session.websocket,
@@ -4285,6 +5083,55 @@ def init_db():
                       created_at TEXT NOT NULL,
                       updated_at TEXT NOT NULL)''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_executions
+                     (id TEXT PRIMARY KEY,
+                      conversation_id TEXT NOT NULL,
+                      run_id TEXT NOT NULL,
+                      user_message_id INTEGER,
+                      assistant_message_id INTEGER,
+                      workflow_name TEXT NOT NULL,
+                      workflow_version TEXT NOT NULL DEFAULT '',
+                      router_version TEXT NOT NULL DEFAULT '',
+                      status TEXT NOT NULL DEFAULT 'running',
+                      started_at TEXT NOT NULL,
+                      ended_at TEXT,
+                      final_outcome TEXT NOT NULL DEFAULT '',
+                      error_text TEXT NOT NULL DEFAULT '',
+                      user_feedback TEXT NOT NULL DEFAULT 'neutral',
+                      tool_count INTEGER NOT NULL DEFAULT 0,
+                      artifact_paths_json TEXT NOT NULL DEFAULT '[]',
+                      route_metadata_json TEXT NOT NULL DEFAULT '{}',
+                      FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                      FOREIGN KEY(run_id) REFERENCES runs(id),
+                      FOREIGN KEY(user_message_id) REFERENCES messages(id),
+                      FOREIGN KEY(assistant_message_id) REFERENCES messages(id))''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_steps
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      execution_id TEXT NOT NULL,
+                      step_index INTEGER NOT NULL,
+                      step_name TEXT NOT NULL DEFAULT '',
+                      tool_name TEXT NOT NULL DEFAULT '',
+                      arguments_json TEXT NOT NULL DEFAULT '{}',
+                      result_ok INTEGER NOT NULL DEFAULT 0,
+                      result_summary TEXT NOT NULL DEFAULT '',
+                      result_json TEXT NOT NULL DEFAULT '{}',
+                      latency_ms INTEGER NOT NULL DEFAULT 0,
+                      auto_generated INTEGER NOT NULL DEFAULT 0,
+                      created_at TEXT NOT NULL,
+                      FOREIGN KEY(execution_id) REFERENCES workflow_executions(id))''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_evaluations
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      execution_id TEXT NOT NULL,
+                      evaluator TEXT NOT NULL,
+                      metric TEXT NOT NULL,
+                      score REAL,
+                      passed INTEGER NOT NULL DEFAULT 0,
+                      notes_json TEXT NOT NULL DEFAULT '{}',
+                      created_at TEXT NOT NULL,
+                      FOREIGN KEY(execution_id) REFERENCES workflow_executions(id))''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS pet_events
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       type TEXT NOT NULL,
@@ -4295,6 +5142,20 @@ def init_db():
             c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
         except sqlite3.OperationalError:
             pass
+
+        c.execute(
+            '''UPDATE messages
+               SET feedback = CASE
+                   WHEN LOWER(TRIM(feedback)) IN ('positive', 'negative', 'neutral') THEN LOWER(TRIM(feedback))
+                   ELSE 'neutral'
+               END
+               WHERE role = 'assistant' AND (
+                   feedback IS NULL
+                   OR TRIM(feedback) = ''
+                   OR feedback != LOWER(TRIM(feedback))
+                   OR LOWER(TRIM(feedback)) NOT IN ('positive', 'negative', 'neutral')
+               )'''
+        )
 
         try:
             c.execute('ALTER TABLE conversations ADD COLUMN run_id TEXT')
@@ -4326,6 +5187,11 @@ def init_db():
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_conversation_id ON runs(conversation_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_conversation_id ON workflow_executions(conversation_id, started_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_assistant_message_id ON workflow_executions(assistant_message_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_feedback ON workflow_executions(user_feedback, workflow_name)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_steps_execution_id ON workflow_steps(execution_id, step_index)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_evaluations_execution_id ON workflow_evaluations(execution_id, created_at)')
         except sqlite3.OperationalError:
             pass
 
@@ -4455,6 +5321,10 @@ class ChatRequest(BaseModel):
     conversation_id: str
 
 
+class FeedbackRequest(BaseModel):
+    feedback: Optional[str] = None
+
+
 class WorkspaceFileUpdateRequest(BaseModel):
     path: str
     content: str
@@ -4485,8 +5355,28 @@ class UiModelReadyRequest(BaseModel):
 
 class VoiceSynthesisRequest(BaseModel):
     text: str
+    conversation_id: Optional[str] = None
 
 # ==================== History selection (token budget for vLLM context) ====================
+
+VALID_FEEDBACK_LABELS = {"positive", "negative", "neutral"}
+
+
+def normalize_feedback_label(value: Optional[str], *, strict: bool = False) -> str:
+    """Normalize a persisted feedback label."""
+    feedback = str(value or "").strip().lower()
+    if not feedback:
+        return "neutral"
+    if feedback in VALID_FEEDBACK_LABELS:
+        return feedback
+    if strict:
+        raise ValueError("Feedback must be 'positive', 'negative', or 'neutral'")
+    return "neutral"
+
+
+def message_feedback_value(role: Optional[str], feedback: Optional[str]) -> str:
+    """Return a normalized feedback label for assistant messages only."""
+    return normalize_feedback_label(feedback) if str(role or "").strip().lower() == "assistant" else ""
 
 def calculate_message_relevance_score(msg: Dict, current_query: str, message_index: int, total_messages: int) -> float:
     """Calculate relevance and quality score for a message"""
@@ -4592,6 +5482,38 @@ def format_messages_for_summary(messages: List[Dict[str, str]], char_limit: int 
         used += len(line)
     return "".join(parts).strip()
 
+
+def get_conversation_messages_for_ui(conv_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return recent raw conversation messages for the UI, preserving ids and feedback."""
+    safe_limit = max(1, min(int(limit or 100), 500))
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        '''SELECT id, role, content, timestamp, feedback
+           FROM (
+               SELECT id, role, content, timestamp, feedback
+               FROM messages
+               WHERE conversation_id = ?
+               ORDER BY timestamp DESC, id DESC
+               LIMIT ?
+           )
+           ORDER BY timestamp ASC, id ASC''',
+        (conv_id, safe_limit),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    return [
+        {
+            "id": row[0],
+            "role": row[1],
+            "content": row[2],
+            "timestamp": row[3],
+            "feedback": message_feedback_value(row[1], row[4]),
+        }
+        for row in rows
+    ]
+
 def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = None, current_query: str = None) -> List[Dict]:
     """Get conversation history, selecting messages by quality and relevance"""
     if max_tokens is None:
@@ -4609,7 +5531,7 @@ def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = 
     for row in c.fetchall():
         all_messages.append({
             'id': row[0], 'role': row[1], 'content': row[2],
-            'timestamp': row[3], 'feedback': row[4] if row[4] else ''
+            'timestamp': row[3], 'feedback': message_feedback_value(row[1], row[4])
         })
 
     conn.close()
@@ -4706,7 +5628,7 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
             {
                 'conversation_id': row[0], 'role': row[1], 'content': row[2],
                 'timestamp': row[3], 'conversation_title': row[4] or 'Untitled',
-                'feedback': row[5] or '', 'fts_rank': row[6],
+                'feedback': message_feedback_value(row[1], row[5]), 'fts_rank': row[6],
             }
             for row in c.fetchall()
         ]
@@ -4747,9 +5669,10 @@ def save_message(conv_id: str, role: str, content: str) -> int:
         except sqlite3.OperationalError:
             pass
 
-    c.execute('''INSERT INTO messages (conversation_id, role, content, timestamp)
-                 VALUES (?, ?, ?, ?)''',
-              (conv_id, role, content, datetime.now().isoformat()))
+    stored_feedback = "neutral" if role == "assistant" else None
+    c.execute('''INSERT INTO messages (conversation_id, role, content, timestamp, feedback)
+                 VALUES (?, ?, ?, ?, ?)''',
+              (conv_id, role, content, datetime.now().isoformat(), stored_feedback))
 
     message_id = c.lastrowid
 
@@ -4864,22 +5787,33 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
     )
 
 
-def allowed_workspace_tools(features: FeatureFlags, include_write: bool = False) -> List[str]:
+def allowed_workspace_tools(
+    features: FeatureFlags,
+    include_write: bool = False,
+    include_render: bool = False,
+) -> List[str]:
     """Return workspace tools allowed by the current per-turn approvals."""
     allowed = ["workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"]
+    if include_render:
+        allowed.append("workspace.render")
     if features.workspace_write and include_write:
         allowed.append("workspace.patch_file")
     if features.workspace_run_commands:
         allowed.append("workspace.run_command")
     return allowed
 
-def update_message_feedback(message_id: int, feedback: str):
-    """Update feedback for a message"""
+def update_message_feedback(message_id: int, feedback: str) -> bool:
+    """Update feedback for a message and report whether it exists."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('UPDATE messages SET feedback = ? WHERE id = ?', (feedback, message_id))
+    exists = c.execute('SELECT 1 FROM messages WHERE id = ?', (message_id,)).fetchone()
+    if not exists:
+        conn.close()
+        return False
+    c.execute('UPDATE messages SET feedback = ? WHERE id = ?', (normalize_feedback_label(feedback), message_id))
     conn.commit()
     conn.close()
+    return True
 
 def get_message_by_id(message_id: int) -> Optional[Dict]:
     """Get a message by its ID"""
@@ -4893,7 +5827,7 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
     if row:
         return {
             'id': row[0], 'conversation_id': row[1], 'role': row[2],
-            'content': row[3], 'timestamp': row[4], 'feedback': row[5]
+            'content': row[3], 'timestamp': row[4], 'feedback': message_feedback_value(row[2], row[5])
         }
     return None
 
@@ -4946,7 +5880,10 @@ async def voice_status():
 
 
 @app.post("/api/voice/transcribe")
-async def transcribe_voice_audio(file: UploadFile = File(...)):
+async def transcribe_voice_audio(
+    file: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(None),
+):
     runtime = get_voice_runtime_summary()
     if not runtime["stt_available"]:
         raise HTTPException(
@@ -4955,7 +5892,7 @@ async def transcribe_voice_audio(file: UploadFile = File(...)):
         )
 
     suffix = pathlib.Path(file.filename or "").suffix.lower()[:16] or ".webm"
-    session_id = uuid.uuid4().hex
+    session_id = build_voice_artifact_id(conversation_id)
     input_dir = get_voice_dir("input")
     output_dir = get_voice_dir("transcripts")
     input_path = input_dir / f"{session_id}{suffix}"
@@ -4985,15 +5922,20 @@ async def transcribe_voice_audio(file: UploadFile = File(...)):
         replacements,
         fallback=default_stt_command(input_path, output_dir),
     )
-    result = await run_native_voice_command(command)
-    transcript = read_transcript_output(output_dir, input_path, transcript_path)
-    return {
-        "transcript": transcript,
-        "bytes": bytes_written,
-        "content_type": file.content_type or "application/octet-stream",
-        "backend": runtime["stt_backend"],
-        "command": result["command"][0],
-    }
+    try:
+        result = await run_native_voice_command(command)
+        transcript = read_transcript_output(output_dir, input_path, transcript_path)
+        return {
+            "transcript": transcript,
+            "bytes": bytes_written,
+            "content_type": file.content_type or "application/octet-stream",
+            "backend": runtime["stt_backend"],
+            "command": result["command"][0],
+        }
+    finally:
+        delete_voice_file(input_path)
+        delete_voice_file(transcript_path)
+        prune_voice_storage_if_needed()
 
 
 @app.post("/api/voice/speak")
@@ -5009,7 +5951,7 @@ async def synthesize_voice_audio(request: VoiceSynthesisRequest):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
 
-    speech_id = uuid.uuid4().hex
+    speech_id = build_voice_artifact_id(request.conversation_id)
     text_dir = get_voice_dir("tts-text")
     output_dir = get_voice_dir("tts-audio")
     text_path = text_dir / f"{speech_id}.txt"
@@ -5024,23 +5966,36 @@ async def synthesize_voice_audio(request: VoiceSynthesisRequest):
         "transcript": "",
         "textfile": str(text_path),
     }
-    result = await run_native_voice_command(
-        build_voice_command(
-            VOICE_TTS_COMMAND,
-            replacements,
-            fallback=default_tts_command(output_path, text_path),
+    response_payload: Optional[Dict[str, Any]] = None
+    keep_output = False
+    try:
+        result = await run_native_voice_command(
+            build_voice_command(
+                VOICE_TTS_COMMAND,
+                replacements,
+                fallback=default_tts_command(output_path, text_path),
+            )
         )
-    )
-    if not output_path.exists():
-        raise HTTPException(status_code=500, detail="Speech synthesis finished but no audio file was created")
-    media_type = guess_audio_media_type(output_path)
-    return {
-        "audio_url": f"/api/voice/file/{output_path.name}",
-        "media_type": media_type,
-        "backend": runtime["tts_backend"],
-        "voice": runtime["tts_voice"],
-        "command": result["command"][0],
-    }
+        if not output_path.exists():
+            raise HTTPException(status_code=500, detail="Speech synthesis finished but no audio file was created")
+        media_type = guess_audio_media_type(output_path)
+        response_payload = {
+            "audio_url": f"/api/voice/file/{output_path.name}",
+            "media_type": media_type,
+            "backend": runtime["tts_backend"],
+            "voice": runtime["tts_voice"],
+            "command": result["command"][0],
+        }
+        keep_output = True
+    finally:
+        delete_voice_file(text_path)
+        if not keep_output:
+            delete_voice_file(output_path)
+        prune_voice_storage_if_needed(
+            protected_paths=[output_path] if keep_output and output_path.exists() else None
+        )
+
+    return response_payload
 
 
 @app.get("/api/voice/file/{filename}")
@@ -5051,6 +6006,10 @@ async def get_voice_file(filename: str):
         raise HTTPException(status_code=404, detail="Audio file not found")
     if get_voice_dir("tts-audio", create=False) not in target.parents:
         raise HTTPException(status_code=403, detail="Access denied")
+    try:
+        os.utime(target, None)
+    except OSError:
+        pass
     return FileResponse(target, media_type=guess_audio_media_type(target), filename=target.name)
 
 
@@ -5248,15 +6207,24 @@ async def get_conversations():
         return {'conversations': []}
 
 @app.post("/api/message/{message_id}/feedback")
-async def submit_feedback(message_id: int, request: dict):
-    feedback = request.get('feedback', '').strip()
-    if feedback not in ['positive', 'negative']:
-        raise HTTPException(status_code=400, detail="Feedback must be 'positive' or 'negative'")
+async def submit_feedback(message_id: int, request: FeedbackRequest):
+    try:
+        feedback = normalize_feedback_label(request.feedback, strict=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
+        message = get_message_by_id(message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        if message.get("role") != "assistant":
+            raise HTTPException(status_code=400, detail="Feedback can only be recorded for assistant messages")
         update_message_feedback(message_id, feedback)
-        return {"status": "success", "message": f"Feedback recorded: {feedback}"}
+        sync_workflow_feedback_for_message(message_id, feedback)
+        return {"status": "success", "message": f"Feedback recorded: {feedback}", "feedback": feedback}
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/message/{message_id}/retry")
@@ -5295,10 +6263,13 @@ async def retry_message(message_id: int, request: dict):
 @app.get("/api/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
     try:
-        history = get_conversation_history(conversation_id, limit=100, current_query=None)
-        return {'messages': history}
+        history = get_conversation_messages_for_ui(conversation_id, limit=100)
+        return {
+            'messages': history,
+            'pending_plan': load_pending_execution_plan(conversation_id),
+        }
     except Exception as e:
-        return {'messages': []}
+        return {'messages': [], 'pending_plan': None}
 
 @app.post("/api/conversation/{conversation_id}/rename")
 async def rename_conversation(conversation_id: str, request: RenameRequest):
@@ -5317,6 +6288,7 @@ async def rename_conversation(conversation_id: str, request: RenameRequest):
 async def delete_conversation(conversation_id: str):
     try:
         delete_run_workspace(conversation_id)
+        delete_voice_artifacts_for_conversation(conversation_id)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
@@ -5325,6 +6297,7 @@ async def delete_conversation(conversation_id: str):
         c.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
         conn.commit()
         conn.close()
+        prune_voice_storage_if_needed()
         return {'status': 'success'}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -5609,6 +6582,14 @@ async def read_workspace_file(conversation_id: str, path: str):
     }
 
 
+@app.get("/api/workspace/{conversation_id}/file/download")
+async def download_workspace_file(conversation_id: str, path: str):
+    target = resolve_workspace_relative_path(conversation_id, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, filename=target.name)
+
+
 @app.post("/api/workspace/{conversation_id}/file")
 async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdateRequest):
     workspace = get_workspace_path(conversation_id)
@@ -5730,6 +6711,7 @@ SUPPORTED_TOOL_NAMES = {
     "workspace.read_file",
     "workspace.patch_file",
     "workspace.run_command",
+    "workspace.render",
     "spreadsheet.describe",
     "conversation.search_history",
     "web.search",
@@ -5738,7 +6720,7 @@ SUPPORTED_TOOL_NAMES = {
 
 SUPPORTED_TOOL_NAME_PATTERN = re.compile(
     r'"name"\s*:\s*"(?P<name>'
-    r'workspace\.(?:list_files|grep|read_file|patch_file|run_command)'
+    r'workspace\.(?:list_files|grep|read_file|patch_file|run_command|render)'
     r'|spreadsheet\.describe'
     r'|conversation\.search_history'
     r'|web\.(?:search|fetch_page)'
@@ -6215,6 +7197,26 @@ def workspace_patch_file_result(
     }
 
 
+def workspace_render_result(conversation_id: str, html: str, title: str = "") -> Dict[str, Any]:
+    """Write HTML content to a preview file and return the path for the viewer."""
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("html is required and must be a non-empty string")
+    encoded = html.encode("utf-8")
+    if len(encoded) > WORKSPACE_WRITE_SIZE_LIMIT:
+        raise ValueError("HTML content too large (max 1MB)")
+    filename = (title.strip().replace("/", "_").replace(" ", "_")[:60] + ".html") if title.strip() else "_preview.html"
+    target = resolve_workspace_relative_path(conversation_id, filename)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as f:
+        f.write(html)
+    workspace = get_workspace_path(conversation_id)
+    return {
+        "path": format_workspace_path(target, workspace),
+        "bytes_written": len(encoded),
+        "render": True,
+    }
+
+
 async def workspace_run_command_result(
     conversation_id: str,
     command: Any,
@@ -6408,7 +7410,7 @@ def conversation_search_history_result(
                 "role": row[1],
                 "content": row[2],
                 "timestamp": row[3],
-                "feedback": row[4] or "",
+                "feedback": message_feedback_value(row[1], row[4]),
                 "fts_rank": row[5],
             }
             for row in c.fetchall()
@@ -6582,6 +7584,94 @@ def compute_title_match_score(query: str, title: str) -> float:
         return 0.0
     overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
     return round(min(overlap, 0.9), 3)
+
+
+CURATED_WEB_SEARCH_PRESETS = [
+    {
+        "scope": "philosophy_reference",
+        "domains": ["plato.stanford.edu", "iep.utm.edu"],
+        "keywords": {
+            "philosophy", "philosopher", "ethics", "epistemology", "metaphysics",
+            "existentialism", "stoicism", "nihilism", "phenomenology", "logic",
+            "consciousness", "ontology", "aesthetics", "kant", "aristotle",
+            "plato", "descartes", "nietzsche", "hegel", "wittgenstein",
+        },
+    },
+]
+
+
+def curated_source_domains() -> set[str]:
+    """Return the set of domains managed by curated search presets."""
+    domains: set[str] = set()
+    for preset in CURATED_WEB_SEARCH_PRESETS:
+        for domain in preset.get("domains", []):
+            normalized = sanitize_web_domain(str(domain))
+            if normalized:
+                domains.add(normalized)
+    return domains
+
+
+def is_curated_source_active(domain: str) -> bool:
+    """Return whether a curated source domain is currently eligible for auto-fan-out."""
+    normalized = sanitize_web_domain(domain)
+    if not normalized or normalized not in curated_source_domains():
+        return True
+    state = CURATED_SOURCE_HEALTH.get(normalized, {})
+    disabled_until = _parse_iso_datetime(state.get("disabled_until"))
+    if disabled_until and disabled_until > datetime.now():
+        return False
+    return True
+
+
+def record_curated_source_failure(domain: str, error: str = "") -> None:
+    """Temporarily disable repeatedly failing curated sources."""
+    normalized = sanitize_web_domain(domain)
+    if not normalized or normalized not in curated_source_domains():
+        return
+    state = dict(CURATED_SOURCE_HEALTH.get(normalized, {}))
+    failures = int(state.get("failures", 0)) + 1
+    state["failures"] = failures
+    state["last_error"] = truncate_output(str(error or "").strip(), limit=240)
+    state["last_failure_at"] = utcnow_iso()
+    if failures >= CURATED_SOURCE_FAILURE_THRESHOLD:
+        state["disabled_until"] = (
+            datetime.now() + timedelta(minutes=CURATED_SOURCE_DISABLE_MINUTES)
+        ).isoformat()
+        logger.warning("Temporarily disabled curated source %s after %s failures", normalized, failures)
+    CURATED_SOURCE_HEALTH[normalized] = state
+
+
+def record_curated_source_success(domain: str) -> None:
+    """Clear failure state for curated sources that recover."""
+    normalized = sanitize_web_domain(domain)
+    if not normalized or normalized not in curated_source_domains():
+        return
+    CURATED_SOURCE_HEALTH[normalized] = {
+        "failures": 0,
+        "last_success_at": utcnow_iso(),
+    }
+
+
+def curated_search_plans_for_query(query: str, limit: int) -> List[Dict[str, Any]]:
+    """Return extra authoritative search plans for queries matching curated domains."""
+    words = set(re.findall(r"[a-z0-9_+-]+", str(query or "").lower()))
+    plans: List[Dict[str, Any]] = []
+    for preset in CURATED_WEB_SEARCH_PRESETS:
+        if not words.intersection(set(preset.get("keywords", set()))):
+            continue
+        active_domains = [
+            domain for domain in list(preset.get("domains", []))
+            if is_curated_source_active(domain)
+        ]
+        if not active_domains:
+            continue
+        plans.append({
+            "scope": str(preset["scope"]),
+            "query": apply_web_domain_filters(str(query or "").strip(), active_domains),
+            "limit": min(4, limit),
+            "domains": active_domains,
+        })
+    return plans
 
 
 def extract_preferred_html_content(html: str) -> str:
@@ -6779,30 +7869,20 @@ def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[D
     return None
 
 
-async def web_search_result(query: str, limit: int = 5, domains: Any = None) -> Dict[str, Any]:
-    """Fetch a small web result set for freshness-sensitive questions."""
-    cleaned_query = (query or "").strip()
-    if len(cleaned_query) < 2:
-        raise ValueError("query must be at least 2 characters")
-
-    safe_limit = max(1, min(int(limit), 8))
-    effective_query = apply_web_domain_filters(cleaned_query, domains)
-    domain_filters = []
-    if isinstance(domains, list):
-        for domain in domains[:5]:
-            normalized = sanitize_web_domain(str(domain))
-            if normalized and normalized not in domain_filters:
-                domain_filters.append(normalized)
-
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(effective_query)}"
+async def duckduckgo_search_results(
+    client: httpx.AsyncClient,
+    query: str,
+    limit: int,
+    search_scope: str,
+) -> List[Dict[str, Any]]:
+    """Run one DuckDuckGo HTML search and normalize the result set."""
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; ai-chat/1.0; +https://localhost)",
     }
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        html = resp.text
+    resp = await client.get(url, headers=headers)
+    resp.raise_for_status()
+    html = resp.text
 
     pattern = re.compile(
         r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
@@ -6816,7 +7896,7 @@ async def web_search_result(query: str, limit: int = 5, domains: Any = None) -> 
     results = []
     seen_urls: set[str] = set()
     cursor = 0
-    while len(results) < safe_limit:
+    while len(results) < limit:
         match = pattern.search(html, cursor)
         if not match:
             break
@@ -6832,30 +7912,143 @@ async def web_search_result(query: str, limit: int = 5, domains: Any = None) -> 
         seen_urls.add(raw_url)
         domain = normalize_web_domain(raw_url)
         results.append({
+            "search_scope": search_scope,
             "search_rank": len(results) + 1,
             "title": title,
             "url": raw_url,
             "domain": domain,
-            "title_match_score": compute_title_match_score(cleaned_query, title),
             "snippet": snippet,
         })
         cursor = match.end()
 
+    return results
+
+
+async def run_scoped_web_search(
+    client: httpx.AsyncClient,
+    plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run one scoped search without letting a single source failure break the whole fan-out."""
+    try:
+        results = await duckduckgo_search_results(client, plan["query"], int(plan["limit"]), str(plan["scope"]))
+        return {
+            "scope": str(plan["scope"]),
+            "domains": list(plan.get("domains", [])),
+            "query": str(plan["query"]),
+            "results": results,
+            "error": "",
+        }
+    except Exception as exc:
+        for domain in plan.get("domains", []):
+            record_curated_source_failure(str(domain), str(exc))
+        logger.warning("Scoped web search failed for %s: %s", plan.get("scope"), exc)
+        return {
+            "scope": str(plan["scope"]),
+            "domains": list(plan.get("domains", [])),
+            "query": str(plan["query"]),
+            "results": [],
+            "error": str(exc),
+        }
+
+
+async def web_search_result(query: str, limit: int = 5, domains: Any = None) -> Dict[str, Any]:
+    """Fetch a web result set, plus Wikipedia and Reddit context when helpful."""
+    cleaned_query = (query or "").strip()
+    if len(cleaned_query) < 2:
+        raise ValueError("query must be at least 2 characters")
+
+    safe_limit = max(1, min(int(limit), 8))
+    domain_filters = []
+    if isinstance(domains, list):
+        for domain in domains[:5]:
+            normalized = sanitize_web_domain(str(domain))
+            if normalized and normalized not in domain_filters:
+                domain_filters.append(normalized)
+
+    search_plans = []
+    effective_query = apply_web_domain_filters(cleaned_query, domain_filters)
+    if domain_filters:
+        search_plans.append({
+            "scope": "domain_filtered",
+            "query": effective_query,
+            "limit": safe_limit,
+            "domains": domain_filters,
+        })
+    else:
+        search_plans.extend([
+            {
+                "scope": "web",
+                "query": cleaned_query,
+                "limit": safe_limit,
+                "domains": [],
+            },
+            {
+                "scope": "wikipedia",
+                "query": apply_web_domain_filters(cleaned_query, ["wikipedia.org"]),
+                "limit": min(3, safe_limit),
+                "domains": ["wikipedia.org"],
+            },
+            {
+                "scope": "reddit",
+                "query": apply_web_domain_filters(cleaned_query, ["reddit.com"]),
+                "limit": min(3, safe_limit),
+                "domains": ["reddit.com"],
+            },
+        ])
+        search_plans.extend(curated_search_plans_for_query(cleaned_query, safe_limit))
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=True) as client:
+        scoped_runs = await asyncio.gather(*[
+            run_scoped_web_search(client, plan)
+            for plan in search_plans
+        ])
+
     requested_domains = set(domain_filters)
-    results.sort(
-        key=lambda item: (
-            -float(item.get("title_match_score", 0.0)),
-            -int(bool(item.get("domain")) and item.get("domain") in requested_domains),
-            int(item.get("search_rank", 9999)),
+    result_sets = []
+    results: List[Dict[str, Any]] = []
+    overall_position = 1
+    skipped_searches = []
+    for plan, scoped_run in zip(search_plans, scoped_runs):
+        scope_results = list(scoped_run.get("results", []))
+        if scoped_run.get("error"):
+            skipped_searches.append({
+                "scope": scoped_run.get("scope", plan["scope"]),
+                "domains": list(scoped_run.get("domains", plan.get("domains", []))),
+                "error": truncate_output(str(scoped_run.get("error", "")), limit=240),
+            })
+        for item in scope_results:
+            item["title_match_score"] = compute_title_match_score(cleaned_query, str(item.get("title", "")))
+        scope_results.sort(
+            key=lambda item: (
+                -float(item.get("title_match_score", 0.0)),
+                -int(bool(item.get("domain")) and item.get("domain") in requested_domains),
+                int(item.get("search_rank", 9999)),
+            )
         )
-    )
-    for index, item in enumerate(results, start=1):
-        item["position"] = index
+        for scope_index, item in enumerate(scope_results, start=1):
+            item["scope_position"] = scope_index
+            item["position"] = overall_position
+            overall_position += 1
+        result_sets.append({
+            "scope": plan["scope"],
+            "query": plan["query"],
+            "domains": list(plan.get("domains", [])),
+            "count": len(scope_results),
+            "results": scope_results,
+        })
+        results.extend(scope_results)
+
+        if not scoped_run.get("error"):
+            for domain in plan.get("domains", []):
+                record_curated_source_success(str(domain))
 
     return {
         "query": cleaned_query,
         "effective_query": effective_query,
         "domains": domain_filters,
+        "searches_run": [plan["scope"] for plan in search_plans],
+        "skipped_searches": skipped_searches,
+        "result_sets": result_sets,
         "results": results,
         "count": len(results),
         "provider": "duckduckgo_html",
@@ -6875,11 +8068,16 @@ async def web_fetch_page_result(url: str) -> Dict[str, Any]:
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; ai-chat/1.0; +https://localhost)",
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=True) as client:
-        resp = await client.get(raw_url, headers=headers)
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        body = resp.text
+    source_domain = normalize_web_domain(raw_url)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=True) as client:
+            resp = await client.get(raw_url, headers=headers)
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            body = resp.text
+    except Exception as exc:
+        record_curated_source_failure(source_domain, str(exc))
+        raise
 
     page_title = ""
     page_text = ""
@@ -6894,6 +8092,7 @@ async def web_fetch_page_result(url: str) -> Dict[str, Any]:
     page_text = truncate_output(page_text, limit=WEB_PAGE_TEXT_LIMIT)
     final_url = canonicalize_http_url(str(resp.url))
     page_domain = normalize_web_domain(final_url or raw_url)
+    record_curated_source_success(page_domain)
     return {
         "url": raw_url,
         "final_url": final_url or str(resp.url),
@@ -6906,43 +8105,96 @@ async def web_fetch_page_result(url: str) -> Dict[str, Any]:
     }
 
 
+def compact_tool_text(value: Any, limit: int = 96) -> str:
+    """Normalize tool-facing text for concise activity summaries."""
+    return truncate_output(re.sub(r"\s+", " ", str(value or "")).strip(), limit=limit)
+
+
+def pluralize_tool_count(count: int, singular: str, plural: Optional[str] = None) -> str:
+    """Render a small count phrase like '3 files'."""
+    safe_count = max(0, int(count or 0))
+    noun = singular if safe_count == 1 else (plural or f"{singular}s")
+    return f"{safe_count} {noun}"
+
+
+def tool_path_preview(value: Any, fallback: str = ".", limit: int = 72) -> str:
+    """Return a readable path-like value for activity lines."""
+    preview = compact_tool_text(value, limit=limit)
+    return preview or fallback
+
+
+def command_preview_text(command: Any, limit: int = 96) -> str:
+    """Render a stable shell-like preview of a structured argv command."""
+    if isinstance(command, list):
+        parts = [str(part).strip() for part in command if str(part).strip()]
+        if not parts:
+            return "command"
+        preview = shlex.join(parts)
+    else:
+        preview = str(command or "").strip()
+    preview = preview.replace("\n", " ")
+    return compact_tool_text(preview, limit=limit) or "command"
+
+
+def tool_activity_label(name: str) -> str:
+    """Map tool names to compact UI activity labels."""
+    if name == "workspace.run_command":
+        return "Command"
+    if name in {"workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"}:
+        return "Explore"
+    if name == "workspace.patch_file":
+        return "Edit"
+    if name == "workspace.render":
+        return "Render"
+    if name == "conversation.search_history":
+        return "History"
+    if name in {"web.search", "web.fetch_page"}:
+        return "Web"
+    return "Tool"
+
+
 def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
     """Human-readable tool activity for the UI."""
     if name == "workspace.list_files":
-        return f"Listing {arguments.get('path', '.')}"
+        return f"Exploring {tool_path_preview(arguments.get('path', '.'), '.')}"
     if name == "workspace.grep":
-        target = arguments.get("path", ".")
-        query = arguments.get("query", "")
-        return f"Searching {target} for {query}"
+        target = tool_path_preview(arguments.get("path", "."), ".")
+        query = compact_tool_text(arguments.get("query", ""), limit=60)
+        return f"Searching {target} for {query or 'text'}"
     if name == "workspace.read_file":
-        return f"Reading {arguments.get('path', '')}"
+        return f"Opening {tool_path_preview(arguments.get('path', ''), 'file')}"
     if name == "workspace.patch_file":
-        return f"Patching {arguments.get('path', '')}"
+        return f"Editing {tool_path_preview(arguments.get('path', ''), 'file')}"
     if name == "workspace.run_command":
-        command = arguments.get("command", [])
-        if isinstance(command, list):
-            command_preview = " ".join(str(part) for part in command[:4])
-        else:
-            command_preview = str(command)
-        return f"Running {command_preview or 'command'}"
+        return f"Running {command_preview_text(arguments.get('command', []))}"
+    if name == "workspace.render":
+        return f"Rendering {tool_path_preview(arguments.get('title', 'HTML preview'), 'HTML preview')}"
     if name == "spreadsheet.describe":
-        target = arguments.get("path", "")
-        sheet = arguments.get("sheet", "")
+        target = tool_path_preview(arguments.get("path", ""), "spreadsheet")
+        sheet = compact_tool_text(arguments.get("sheet", ""), limit=40)
         return f"Inspecting {target}{f' [{sheet}]' if sheet else ''}"
     if name == "conversation.search_history":
-        return f"Searching chat history for {arguments.get('query', '')}"
+        query = compact_tool_text(arguments.get("query", ""), limit=60)
+        return f"Searching chat history for {query or 'prior messages'}"
     if name == "web.search":
+        query = compact_tool_text(arguments.get("query", ""), limit=60)
         domains = arguments.get("domains", [])
         if isinstance(domains, list) and domains:
-            return f"Searching the web for {arguments.get('query', '')} on {', '.join(str(item) for item in domains[:3])}"
-        return f"Searching the web for {arguments.get('query', '')}"
+            domain_preview = ", ".join(compact_tool_text(item, limit=30) for item in domains[:3] if compact_tool_text(item, limit=30))
+            return f"Searching the web for {query or 'sources'} on {domain_preview}" if domain_preview else f"Searching the web for {query or 'sources'}"
+        return f"Searching the web for {query or 'sources'}"
     if name == "web.fetch_page":
-        return f"Fetching {arguments.get('url', '')}"
+        return f"Fetching {tool_path_preview(arguments.get('url', ''), 'page', limit=88)}"
     return name
 
 
-def tool_result_preview(result: Dict[str, Any]) -> str:
+def tool_result_preview(
+    result: Dict[str, Any],
+    name: str = "",
+    arguments: Optional[Dict[str, Any]] = None,
+) -> str:
     """Compact preview of a tool result for the UI."""
+    arguments = arguments or {}
     if not result.get("ok"):
         details = result.get("details", {})
         if isinstance(details, dict) and details.get("type") == "patch_mismatch":
@@ -6951,45 +8203,85 @@ def tool_result_preview(result: Dict[str, Any]) -> str:
                 f"expected {details.get('expected_count', '?')} match(es), "
                 f"found {details.get('actual_count', '?')}"
             )
-        return str(result.get("error", "Tool failed"))
+        if name == "workspace.run_command":
+            return f"Command failed: {command_preview_text(arguments.get('command', []))}"
+        return compact_tool_text(result.get("error", "Tool failed"), limit=200) or "Tool failed"
 
     payload = result.get("result", {})
     if not isinstance(payload, dict):
         return "Completed"
 
-    if "final_url" in payload:
-        title = payload.get("title", "") or payload.get("final_url", "")
-        return f"Fetched {title}"
-    if "items" in payload:
+    if name == "workspace.run_command" or "returncode" in payload:
+        returncode = int(payload.get("returncode", 0) or 0)
+        cwd = tool_path_preview(payload.get("cwd", arguments.get("cwd", ".")), ".")
+        command = command_preview_text(arguments.get("command", []))
+        if returncode == 0:
+            return f"Ran {command} in {cwd}"
+        return f"Ran {command} in {cwd} (exit {returncode})"
+
+    if name == "workspace.list_files" or "items" in payload:
         items = payload.get("items", [])
-        return f"Found {len(items)} item(s) in {payload.get('path', '.')}"
-    if "grep_matches" in payload:
-        return (
-            f"Found {payload.get('count', 0)} match(es) in "
-            f"{payload.get('matched_files', 0)} file(s)"
-        )
-    if "content" in payload:
-        return f"Read {payload.get('lines', 0)} line(s) from {payload.get('path', '')}"
-    if "edits_applied" in payload:
+        files = sum(1 for item in items if isinstance(item, dict) and item.get("type") == "file")
+        directories = sum(1 for item in items if isinstance(item, dict) and item.get("type") == "directory")
+        target = tool_path_preview(payload.get("path", arguments.get("path", ".")), ".")
+        if files and directories:
+            return f"Explored {pluralize_tool_count(files, 'file')} and {pluralize_tool_count(directories, 'folder')} in {target}"
+        if files:
+            return f"Explored {pluralize_tool_count(files, 'file')} in {target}"
+        if directories:
+            return f"Explored {pluralize_tool_count(directories, 'folder')} in {target}"
+        return f"Explored {target}"
+
+    if name == "workspace.grep" or "grep_matches" in payload:
+        matched_files = int(payload.get("matched_files", 0) or 0)
+        files_scanned = int(payload.get("files_scanned", 0) or 0)
+        match_count = int(payload.get("count", 0) or 0)
+        query = compact_tool_text(payload.get("query", arguments.get("query", "")), limit=60) or "text"
+        target = tool_path_preview(payload.get("path", arguments.get("path", ".")), ".")
+        if matched_files:
+            match_note = f" ({pluralize_tool_count(match_count, 'match', 'matches')})" if match_count else ""
+            return f"Explored {pluralize_tool_count(matched_files, 'file')} for {query} in {target}{match_note}"
+        scanned = pluralize_tool_count(files_scanned, "file")
+        return f"Searched {scanned} in {target} for {query}"
+
+    if name == "workspace.read_file" or "content" in payload:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "file")
+        lines = int(payload.get("lines", 0) or 0)
+        line_note = f" ({pluralize_tool_count(lines, 'line')})" if lines else ""
+        return f"Opened {path}{line_note}"
+
+    if name == "workspace.render" or payload.get("render"):
+        return f"Rendered {tool_path_preview(payload.get('path', 'preview'), 'preview')} in the workspace viewer"
+
+    if name == "workspace.patch_file" or "edits_applied" in payload:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "file")
         if payload.get("created"):
-            return f"Created {payload.get('path', '')} ({payload.get('bytes_written', 0)} bytes)"
+            return f"Created {path} ({payload.get('bytes_written', 0)} bytes)"
+        return f"Edited {path} ({pluralize_tool_count(payload.get('edits_applied', 0), 'change')})"
+
+    if name == "spreadsheet.describe" or "sheet_names" in payload:
+        sheet = compact_tool_text(payload.get("sheet", ""), limit=40)
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "spreadsheet")
+        sheet_note = f" [{sheet}]" if sheet else ""
         return (
-            f"Patched {payload.get('path', '')} "
-            f"with {payload.get('edits_applied', 0)} edit(s)"
+            f"Explored {path}{sheet_note}: "
+            f"{pluralize_tool_count(payload.get('row_count', 0), 'row')}, "
+            f"{pluralize_tool_count(payload.get('column_count', 0), 'column')}"
         )
-    if "returncode" in payload:
-        return f"Exit {payload.get('returncode', 1)} in {payload.get('cwd', '.')}"
-    if "sheet_names" in payload:
-        sheet = payload.get("sheet", "")
-        return (
-            f"Loaded {payload.get('path', '')}"
-            f"{f' [{sheet}]' if sheet else ''}: "
-            f"{payload.get('row_count', 0)} row(s), {payload.get('column_count', 0)} column(s)"
-        )
-    if "matches" in payload:
-        return f"Found {payload.get('count', 0)} chat match(es) for {payload.get('query', '')}"
-    if "results" in payload:
-        return f"Found {payload.get('count', 0)} web result(s) for {payload.get('query', '')}"
+
+    if name == "conversation.search_history" or "matches" in payload:
+        query = compact_tool_text(payload.get("query", arguments.get("query", "")), limit=60) or "history"
+        return f"Searched chat history for {query} ({pluralize_tool_count(payload.get('count', 0), 'match', 'matches')})"
+
+    if name == "web.search" or "results" in payload:
+        query = compact_tool_text(payload.get("query", arguments.get("query", "")), limit=60) or "sources"
+        return f"Searched the web for {query} ({pluralize_tool_count(payload.get('count', 0), 'result')})"
+
+    if name == "web.fetch_page" or "final_url" in payload:
+        title = compact_tool_text(payload.get("title", ""), limit=80)
+        target = title or tool_path_preview(payload.get("final_url", payload.get("url", "")), "page", limit=88)
+        return f"Fetched {target}"
+
     return "Completed"
 
 
@@ -7030,6 +8322,12 @@ async def execute_tool_call(
                 arguments.get("edits"),
                 arguments.get("create", False),
                 arguments.get("new_content"),
+            )
+        elif name == "workspace.render":
+            result = workspace_render_result(
+                conversation_id,
+                str(arguments.get("html", "")),
+                str(arguments.get("title", "")),
             )
         elif name == "workspace.run_command":
             result = await workspace_run_command_result(
@@ -7083,28 +8381,36 @@ async def emit_direct_tool_call(
     status_prefix: str = "",
     activity_phase: str = "respond",
     activity_step_label: Optional[str] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> Dict[str, Any]:
     """Execute one deterministic tool call while mirroring the normal tool-loop UI events."""
+    tool_name = call["name"]
+    tool_arguments = call.get("arguments", {})
+    activity_label = tool_activity_label(tool_name)
+    start_summary = tool_status_summary(tool_name, tool_arguments)
     await websocket.send_json({
         "type": "tool_start",
-        "name": call["name"],
-        "content": f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
-        "arguments": call.get("arguments", {}),
+        "name": tool_name,
+        "content": f"{status_prefix}{start_summary}",
+        "arguments": tool_arguments,
     })
     await send_activity_event(
         websocket,
         activity_phase,
-        "Tool",
-        f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
+        activity_label,
+        f"{status_prefix}{start_summary}",
         step_label=activity_step_label,
     )
+    started = time.perf_counter()
     result = await execute_tool_call(conversation_id, call, features)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    result_summary = tool_result_preview(result, tool_name, tool_arguments)
     await websocket.send_json({
         "type": "tool_result",
-        "name": call["name"],
+        "name": tool_name,
         "ok": result.get("ok", False),
-        "content": f"{status_prefix}{tool_result_preview(result)}",
-        "arguments": call.get("arguments", {}),
+        "content": f"{status_prefix}{result_summary}",
+        "arguments": tool_arguments,
         "payload": result.get("result", {}) if result.get("ok") else {
             "error": result.get("error", "Tool failed"),
         },
@@ -7112,9 +8418,16 @@ async def emit_direct_tool_call(
     await send_activity_event(
         websocket,
         activity_phase if result.get("ok") else "error",
-        "Tool Result" if result.get("ok") else "Tool Error",
-        f"{status_prefix}{tool_result_preview(result)}",
+        activity_label,
+        f"{status_prefix}{result_summary}",
         step_label=activity_step_label,
+    )
+    record_workflow_step(
+        workflow_execution,
+        step_name=activity_step_label or activity_phase or call.get("name", ""),
+        call=call,
+        result=result,
+        latency_ms=latency_ms,
     )
     return result
 
@@ -7131,6 +8444,7 @@ async def run_tool_loop(
     max_steps: Optional[int] = None,
     activity_phase: str = "tool",
     activity_step_label: Optional[str] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> ToolLoopOutcome:
     """Run a small tool protocol until the model returns a final answer."""
     tool_prompt = (
@@ -7193,25 +8507,33 @@ async def run_tool_loop(
                         "ok": False,
                         "error": f"Command '{command_key or command_list[0]}' was not approved for this chat",
                     }
+                    denied_summary = tool_result_preview(denied_result, call["name"], call.get("arguments", {}))
                     await websocket.send_json({
                         "type": "tool_result",
                         "name": call["name"],
                         "ok": False,
-                        "content": f"{status_prefix}{tool_result_preview(denied_result)}",
+                        "content": f"{status_prefix}{denied_summary}",
                         "arguments": call.get("arguments", {}),
                         "payload": {"error": denied_result["error"]},
                     })
                     await send_activity_event(
                         websocket,
                         "error",
-                        "Tool Error",
-                        f"{status_prefix}{tool_result_preview(denied_result)}",
+                        tool_activity_label(call["name"]),
+                        f"{status_prefix}{denied_summary}",
                         step_label=activity_step_label,
                     )
                     tool_results.append({
                         "call": call,
                         "result": denied_result,
                     })
+                    record_workflow_step(
+                        workflow_execution,
+                        step_name=activity_step_label or activity_phase or call.get("name", ""),
+                        call=call,
+                        result=denied_result,
+                        latency_ms=0,
+                    )
                     messages.append({"role": "assistant", "content": cleaned})
                     messages.append({
                         "role": "user",
@@ -7219,17 +8541,18 @@ async def run_tool_loop(
                     })
                     continue
 
+        start_summary = tool_status_summary(call["name"], call.get("arguments", {}))
         await websocket.send_json({
             "type": "tool_start",
             "name": call["name"],
-            "content": f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
+            "content": f"{status_prefix}{start_summary}",
             "arguments": call.get("arguments", {}),
         })
         await send_activity_event(
             websocket,
             activity_phase,
-            "Tool",
-            f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
+            tool_activity_label(call["name"]),
+            f"{status_prefix}{start_summary}",
             step_label=activity_step_label,
         )
 
@@ -7252,7 +8575,9 @@ async def run_tool_loop(
                     ),
                 }
             else:
+                started = time.perf_counter()
                 result = await execute_tool_call(conversation_id, call, features)
+                latency_ms = int((time.perf_counter() - started) * 1000)
                 if result.get("ok"):
                     payload = result.get("result", {})
                     if isinstance(payload, dict):
@@ -7272,12 +8597,15 @@ async def run_tool_loop(
                         if final_key:
                             fetched_unique_pages.add(final_key)
         else:
+            started = time.perf_counter()
             result = await execute_tool_call(conversation_id, call, features)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+        result_summary = tool_result_preview(result, call["name"], call.get("arguments", {}))
         await websocket.send_json({
             "type": "tool_result",
             "name": call["name"],
             "ok": result.get("ok", False),
-            "content": f"{status_prefix}{tool_result_preview(result)}",
+            "content": f"{status_prefix}{result_summary}",
             "arguments": call.get("arguments", {}),
             "payload": result.get("result", {}) if result.get("ok") else {
                 "error": result.get("error", "Tool failed"),
@@ -7286,14 +8614,21 @@ async def run_tool_loop(
         await send_activity_event(
             websocket,
             activity_phase if result.get("ok") else "error",
-            "Tool Result" if result.get("ok") else "Tool Error",
-            f"{status_prefix}{tool_result_preview(result)}",
+            tool_activity_label(call["name"]),
+            f"{status_prefix}{result_summary}",
             step_label=activity_step_label,
         )
         tool_results.append({
             "call": call,
             "result": result,
         })
+        record_workflow_step(
+            workflow_execution,
+            step_name=activity_step_label or activity_phase or call.get("name", ""),
+            call=call,
+            result=result,
+            latency_ms=latency_ms,
+        )
 
         messages.append({"role": "assistant", "content": cleaned})
         messages.append({
@@ -7336,16 +8671,19 @@ async def run_tool_loop(
                     await send_activity_event(
                         websocket,
                         "verify",
-                        "Auto Verify",
+                        tool_activity_label(auto_call["name"]),
                         f"{status_prefix}{auto_verify.get('label', tool_status_summary(auto_call['name'], auto_call['arguments']))}",
                         step_label=activity_step_label,
                     )
+                    auto_started = time.perf_counter()
                     auto_result = await execute_tool_call(conversation_id, auto_call, features)
+                    auto_latency_ms = int((time.perf_counter() - auto_started) * 1000)
+                    auto_result_summary = tool_result_preview(auto_result, auto_call["name"], auto_call.get("arguments", {}))
                     await websocket.send_json({
                         "type": "tool_result",
                         "name": auto_call["name"],
                         "ok": auto_result.get("ok", False),
-                        "content": f"{status_prefix}{tool_result_preview(auto_result)}",
+                        "content": f"{status_prefix}{auto_result_summary}",
                         "arguments": auto_call["arguments"],
                         "payload": auto_result.get("result", {}) if auto_result.get("ok") else {
                             "error": auto_result.get("error", "Tool failed"),
@@ -7354,8 +8692,8 @@ async def run_tool_loop(
                     await send_activity_event(
                         websocket,
                         "verify" if auto_result.get("ok") else "error",
-                        "Auto Verify Result" if auto_result.get("ok") else "Auto Verify Error",
-                        f"{status_prefix}{tool_result_preview(auto_result)}",
+                        tool_activity_label(auto_call["name"]),
+                        f"{status_prefix}{auto_result_summary}",
                         step_label=activity_step_label,
                     )
                     tool_results.append({
@@ -7363,6 +8701,14 @@ async def run_tool_loop(
                         "result": auto_result,
                         "auto_generated": True,
                     })
+                    record_workflow_step(
+                        workflow_execution,
+                        step_name=activity_step_label or "auto_verify",
+                        call=auto_call,
+                        result=auto_result,
+                        latency_ms=auto_latency_ms,
+                        auto_generated=True,
+                    )
                     messages.append({
                         "role": "user",
                         "content": (
@@ -7397,11 +8743,11 @@ def classify_workspace_intent(message: str) -> str:
         return "none"
 
     words = set(re.findall(r"[a-z0-9_+-]+", text))
-    read_verbs = {"inspect", "read", "open", "show", "list", "search", "find", "grep", "explain", "review"}
+    read_verbs = {"inspect", "read", "open", "show", "list", "search", "find", "grep", "explain", "review", "render", "preview", "display", "view"}
     write_verbs = {
         "edit", "change", "update", "patch", "refactor", "create", "write", "add",
         "delete", "remove", "rename", "run", "execute", "test", "build", "compile",
-        "debug", "fix", "implement", "generate", "scaffold",
+        "debug", "fix", "implement", "generate", "scaffold", "tweak", "adjust", "modify", "improve", "revise",
     }
 
     path_refs = extract_workspace_path_references(message)
@@ -7451,20 +8797,31 @@ def tool_loop_token_budget(max_tokens: int, message: str, allowed_tools: List[st
     return min(max_tokens, 2048)
 
 
-def select_enabled_tools(conversation_id: str, message: str, features: FeatureFlags) -> List[str]:
+def select_enabled_tools(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> List[str]:
     """Return the small set of tools worth exposing for this request."""
     allowed: List[str] = []
     intent = classify_workspace_intent(message)
-    if should_use_workspace_tools(conversation_id, message, features):
+    render_requested = should_offer_workspace_render(message, history, features)
+    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features) or (
+        features.agent_tools
+        and features.workspace_write
+        and intent in {"focused_write", "broad_write"}
+    )
+    if workspace_requested:
         if intent == "focused_read":
             path_refs = extract_workspace_path_references(message)
             if path_refs and any(pathlib.Path(path).suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS for path in path_refs):
                 allowed.append("spreadsheet.describe")
-            allowed.extend(allowed_workspace_tools(features, include_write=False))
+            allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
         elif intent == "focused_write":
-            allowed.extend(allowed_workspace_tools(features, include_write=True))
+            allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
         else:
-            allowed.extend(allowed_workspace_tools(features, include_write=True))
+            allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
     if should_offer_local_rag(message, features):
         allowed.append("conversation.search_history")
     if should_offer_web_search(message, features):
@@ -7490,7 +8847,7 @@ def workspace_has_content(conversation_id: str) -> bool:
 
 
 def should_use_workspace_tools(conversation_id: str, message: str, features: FeatureFlags) -> bool:
-    """Heuristic: only enter workspace mode when the user is clearly asking for local file work."""
+    """Heuristic: enter workspace mode when local files are likely to ground the answer or change."""
     if not features.agent_tools:
         return False
 
@@ -7499,6 +8856,12 @@ def should_use_workspace_tools(conversation_id: str, message: str, features: Fea
         return False
 
     if extract_artifact_references(message):
+        return True
+
+    if any(marker in text for marker in ATTACHMENT_CONTEXT_MARKERS):
+        return True
+
+    if message_requests_workspace_render(message):
         return True
 
     if any(token in text for token in ("workspace", "repo", "repository", "codebase", "project folder")):
@@ -7522,6 +8885,12 @@ def should_use_workspace_tools(conversation_id: str, message: str, features: Fea
             return True
         if any(text.startswith(prefix) for prefix in ("fix ", "debug ", "run ", "test ", "build ", "refactor ")):
             return True
+        repo_change_terms = {
+            "prompt", "prompts", "behavior", "flow", "workflow", "feature", "features",
+            "logic", "planner", "plan", "harness", "tool", "tools", "approval",
+        }
+        if words & WORKSPACE_SIGNAL_VERBS and words & repo_change_terms:
+            return True
 
     return False
 
@@ -7534,11 +8903,113 @@ WEB_SEARCH_HINTS = {
     "latest", "today", "current", "recent", "news", "release", "released", "version",
     "price", "weather", "score", "web", "website", "online", "search", "google", "browse",
 }
+ATTACHMENT_CONTEXT_MARKERS = (
+    "attached files are available in the workspace:",
+    "relevant extracted context from attachments:",
+    "attachment overview:",
+)
+EXPLICIT_WEB_SEARCH_PHRASES = (
+    "search the web",
+    "search web",
+    "search online",
+    "use search",
+    "look up",
+    "browse",
+    "google",
+    "find sources",
+    "add citations",
+    "cite sources",
+    "with citations",
+    "with sources",
+)
+EXPLICIT_HISTORY_SEARCH_PHRASES = (
+    "search history",
+    "search the history",
+    "search our chat",
+    "search this chat",
+    "conversation history",
+    "earlier in this chat",
+    "what did we say",
+    "what did i say",
+)
+RENDER_CONTEXT_HINTS = {
+    "html", "page", "site", "dashboard", "report", "visualization", "viewer", "preview", "render",
+}
+HTML_SNIPPET_PATTERN = re.compile(
+    r"<!doctype html|<html\b|<head\b|<body\b|<main\b|<section\b|<article\b|<div\b|<style\b|```html",
+    re.IGNORECASE,
+)
+DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN = re.compile(
+    r"\b(can't|cannot|don't have|do not have|unable to|limited by|no built-in|not available|prevent me from|server-side restriction)\b",
+    re.IGNORECASE,
+)
+
+
+def explicit_history_lookup_requested(message: str) -> bool:
+    """Return whether the user explicitly asked to search earlier chat context."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    return any(phrase in text for phrase in EXPLICIT_HISTORY_SEARCH_PHRASES)
+
+
+def explicit_web_search_requested(message: str) -> bool:
+    """Return whether the user explicitly asked for web research or sourced citations."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    if any(phrase in text for phrase in EXPLICIT_WEB_SEARCH_PHRASES):
+        return True
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    return bool({"citations", "citation", "sources", "source", "references"} & words)
+
+
+def message_requests_workspace_render(message: str) -> bool:
+    """Return whether the user is asking to preview or render HTML-like content."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if any(phrase in text for phrase in ("render this page", "show this page", "open in the viewer", "using your viewer")):
+        return True
+    if {"render", "preview", "viewer"} & words and (RENDER_CONTEXT_HINTS & words or "viewer tools" in text):
+        return True
+    if {"display", "show", "view", "open"} & words and {"html", "page", "site", "dashboard", "report"} & words:
+        return True
+    return False
+
+
+def history_contains_renderable_html(history: Optional[List[Dict[str, str]]], limit: int = 6) -> bool:
+    """Check recent chat history for inline HTML that could be rendered."""
+    if not history:
+        return False
+    for item in history[-limit:]:
+        if str(item.get("role", "")) != "assistant":
+            continue
+        if HTML_SNIPPET_PATTERN.search(str(item.get("content", ""))):
+            return True
+    return False
+
+
+def should_offer_workspace_render(
+    message: str,
+    history: Optional[List[Dict[str, str]]],
+    features: FeatureFlags,
+) -> bool:
+    """Expose the HTML render tool when the prompt strongly implies it."""
+    if not features.agent_tools:
+        return False
+    if not message_requests_workspace_render(message):
+        return False
+    text = " ".join((message or "").strip().lower().split())
+    if HTML_SNIPPET_PATTERN.search(text):
+        return True
+    return history_contains_renderable_html(history) or bool(RENDER_CONTEXT_HINTS & set(re.findall(r"[a-z0-9_+-]+", text)))
 
 
 def should_offer_local_rag(message: str, features: FeatureFlags) -> bool:
     """Use lightweight retrieval only for prompts that imply recall/search."""
-    if not features.local_rag:
+    if not features.local_rag and not explicit_history_lookup_requested(message):
         return False
     text = (message or "").strip().lower()
     if len(text) < 3:
@@ -7549,10 +9020,12 @@ def should_offer_local_rag(message: str, features: FeatureFlags) -> bool:
 
 def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     """Only offer web search when explicitly useful."""
-    if not features.web_search:
-        return False
     text = (message or "").strip().lower()
     if len(text) < 3:
+        return False
+    if explicit_web_search_requested(message):
+        return True
+    if not features.web_search:
         return False
     if "http://" in text or "https://" in text:
         return True
@@ -7560,6 +9033,86 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
         return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     return bool(words & WEB_SEARCH_HINTS)
+
+
+def choose_turn_workflow_name(
+    *,
+    slash_command: Optional[Dict[str, str]] = None,
+    mode: str = "normal",
+    auto_execute_workspace: bool = False,
+    enabled_tools: Optional[List[str]] = None,
+) -> str:
+    """Map the chosen route to a compact workflow label for later analysis."""
+    normalized_mode = str(mode or "normal").strip().lower()
+    tools = [str(name or "").strip() for name in (enabled_tools or []) if str(name or "").strip()]
+
+    if slash_command:
+        slash_name = normalize_direct_slash_command(slash_command.get("name", "")) or "unknown"
+        return f"slash_{slash_name}"
+    if normalized_mode == "deep" or auto_execute_workspace:
+        return "deep_orchestrated"
+    if "workspace.render" in tools:
+        return "normal_render_tool_loop"
+    if any(name.startswith("web.") for name in tools):
+        return "normal_web_tool_loop"
+    if any(name.startswith("workspace.") or name == "spreadsheet.describe" for name in tools):
+        return "normal_workspace_tool_loop"
+    if "conversation.search_history" in tools:
+        return "normal_history_tool_loop"
+    if tools:
+        return "normal_tool_loop"
+    return "direct_answer"
+
+
+def build_turn_route_metadata(
+    *,
+    mode: str,
+    workspace_intent: str,
+    enabled_tools: List[str],
+    auto_execute_workspace: bool,
+    slash_command: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Capture deterministic routing facts for offline workflow analysis."""
+    metadata: Dict[str, Any] = {
+        "mode": str(mode or "normal"),
+        "workspace_intent": str(workspace_intent or "none"),
+        "enabled_tools": list(enabled_tools or []),
+        "auto_execute_workspace": bool(auto_execute_workspace),
+    }
+    if slash_command:
+        metadata["slash_command"] = {
+            "name": normalize_direct_slash_command(slash_command.get("name", "")) or "",
+            "raw_name": str(slash_command.get("raw_name", "")).strip().lower(),
+        }
+    return metadata
+
+
+def direct_response_tool_recovery_candidates(
+    conversation_id: str,
+    message: str,
+    history: Optional[List[Dict[str, str]]],
+    response: str,
+    features: FeatureFlags,
+) -> List[str]:
+    """Give direct-mode replies one recovery pass when they falsely refuse an available capability."""
+    if not DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(str(response or "")):
+        return []
+
+    allowed: List[str] = []
+    render_requested = should_offer_workspace_render(message, history, features)
+    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features)
+    if workspace_requested:
+        allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
+    if should_offer_local_rag(message, features):
+        allowed.append("conversation.search_history")
+    if should_offer_web_search(message, features):
+        allowed.extend(["web.search", "web.fetch_page"])
+
+    deduped: List[str] = []
+    for tool_name in allowed:
+        if tool_name not in deduped:
+            deduped.append(tool_name)
+    return deduped
 
 
 async def deep_inspect_workspace(session: DeepSession) -> str:
@@ -7579,7 +9132,7 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         "content": (
             f"Conversation context:\n{session.context or '(none)'}\n\n"
             f"Deterministic workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
-            f"User request:\n{session.message}\n\n"
+            f"User request:\n{session.task_request or session.message}\n\n"
             "Inspect the workspace and gather the most relevant facts before planning. "
             "Use tools when needed, then return a concise fact summary."
         ),
@@ -7595,6 +9148,7 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         status_prefix="Inspect: ",
         max_steps=4,
         activity_phase="inspect",
+        workflow_execution=session.workflow_execution,
     )
     facts = outcome.final_text.strip()
     snapshot_facts = format_workspace_snapshot(session.workspace_snapshot)
@@ -7608,19 +9162,19 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
 
 async def deep_confirm_understanding(session: DeepSession) -> str:
     """Send a brief confirmation of the assistant's current understanding."""
-    confirmation = render_deep_confirmation(session.message, session.workspace_enabled)
+    confirmation = render_deep_confirmation(session.task_request or session.message, session.workspace_enabled)
     if confirmation:
         await send_reasoning_note(session.websocket, confirmation)
     return confirmation
 
 
-async def deep_build_workspace(session: DeepSession) -> str:
-    """Execute the builder checklist one step at a time with workspace offloading."""
+async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
+    """Execute the remaining planned build steps and persist progress after each one."""
     if not session.workspace_enabled:
         session.build_summary = ""
         session.build_step_summaries = []
         session.changed_files = []
-        return session.build_summary
+        return DeepBuildResult(summary=session.build_summary, build_complete=True)
     if not session.features.workspace_write:
         session.build_summary = "Build skipped because workspace write permission was not granted for this turn."
         session.build_step_summaries = [session.build_summary]
@@ -7632,7 +9186,7 @@ async def deep_build_workspace(session: DeepSession) -> str:
             "Write permission required before I can create or edit workspace files.",
         )
         await persist_task_state(session)
-        return session.build_summary
+        return DeepBuildResult(summary=session.build_summary, build_complete=False)
     await send_activity_event(
         session.websocket,
         "execute",
@@ -7646,6 +9200,7 @@ async def deep_build_workspace(session: DeepSession) -> str:
     if not session.resumed:
         session.build_step_summaries = []
         session.step_reports = []
+    session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
     steps = session.plan.get("builder_steps", [])
     start_index = min(len(session.build_step_summaries), len(steps))
     await send_build_steps(
@@ -7667,7 +9222,7 @@ async def deep_build_workspace(session: DeepSession) -> str:
         await persist_task_state(session)
         session.build_summary = "\n".join(session.build_step_summaries) or "(build already completed)"
         session.changed_files = changed_files
-        return session.build_summary
+        return DeepBuildResult(summary=session.build_summary, build_complete=True)
 
     for idx in range(start_index, len(steps)):
         step = steps[idx]
@@ -7686,7 +9241,8 @@ async def deep_build_workspace(session: DeepSession) -> str:
             "content": (
                 f"Conversation context:\n{session.context or '(none)'}\n\n"
                 f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                f"User request:\n{session.message}\n\n"
+                f"Current workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
+                f"User request:\n{session.task_request or session.message}\n\n"
                 f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
                 f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
                 "Completed build step notes:\n"
@@ -7697,7 +9253,7 @@ async def deep_build_workspace(session: DeepSession) -> str:
                 f"Build task:\n{agent_a.get('prompt', '')}\n\n"
                 "Focus on the current step only. Use the task board as external memory instead of trying to carry the whole plan in-context. "
                 "Use tools to inspect, patch, and validate as needed for this step. "
-                "When done, return a concise step result covering what changed, any artifact paths, and remaining caveats for the next step."
+                "When done, return a concise step result covering what changed, any artifact paths, and remaining caveats for later verification."
             ),
         }]
         outcome = await run_tool_loop(
@@ -7709,9 +9265,10 @@ async def deep_build_workspace(session: DeepSession) -> str:
             features=session.features,
             allowed_tools=allowed_workspace_tools(session.features, include_write=True),
             status_prefix=f"Build {idx + 1}/{len(steps)}: ",
-            max_steps=4,
+            max_steps=6,
             activity_phase="execute",
             activity_step_label=step_label,
+            workflow_execution=session.workflow_execution,
         )
         successful_tools = sum(1 for entry in outcome.tool_results if entry.get("result", {}).get("ok"))
         successful_commands = sum(
@@ -7753,23 +9310,26 @@ async def deep_build_workspace(session: DeepSession) -> str:
             if isinstance(path, str) and path not in changed_files:
                 changed_files.append(path)
 
+        session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
         session.changed_files = changed_files
         session.build_summary = "\n".join(session.build_step_summaries) or "(no build work completed)"
+        next_active_index = idx + 1 if idx + 1 < len(steps) else None
         await send_build_steps(
             session.websocket,
             steps,
             completed_count=idx + 1,
-            active_index=(idx + 1 if idx + 1 < len(steps) else None),
+            active_index=next_active_index,
         )
-        await persist_task_board(session, active_build_step=(idx + 1 if idx + 1 < len(steps) else None))
+        await persist_task_board(session, active_build_step=next_active_index)
         await persist_task_state(session)
 
-    session.changed_files = changed_files
-    session.build_summary = "\n".join(session.build_step_summaries) or "(no build work completed)"
-    await send_build_steps(session.websocket, steps, completed_count=len(steps), active_index=None)
-    await persist_task_board(session, active_build_step=None)
-    await persist_task_state(session)
-    return session.build_summary
+    await send_activity_event(
+        session.websocket,
+        "execute",
+        "Execute",
+        "Completed all planned build steps.",
+    )
+    return DeepBuildResult(summary=session.build_summary, build_complete=True)
 
 
 async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Dict[str, Any]:
@@ -7805,7 +9365,7 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
                 "content": (
                     f"Conversation context:\n{session.context or '(none)'}\n\n"
                     f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                    f"User's new query:\n{session.message}"
+                    f"User's new query:\n{session.task_request or session.message}"
                 ),
             },
         ]
@@ -7838,7 +9398,12 @@ async def deep_answer_directly(session: DeepSession) -> str:
         "Respond",
         "Answering from inspected context.",
     )
-    allowed_tools = select_enabled_tools(session.conversation_id, session.message, session.features)
+    allowed_tools = select_enabled_tools(
+        session.conversation_id,
+        session.message,
+        session.features,
+        history=session.history,
+    )
     allowed_tools = [
         tool_name for tool_name in allowed_tools
         if tool_name not in {"workspace.patch_file", "workspace.run_command"}
@@ -7848,7 +9413,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
         "content": (
             f"Conversation context:\n{session.context or '(none)'}\n\n"
             f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-            f"User request:\n{session.message}\n\n"
+            f"User request:\n{session.task_request or session.message}\n\n"
             "Answer directly unless execution is clearly required. "
             "Use read-only tools if they materially improve the answer."
         ),
@@ -7865,6 +9430,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
             status_prefix="Deep: ",
             max_steps=4,
             activity_phase="respond",
+            workflow_execution=session.workflow_execution,
         )
         return outcome.final_text
 
@@ -7900,7 +9466,7 @@ async def deep_verify(session: DeepSession) -> str:
     verify_history = session.history_messages() + [{
         "role": "user",
         "content": (
-            f"User request:\n{session.message}\n\n"
+            f"User request:\n{session.task_request or session.message}\n\n"
             f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
             f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
             f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
@@ -7928,6 +9494,7 @@ async def deep_verify(session: DeepSession) -> str:
         status_prefix="Verify: ",
         max_steps=4,
         activity_phase="verify",
+        workflow_execution=session.workflow_execution,
     )
     session.verification_summary = outcome.final_text
     session.scope_audit = build_scope_audit(session)
@@ -7951,7 +9518,7 @@ async def deep_review(session: DeepSession) -> str:
     synth_history = session.history_messages() + [{
         "role": "user",
         "content": (
-            f"User's question:\n{session.message}\n\n"
+            f"User's question:\n{session.task_request or session.message}\n\n"
             f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
             f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
             f"Artifacts to inspect:\n" + "\n".join(artifact_refs) + "\n\n"
@@ -7975,6 +9542,7 @@ async def deep_review(session: DeepSession) -> str:
         status_prefix="Synthesize: ",
         max_steps=6,
         activity_phase="synthesize",
+        workflow_execution=session.workflow_execution,
     )
     session.draft_response = outcome.final_text
     await persist_task_state(session)
@@ -7990,6 +9558,8 @@ async def orchestrated_chat(
     system_prompt: str,
     max_tokens: int,
     features: FeatureFlags,
+    auto_execute: bool = False,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Deep-mode pipeline using explicit shared session state."""
     await send_activity_event(
@@ -8003,12 +9573,16 @@ async def orchestrated_chat(
         websocket=websocket,
         conversation_id=conversation_id,
         message=message,
+        task_request=message,
         history=history,
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=features,
         context=build_recent_context(history),
         workspace_enabled=should_use_workspace_tools(conversation_id, message, features),
+        execution_requested=is_explicit_plan_execution_request(message),
+        auto_execute=auto_execute,
+        workflow_execution=workflow_execution,
     )
 
     if session.workspace_enabled:
@@ -8038,7 +9612,7 @@ async def orchestrated_chat(
 
     await deep_inspect_workspace(session)
 
-    if is_bare_plan_execution_request(session.message) and not session.plan:
+    if session.execution_requested and not session.plan:
         return "I couldn't find a saved plan to execute in this chat. Ask me to generate the plan again first."
 
     if should_preview_deep_plan(session):
@@ -8046,10 +9620,15 @@ async def orchestrated_chat(
         await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
         return render_deep_plan_preview(session.plan)
 
-    if is_explicit_plan_execution_request(session.message):
+    if session.execution_requested or session.auto_execute:
         await deep_decompose(session)
         logger.info("Deep mode execution strategy: %s", session.plan.get("strategy", "parallel subtasks"))
-        await deep_build_workspace(session)
+        if not session.features.workspace_write:
+            await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
+            return render_saved_plan_write_access_message(session.plan)
+        build_result = await deep_build_workspace(session)
+        if build_result.needs_user_confirmation:
+            return build_result.summary
         await deep_parallel_solve(session)
         await deep_verify(session)
         draft_response = await deep_review(session)
@@ -8065,7 +9644,7 @@ async def orchestrated_chat(
         "Review",
         "Reviewing the draft.",
     )
-    critique = await critique_response(message, draft_response)
+    critique = await critique_response(session.task_request or message, draft_response)
     if critique["pass"]:
         return draft_response
 
@@ -8083,7 +9662,7 @@ async def orchestrated_chat(
         {
             "role": "user",
             "content": (
-                f"User's question:\n{message}\n\n"
+                f"User's question:\n{session.task_request or message}\n\n"
                 f"Current draft:\n{draft_response}\n\n"
                 f"Issues to fix:\n{issues}"
             ),
@@ -8092,7 +9671,7 @@ async def orchestrated_chat(
     refined = await vllm_chat_complete(refine_messages, max_tokens=max_tokens, temperature=0.15)
     refined_response = strip_stream_special_tokens(refined)
 
-    follow_up = await critique_response(message, refined_response)
+    follow_up = await critique_response(session.task_request or message, refined_response)
     if follow_up["pass"]:
         return refined_response
 
@@ -8125,6 +9704,7 @@ async def handle_direct_search_command(
     max_tokens: int,
     features: FeatureFlags,
     query: str,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Run a deterministic web search first, then let the model fetch pages only if needed."""
     cleaned_query = str(query or "").strip()
@@ -8144,6 +9724,7 @@ async def handle_direct_search_command(
         features=command_features,
         status_prefix="Slash /search: ",
         activity_phase="respond",
+        workflow_execution=workflow_execution,
     )
     if not search_result.get("ok"):
         return f"Search failed: {search_result.get('error', 'unknown error')}"
@@ -8168,6 +9749,7 @@ async def handle_direct_search_command(
         status_prefix="Slash /search: ",
         max_steps=3,
         activity_phase="respond",
+        workflow_execution=workflow_execution,
     )
     return outcome.final_text
 
@@ -8180,6 +9762,7 @@ async def handle_direct_grep_command(
     max_tokens: int,
     features: FeatureFlags,
     query: str,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Run grep first, then let the model inspect matching files if needed."""
     cleaned_query = str(query or "").strip()
@@ -8199,6 +9782,7 @@ async def handle_direct_grep_command(
         features=command_features,
         status_prefix="Slash /grep: ",
         activity_phase="respond",
+        workflow_execution=workflow_execution,
     )
     if not grep_result.get("ok"):
         return f"Grep failed: {grep_result.get('error', 'unknown error')}"
@@ -8223,6 +9807,7 @@ async def handle_direct_grep_command(
         status_prefix="Slash /grep: ",
         max_steps=3,
         activity_phase="respond",
+        workflow_execution=workflow_execution,
     )
     return outcome.final_text
 
@@ -8235,6 +9820,7 @@ async def handle_direct_plan_command(
     max_tokens: int,
     features: FeatureFlags,
     request_text: str,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Inspect first and always return a concrete execution plan draft."""
     cleaned_request = str(request_text or "").strip()
@@ -8242,6 +9828,50 @@ async def handle_direct_plan_command(
         return "Use `/plan <task>` to generate an execution plan."
 
     command_features = replace(features, agent_tools=True)
+    execution_attempt = is_explicit_plan_execution_request(cleaned_request) or is_plan_approval_reply(cleaned_request)
+    if execution_attempt:
+        payload = load_task_state(conversation_id)
+        if not payload or (
+            not bool(payload.get("plan_preview_pending"))
+            and not task_state_has_pending_follow_up(payload)
+        ):
+            return "I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first."
+        session = DeepSession(
+            websocket=websocket,
+            conversation_id=conversation_id,
+            message=cleaned_request,
+            history=history,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            features=command_features,
+            task_request=cleaned_request,
+            context=build_recent_context(history),
+            workspace_enabled=True,
+            execution_requested=is_explicit_plan_execution_request(cleaned_request),
+            workflow_execution=workflow_execution,
+        )
+        await send_activity_event(
+            websocket,
+            "analyze",
+            "Analyze",
+            "Slash /plan is resuming the saved execution plan.",
+        )
+        await deep_confirm_understanding(session)
+        await maybe_resume_task_state(session)
+        await deep_inspect_workspace(session)
+        if not session.plan:
+            return "I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first."
+        await deep_decompose(session)
+        if not command_features.workspace_write:
+            await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
+            return render_saved_plan_write_access_message(session.plan)
+        build_result = await deep_build_workspace(session)
+        if build_result.needs_user_confirmation:
+            return build_result.summary
+        await deep_parallel_solve(session)
+        await deep_verify(session)
+        return await deep_review(session)
+
     session = DeepSession(
         websocket=websocket,
         conversation_id=conversation_id,
@@ -8250,8 +9880,11 @@ async def handle_direct_plan_command(
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=command_features,
+        task_request=cleaned_request,
         context=build_recent_context(history),
         workspace_enabled=True,
+        execution_requested=is_explicit_plan_execution_request(cleaned_request),
+        workflow_execution=workflow_execution,
     )
     await send_activity_event(
         websocket,
@@ -8274,6 +9907,7 @@ async def handle_direct_code_command(
     max_tokens: int,
     features: FeatureFlags,
     request_text: str,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Run the inspect-plan-build-verify pipeline directly for code work."""
     cleaned_request = str(request_text or "").strip()
@@ -8289,8 +9923,11 @@ async def handle_direct_code_command(
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=command_features,
+        task_request=cleaned_request,
         context=build_recent_context(history),
         workspace_enabled=True,
+        execution_requested=is_explicit_plan_execution_request(cleaned_request),
+        workflow_execution=workflow_execution,
     )
     await send_activity_event(
         websocket,
@@ -8310,7 +9947,9 @@ async def handle_direct_code_command(
             "Approve workspace edits and run the saved plan again, or copy the draft into the composer if you want to edit it first."
         )
 
-    await deep_build_workspace(session)
+    build_result = await deep_build_workspace(session)
+    if build_result.needs_user_confirmation:
+        return build_result.summary
     await deep_parallel_solve(session)
     await deep_verify(session)
     return await deep_review(session)
@@ -8324,25 +9963,26 @@ async def handle_direct_slash_command(
     system_prompt: str,
     max_tokens: int,
     features: FeatureFlags,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Dispatch supported direct slash commands to their deterministic workflow."""
     name = slash_command.get("name", "")
     args = slash_command.get("args", "")
     if name == "search":
         return await handle_direct_search_command(
-            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
         )
     if name == "grep":
         return await handle_direct_grep_command(
-            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
         )
     if name == "plan":
         return await handle_direct_plan_command(
-            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
         )
     if name == "code":
         return await handle_direct_code_command(
-            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
         )
     return f"Unsupported slash command: /{slash_command.get('raw_name') or name}"
 
@@ -8365,6 +10005,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     custom_system_prompt = data.get('system_prompt')
     mode = data.get('mode', 'normal')
     features = parse_feature_flags(data.get('features'))
+    workflow_execution: Optional[WorkflowExecutionContext] = None
     slash_command = (
         parse_direct_slash_command_payload(data.get("slash_command"))
         or infer_direct_slash_command_from_message(message)
@@ -8381,11 +10022,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 str(slash_command.get("args", "")).strip()
             )
             history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
-            save_message(conv_id, 'user', saved_user_message)
+            user_message_id = save_message(conv_id, 'user', saved_user_message)
             effective_message = slash_request or saved_user_message
         else:
             effective_message = saved_user_message
-            save_message(conv_id, 'user', effective_message)
+            user_message_id = save_message(conv_id, 'user', effective_message)
             history = get_conversation_history(conv_id, current_query=effective_message)
         system_prompt = build_effective_system_prompt(
             custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
@@ -8395,7 +10036,31 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         max_tokens = agent_params["max_tokens"]
         deep_succeeded = False
         workspace_intent = classify_workspace_intent(effective_message)
-        enabled_tools = select_enabled_tools(conv_id, effective_message, features) if TOOL_LOOP_ENABLED else []
+        enabled_tools = (
+            select_enabled_tools(conv_id, effective_message, features, history=history)
+            if TOOL_LOOP_ENABLED else []
+        )
+        auto_execute_workspace = (
+            not slash_command
+            and should_auto_execute_workspace_task(effective_message, features)
+        )
+        workflow_execution = create_workflow_execution(
+            conv_id,
+            user_message_id,
+            choose_turn_workflow_name(
+                slash_command=slash_command,
+                mode=mode,
+                auto_execute_workspace=auto_execute_workspace,
+                enabled_tools=enabled_tools,
+            ),
+            build_turn_route_metadata(
+                mode=mode,
+                workspace_intent=workspace_intent,
+                enabled_tools=enabled_tools,
+                auto_execute_workspace=auto_execute_workspace,
+                slash_command=slash_command,
+            ),
+        )
 
         await send_activity_event(
             websocket,
@@ -8406,7 +10071,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 if slash_command else
                 (
                     f"Mode {mode}. Intent {workspace_intent}. "
-                    f"Tools: {', '.join(enabled_tools) if enabled_tools else 'none'}."
+                    f"Tools: {', '.join(enabled_tools) if enabled_tools else 'none'}. "
+                    f"Auto-execute workspace build: {'yes' if auto_execute_workspace else 'no'}."
                 )
             ),
         )
@@ -8420,30 +10086,59 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 system_prompt,
                 max_tokens,
                 features,
+                workflow_execution=workflow_execution,
             )
             await websocket.send_json({'type': 'start'})
             await send_final_replacement(websocket, full_response)
             assistant_message_id = save_message(conv_id, 'assistant', full_response)
+            finalize_workflow_execution(
+                workflow_execution,
+                assistant_message_id=assistant_message_id,
+                final_outcome="completed_slash",
+            )
             schedule_conversation_summary_refresh(conv_id)
             await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
             await websocket.send_json({'type': 'done'})
             return
 
-        if mode == 'deep':
+        if mode == 'deep' or auto_execute_workspace:
             try:
                 full_response = await orchestrated_chat(
-                    websocket, conv_id, effective_message, history, system_prompt, max_tokens, features
+                    websocket,
+                    conv_id,
+                    effective_message,
+                    history,
+                    system_prompt,
+                    max_tokens,
+                    features,
+                    auto_execute=auto_execute_workspace,
+                    workflow_execution=workflow_execution,
                 )
                 assistant_message_id = save_message(conv_id, 'assistant', full_response)
+                finalize_workflow_execution(
+                    workflow_execution,
+                    assistant_message_id=assistant_message_id,
+                    final_outcome="completed_deep",
+                )
                 schedule_conversation_summary_refresh(conv_id)
                 await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
                 await websocket.send_json({'type': 'done'})
                 deep_succeeded = True
             except Exception as e:
-                logger.warning("Deep mode failed, falling back: %s", e)
+                logger.warning("Deep/auto workspace mode failed, falling back: %s", e)
+                if workflow_execution:
+                    workflow_execution.route_metadata["fallback_from"] = workflow_execution.workflow_name
+                    workflow_execution.route_metadata["fallback_reason"] = "deep_error"
+                    workflow_execution.workflow_name = choose_turn_workflow_name(
+                        slash_command=None,
+                        mode="normal",
+                        auto_execute_workspace=False,
+                        enabled_tools=enabled_tools,
+                    )
+                    persist_workflow_execution_route(workflow_execution)
                 await websocket.send_json({
                     'type': 'status',
-                    'content': 'Deep mode failed, using normal mode...',
+                    'content': 'Workspace execution path failed, using normal mode...',
                 })
 
         if not deep_succeeded:
@@ -8481,6 +10176,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     allowed_tools=enabled_tools,
                     max_steps=tool_step_limit,
                     activity_phase="respond",
+                    workflow_execution=workflow_execution,
                 )
                 full_response = tool_outcome.final_text
                 await websocket.send_json({'type': 'start'})
@@ -8494,6 +10190,42 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     messages,
                     max_tokens,
                 )
+                recovery_tools = direct_response_tool_recovery_candidates(
+                    conv_id,
+                    effective_message,
+                    history,
+                    full_response,
+                    features,
+                )
+                if recovery_tools:
+                    await send_activity_event(
+                        websocket,
+                        "evaluate",
+                        "Recover",
+                        "The draft refused a capability that matches an available tool. Retrying with tools.",
+                    )
+                    tool_outcome = await run_tool_loop(
+                        websocket,
+                        conv_id,
+                        history,
+                        system_prompt,
+                        tool_loop_token_budget(max_tokens, effective_message, recovery_tools),
+                        features=features,
+                        allowed_tools=recovery_tools,
+                        max_steps=max(2, tool_loop_step_limit_for_request(effective_message, recovery_tools)),
+                        activity_phase="respond",
+                        workflow_execution=workflow_execution,
+                    )
+                    full_response = tool_outcome.final_text
+                    if workflow_execution:
+                        workflow_execution.route_metadata["recovery_tools"] = list(recovery_tools)
+                        workflow_execution.workflow_name = choose_turn_workflow_name(
+                            slash_command=None,
+                            mode="normal",
+                            auto_execute_workspace=False,
+                            enabled_tools=recovery_tools,
+                        )
+                        persist_workflow_execution_route(workflow_execution)
                 leaked_call = extract_leaked_tool_call(full_response)
                 if leaked_call:
                     logger.warning(
@@ -8502,21 +10234,50 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         leaked_call.get("name", ""),
                     )
                     full_response = format_leaked_tool_call_message(leaked_call, features)
-                    await send_final_replacement(websocket, full_response)
+                full_response = strip_unverified_workspace_write_claims(full_response)
+                await send_final_replacement(websocket, full_response)
             assistant_message_id = save_message(conv_id, 'assistant', full_response)
+            finalize_workflow_execution(
+                workflow_execution,
+                assistant_message_id=assistant_message_id,
+                final_outcome=(
+                    "completed_with_tools"
+                    if workflow_execution and workflow_execution.tool_count > 0
+                    else "completed_direct"
+                ),
+            )
             schedule_conversation_summary_refresh(conv_id)
             await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
             await websocket.send_json({'type': 'done'})
 
     except asyncio.CancelledError:
+        finalize_workflow_execution(workflow_execution, status="canceled", final_outcome="canceled")
         logger.info("Canceled active chat turn for conversation %s", conv_id)
         raise
     except httpx.HTTPStatusError as e:
+        finalize_workflow_execution(
+            workflow_execution,
+            status="failed",
+            final_outcome="http_error",
+            error_text=f"vLLM HTTP {e.response.status_code}",
+        )
         logger.error(f"vLLM API error: {e}")
         await websocket.send_json({'type': 'error', 'content': f'vLLM error: {e.response.status_code}. Is the model loaded?'})
     except httpx.ConnectError:
+        finalize_workflow_execution(
+            workflow_execution,
+            status="failed",
+            final_outcome="connect_error",
+            error_text="Cannot connect to vLLM",
+        )
         await websocket.send_json({'type': 'error', 'content': 'Cannot connect to vLLM. Is it running?'})
     except Exception as e:
+        finalize_workflow_execution(
+            workflow_execution,
+            status="failed",
+            final_outcome="exception",
+            error_text=str(e),
+        )
         logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
         await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
 
@@ -8698,24 +10459,16 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
         if loading.get("status") not in {"loading"} or loading.get("model_name") != target_name:
             mark_model_load_started(target_name, reason="startup", profile_key=selected_profile["key"])
     available_profiles = [
-        {
-            "key": profile["key"],
-            "label": profile["label"],
-            "name": profile["name"],
-            "active": profile["key"] == active_profile_key,
-            "selected": profile["key"] == selected_profile["key"],
-        }
+        serialize_model_profile(
+            profile,
+            active=profile["key"] == active_profile_key,
+            selected=profile["key"] == selected_profile["key"],
+        )
         for profile in MODEL_PROFILES.values()
     ]
     if selected_profile["key"] == "custom":
         available_profiles.append(
-            {
-                "key": selected_profile["key"],
-                "label": selected_profile["label"],
-                "name": selected_profile["name"],
-                "active": active_profile_key == "custom",
-                "selected": True,
-            }
+            serialize_model_profile(selected_profile, active=active_profile_key == "custom", selected=True)
         )
     return {
         "model_ok": model_ok,
