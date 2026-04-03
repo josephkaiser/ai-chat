@@ -84,12 +84,20 @@ Rules:
 - Use tools only when local files, commands, or current web data matter.
 - Treat attached files, workspace files, and `[[artifact:...]]` references as primary context.
 - Use one tool call at a time.
+- Never emit multiple sibling JSON tool calls in one response.
 - Prefer read, then patch, then verify.
 - Prefer small edits over rewrites.
+- Use `workspace.grep` for workspace code/text search before opening files one by one.
 - For starter projects, templates, scaffolds, example apps, or repos, create the deliverable in the workspace instead of describing how the user could create it manually.
 - When you create a multi-file deliverable, prefer writing the files, listing the main paths briefly, and running a lightweight verification command when possible.
 - Do not respond with copy-paste file contents when the workspace tools can create the files directly.
 - Use `spreadsheet.describe` for workbook or tabular inspection.
+- Use `conversation.search_history` for recall questions about earlier chat context.
+- When the user asks to search a specific site, include that site in the query, for example `site:wikipedia.org`.
+- Use `web.search` + `web.fetch_page` only for freshness-sensitive, site-specific, or explicitly web-based questions.
+- After `web.search`, treat snippets as discovery only. Use `web.fetch_page` before making detailed factual claims.
+- For ambiguous or comparative web questions, fetch 2 to 3 distinct result pages before answering.
+- When using fetched web pages, cite the first factual use inline with a Markdown link and end with a `Sources:` line listing the fetched page URLs you relied on.
 - After a tool result, either call the next tool or answer.
 - Return a normal user-facing answer when done.
 - Never invent tool results."""
@@ -147,8 +155,10 @@ Goal:
 Rules:
 - Think carefully and answer directly when execution is not clearly needed.
 - If local files help, inspect them with read-only tools first.
+- Use workspace tools for repo questions, conversation search for recall, and web search only when freshness or site-specific grounding is needed.
 - Prefer critique, synthesis, and practical judgment over ceremony.
 - Do not create a plan unless the user explicitly asks for one.
+- If you rely on fetched web pages, include inline Markdown citations and a trailing `Sources:` line.
 - Keep the final answer concise, grounded, and user-facing.
 - Return either the next tool call or the final answer.
 """
@@ -162,6 +172,7 @@ Goal:
 Rules:
 - Read the task board and the most relevant artifacts before answering.
 - Ground the answer in what was actually built or verified.
+- If fetched web pages informed the answer, include inline Markdown citations and a trailing `Sources:` line.
 - Mention the main artifact path briefly when relevant.
 - Reflect verification gaps clearly.
 - Keep the answer concise and user-facing.

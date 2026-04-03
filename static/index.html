@@ -115,7 +115,7 @@
                                         type="range"
                                         id="settingSpeechSpeed"
                                         min="0"
-                                        max="4"
+                                        max="6"
                                         step="1"
                                         list="speechSpeedTicks"
                                         value="2"
@@ -128,8 +128,12 @@
                                         <option value="2"></option>
                                         <option value="3"></option>
                                         <option value="4"></option>
+                                        <option value="5"></option>
+                                        <option value="6"></option>
                                     </datalist>
                                     <div class="speed-control-scale" aria-hidden="true">
+                                        <span></span>
+                                        <span></span>
                                         <span></span>
                                         <span></span>
                                         <span></span>
@@ -171,6 +175,17 @@
                             </span>
                         </label>
                     </div>
+                    <div class="settings-section settings-danger-zone">
+                        <div class="settings-section-title">Danger Zone</div>
+                        <div class="settings-danger-copy">
+                            <div class="settings-toggle-label">Reset App Data</div>
+                            <div class="settings-toggle-note">Delete all chats, workspaces, installed workspace packages, artifacts, pet memory, and saved browser preferences to return to a fresh base state.</div>
+                        </div>
+                        <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">
+                            <span class="settings-icon">&#128465;</span>
+                            <span>Delete All Data</span>
+                        </button>
+                    </div>
                 </div>
                 <div class="settings-view settings-view-hidden" id="settingsAboutView">
                     <button class="settings-back" onclick="showSettingsHome()">
@@ -179,9 +194,11 @@
                     </button>
                     <div class="about-card">
                         <div class="about-eyebrow">From the author</div>
-                        <h2>Thanks for using {{ app_title }}</h2>
-                        <p>Thank you for spending time with this project. I hope you enjoy using it and that it helps you do your best work.</p>
-                        <p>If you run into bugs or have ideas to improve it, please feel free to post issues on GitHub.</p>
+                        <h2>Hi there, dear user!</h2>
+                        <p>I cannot thank you enough for trying Compy. It means you are a select few who have the hardware and gumption to set up some obscure repository built in 2026 when AI-powered development has exploded.</p>
+                        <p>Thank you for spending time with this project. I hope you enjoy using it and that it helps you do your best work. I have created it with the intent of being a joyful tool to use, one that does not pretend to be more than what it is, that does not antagonize the user or work against the user, and that is economical with the hardware to accomplish useful tasks.</p>
+                        <p>If you run into bugs or have ideas to improve it, please feel free to post issues on GitHub. Your attention and contributions are incredibly valuable.</p>
+                        <p>Joseph Kaiser</p>
                     </div>
                 </div>
             </div>
@@ -200,7 +217,7 @@
                 <div class="messages" id="messages">
                     <div class="welcome">
                         <div class="welcome-brand" aria-label="{{ app_title }}">
-                            <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click for a bark." data-pose="sit">
+                            <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click for a bark." data-pose="sit">
                                 <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 128 112" role="img" aria-hidden="true">
                                     <defs>
                                         <style>
@@ -219,37 +236,50 @@
                                     <g class="dog-drawing" shape-rendering="crispEdges">
                                         <!-- Bark lines -->
                                         <g class="dog-bark-lines" aria-hidden="true">
-                                            <rect class="px-accent" x="96" y="24" width="8" height="8"/>
+                                            <rect class="px-accent" x="112" y="24" width="8" height="8"/>
                                             <rect class="px-accent" x="104" y="32" width="8" height="8"/>
-                                            <rect class="px-accent" x="96" y="40" width="8" height="8"/>
+                                            <rect class="px-accent" x="112" y="40" width="8" height="8"/>
                                         </g>
                                         <!-- Shadow -->
-                                        <rect class="dog-shadow px-bg2" x="24" y="88" width="56" height="8"/>
+                                        <rect class="dog-shadow px-bg2" x="16" y="88" width="80" height="8"/>
                                         <!-- Tail -->
-                                        <rect class="dog-tail px-bg4" x="16" y="48" width="8" height="16"/>
+                                        <g class="dog-tail">
+                                            <rect class="px-bg4" x="16" y="40" width="8" height="8"/>
+                                            <rect class="px-bg4" x="24" y="32" width="8" height="16"/>
+                                            <rect class="px-bg3" x="32" y="32" width="8" height="24"/>
+                                        </g>
                                         <!-- Body -->
-                                        <rect class="px-bg4" x="24" y="40" width="48" height="32"/>
-                                        <rect class="px-bg3" x="32" y="48" width="32" height="16"/>
+                                        <rect class="px-bg4" x="32" y="40" width="48" height="24"/>
+                                        <rect class="px-bg4" x="72" y="48" width="16" height="16"/>
+                                        <rect class="px-bg3" x="40" y="48" width="32" height="8"/>
+                                        <rect class="px-bg0" x="56" y="56" width="12" height="8"/>
+                                        <rect class="px-bg3" x="68" y="56" width="12" height="8"/>
                                         <!-- Head -->
                                         <g class="dog-head-group">
-                                            <rect class="px-bg4" x="64" y="24" width="24" height="24"/>
-                                            <rect class="dog-ear-left px-bg4" x="64" y="16" width="8" height="8"/>
-                                            <rect class="dog-ear-right px-bg4" x="80" y="16" width="8" height="8"/>
+                                            <rect class="px-bg4" x="72" y="24" width="24" height="24"/>
+                                            <rect class="px-bg4" x="88" y="32" width="24" height="16"/>
+                                            <rect class="dog-ear-left px-bg4" x="72" y="16" width="8" height="8"/>
+                                            <rect class="dog-ear-right px-bg4" x="88" y="12" width="8" height="12"/>
+                                            <rect class="px-bg3" x="76" y="24" width="16" height="4"/>
                                             <!-- Eyes -->
-                                            <rect class="px-bg0" x="68" y="32" width="4" height="4"/>
+                                            <rect class="px-bg3" x="76" y="28" width="8" height="4"/>
+                                            <rect class="px-bg3" x="88" y="32" width="8" height="4"/>
                                             <rect class="px-bg0" x="80" y="32" width="4" height="4"/>
+                                            <rect class="px-bg0" x="92" y="36" width="4" height="4"/>
                                             <!-- Nose/mouth -->
-                                            <rect class="dog-mouth-neutral px-bg3" x="80" y="40" width="8" height="8"/>
-                                            <rect class="dog-mouth-bark px-accent" x="80" y="40" width="8" height="8"/>
-                                            <rect class="px-accent" x="68" y="48" width="16" height="8"/>
+                                            <rect class="dog-mouth-neutral px-bg3" x="100" y="44" width="8" height="4"/>
+                                            <rect class="dog-mouth-bark px-accent" x="100" y="40" width="8" height="8"/>
+                                            <rect class="px-accent" x="92" y="48" width="16" height="4"/>
                                         </g>
                                         <!-- Back legs -->
                                         <g class="dog-leg-group dog-leg-back-group">
-                                            <rect class="px-bg4" x="32" y="72" width="8" height="16"/>
+                                            <rect class="px-bg4" x="40" y="64" width="8" height="24"/>
+                                            <rect class="px-bg3" x="48" y="72" width="8" height="16"/>
                                         </g>
                                         <!-- Front legs -->
                                         <g class="dog-leg-group dog-leg-front-group">
-                                            <rect class="px-bg4" x="56" y="72" width="8" height="16"/>
+                                            <rect class="px-bg4" x="76" y="64" width="8" height="24"/>
+                                            <rect class="px-bg3" x="84" y="72" width="8" height="16"/>
                                         </g>
                                     </g>
                                 </svg>
@@ -257,6 +287,7 @@
                             </button>
                             <h1 class="welcome-title">{{ app_title }}</h1>
                             <span class="bond-note" id="bondNote"></span>
+                            <div class="welcome-hint" id="welcomeHint" aria-live="polite"></div>
                         </div>
                     </div>
                 </div>

@@ -22,10 +22,11 @@ ai-chat/
 
 ## How the pieces connect
 
-- **`app.py`** is the entrypoint. It mounts static files, renders `index.html`, and implements REST + WebSocket handlers. For orientation, read the module docstring at the top of `app.py`.
+- **`app.py`** is the entrypoint. It mounts static files, renders `index.html`, and implements REST + WebSocket handlers. It also now owns the chat harness, workspace APIs, terminal sessions, dashboard endpoints, voice pipeline, and tool execution loop.
 - **`themes.py`** defines small named palettes (e.g. paper, ink, panel). Those expand to the `--bg_primary`, `--text_secondary`, … keys that **`static/style.css`** already expects. At runtime, `GET /` injects JSON into the page; **`static/app.js`** calls `applyTheme()` to set `document.documentElement` styles.
-- **`prompts.py`** holds **`DEFAULT_SYSTEM_PROMPT`**. The chat WebSocket uses it unless the client sends a custom `system_prompt`.
+- **`prompts.py`** holds **`DEFAULT_SYSTEM_PROMPT`** plus the tool-use and execution prompts that shape both normal tool turns and deep-mode planning/build flows.
 - **`thinking_stream.py`** implements **`ThinkingStreamSplitter`**: it parses model output for paired thinking tags (must match **`THINK_TAG_PAIRS` in `static/app.js`**) and emits the WebSocket payloads (`think_start`, `think_token`, `think_end`, and normal `token`).
+- **`static/app.js`** is now a substantial client runtime, not just a chat socket wrapper. It manages feature toggles, model/profile controls, reasoning mode, attachments, slash commands, workspace activity, the file modal, terminal streaming, dashboard actions, and voice playback/recording.
 
 ## Tech stack
 
@@ -34,4 +35,10 @@ ai-chat/
 - **LLM:** vLLM (OpenAI-compatible API); model name is configured via env / compose (see [Configuration](configuration.md))
 - **Database:** SQLite (conversations, messages, optional feedback for history scoring)
 - **Streaming:** WebSocket `/ws/chat` for token and thinking-region events
+- **Workspace terminal:** WebSocket `/ws/terminal/{conversation_id}` for PTY-backed command output
 - **Dashboard / ops:** Optional Docker socket access from the chat container for vLLM restart and cache paths (see `GET /api/dashboard` and related endpoints in [API](api.md))
+
+## Additional guides
+
+- [Harness And Tools](harness.md) — how the runtime chooses tools, executes them, and reports progress
+- [UI Features](ui.md) — the modern chat/workspace UI surface and its major controls

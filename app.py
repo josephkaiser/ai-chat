@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -48,6 +48,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import fcntl
 import termios
+
+try:
+    from huggingface_hub import snapshot_download
+except Exception:
+    snapshot_download = None
 
 try:
     import pandas as pd
@@ -124,6 +129,7 @@ MODEL_8B_ARGS = os.getenv(
     "--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching "
     "--max-num-seqs 16 --enable-chunked-prefill --enforce-eager",
 )
+CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -135,11 +141,14 @@ WORKSPACE_WRITE_SIZE_LIMIT = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = float(os.getenv("COMMAND_TIMEOUT_SECONDS", "8"))
 COMMAND_OUTPUT_LIMIT = int(os.getenv("COMMAND_OUTPUT_LIMIT", "12000"))
 TOOL_RESULT_TEXT_LIMIT = int(os.getenv("TOOL_RESULT_TEXT_LIMIT", "40000"))
+WEB_PAGE_TEXT_LIMIT = int(os.getenv("WEB_PAGE_TEXT_LIMIT", "16000"))
+WEB_FETCH_PAGE_MAX_PER_TURN = max(1, int(os.getenv("WEB_FETCH_PAGE_MAX_PER_TURN", "3")))
 UPLOAD_FILE_SIZE_LIMIT = 10 * 1024 * 1024
 VOICE_INPUT_SIZE_LIMIT = int(os.getenv("VOICE_INPUT_SIZE_LIMIT", str(15 * 1024 * 1024)))
 VOICE_COMMAND_TIMEOUT_SECONDS = float(os.getenv("VOICE_COMMAND_TIMEOUT_SECONDS", "180"))
 VOICE_TTS_COMMAND = os.getenv("VOICE_TTS_COMMAND", "").strip()
 VOICE_STT_COMMAND = os.getenv("VOICE_STT_COMMAND", "").strip()
+VOICE_STT_LANGUAGE = os.getenv("VOICE_STT_LANGUAGE", "en").strip() or "en"
 VOICE_TTS_VOICE = os.getenv("VOICE_TTS_VOICE", "Samantha").strip() or "Samantha"
 MAX_ATTACHMENTS_PER_MESSAGE = 8
 SPREADSHEET_PREVIEW_ROWS = 8
@@ -160,6 +169,20 @@ WORKSPACE_TEMPLATE_TERMS = {
     "saas", "mvp", "skeleton", "seed", "bootstrap", "generate",
 }
 
+
+def env_flag(name: str, default: bool = False) -> bool:
+    """Parse a conventional boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+DOCKER_CONTROL_ENABLED = env_flag("DOCKER_CONTROL_ENABLED", False)
+INTERACTIVE_TERMINAL_ENABLED = env_flag("INTERACTIVE_TERMINAL_ENABLED", False)
+EXECUTE_CODE_ENABLED = env_flag("EXECUTE_CODE_ENABLED", False)
+STRICT_WORKSPACE_COMMAND_PATHS = env_flag("STRICT_WORKSPACE_COMMAND_PATHS", True)
+
 MODEL_PROFILES: Dict[str, Dict[str, str]] = {
     "14b": {
         "key": "14b",
@@ -178,23 +201,56 @@ if DEFAULT_MODEL_PROFILE not in MODEL_PROFILES:
     DEFAULT_MODEL_PROFILE = "14b"
 
 
-def _read_model_state_key() -> str:
-    """Load the last selected model profile from disk."""
+def _read_model_state_payload() -> Dict[str, Any]:
+    """Load persisted model runtime state from disk."""
     try:
         with open(MODEL_STATE_PATH, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
-        selected = str(payload.get("active_profile", "")).strip().lower()
-        if selected in MODEL_PROFILES:
-            return selected
+        if isinstance(payload, dict):
+            return payload
     except Exception:
         pass
-    return DEFAULT_MODEL_PROFILE
+    return {}
 
 
-ACTIVE_MODEL_PROFILE = _read_model_state_key()
+def _read_selected_model_state() -> tuple[str, Optional[str], Dict[str, Any], Dict[str, Any]]:
+    """Load selected model, custom model name, load history, and loading state."""
+    payload = _read_model_state_payload()
+    selected = str(payload.get("active_profile", "")).strip().lower()
+    custom_model_name = str(payload.get("custom_model_name", "")).strip() or None
+    if selected not in MODEL_PROFILES and not custom_model_name:
+        selected = DEFAULT_MODEL_PROFILE
+    elif selected not in MODEL_PROFILES and custom_model_name:
+        selected = "custom"
+
+    load_history = payload.get("load_history")
+    if not isinstance(load_history, dict):
+        load_history = {}
+
+    loading = payload.get("loading")
+    if not isinstance(loading, dict):
+        loading = {}
+
+    return selected or DEFAULT_MODEL_PROFILE, custom_model_name, load_history, loading
+
+
+ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME, MODEL_LOAD_HISTORY, MODEL_LOADING_STATUS = _read_selected_model_state()
 ACTIVE_MODEL_LOCK: asyncio.Lock | None = None
 TERMINAL_SESSIONS: Dict[str, TerminalSession] = {}
 TERMINAL_LOCKS: Dict[str, asyncio.Lock] = {}
+MODEL_DOWNLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
+MODEL_DOWNLOAD_LOCK: asyncio.Lock | None = None
+COMMAND_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
+
+
+def build_model_profile(key: str, name: str, args: str, label: Optional[str] = None) -> Dict[str, str]:
+    """Create a model profile dictionary."""
+    return {
+        "key": key,
+        "label": label or key.upper(),
+        "name": name,
+        "args": args,
+    }
 
 
 def get_active_model_profile() -> Dict[str, str]:
@@ -202,6 +258,8 @@ def get_active_model_profile() -> Dict[str, str]:
     profile = MODEL_PROFILES.get(ACTIVE_MODEL_PROFILE)
     if profile:
         return profile
+    if ACTIVE_CUSTOM_MODEL_NAME:
+        return build_model_profile("custom", ACTIVE_CUSTOM_MODEL_NAME, CUSTOM_MODEL_ARGS, label="Custom")
     return MODEL_PROFILES[DEFAULT_MODEL_PROFILE]
 
 
@@ -215,20 +273,34 @@ def is_fast_profile_active() -> bool:
     return get_active_model_profile()["key"] == "8b"
 
 
-def persist_active_model_profile(profile_key: str):
-    """Persist the selected profile so the UI survives restarts."""
+def persist_model_state():
+    """Persist selected model metadata plus load history to disk."""
     os.makedirs(os.path.dirname(MODEL_STATE_PATH), exist_ok=True)
     payload = {
-        "active_profile": profile_key,
+        "active_profile": ACTIVE_MODEL_PROFILE,
+        "custom_model_name": ACTIVE_CUSTOM_MODEL_NAME,
+        "load_history": MODEL_LOAD_HISTORY,
+        "loading": MODEL_LOADING_STATUS,
         "updated_at": datetime.now().isoformat(),
     }
     with open(MODEL_STATE_PATH, "w", encoding="utf-8") as fh:
         json.dump(payload, fh)
 
 
-def build_vllm_command(profile_key: str) -> List[str]:
-    """Build the vLLM argv for a profile."""
-    profile = MODEL_PROFILES[profile_key]
+def persist_active_model_selection(profile_key: str, custom_model_name: Optional[str] = None):
+    """Persist the selected model/profile so the UI survives restarts."""
+    global ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME
+    ACTIVE_MODEL_PROFILE = profile_key
+    ACTIVE_CUSTOM_MODEL_NAME = (custom_model_name or "").strip() or None
+    persist_model_state()
+
+
+def build_vllm_command(profile_key: Optional[str] = None, model_name: Optional[str] = None) -> List[str]:
+    """Build the vLLM argv for a profile or custom model."""
+    if model_name:
+        profile = build_model_profile(profile_key or "custom", model_name, CUSTOM_MODEL_ARGS, label="Custom")
+    else:
+        profile = MODEL_PROFILES[profile_key or DEFAULT_MODEL_PROFILE]
     return [
         "--model", profile["name"],
         "--host", "0.0.0.0",
@@ -314,7 +386,7 @@ RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 VOICE_ROOT_PATH = pathlib.Path(VOICE_ROOT).resolve()
 VOICE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 PIPER_DEFAULT_MODEL = pathlib.Path(
-    os.getenv("PIPER_MODEL", str(VOICE_ROOT_PATH / "models" / "en_US-amy-medium.onnx"))
+    os.getenv("PIPER_MODEL", str(VOICE_ROOT_PATH / "models" / "en_US-lessac-high.onnx"))
 )
 
 
@@ -351,6 +423,150 @@ def ensure_unique_workspace_filename(workspace: pathlib.Path, filename: str) -> 
         if not (workspace / candidate).exists():
             return candidate
     raise HTTPException(status_code=500, detail="Unable to allocate a unique filename")
+
+
+def sanitize_relative_workspace_path(path_value: str, fallback: str = "snippet.txt") -> str:
+    """Normalize a user/model-suggested relative path into safe workspace components."""
+    raw = str(path_value or "").strip().replace("\\", "/")
+    if not raw:
+        return sanitize_uploaded_filename(fallback)
+
+    parts = []
+    for part in raw.split("/"):
+        cleaned = part.strip()
+        if not cleaned or cleaned in {".", ".."}:
+            continue
+        parts.append(sanitize_uploaded_filename(cleaned))
+
+    if not parts:
+        return sanitize_uploaded_filename(fallback)
+    return "/".join(parts[:8])
+
+
+RECOVERED_CODE_EXTENSIONS = {
+    "bash": ".sh",
+    "c": ".c",
+    "cpp": ".cpp",
+    "csharp": ".cs",
+    "css": ".css",
+    "csv": ".csv",
+    "go": ".go",
+    "html": ".html",
+    "java": ".java",
+    "javascript": ".js",
+    "js": ".js",
+    "json": ".json",
+    "jsx": ".jsx",
+    "markdown": ".md",
+    "md": ".md",
+    "python": ".py",
+    "py": ".py",
+    "ruby": ".rb",
+    "rust": ".rs",
+    "shell": ".sh",
+    "sql": ".sql",
+    "text": ".txt",
+    "toml": ".toml",
+    "ts": ".ts",
+    "tsx": ".tsx",
+    "typescript": ".ts",
+    "xml": ".xml",
+    "yaml": ".yml",
+    "yml": ".yml",
+}
+RECOVERED_CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+RECOVERED_FILENAME_HINT_RE = re.compile(
+    r"(?:save(?:\s+it)?\s+as|write(?:\s+this)?\s+to|file(?:name)?|named|call(?:ed)?|create\s+)"
+    r"\s*`?([A-Za-z0-9][A-Za-z0-9._/\-]{0,140}\.[A-Za-z0-9]{1,12})`?",
+    re.IGNORECASE,
+)
+
+
+def infer_code_extension(language_hint: str) -> str:
+    """Map a fenced-code language token to a common file extension."""
+    token = str(language_hint or "").strip().lower()
+    if not token:
+        return ".txt"
+    token = token.split()[0]
+    return RECOVERED_CODE_EXTENSIONS.get(token, ".txt")
+
+
+def infer_filename_from_text(text: str) -> Optional[str]:
+    """Extract a likely filename reference from prose near a code block."""
+    for match in RECOVERED_FILENAME_HINT_RE.finditer(text or ""):
+        candidate = match.group(1)
+        if candidate and "://" not in candidate:
+            return sanitize_relative_workspace_path(candidate)
+
+    for candidate in re.findall(r"`([A-Za-z0-9][A-Za-z0-9._/\-]{0,140}\.[A-Za-z0-9]{1,12})`", text or ""):
+        if "://" not in candidate:
+            return sanitize_relative_workspace_path(candidate)
+    return None
+
+
+def infer_filename_for_code_block(info: str, context_before: str, full_message: str, index: int, total_blocks: int) -> str:
+    """Choose a stable filename for a recovered fenced code block."""
+    info = str(info or "").strip()
+    info_tokens = [token.strip("()[]{}<>,;:") for token in info.split() if token.strip()]
+
+    if len(info_tokens) > 1:
+        for token in info_tokens[1:]:
+            if "." in token and "://" not in token:
+                return sanitize_relative_workspace_path(token)
+    elif info_tokens:
+        lone = info_tokens[0]
+        if "." in lone and "://" not in lone:
+            return sanitize_relative_workspace_path(lone)
+
+    context_candidate = infer_filename_from_text(context_before)
+    if context_candidate:
+        return context_candidate
+
+    if total_blocks == 1:
+        message_candidate = infer_filename_from_text(full_message)
+        if message_candidate:
+            return message_candidate
+
+    extension = infer_code_extension(info_tokens[0] if info_tokens else "")
+    return sanitize_relative_workspace_path(f"snippet-{index}{extension}")
+
+
+def strip_fenced_code_blocks(markdown_text: str) -> str:
+    """Remove fenced code blocks so notes can keep the surrounding explanation."""
+    return RECOVERED_CODE_BLOCK_RE.sub("", markdown_text or "")
+
+
+def build_recovered_notes_markdown(
+    source_label: str,
+    created_paths: List[str],
+    message_content: str,
+    recovered_at: str,
+) -> str:
+    """Create a README capturing the non-code guidance from a recovered chat response."""
+    notes_body = strip_fenced_code_blocks(message_content).strip()
+    lines = [
+        "# Recovered Chat Output",
+        "",
+        f"- Source: {source_label}",
+        f"- Recovered at: {recovered_at}",
+        "",
+        "## Files",
+    ]
+    if created_paths:
+        lines.extend(f"- `{path}`" for path in created_paths)
+    else:
+        lines.append("- No fenced code blocks were found in the source message.")
+
+    lines.extend([
+        "",
+        "## Notes",
+        notes_body or "No separate prose notes were present in the source message.",
+        "",
+        "## Review",
+        "Treat this folder as a staging area. Review the recovered files here before moving them into the main repo.",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def utcnow_iso() -> str:
@@ -534,7 +750,7 @@ def default_stt_command(input_path: pathlib.Path, output_dir: pathlib.Path) -> L
         whisper_path,
         str(input_path),
         "--model", "turbo",
-        "--language", "en",
+        "--language", VOICE_STT_LANGUAGE,
         "--output_format", "txt",
         "--output_dir", str(output_dir),
     ]
@@ -631,6 +847,7 @@ def get_voice_runtime_summary() -> Dict[str, Any]:
         "tts_backend": tts_backend,
         "stt_backend": stt_backend,
         "tts_voice": VOICE_TTS_VOICE,
+        "stt_language": VOICE_STT_LANGUAGE,
         "voice_root": str(VOICE_ROOT_PATH),
     }
 
@@ -1319,6 +1536,131 @@ def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") ->
     return target
 
 
+def workspace_command_allows_argument(argument: str, workspace: pathlib.Path) -> bool:
+    """Reject command arguments that reference paths outside the workspace."""
+    token = str(argument or "").strip()
+    if not token or token == "-":
+        return True
+    if "\x00" in token:
+        return False
+    if "://" in token or token.startswith("-"):
+        return True
+
+    normalized = token.replace("\\", "/")
+    if normalized.startswith("/"):
+        try:
+            resolved = pathlib.Path(normalized).resolve(strict=False)
+        except Exception:
+            return False
+        return resolved == workspace or workspace in resolved.parents
+
+    path_like = "/" in normalized or normalized in {".", ".."} or normalized.startswith("./") or normalized.startswith("../")
+    if not path_like:
+        return True
+
+    try:
+        resolved = (workspace / normalized).resolve(strict=False)
+    except Exception:
+        return False
+    return resolved == workspace or workspace in resolved.parents
+
+
+def normalize_allowed_command_key(value: str) -> str:
+    """Normalize a persisted command-approval token."""
+    return str(value or "").strip().lower()
+
+
+def command_permission_key(
+    conversation_id: str,
+    command: List[str],
+    cwd_path: pathlib.Path,
+) -> str:
+    """Build a stable permission key for a command invocation."""
+    if not command:
+        return ""
+
+    executable = str(command[0] or "").strip()
+    if not executable:
+        return ""
+
+    normalized = executable.replace("\\", "/")
+    if "/" not in normalized:
+        return f"exec:{pathlib.Path(normalized).name.lower()}"
+
+    workspace = get_workspace_path(conversation_id)
+    resolved_exec = pathlib.Path(executable).expanduser()
+    if not resolved_exec.is_absolute():
+        resolved_exec = (cwd_path / resolved_exec).resolve(strict=False)
+    else:
+        resolved_exec = resolved_exec.resolve(strict=False)
+
+    if resolved_exec != workspace and workspace not in resolved_exec.parents:
+        raise ValueError("Executable path must stay inside the workspace")
+
+    return f"workspace:{format_workspace_path(resolved_exec, workspace).lower()}"
+
+
+def is_command_allowlisted(
+    conversation_id: str,
+    command: List[str],
+    cwd_path: pathlib.Path,
+    features: FeatureFlags,
+) -> bool:
+    """Return whether the command's executable has been approved for this chat."""
+    if not command:
+        return False
+    key = command_permission_key(conversation_id, command, cwd_path)
+    if not key:
+        return False
+    allowed = {
+        normalize_allowed_command_key(item)
+        for item in (features.allowed_commands or [])
+        if isinstance(item, str) and normalize_allowed_command_key(item)
+    }
+    return key in allowed
+
+
+def validate_workspace_command(
+    conversation_id: str,
+    command: List[str],
+    cwd_path: pathlib.Path,
+    features: Optional[FeatureFlags] = None,
+) -> None:
+    """Conservatively validate workspace command inputs before execution."""
+    if features is not None and not is_command_allowlisted(conversation_id, command, cwd_path, features):
+        command_key = command_permission_key(conversation_id, command, cwd_path)
+        raise ValueError(
+            f"Command '{command_key or command[0]}' is not approved for this chat"
+        )
+
+    workspace = get_workspace_path(conversation_id)
+    executable = command[0].strip()
+
+    if "/" in executable:
+        resolved_exec = pathlib.Path(executable).expanduser()
+        if not resolved_exec.is_absolute():
+            resolved_exec = (cwd_path / resolved_exec).resolve(strict=False)
+        else:
+            resolved_exec = resolved_exec.resolve(strict=False)
+        if resolved_exec != workspace and workspace not in resolved_exec.parents:
+            raise ValueError("Executable path must stay inside the workspace")
+
+    if not STRICT_WORKSPACE_COMMAND_PATHS:
+        return
+
+    for index, part in enumerate(command[1:], start=1):
+        if not workspace_command_allows_argument(part, workspace):
+            raise ValueError(f"command argument {index} references a path outside the workspace")
+
+
+def ensure_docker_control_enabled() -> None:
+    """Fail closed unless the operator explicitly enabled Docker control."""
+    if not DOCKER_CONTROL_ENABLED:
+        raise HTTPException(status_code=403, detail="Docker control is disabled on this server")
+    if not os.path.exists("/var/run/docker.sock"):
+        raise HTTPException(status_code=503, detail="Docker socket is not mounted")
+
+
 def delete_run_workspace(conversation_id: str):
     """Delete the run sandbox for a conversation if it exists."""
     run = get_run_record(conversation_id)
@@ -1327,6 +1669,70 @@ def delete_run_workspace(conversation_id: str):
     sandbox_path = pathlib.Path(run["sandbox_path"]).resolve()
     if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
         shutil.rmtree(sandbox_path.parent, ignore_errors=True)
+
+
+def reset_directory_contents(root: pathlib.Path) -> None:
+    """Remove everything inside a safe app-owned directory, then recreate it."""
+    resolved_root = root.resolve()
+    resolved_root.mkdir(parents=True, exist_ok=True)
+    for child in resolved_root.iterdir():
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
+
+
+async def reset_application_state() -> None:
+    """Wipe persisted chat data, workspaces, pet artifacts, and transient runtime state."""
+    sessions = list(TERMINAL_SESSIONS.values())
+    TERMINAL_SESSIONS.clear()
+    TERMINAL_LOCKS.clear()
+    for session in sessions:
+        await _close_terminal_session(session)
+
+    for waiter in COMMAND_APPROVAL_WAITERS.values():
+        future = waiter.get("future")
+        if future and not future.done():
+            future.cancel()
+    COMMAND_APPROVAL_WAITERS.clear()
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute('DELETE FROM conversation_summaries')
+        c.execute('DELETE FROM messages')
+        c.execute('DELETE FROM conversations')
+        c.execute('DELETE FROM runs')
+        c.execute('DELETE FROM pet_memories')
+        c.execute('DELETE FROM pet_capabilities')
+        c.execute('DELETE FROM pet_events')
+        c.execute('DELETE FROM pet_profile')
+        try:
+            c.execute(
+                "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'pet_memories', 'pet_capabilities', 'pet_events')"
+            )
+        except sqlite3.OperationalError:
+            pass
+        if sqlite_has_fts(conn):
+            try:
+                c.execute(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')")
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
+    finally:
+        conn.close()
+
+    reset_directory_contents(RUNS_ROOT_PATH)
+    reset_directory_contents(WORKSPACE_ROOT_PATH)
+    reset_directory_contents(PET_ROOT_PATH)
+    for kind in ("input", "transcripts", "tts-text", "tts-audio"):
+        reset_directory_contents(get_voice_dir(kind, create=True))
+
+    ensure_pet_dirs()
+    ensure_default_agent_profile()
 
 
 def format_workspace_path(path: pathlib.Path, workspace: pathlib.Path) -> str:
@@ -1496,21 +1902,26 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
     """Combine the base assistant prompt with the tool protocol and supported tools."""
     tool_schema = """Available tools:
 - workspace.list_files {"path":"."}
+- workspace.grep {"query":"FeatureFlags","path":".","glob":"*.py","limit":20}
 - workspace.read_file {"path":"src/app.py"}
 - workspace.patch_file {"path":"src/app.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
 - spreadsheet.describe {"path":"model.xlsx","sheet":"Assumptions"}
 - conversation.search_history {"query":"retry logic","limit":5}
-- web.search {"query":"fastapi websocket docs","limit":5}
+- web.search {"query":"python async docs","limit":5}
+- web.search {"query":"history of C programming language","domains":["wikipedia.org"],"limit":5}
+- web.fetch_page {"url":"https://en.wikipedia.org/wiki/Python_(programming_language)"}
 
 Constraints:
 - Paths are always relative to the current conversation workspace.
+- workspace.grep searches text files in the workspace and returns matching file paths and lines.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
-- web.search is for fresh or explicitly web-based questions.
+- web.search is for fresh or explicitly web-based questions, supports optional domain filters, and returns ordered results with normalized domains.
+- web.fetch_page reads a web page after search and returns normalized domain/content metadata for citation-ready summaries.
 - Write reusable artifacts to the workspace and mention the path briefly.
 - Ask for another tool only when needed; otherwise answer."""
     return f"{base_system_prompt.strip()}\n\n{TOOL_USE_SYSTEM_PROMPT.strip()}\n\n{tool_schema}"
@@ -1574,6 +1985,122 @@ class ToolLoopOutcome:
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
 
 
+def fetched_web_sources(tool_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Collect unique fetched-page metadata for citation and audit flows."""
+    sources: Dict[str, Dict[str, str]] = {}
+    for entry in tool_results:
+        call = entry.get("call", {})
+        result = entry.get("result", {})
+        if call.get("name") != "web.fetch_page" or not result.get("ok"):
+            continue
+        payload = result.get("result", {})
+        if not isinstance(payload, dict):
+            continue
+        url = canonicalize_http_url(str(payload.get("final_url") or payload.get("url") or "").strip())
+        if not url:
+            continue
+        if url not in sources:
+            sources[url] = {
+                "url": url,
+                "title": str(payload.get("title", "")).strip(),
+                "domain": str(payload.get("domain", "")).strip(),
+            }
+    return list(sources.values())
+
+
+def answer_has_required_source_grounding(answer: str, sources: List[Dict[str, str]]) -> bool:
+    """Return whether an answer already cites fetched sources and includes a sources line."""
+    text = str(answer or "")
+    if not text or not sources:
+        return True
+    has_sources_line = bool(re.search(r"(?im)^sources:\s*", text))
+    body = re.split(r"(?im)^sources:\s*", text, maxsplit=1)[0]
+    has_inline_markdown_citation = any(
+        source.get("url")
+        and re.search(rf"\[[^\]]+\]\({re.escape(source['url'])}\)", body)
+        for source in sources
+    )
+    return has_sources_line and has_inline_markdown_citation
+
+
+def append_sources_line(answer: str, sources: List[Dict[str, str]]) -> str:
+    """Ensure the final answer ends with a deterministic sources line."""
+    cleaned = str(answer or "").rstrip()
+    if not sources:
+        return cleaned
+    entries = []
+    for source in sources:
+        url = source.get("url", "").strip()
+        if not url:
+            continue
+        label = source.get("title", "").strip() or source.get("domain", "").strip() or url
+        entries.append(f"[{label}]({url})")
+    if not entries:
+        return cleaned
+    sources_line = "Sources: " + ", ".join(entries)
+    if re.search(r"(?im)^sources:\s*", cleaned):
+        cleaned = re.sub(r"(?im)^sources:\s*.*$", sources_line, cleaned)
+        return cleaned
+    separator = "\n\n" if cleaned else ""
+    return f"{cleaned}{separator}{sources_line}"
+
+
+async def repair_answer_with_citations(
+    draft_answer: str,
+    sources: List[Dict[str, str]],
+    max_tokens: int,
+) -> str:
+    """Rewrite a fetched-page answer so it includes inline citations and a sources line."""
+    if not sources:
+        return draft_answer
+
+    source_lines = []
+    for source in sources:
+        url = source.get("url", "").strip()
+        title = source.get("title", "").strip() or source.get("domain", "").strip() or url
+        domain = source.get("domain", "").strip()
+        source_lines.append(f"- {title} | {domain or 'unknown domain'} | {url}")
+
+    repair_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Rewrite the draft answer so it includes inline Markdown citations for web-backed claims "
+                "and ends with a `Sources:` line listing the provided URLs. "
+                "Preserve the substance, keep it concise, and do not add new factual claims."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Draft answer:\n"
+                f"{draft_answer.strip()}\n\n"
+                "Fetched sources you may cite:\n"
+                + "\n".join(source_lines)
+            ),
+        },
+    ]
+    repaired = strip_stream_special_tokens(
+        await vllm_chat_complete(repair_messages, max_tokens=min(max_tokens, 1024), temperature=0.1)
+    ).strip()
+    if not repaired:
+        return append_sources_line(draft_answer, sources)
+    return append_sources_line(repaired, sources)
+
+
+async def finalize_tool_loop_answer(
+    final_text: str,
+    tool_results: List[Dict[str, Any]],
+    max_tokens: int,
+) -> ToolLoopOutcome:
+    """Apply citation repair when fetched web pages informed the final answer."""
+    sources = fetched_web_sources(tool_results)
+    cleaned = str(final_text or "").strip()
+    if sources and not answer_has_required_source_grounding(cleaned, sources):
+        cleaned = await repair_answer_with_citations(cleaned, sources, max_tokens)
+    return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
+
+
 @dataclass
 class TerminalSession:
     """Persistent PTY-backed shell session for a conversation workspace."""
@@ -1592,6 +2119,44 @@ class FeatureFlags:
     workspace_run_commands: bool = False
     local_rag: bool = True
     web_search: bool = False
+    allowed_commands: List[str] = field(default_factory=list)
+
+
+async def wait_for_command_approval(
+    websocket: WebSocket,
+    conversation_id: str,
+    command: List[str],
+    command_key: str,
+    cwd: str = ".",
+    step_label: Optional[str] = None,
+) -> bool:
+    """Pause the active tool loop until the user approves or denies the command."""
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[bool] = loop.create_future()
+    COMMAND_APPROVAL_WAITERS[conversation_id] = {
+        "future": future,
+        "command_key": command_key,
+    }
+    try:
+        await websocket.send_json({
+            "type": "command_approval_required",
+            "command": command,
+            "command_key": command_key,
+            "cwd": cwd or ".",
+            "content": f"Approve '{command_key or 'command'}' for this chat to continue.",
+        })
+        await send_activity_event(
+            websocket,
+            "blocked",
+            "Blocked",
+            f"Waiting for approval to run '{command_key or 'command'}' in this chat.",
+            step_label=step_label,
+        )
+        return await future
+    finally:
+        current = COMMAND_APPROVAL_WAITERS.get(conversation_id)
+        if current and current.get("future") is future:
+            COMMAND_APPROVAL_WAITERS.pop(conversation_id, None)
 
 
 class PatchApplicationError(ValueError):
@@ -1819,7 +2384,7 @@ def render_deep_confirmation(message: str, workspace_enabled: bool) -> str:
     if len(request) > 180:
         request = request[:177].rstrip() + "..."
     next_step = "inspect the workspace first" if workspace_enabled else "work from the conversation context first"
-    return f"I’m working on: {request or 'the current request'}. I’ll {next_step}, then make the smallest verified improvement that gets us to a solid answer."
+    return f"I’m working on: {request or 'the current request'}. I’ll {next_step} and then respond with the best verified answer I can."
 
 
 def is_explicit_plan_execution_request(message: str) -> bool:
@@ -2287,6 +2852,11 @@ async def send_assistant_note(websocket: WebSocket, content: str):
     await websocket.send_json({"type": "assistant_note", "content": content})
 
 
+async def send_reasoning_note(websocket: WebSocket, content: str):
+    """Emit a short reasoning-only note that should not appear as final output."""
+    await websocket.send_json({"type": "reasoning_note", "content": content})
+
+
 async def send_activity_event(
     websocket: WebSocket,
     phase: str,
@@ -2395,23 +2965,27 @@ async def fetch_loaded_model_name() -> Optional[str]:
 
 def sync_active_profile_from_model_name(model_name: Optional[str]) -> str:
     """Update the selected profile when the served model reveals itself."""
-    global ACTIVE_MODEL_PROFILE
     if not model_name:
         return ACTIVE_MODEL_PROFILE
     for key, profile in MODEL_PROFILES.items():
         if profile["name"] == model_name:
-            if ACTIVE_MODEL_PROFILE != key:
-                ACTIVE_MODEL_PROFILE = key
+            if ACTIVE_MODEL_PROFILE != key or ACTIVE_CUSTOM_MODEL_NAME:
                 try:
-                    persist_active_model_profile(key)
+                    persist_active_model_selection(key, None)
                 except Exception:
                     logger.warning("Failed to persist model profile %s", key, exc_info=True)
             return key
-    return ACTIVE_MODEL_PROFILE
+    if ACTIVE_MODEL_PROFILE != "custom" or ACTIVE_CUSTOM_MODEL_NAME != model_name:
+        try:
+            persist_active_model_selection("custom", model_name)
+        except Exception:
+            logger.warning("Failed to persist custom model profile %s", model_name, exc_info=True)
+    return "custom"
 
 
 async def docker_api_request(method: str, path: str, **kwargs) -> httpx.Response:
     """Send a request to the local Docker API over the mounted socket."""
+    ensure_docker_control_enabled()
     transport = httpx.AsyncHTTPTransport(uds="/var/run/docker.sock")
     async with httpx.AsyncClient(transport=transport, timeout=30.0) as client:
         return await client.request(method, f"http://localhost{path}", **kwargs)
@@ -2425,7 +2999,12 @@ async def inspect_vllm_container() -> Dict[str, Any]:
     return resp.json()
 
 
-def build_vllm_create_payload(container_info: Dict[str, Any], profile_key: str) -> Dict[str, Any]:
+def build_vllm_create_payload(
+    container_info: Dict[str, Any],
+    profile_key: Optional[str] = None,
+    *,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """Clone the current vLLM container config and swap in the selected model command."""
     config = container_info.get("Config", {})
     host_config = container_info.get("HostConfig", {})
@@ -2439,7 +3018,7 @@ def build_vllm_create_payload(container_info: Dict[str, Any], profile_key: str) 
 
     return {
         "Image": container_info.get("Image") or config.get("Image"),
-        "Cmd": build_vllm_command(profile_key),
+        "Cmd": build_vllm_command(profile_key, model_name=model_name),
         "Env": config.get("Env") or [],
         "ExposedPorts": config.get("ExposedPorts") or {},
         "Labels": config.get("Labels") or {},
@@ -2457,8 +3036,8 @@ def build_vllm_create_payload(container_info: Dict[str, Any], profile_key: str) 
     }
 
 
-async def recreate_vllm_container(profile_key: str):
-    """Hard-switch the vLLM container to the selected model profile."""
+async def recreate_vllm_container(profile_key: Optional[str] = None, *, model_name: Optional[str] = None):
+    """Hard-switch the vLLM container to the selected model profile or custom model."""
     container_info = await inspect_vllm_container()
 
     stop_resp = await docker_api_request("POST", "/containers/vllm/stop", params={"t": 10})
@@ -2469,7 +3048,7 @@ async def recreate_vllm_container(profile_key: str):
     if delete_resp.status_code not in {204, 404}:
         raise HTTPException(status_code=500, detail=f"Failed to remove vLLM (HTTP {delete_resp.status_code})")
 
-    create_payload = build_vllm_create_payload(container_info, profile_key)
+    create_payload = build_vllm_create_payload(container_info, profile_key, model_name=model_name)
     create_resp = await docker_api_request("POST", "/containers/create", params={"name": "vllm"}, json=create_payload)
     if create_resp.status_code != 201:
         detail = create_resp.text.strip() or f"HTTP {create_resp.status_code}"
@@ -2808,8 +3387,26 @@ class WorkspaceFileUpdateRequest(BaseModel):
     content: str
 
 
+class RecoverAssistantMessageRequest(BaseModel):
+    message_id: Optional[int] = None
+    content: str = ""
+    target_dir: str = ""
+
+
 class SwitchModelRequest(BaseModel):
     profile: str
+
+
+class ModelDownloadRequest(BaseModel):
+    source: str
+
+
+class ModelDeleteRequest(BaseModel):
+    model_id: str
+
+
+class ModelActivateRequest(BaseModel):
+    model_id: str
 
 
 class UiModelReadyRequest(BaseModel):
@@ -3179,6 +3776,13 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
         value = payload.get(name, default)
         return value if isinstance(value, bool) else default
 
+    raw_allowed = payload.get("allowed_commands", [])
+    allowed_commands = [
+        normalize_allowed_command_key(item)
+        for item in (raw_allowed if isinstance(raw_allowed, list) else [])
+        if isinstance(item, str) and normalize_allowed_command_key(item)
+    ]
+
     return FeatureFlags(
         agent_tools=(
             flag("agent_tools", True)
@@ -3189,12 +3793,13 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
         workspace_run_commands=flag("workspace_run_commands", False),
         local_rag=flag("local_rag", True),
         web_search=flag("web_search", False),
+        allowed_commands=sorted(set(allowed_commands)),
     )
 
 
 def allowed_workspace_tools(features: FeatureFlags, include_write: bool = False) -> List[str]:
     """Return workspace tools allowed by the current per-turn approvals."""
-    allowed = ["workspace.list_files", "workspace.read_file", "spreadsheet.describe"]
+    allowed = ["workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"]
     if features.workspace_write and include_write:
         allowed.append("workspace.patch_file")
     if features.workspace_run_commands:
@@ -3657,6 +4262,16 @@ async def delete_conversation(conversation_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/reset-all")
+async def reset_all_application_data():
+    try:
+        await reset_application_state()
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Error resetting application data: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/search")
 async def search_chats(query: str):
     try:
@@ -3667,6 +4282,9 @@ async def search_chats(query: str):
 
 @app.post("/api/execute-code")
 async def execute_code(request: dict):
+    if not EXECUTE_CODE_ENABLED:
+        raise HTTPException(status_code=403, detail="Ad-hoc code execution is disabled on this server")
+
     code = request.get('code', '').strip()
     language = request.get('language', 'python').lower()
     conversation_id = request.get('conversation_id', '').strip()
@@ -3932,6 +4550,82 @@ async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdat
     }
 
 
+@app.post("/api/workspace/{conversation_id}/recover")
+async def recover_assistant_message_to_workspace(conversation_id: str, request: RecoverAssistantMessageRequest):
+    workspace = get_workspace_path(conversation_id)
+    source_message = None
+
+    if request.message_id is not None:
+        source_message = get_message_by_id(request.message_id)
+        if not source_message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        if source_message["conversation_id"] != conversation_id:
+            raise HTTPException(status_code=400, detail="Message does not belong to this conversation")
+        if source_message["role"] != "assistant":
+            raise HTTPException(status_code=400, detail="Only assistant messages can be recovered")
+
+    message_content = (
+        source_message["content"]
+        if source_message is not None
+        else str(request.content or "")
+    ).strip()
+    if not message_content:
+        raise HTTPException(status_code=400, detail="No assistant content was provided")
+
+    now = datetime.now()
+    source_label = f"assistant message #{source_message['id']}" if source_message else "assistant draft"
+    default_target = f"recovered/{now.strftime('%Y%m%d-%H%M%S')}"
+    base_rel = sanitize_relative_workspace_path(request.target_dir or default_target, fallback=default_target)
+    base_dir = resolve_workspace_relative_path(conversation_id, base_rel)
+    if base_dir.exists():
+        base_rel = sanitize_relative_workspace_path(f"{base_rel}-{uuid.uuid4().hex[:6]}", fallback=default_target)
+        base_dir = resolve_workspace_relative_path(conversation_id, base_rel)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    files_dir = base_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    matches = list(RECOVERED_CODE_BLOCK_RE.finditer(message_content))
+    created_paths: List[str] = []
+
+    for index, match in enumerate(matches, start=1):
+        info = (match.group(1) or "").strip()
+        code = match.group(2) or ""
+        context_before = message_content[max(0, match.start() - 500):match.start()]
+        inferred_name = infer_filename_for_code_block(info, context_before, message_content, index, len(matches))
+        safe_name = sanitize_relative_workspace_path(inferred_name, fallback=f"snippet-{index}.txt")
+        destination = files_dir / safe_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            replacement = ensure_unique_workspace_filename(destination.parent, destination.name)
+            destination = destination.parent / replacement
+        destination.write_text(code.rstrip() + "\n", encoding="utf-8")
+        created_paths.append(format_workspace_path(destination, workspace))
+
+    readme_path = base_dir / "README.md"
+    readme_path.write_text(
+        build_recovered_notes_markdown(
+            source_label=source_label,
+            created_paths=created_paths,
+            message_content=message_content,
+            recovered_at=now.isoformat(),
+        ),
+        encoding="utf-8",
+    )
+
+    all_paths = [format_workspace_path(readme_path, workspace), *created_paths]
+    return {
+        "conversation_id": conversation_id,
+        "workspace_path": str(workspace),
+        "source": source_label,
+        "target_dir": format_workspace_path(base_dir, workspace),
+        "readme_path": format_workspace_path(readme_path, workspace),
+        "created_files": created_paths,
+        "paths": all_paths,
+        "count": len(created_paths),
+    }
+
+
 @app.get("/api/workspace/{conversation_id}/spreadsheet")
 async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Optional[str] = None):
     workspace = get_workspace_path(conversation_id)
@@ -3969,14 +4663,8 @@ async def download_workspace(conversation_id: str):
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
 
 
-def parse_tool_call(raw: str) -> Optional[Dict[str, Any]]:
-    """Extract a single tool call block from model output."""
-    cleaned = strip_stream_special_tokens(raw).strip()
-    match = re.fullmatch(r"<tool_call>\s*(\{.*\})\s*</tool_call>", cleaned, re.DOTALL)
-    if not match:
-        return None
-
-    payload = json.loads(match.group(1))
+def _validate_tool_call_payload(payload: Any) -> Dict[str, Any]:
+    """Validate a parsed tool-call payload and normalize the result."""
     if not isinstance(payload, dict):
         raise ValueError("Tool call payload must be a JSON object")
 
@@ -3992,6 +4680,37 @@ def parse_tool_call(raw: str) -> Optional[Dict[str, Any]]:
         raise ValueError("Tool call arguments must be an object")
 
     return {"id": call_id, "name": name, "arguments": arguments}
+
+
+def parse_tool_call(raw: str) -> Optional[Dict[str, Any]]:
+    """Extract the first valid tool call from model output."""
+    cleaned = strip_stream_special_tokens(raw).strip()
+    if not cleaned:
+        return None
+
+    decoder = json.JSONDecoder()
+
+    wrapped_match = re.search(r"<tool_call>(?P<body>.*?)</tool_call>", cleaned, re.DOTALL)
+    if wrapped_match:
+        wrapped_body = wrapped_match.group("body").strip()
+        for match in re.finditer(r"\{", wrapped_body):
+            try:
+                payload, _ = decoder.raw_decode(wrapped_body[match.start():])
+            except json.JSONDecodeError:
+                continue
+            return _validate_tool_call_payload(payload)
+
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            payload, _ = decoder.raw_decode(cleaned[match.start():])
+        except json.JSONDecodeError:
+            continue
+        try:
+            return _validate_tool_call_payload(payload)
+        except ValueError:
+            continue
+
+    return None
 
 
 def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dict[str, Any]:
@@ -4019,6 +4738,119 @@ def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dic
     return {
         "path": format_workspace_path(target, workspace),
         "items": items,
+    }
+
+
+def is_probably_binary_file(target: pathlib.Path) -> bool:
+    """Cheap binary-file check so grep stays focused on readable text."""
+    try:
+        with target.open("rb") as f:
+            sample = f.read(4096)
+    except OSError:
+        return True
+    return b"\x00" in sample
+
+
+def workspace_grep_result(
+    conversation_id: str,
+    query: str,
+    rel_path: str = ".",
+    glob: str = "*",
+    limit: int = 20,
+    case_sensitive: bool = False,
+) -> Dict[str, Any]:
+    """Search workspace text files for a query and return line-level matches."""
+    cleaned_query = str(query or "").strip()
+    if len(cleaned_query) < 2:
+        raise ValueError("query must be at least 2 characters")
+
+    workspace = get_workspace_path(conversation_id)
+    target = resolve_workspace_relative_path(conversation_id, rel_path or ".")
+    if not target.exists():
+        raise ValueError("Path not found")
+
+    glob_pattern = str(glob or "*").strip() or "*"
+    safe_limit = max(1, min(int(limit), 100))
+    file_candidates: List[pathlib.Path]
+
+    if target.is_file():
+        file_candidates = [target]
+    elif target.is_dir():
+        file_candidates = sorted(
+            (candidate for candidate in target.rglob(glob_pattern) if candidate.is_file()),
+            key=lambda item: format_workspace_path(item, workspace),
+        )
+    else:
+        raise ValueError("path must be a file or directory")
+
+    matches: List[Dict[str, Any]] = []
+    files_scanned = 0
+    files_with_matches: set[str] = set()
+    skipped_files = 0
+    needle = cleaned_query if case_sensitive else cleaned_query.casefold()
+
+    for file_path in file_candidates:
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            skipped_files += 1
+            continue
+
+        if file_size > WORKSPACE_FILE_SIZE_LIMIT or is_probably_binary_file(file_path):
+            skipped_files += 1
+            continue
+
+        try:
+            with file_path.open("r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            skipped_files += 1
+            continue
+
+        files_scanned += 1
+        rel_file_path = format_workspace_path(file_path, workspace)
+        for line_number, line in enumerate(lines, start=1):
+            haystack = line if case_sensitive else line.casefold()
+            column_index = haystack.find(needle)
+            if column_index < 0:
+                continue
+            match_text = line.rstrip("\n\r")
+            before_line = lines[line_number - 2].rstrip("\n\r") if line_number > 1 else ""
+            after_line = lines[line_number].rstrip("\n\r") if line_number < len(lines) else ""
+            matches.append({
+                "path": rel_file_path,
+                "line": line_number,
+                "column": column_index + 1,
+                "text": truncate_output(match_text, limit=240),
+                "before": truncate_output(before_line, limit=160) if before_line else "",
+                "after": truncate_output(after_line, limit=160) if after_line else "",
+            })
+            files_with_matches.add(rel_file_path)
+            if len(matches) >= safe_limit:
+                return {
+                    "query": cleaned_query,
+                    "path": format_workspace_path(target, workspace),
+                    "glob": glob_pattern,
+                    "count": len(matches),
+                    "files_scanned": files_scanned,
+                    "matched_files": len(files_with_matches),
+                    "skipped_files": skipped_files,
+                    "truncated": True,
+                    "paths": sorted(files_with_matches),
+                    "grep_matches": matches,
+                }
+
+    return {
+        "query": cleaned_query,
+        "path": format_workspace_path(target, workspace),
+        "glob": glob_pattern,
+        "count": len(matches),
+        "files_scanned": files_scanned,
+        "matched_files": len(files_with_matches),
+        "skipped_files": skipped_files,
+        "truncated": False,
+        "paths": sorted(files_with_matches),
+        "grep_matches": matches,
     }
 
 
@@ -4204,6 +5036,7 @@ async def workspace_run_command_result(
     conversation_id: str,
     command: Any,
     cwd: str = ".",
+    features: Optional[FeatureFlags] = None,
 ) -> Dict[str, Any]:
     """Run a short-lived command inside the conversation workspace."""
     if not isinstance(command, list) or not command:
@@ -4216,6 +5049,8 @@ async def workspace_run_command_result(
         raise ValueError("cwd not found")
     if not cwd_path.is_dir():
         raise ValueError("cwd must be a directory")
+
+    validate_workspace_command(conversation_id, command, cwd_path, features)
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -4376,7 +5211,7 @@ def conversation_search_history_result(
         if not fts_query:
             raise sqlite3.OperationalError("No valid FTS tokens")
         c.execute(
-            f'''SELECT m.role, m.content, m.timestamp, m.feedback, bm25({FTS_TABLE}) as fts_rank
+            f'''SELECT m.id, m.role, m.content, m.timestamp, m.feedback, bm25({FTS_TABLE}) as fts_rank
                 FROM {FTS_TABLE} f
                 JOIN messages m ON m.id = f.rowid
                 WHERE {FTS_TABLE} MATCH ? AND m.conversation_id = ?
@@ -4386,18 +5221,19 @@ def conversation_search_history_result(
         )
         ranked_rows = rerank_search_rows([
             {
-                "role": row[0],
-                "content": row[1],
-                "timestamp": row[2],
-                "feedback": row[3] or "",
-                "fts_rank": row[4],
+                "id": row[0],
+                "role": row[1],
+                "content": row[2],
+                "timestamp": row[3],
+                "feedback": row[4] or "",
+                "fts_rank": row[5],
             }
             for row in c.fetchall()
         ], cleaned_query, safe_limit)
     except sqlite3.OperationalError:
         search_term = f"%{cleaned_query}%"
         c.execute(
-            '''SELECT role, content, timestamp
+            '''SELECT id, role, content, timestamp
                FROM messages
                WHERE conversation_id = ? AND content LIKE ?
                ORDER BY timestamp DESC
@@ -4406,19 +5242,49 @@ def conversation_search_history_result(
         )
         ranked_rows = [
             {
-                "role": row[0],
-                "content": row[1],
-                "timestamp": row[2],
+                "id": row[0],
+                "role": row[1],
+                "content": row[2],
+                "timestamp": row[3],
             }
             for row in c.fetchall()
         ]
 
     matches = []
     for row in ranked_rows:
+        message_id = row.get("id")
+        context_before = ""
+        context_after = ""
+        if message_id is not None:
+            previous_row = c.execute(
+                '''SELECT role, content
+                   FROM messages
+                   WHERE conversation_id = ? AND id < ?
+                   ORDER BY id DESC
+                   LIMIT 1''',
+                (conversation_id, message_id),
+            ).fetchone()
+            next_row = c.execute(
+                '''SELECT role, content
+                   FROM messages
+                   WHERE conversation_id = ? AND id > ?
+                   ORDER BY id ASC
+                   LIMIT 1''',
+                (conversation_id, message_id),
+            ).fetchone()
+            if previous_row:
+                context_before = f"{previous_row[0]}: {build_query_excerpt(previous_row[1], cleaned_query, window=140)}"
+            if next_row:
+                context_after = f"{next_row[0]}: {build_query_excerpt(next_row[1], cleaned_query, window=140)}"
+
+        snippet = build_query_excerpt(row["content"], cleaned_query, window=260)
         matches.append({
             "role": row["role"],
             "content": truncate_output(row["content"], limit=800),
+            "snippet": truncate_output(snippet, limit=320),
             "timestamp": row["timestamp"],
+            "context_before": truncate_output(context_before, limit=180) if context_before else "",
+            "context_after": truncate_output(context_after, limit=180) if context_after else "",
         })
     conn.close()
 
@@ -4445,6 +5311,149 @@ def normalize_search_result_url(url: str) -> str:
     if url.startswith("//"):
         return "https:" + url
     return url
+
+
+def sanitize_web_domain(domain: str) -> Optional[str]:
+    """Normalize a user-supplied domain filter into a host name."""
+    cleaned = str(domain or "").strip().lower()
+    if not cleaned:
+        return None
+    if "://" in cleaned:
+        cleaned = urlparse(cleaned).netloc.lower()
+    else:
+        cleaned = cleaned.split("/", 1)[0].lower()
+    cleaned = cleaned.strip(".")
+    if cleaned.startswith("www."):
+        cleaned = cleaned[4:]
+    if not cleaned or not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", cleaned):
+        return None
+    return cleaned
+
+
+def normalize_web_domain(url_or_domain: str) -> str:
+    """Extract a stable normalized domain from a URL or host string."""
+    if "://" in str(url_or_domain or ""):
+        domain = sanitize_web_domain(url_or_domain)
+        return domain or ""
+    return sanitize_web_domain(url_or_domain) or ""
+
+
+def canonicalize_http_url(url: str) -> str:
+    """Normalize a URL for dedupe and citation matching."""
+    normalized = normalize_search_result_url(str(url or "").strip())
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return normalized
+    clean_path = parsed.path or "/"
+    if clean_path != "/" and clean_path.endswith("/"):
+        clean_path = clean_path.rstrip("/")
+    clean_netloc = parsed.netloc.lower()
+    if clean_netloc.startswith("www."):
+        clean_netloc = clean_netloc[4:]
+    return urlunparse((parsed.scheme.lower(), clean_netloc, clean_path, "", parsed.query, ""))
+
+
+def apply_web_domain_filters(query: str, domains: Any) -> str:
+    """Append site filters to a web query when domains are provided."""
+    if not isinstance(domains, list):
+        return query
+    cleaned_domains: List[str] = []
+    for domain in domains[:5]:
+        normalized = sanitize_web_domain(str(domain))
+        if normalized and normalized not in cleaned_domains:
+            cleaned_domains.append(normalized)
+    if not cleaned_domains:
+        return query
+    if len(cleaned_domains) == 1:
+        return f"{query} site:{cleaned_domains[0]}"
+    filters = " OR ".join(f"site:{domain}" for domain in cleaned_domains)
+    return f"{query} ({filters})"
+
+
+def extract_html_title(html: str) -> str:
+    """Return the HTML <title> text when present."""
+    match = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.IGNORECASE | re.DOTALL)
+    return strip_html(match.group(1)) if match else ""
+
+
+def normalize_search_title(text: str) -> str:
+    """Normalize a title or query into a compact comparable token string."""
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def compute_title_match_score(query: str, title: str) -> float:
+    """Estimate how closely a search result title matches the query."""
+    normalized_query = normalize_search_title(query)
+    normalized_title = normalize_search_title(title)
+    if not normalized_query or not normalized_title:
+        return 0.0
+    if normalized_query == normalized_title:
+        return 1.0
+    if normalized_query in normalized_title or normalized_title in normalized_query:
+        return 0.92
+    query_tokens = set(normalized_query.split())
+    title_tokens = set(normalized_title.split())
+    if not query_tokens or not title_tokens:
+        return 0.0
+    overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
+    return round(min(overlap, 0.9), 3)
+
+
+def extract_preferred_html_content(html: str) -> str:
+    """Prefer article-like content regions when available."""
+    for pattern in (
+        r"(?is)<article[^>]*>(.*?)</article>",
+        r"(?is)<main[^>]*>(.*?)</main>",
+        r'(?is)<div[^>]+role=["\']main["\'][^>]*>(.*?)</div>',
+    ):
+        match = re.search(pattern, html or "")
+        if match and len(match.group(1).strip()) > 400:
+            return match.group(1)
+
+    body_match = re.search(r"(?is)<body[^>]*>(.*?)</body>", html or "")
+    if body_match:
+        return body_match.group(1)
+    return html or ""
+
+
+def html_to_text_content(html: str) -> str:
+    """Collapse a full HTML document into readable plain text."""
+    preferred = extract_preferred_html_content(html)
+    cleaned = re.sub(r"(?is)<(script|style|noscript|svg|canvas|nav|footer|aside|form)[^>]*>.*?</\1>", " ", preferred or "")
+    cleaned = re.sub(r"(?i)<br\s*/?>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</(p|div|section|article|li|ul|ol|h1|h2|h3|h4|h5|h6|tr|table|blockquote)>", "\n", cleaned)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = unescape(cleaned)
+    cleaned = cleaned.replace("\r", "\n")
+    cleaned = re.sub(r"\n\s*\n\s*\n+", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
+
+
+def build_query_excerpt(content: str, query: str, window: int = 220) -> str:
+    """Extract a focused snippet around the first query-token match."""
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return ""
+    tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", str(query or "").lower()) if len(token) >= 2]
+    lowered = text.lower()
+    start = -1
+    for token in tokens:
+        index = lowered.find(token)
+        if index >= 0 and (start < 0 or index < start):
+            start = index
+    if start < 0:
+        return truncate_output(text, limit=window)
+    snippet_start = max(start - (window // 3), 0)
+    snippet_end = min(snippet_start + window, len(text))
+    snippet = text[snippet_start:snippet_end].strip()
+    if snippet_start > 0:
+        snippet = "..." + snippet
+    if snippet_end < len(text):
+        snippet = snippet + "..."
+    return snippet
 
 
 def find_nearest_workspace_file(start: pathlib.Path, workspace: pathlib.Path, filename: str) -> Optional[pathlib.Path]:
@@ -4587,14 +5596,22 @@ def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[D
     return None
 
 
-async def web_search_result(query: str, limit: int = 5) -> Dict[str, Any]:
+async def web_search_result(query: str, limit: int = 5, domains: Any = None) -> Dict[str, Any]:
     """Fetch a small web result set for freshness-sensitive questions."""
     cleaned_query = (query or "").strip()
     if len(cleaned_query) < 2:
         raise ValueError("query must be at least 2 characters")
 
     safe_limit = max(1, min(int(limit), 8))
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(cleaned_query)}"
+    effective_query = apply_web_domain_filters(cleaned_query, domains)
+    domain_filters = []
+    if isinstance(domains, list):
+        for domain in domains[:5]:
+            normalized = sanitize_web_domain(str(domain))
+            if normalized and normalized not in domain_filters:
+                domain_filters.append(normalized)
+
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(effective_query)}"
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; ai-chat/1.0; +https://localhost)",
     }
@@ -4614,29 +5631,95 @@ async def web_search_result(query: str, limit: int = 5) -> Dict[str, Any]:
     )
 
     results = []
+    seen_urls: set[str] = set()
     cursor = 0
     while len(results) < safe_limit:
         match = pattern.search(html, cursor)
         if not match:
             break
-        raw_url = normalize_search_result_url(unescape(match.group("url")))
+        raw_url = canonicalize_http_url(unescape(match.group("url")))
         title = strip_html(match.group("title"))
         snippet = ""
         snippet_match = snippet_pattern.search(html, match.start())
         if snippet_match and snippet_match.start() == match.start():
             snippet = strip_html(snippet_match.group("snippet"))
+        if not raw_url or raw_url in seen_urls:
+            cursor = match.end()
+            continue
+        seen_urls.add(raw_url)
+        domain = normalize_web_domain(raw_url)
         results.append({
+            "search_rank": len(results) + 1,
             "title": title,
             "url": raw_url,
+            "domain": domain,
+            "title_match_score": compute_title_match_score(cleaned_query, title),
             "snippet": snippet,
         })
         cursor = match.end()
 
+    requested_domains = set(domain_filters)
+    results.sort(
+        key=lambda item: (
+            -float(item.get("title_match_score", 0.0)),
+            -int(bool(item.get("domain")) and item.get("domain") in requested_domains),
+            int(item.get("search_rank", 9999)),
+        )
+    )
+    for index, item in enumerate(results, start=1):
+        item["position"] = index
+
     return {
         "query": cleaned_query,
+        "effective_query": effective_query,
+        "domains": domain_filters,
         "results": results,
         "count": len(results),
         "provider": "duckduckgo_html",
+    }
+
+
+async def web_fetch_page_result(url: str) -> Dict[str, Any]:
+    """Fetch and normalize the readable content of a web page."""
+    raw_url = canonicalize_http_url(str(url or "").strip())
+    if not raw_url:
+        raise ValueError("url is required")
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("url must be an absolute http(s) URL")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ai-chat/1.0; +https://localhost)",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=True) as client:
+        resp = await client.get(raw_url, headers=headers)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        body = resp.text
+
+    page_title = ""
+    page_text = ""
+    if content_type in {"", "text/html", "application/xhtml+xml"}:
+        page_title = extract_html_title(body)
+        page_text = html_to_text_content(body)
+    elif content_type.startswith("text/"):
+        page_text = body.strip()
+    else:
+        raise ValueError(f"Unsupported page content type: {content_type or 'unknown'}")
+
+    page_text = truncate_output(page_text, limit=WEB_PAGE_TEXT_LIMIT)
+    final_url = canonicalize_http_url(str(resp.url))
+    page_domain = normalize_web_domain(final_url or raw_url)
+    return {
+        "url": raw_url,
+        "final_url": final_url or str(resp.url),
+        "title": page_title,
+        "domain": page_domain,
+        "content_type": content_type or "text/html",
+        "status_code": resp.status_code,
+        "content_length": len(page_text),
+        "content": page_text,
     }
 
 
@@ -4644,6 +5727,10 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
     """Human-readable tool activity for the UI."""
     if name == "workspace.list_files":
         return f"Listing {arguments.get('path', '.')}"
+    if name == "workspace.grep":
+        target = arguments.get("path", ".")
+        query = arguments.get("query", "")
+        return f"Searching {target} for {query}"
     if name == "workspace.read_file":
         return f"Reading {arguments.get('path', '')}"
     if name == "workspace.patch_file":
@@ -4662,7 +5749,12 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
     if name == "conversation.search_history":
         return f"Searching chat history for {arguments.get('query', '')}"
     if name == "web.search":
+        domains = arguments.get("domains", [])
+        if isinstance(domains, list) and domains:
+            return f"Searching the web for {arguments.get('query', '')} on {', '.join(str(item) for item in domains[:3])}"
         return f"Searching the web for {arguments.get('query', '')}"
+    if name == "web.fetch_page":
+        return f"Fetching {arguments.get('url', '')}"
     return name
 
 
@@ -4682,9 +5774,17 @@ def tool_result_preview(result: Dict[str, Any]) -> str:
     if not isinstance(payload, dict):
         return "Completed"
 
+    if "final_url" in payload:
+        title = payload.get("title", "") or payload.get("final_url", "")
+        return f"Fetched {title}"
     if "items" in payload:
         items = payload.get("items", [])
         return f"Found {len(items)} item(s) in {payload.get('path', '.')}"
+    if "grep_matches" in payload:
+        return (
+            f"Found {payload.get('count', 0)} match(es) in "
+            f"{payload.get('matched_files', 0)} file(s)"
+        )
     if "content" in payload:
         return f"Read {payload.get('lines', 0)} line(s) from {payload.get('path', '')}"
     if "edits_applied" in payload:
@@ -4710,7 +5810,11 @@ def tool_result_preview(result: Dict[str, Any]) -> str:
     return "Completed"
 
 
-async def execute_tool_call(conversation_id: str, call: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_tool_call(
+    conversation_id: str,
+    call: Dict[str, Any],
+    features: Optional[FeatureFlags] = None,
+) -> Dict[str, Any]:
     """Validate and execute a supported tool call."""
     call_id = call["id"]
     name = call["name"]
@@ -4719,6 +5823,15 @@ async def execute_tool_call(conversation_id: str, call: Dict[str, Any]) -> Dict[
     try:
         if name == "workspace.list_files":
             result = workspace_list_files_result(conversation_id, str(arguments.get("path", "")))
+        elif name == "workspace.grep":
+            result = workspace_grep_result(
+                conversation_id,
+                str(arguments.get("query", "")),
+                str(arguments.get("path", ".")),
+                str(arguments.get("glob", "*")),
+                int(arguments.get("limit", 20)),
+                bool(arguments.get("case_sensitive", False)),
+            )
         elif name == "workspace.read_file":
             path = str(arguments.get("path", "")).strip()
             if not path:
@@ -4740,6 +5853,7 @@ async def execute_tool_call(conversation_id: str, call: Dict[str, Any]) -> Dict[
                 conversation_id,
                 arguments.get("command"),
                 str(arguments.get("cwd", ".")),
+                features,
             )
         elif name == "spreadsheet.describe":
             path = str(arguments.get("path", "")).strip()
@@ -4761,7 +5875,10 @@ async def execute_tool_call(conversation_id: str, call: Dict[str, Any]) -> Dict[
             result = await web_search_result(
                 str(arguments.get("query", "")),
                 int(arguments.get("limit", 5)),
+                arguments.get("domains"),
             )
+        elif name == "web.fetch_page":
+            result = await web_fetch_page_result(str(arguments.get("url", "")))
         else:
             raise ValueError(f"Unsupported tool: {name}")
     except PatchApplicationError as exc:
@@ -4780,6 +5897,7 @@ async def run_tool_loop(
     history: List[Dict[str, str]],
     system_prompt: str,
     max_tokens: int,
+    features: Optional[FeatureFlags] = None,
     allowed_tools: Optional[List[str]] = None,
     status_prefix: str = "",
     max_steps: Optional[int] = None,
@@ -4795,6 +5913,8 @@ async def run_tool_loop(
     tool_results: List[Dict[str, Any]] = []
     auto_verify_runs = 0
     auto_verify_signatures: set[str] = set()
+    fetched_page_cache: Dict[str, Dict[str, Any]] = {}
+    fetched_unique_pages: set[str] = set()
     step_limit = max_steps or TOOL_LOOP_MAX_STEPS
     if is_fast_profile_active():
         step_limit = min(step_limit, 4)
@@ -4809,10 +5929,10 @@ async def run_tool_loop(
             call = parse_tool_call(cleaned)
         except Exception as exc:
             logger.warning("Tool call parse error, treating as final answer: %s", exc)
-            return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
+            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens)
 
         if not call:
-            return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
+            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens)
 
         if allowed_tools and call["name"] not in allowed_tools:
             return ToolLoopOutcome(
@@ -4822,6 +5942,54 @@ async def run_tool_loop(
                 ),
                 tool_results=tool_results,
             )
+
+        if call["name"] == "workspace.run_command":
+            arguments = call.get("arguments", {})
+            command = arguments.get("command")
+            command_list = command if isinstance(command, list) else []
+            cwd_value = str(arguments.get("cwd", "."))
+            cwd_path = resolve_workspace_relative_path(conversation_id, cwd_value or ".")
+            command_key = command_permission_key(conversation_id, command_list, cwd_path) if command_list else ""
+            if features is not None and command_list and not is_command_allowlisted(conversation_id, command_list, cwd_path, features):
+                approved = await wait_for_command_approval(
+                    websocket,
+                    conversation_id,
+                    command_list,
+                    command_key or "command",
+                    cwd=cwd_value,
+                    step_label=activity_step_label,
+                )
+                if not approved:
+                    denied_result = {
+                        "id": call.get("id", ""),
+                        "ok": False,
+                        "error": f"Command '{command_key or command_list[0]}' was not approved for this chat",
+                    }
+                    await websocket.send_json({
+                        "type": "tool_result",
+                        "name": call["name"],
+                        "ok": False,
+                        "content": f"{status_prefix}{tool_result_preview(denied_result)}",
+                        "arguments": call.get("arguments", {}),
+                        "payload": {"error": denied_result["error"]},
+                    })
+                    await send_activity_event(
+                        websocket,
+                        "error",
+                        "Tool Error",
+                        f"{status_prefix}{tool_result_preview(denied_result)}",
+                        step_label=activity_step_label,
+                    )
+                    tool_results.append({
+                        "call": call,
+                        "result": denied_result,
+                    })
+                    messages.append({"role": "assistant", "content": cleaned})
+                    messages.append({
+                        "role": "user",
+                        "content": "<tool_result>\n" + json.dumps(denied_result, ensure_ascii=False) + "\n</tool_result>",
+                    })
+                    continue
 
         await websocket.send_json({
             "type": "tool_start",
@@ -4837,7 +6005,46 @@ async def run_tool_loop(
             step_label=activity_step_label,
         )
 
-        result = await execute_tool_call(conversation_id, call)
+        if call["name"] == "web.fetch_page":
+            requested_url = canonicalize_http_url(str(call.get("arguments", {}).get("url", "")).strip())
+            if requested_url and requested_url in fetched_page_cache:
+                cached_result = dict(fetched_page_cache[requested_url])
+                cached_result["id"] = call["id"]
+                cached_result["result"] = dict(cached_result.get("result", {}))
+                if isinstance(cached_result["result"], dict):
+                    cached_result["result"]["cached"] = True
+                result = cached_result
+            elif requested_url and len(fetched_unique_pages) >= WEB_FETCH_PAGE_MAX_PER_TURN:
+                result = {
+                    "id": call["id"],
+                    "ok": False,
+                    "error": (
+                        f"Reached the per-turn web page fetch limit ({WEB_FETCH_PAGE_MAX_PER_TURN}). "
+                        "Use the pages already fetched to answer."
+                    ),
+                }
+            else:
+                result = await execute_tool_call(conversation_id, call, features)
+                if result.get("ok"):
+                    payload = result.get("result", {})
+                    if isinstance(payload, dict):
+                        cached_payload = {
+                            "id": call["id"],
+                            "ok": True,
+                            "result": dict(payload),
+                        }
+                        for cache_key in {
+                            requested_url,
+                            canonicalize_http_url(str(payload.get("url", "")).strip()),
+                            canonicalize_http_url(str(payload.get("final_url", "")).strip()),
+                        }:
+                            if cache_key:
+                                fetched_page_cache[cache_key] = dict(cached_payload)
+                        final_key = canonicalize_http_url(str(payload.get("final_url") or payload.get("url") or requested_url).strip())
+                        if final_key:
+                            fetched_unique_pages.add(final_key)
+        else:
+            result = await execute_tool_call(conversation_id, call, features)
         await websocket.send_json({
             "type": "tool_result",
             "name": call["name"],
@@ -4905,7 +6112,7 @@ async def run_tool_loop(
                         f"{status_prefix}{auto_verify.get('label', tool_status_summary(auto_call['name'], auto_call['arguments']))}",
                         step_label=activity_step_label,
                     )
-                    auto_result = await execute_tool_call(conversation_id, auto_call)
+                    auto_result = await execute_tool_call(conversation_id, auto_call, features)
                     await websocket.send_json({
                         "type": "tool_result",
                         "name": auto_call["name"],
@@ -5025,7 +6232,7 @@ def select_enabled_tools(conversation_id: str, message: str, features: FeatureFl
             path_refs = extract_workspace_path_references(message)
             if path_refs and any(pathlib.Path(path).suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS for path in path_refs):
                 allowed.append("spreadsheet.describe")
-            allowed.append("workspace.read_file")
+            allowed.extend(allowed_workspace_tools(features, include_write=False))
         elif intent == "focused_write":
             allowed.extend(allowed_workspace_tools(features, include_write=True))
         else:
@@ -5034,6 +6241,7 @@ def select_enabled_tools(conversation_id: str, message: str, features: FeatureFl
         allowed.append("conversation.search_history")
     if should_offer_web_search(message, features):
         allowed.append("web.search")
+        allowed.append("web.fetch_page")
     deduped: List[str] = []
     for tool_name in allowed:
         if tool_name not in deduped:
@@ -5118,6 +6326,10 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     text = (message or "").strip().lower()
     if len(text) < 3:
         return False
+    if "http://" in text or "https://" in text:
+        return True
+    if re.search(r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text):
+        return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     return bool(words & WEB_SEARCH_HINTS)
 
@@ -5150,6 +6362,7 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         inspect_history,
         f"{session.system_prompt}\n\n{DEEP_INSPECT_SYSTEM_PROMPT}",
         min(session.max_tokens, 1536),
+        features=session.features,
         allowed_tools=allowed_workspace_tools(session.features, include_write=False),
         status_prefix="Inspect: ",
         max_steps=4,
@@ -5169,7 +6382,7 @@ async def deep_confirm_understanding(session: DeepSession) -> str:
     """Send a brief confirmation of the assistant's current understanding."""
     confirmation = render_deep_confirmation(session.message, session.workspace_enabled)
     if confirmation:
-        await send_assistant_note(session.websocket, confirmation)
+        await send_reasoning_note(session.websocket, confirmation)
     return confirmation
 
 
@@ -5265,6 +6478,7 @@ async def deep_build_workspace(session: DeepSession) -> str:
             build_history,
             f"{session.system_prompt}\n\n{DEEP_BUILD_SYSTEM_PROMPT}",
             min(session.max_tokens, 1536),
+            features=session.features,
             allowed_tools=allowed_workspace_tools(session.features, include_write=True),
             status_prefix=f"Build {idx + 1}/{len(steps)}: ",
             max_steps=4,
@@ -5412,6 +6626,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
             direct_history,
             f"{session.system_prompt}\n\n{DEEP_DIRECT_SYSTEM_PROMPT}",
             min(session.max_tokens, 2048),
+            features=session.features,
             allowed_tools=allowed_tools,
             status_prefix="Deep: ",
             max_steps=4,
@@ -5474,6 +6689,7 @@ async def deep_verify(session: DeepSession) -> str:
         verify_history,
         f"{session.system_prompt}\n\n{DEEP_VERIFY_SYSTEM_PROMPT}",
         min(session.max_tokens, 1536),
+        features=session.features,
         allowed_tools=allowed_workspace_tools(session.features, include_write=False),
         status_prefix="Verify: ",
         max_steps=4,
@@ -5520,6 +6736,7 @@ async def deep_review(session: DeepSession) -> str:
         synth_history,
         f"{session.system_prompt}\n\n{DEEP_SYNTHESIZE_SYSTEM_PROMPT}",
         min(session.max_tokens, 2048),
+        features=session.features,
         allowed_tools=allowed_workspace_tools(session.features, include_write=False),
         status_prefix="Synthesize: ",
         max_steps=6,
@@ -5741,6 +6958,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     history,
                     system_prompt,
                     tool_max_tokens,
+                    features=features,
                     allowed_tools=enabled_tools,
                     max_steps=tool_step_limit,
                     activity_phase="respond",
@@ -5797,6 +7015,23 @@ async def chat_websocket(websocket: WebSocket):
                 active_task = None
                 continue
 
+            if data.get('type') == 'command_approval':
+                conversation_id = str(data.get("conversation_id", "")).strip()
+                command_key = normalize_allowed_command_key(str(data.get("command_key", "")))
+                approved = bool(data.get("approved"))
+                waiter = COMMAND_APPROVAL_WAITERS.get(conversation_id)
+                if not waiter:
+                    await websocket.send_json({'type': 'error', 'content': 'No command approval is pending for this chat.'})
+                    continue
+                expected_key = normalize_allowed_command_key(str(waiter.get("command_key", "")))
+                future = waiter.get("future")
+                if command_key != expected_key:
+                    await websocket.send_json({'type': 'error', 'content': 'Command approval response did not match the pending command.'})
+                    continue
+                if isinstance(future, asyncio.Future) and not future.done():
+                    future.set_result(approved)
+                continue
+
             if data.get('type') == 'interrupt':
                 if active_task and not active_task.done():
                     active_task.cancel()
@@ -5817,6 +7052,10 @@ async def chat_websocket(websocket: WebSocket):
             active_task = asyncio.create_task(process_chat_turn(websocket, data))
 
     except WebSocketDisconnect:
+        for conversation_id, waiter in list(COMMAND_APPROVAL_WAITERS.items()):
+            future = waiter.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.set_result(False)
         if active_task and not active_task.done():
             active_task.cancel()
         logger.info("WebSocket disconnected")
@@ -5853,6 +7092,16 @@ async def terminal_websocket(websocket: WebSocket, conversation_id: str):
     session: Optional[TerminalSession] = None
 
     try:
+        if not INTERACTIVE_TERMINAL_ENABLED:
+            await _send_terminal_json(
+                websocket,
+                {
+                    "type": "terminal_unavailable",
+                    "content": "Interactive terminal is disabled on this server",
+                },
+            )
+            return
+
         session = await _start_terminal_session(conversation_id, websocket)
         while True:
             data = await websocket.receive_json()
@@ -5906,9 +7155,20 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
     """Collect model state for health and dashboard views."""
     loaded_model_name = await fetch_loaded_model_name()
     active_profile_key = sync_active_profile_from_model_name(loaded_model_name)
-    active_profile = MODEL_PROFILES[active_profile_key]
     selected_profile = get_active_model_profile()
+    active_profile = (
+        MODEL_PROFILES[active_profile_key]
+        if active_profile_key in MODEL_PROFILES
+        else build_model_profile("custom", loaded_model_name or selected_profile["name"], CUSTOM_MODEL_ARGS, label="Custom")
+    )
     model_ok = await vllm_health_check()
+    if model_ok:
+        mark_model_load_completed(loaded_model_name or selected_profile["name"])
+    else:
+        target_name = selected_profile["name"]
+        loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
+        if loading.get("status") not in {"loading"} or loading.get("model_name") != target_name:
+            mark_model_load_started(target_name, reason="startup", profile_key=selected_profile["key"])
     available_profiles = [
         {
             "key": profile["key"],
@@ -5919,12 +7179,23 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
         }
         for profile in MODEL_PROFILES.values()
     ]
+    if selected_profile["key"] == "custom":
+        available_profiles.append(
+            {
+                "key": selected_profile["key"],
+                "label": selected_profile["label"],
+                "name": selected_profile["name"],
+                "active": active_profile_key == "custom",
+                "selected": True,
+            }
+        )
     return {
         "model_ok": model_ok,
         "loaded_model_name": loaded_model_name or selected_profile["name"],
         "active_profile": active_profile,
         "selected_profile": selected_profile,
         "available_profiles": available_profiles,
+        "loading": get_model_loading_stats(loaded_model_name or selected_profile["name"], model_ok),
     }
 
 @app.get("/health")
@@ -5937,6 +7208,7 @@ async def health():
         "model": runtime["loaded_model_name"],
         "model_available": runtime["model_ok"],
         "model_profile": runtime["active_profile"]["key"],
+        "loading": runtime["loading"],
         "voice": voice,
         "message": (
             f"Model {runtime['loaded_model_name']} is ready"
@@ -5994,11 +7266,244 @@ def get_cache_info(model_name: str):
         size_display = f"{total_size / 1024:.1f} KB"
 
     return {
+        "model_id": model_name,
+        "cache_dir": cache_dir,
         "status": "valid" if has_snapshots else "incomplete",
         "size_bytes": total_size,
         "size_display": size_display,
         "file_count": file_count,
         "last_modified": last_modified,
+    }
+
+
+def normalize_model_source(source: str) -> str:
+    """Accept a Hugging Face model id or model URL and normalize it to repo_id."""
+    raw = (source or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Enter a Hugging Face model id or URL")
+
+    if raw.startswith("https://") or raw.startswith("http://"):
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").lower()
+        if host not in {"huggingface.co", "www.huggingface.co", "hf.co"}:
+            raise HTTPException(status_code=400, detail="Only Hugging Face model links are supported")
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 2:
+            raise HTTPException(status_code=400, detail="Could not determine the model id from that Hugging Face URL")
+        if parts[0] in {"models", "datasets", "spaces"} and len(parts) >= 3:
+            if parts[0] != "models":
+                raise HTTPException(status_code=400, detail="Only Hugging Face model repositories are supported")
+            model_id = "/".join(parts[1:3])
+        else:
+            model_id = "/".join(parts[:2])
+    else:
+        model_id = raw
+
+    model_id = model_id.strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?", model_id):
+        raise HTTPException(status_code=400, detail="Model id must look like 'owner/name' or 'name'")
+    return model_id
+
+
+def iter_model_cache_dirs() -> List[pathlib.Path]:
+    """Return all Hugging Face model cache directories."""
+    hub_root = pathlib.Path(HF_CACHE_PATH) / "hub"
+    if not hub_root.exists():
+        return []
+    return sorted(
+        [path for path in hub_root.iterdir() if path.is_dir() and path.name.startswith("models--")],
+        key=lambda path: path.name.lower(),
+    )
+
+
+def cache_dir_to_model_id(cache_dir: pathlib.Path) -> str:
+    """Convert a Hugging Face cache directory name into a repo id."""
+    name = cache_dir.name
+    if name.startswith("models--"):
+        name = name[len("models--"):]
+    return name.replace("--", "/")
+
+
+def list_cached_models() -> List[Dict[str, Any]]:
+    """List model repositories currently present in the Hugging Face cache."""
+    runtime_model_names = {profile["name"] for profile in MODEL_PROFILES.values()}
+    active_name = get_active_model_name()
+    jobs_by_model = {job.get("model_id"): job for job in MODEL_DOWNLOAD_JOBS.values()}
+    items: List[Dict[str, Any]] = []
+    for cache_dir in iter_model_cache_dirs():
+        model_id = cache_dir_to_model_id(cache_dir)
+        info = get_cache_info(model_id)
+        info.update(
+            {
+                "download_url": f"https://huggingface.co/{quote_plus(model_id, safe='/')}",
+                "managed_by_profile": model_id in runtime_model_names,
+                "active_profile": model_id == active_name,
+                "download_job": jobs_by_model.get(model_id),
+            }
+        )
+        items.append(info)
+    items.sort(key=lambda item: ((not item["active_profile"]), item["model_id"].lower()))
+    return items
+
+
+def current_model_download_jobs() -> List[Dict[str, Any]]:
+    """Return current background model download jobs."""
+    jobs = [dict(job) for job in MODEL_DOWNLOAD_JOBS.values()]
+    jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return jobs
+
+
+async def run_model_download_job(job_id: str, model_id: str) -> None:
+    """Download a Hugging Face model snapshot into the shared cache."""
+    job = MODEL_DOWNLOAD_JOBS[job_id]
+    job["status"] = "downloading"
+    job["started_at"] = datetime.now().isoformat()
+    job["error"] = None
+    try:
+        if snapshot_download is None:
+            raise RuntimeError("huggingface_hub is not installed in the chat-app image")
+        await asyncio.to_thread(
+            snapshot_download,
+            repo_id=model_id,
+            repo_type="model",
+            cache_dir=HF_CACHE_PATH,
+            local_files_only=False,
+            resume_download=True,
+        )
+        info = get_cache_info(model_id)
+        job["status"] = "completed"
+        job["completed_at"] = datetime.now().isoformat()
+        job["cache"] = info
+    except Exception as exc:
+        logger.error("Model download failed for %s", model_id, exc_info=True)
+        job["status"] = "error"
+        job["completed_at"] = datetime.now().isoformat()
+        job["error"] = str(exc)
+
+
+def model_is_managed_by_profile(model_id: str) -> bool:
+    """Return whether the model is referenced by a configured runtime profile."""
+    return any(profile["name"] == model_id for profile in MODEL_PROFILES.values())
+
+
+def model_cache_dir(model_id: str) -> pathlib.Path:
+    """Return the cache directory for a model id."""
+    model_dir = model_id.replace("/", "--")
+    return pathlib.Path(HF_CACHE_PATH) / "hub" / f"models--{model_dir}"
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse a stored ISO timestamp safely."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def model_load_history_summary(model_name: str) -> Dict[str, Any]:
+    """Summarize prior successful load times for a model."""
+    entry = MODEL_LOAD_HISTORY.get(model_name) or {}
+    samples = entry.get("samples")
+    if not isinstance(samples, list):
+        samples = []
+    durations = [float(item) for item in samples if isinstance(item, (int, float))]
+    if not durations:
+        return {
+            "sample_count": 0,
+            "average_seconds": None,
+            "last_seconds": None,
+            "last_completed_at": entry.get("last_completed_at"),
+        }
+    return {
+        "sample_count": len(durations),
+        "average_seconds": round(sum(durations) / len(durations), 1),
+        "last_seconds": round(durations[-1], 1),
+        "last_completed_at": entry.get("last_completed_at"),
+    }
+
+
+def mark_model_load_started(model_name: str, reason: str, profile_key: Optional[str] = None):
+    """Record that a model load has started so the UI can estimate progress."""
+    global MODEL_LOADING_STATUS
+    now = datetime.now().isoformat()
+    MODEL_LOADING_STATUS = {
+        "status": "loading",
+        "phase": "restarting" if reason in {"switch", "activate", "redownload", "restart"} else "loading",
+        "reason": reason,
+        "model_name": model_name,
+        "profile_key": profile_key or ACTIVE_MODEL_PROFILE,
+        "started_at": now,
+        "updated_at": now,
+    }
+    persist_model_state()
+
+
+def mark_model_load_completed(model_name: str):
+    """Record a successful model load and update historical timing."""
+    global MODEL_LOADING_STATUS, MODEL_LOAD_HISTORY
+    now_dt = datetime.now()
+    loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
+    started_at = _parse_iso_datetime(loading.get("started_at"))
+    duration = None
+    if started_at:
+        duration = max(0.0, (now_dt - started_at).total_seconds())
+        entry = MODEL_LOAD_HISTORY.get(model_name) or {}
+        samples = entry.get("samples")
+        if not isinstance(samples, list):
+            samples = []
+        samples = [float(item) for item in samples if isinstance(item, (int, float))]
+        samples.append(round(duration, 1))
+        MODEL_LOAD_HISTORY[model_name] = {
+            "samples": samples[-10:],
+            "last_completed_at": now_dt.isoformat(),
+        }
+
+    MODEL_LOADING_STATUS = {
+        "status": "ready",
+        "phase": "ready",
+        "model_name": model_name,
+        "completed_at": now_dt.isoformat(),
+        "last_duration_seconds": round(duration, 1) if duration is not None else None,
+    }
+    persist_model_state()
+
+
+def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
+    """Return current loading state with historical ETA estimates."""
+    history = model_load_history_summary(model_name)
+    loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
+    target_name = str(loading.get("model_name") or model_name)
+    target_matches = target_name == model_name
+    started_at = _parse_iso_datetime(loading.get("started_at")) if target_matches else None
+    elapsed_seconds = max(0.0, (datetime.now() - started_at).total_seconds()) if started_at else None
+    estimated_total = history.get("average_seconds")
+    eta_seconds = None
+    progress = None
+    if elapsed_seconds is not None and estimated_total:
+        eta_seconds = round(max(estimated_total - elapsed_seconds, 0.0), 1)
+        progress = min(max(elapsed_seconds / max(estimated_total, 1.0), 0.0), 0.99)
+
+    if model_ok:
+        phase = "ready"
+        status = "ready"
+    else:
+        phase = str(loading.get("phase") or "loading")
+        status = str(loading.get("status") or "loading")
+
+    return {
+        "status": status,
+        "phase": phase,
+        "model_name": target_name if not model_ok else model_name,
+        "elapsed_seconds": round(elapsed_seconds, 1) if elapsed_seconds is not None else None,
+        "estimated_total_seconds": estimated_total,
+        "eta_seconds": eta_seconds,
+        "progress": round(progress, 3) if progress is not None else None,
+        "history": history,
+        "started_at": loading.get("started_at") if target_matches else None,
+        "updated_at": loading.get("updated_at"),
+        "reason": loading.get("reason"),
     }
 
 @app.get("/api/dashboard")
@@ -6007,34 +7512,164 @@ async def get_dashboard():
 
     # Get vLLM container status via Docker socket
     container_status = None
-    try:
-        resp = await docker_api_request("GET", "/containers/vllm/json")
-        if resp.status_code == 200:
-            info = resp.json()
-            container_status = {
-                "status": info.get("State", {}).get("Status"),
-                "running": info.get("State", {}).get("Running"),
-                "started_at": info.get("State", {}).get("StartedAt"),
-            }
-    except Exception:
-        pass
+    docker_control_available = DOCKER_CONTROL_ENABLED and os.path.exists("/var/run/docker.sock")
+    if docker_control_available:
+        try:
+            resp = await docker_api_request("GET", "/containers/vllm/json")
+            if resp.status_code == 200:
+                info = resp.json()
+                container_status = {
+                    "status": info.get("State", {}).get("Status"),
+                    "running": info.get("State", {}).get("Running"),
+                    "started_at": info.get("State", {}).get("StartedAt"),
+                }
+        except Exception:
+            pass
 
     cache_info = get_cache_info(runtime["selected_profile"]["name"])
 
     return {
         "model_name": runtime["loaded_model_name"],
         "selected_model_name": runtime["selected_profile"]["name"],
-        "active_profile": runtime["active_profile"]["key"],
+        "selected_profile": runtime["selected_profile"],
+        "selected_profile_key": runtime["selected_profile"]["key"],
+        "active_profile": runtime["active_profile"],
+        "active_profile_key": runtime["active_profile"]["key"],
         "available_profiles": runtime["available_profiles"],
         "vllm_host": VLLM_HOST,
         "model_available": runtime["model_ok"],
+        "loading": runtime["loading"],
         "container": container_status,
         "cache": cache_info,
+        "docker_control_available": docker_control_available,
+        "interactive_terminal_enabled": INTERACTIVE_TERMINAL_ENABLED,
+        "execute_code_enabled": EXECUTE_CODE_ENABLED,
     }
+
+@app.get("/api/models/library")
+async def get_model_library():
+    return {
+        "cache_root": str(pathlib.Path(HF_CACHE_PATH) / "hub"),
+        "models": list_cached_models(),
+        "jobs": current_model_download_jobs(),
+        "profiles": list(MODEL_PROFILES.values()),
+        "active_model_name": get_active_model_name(),
+        "loading": get_model_loading_stats(get_active_model_name(), False),
+    }
+
+@app.post("/api/models/library/download")
+async def download_model_to_library(request: ModelDownloadRequest):
+    global MODEL_DOWNLOAD_LOCK
+
+    model_id = normalize_model_source(request.source)
+    if MODEL_DOWNLOAD_LOCK is None:
+        MODEL_DOWNLOAD_LOCK = asyncio.Lock()
+
+    async with MODEL_DOWNLOAD_LOCK:
+        for job in MODEL_DOWNLOAD_JOBS.values():
+            if job.get("model_id") == model_id and job.get("status") in {"queued", "downloading"}:
+                return {
+                    "status": "accepted",
+                    "message": f"{model_id} is already downloading.",
+                    "job": job,
+                }
+
+        existing_cache = get_cache_info(model_id)
+        if existing_cache.get("status") == "valid":
+            return {
+                "status": "success",
+                "message": f"{model_id} is already cached.",
+                "cache": existing_cache,
+            }
+
+        job_id = uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "model_id": model_id,
+            "source": request.source.strip(),
+            "status": "queued",
+            "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
+        MODEL_DOWNLOAD_JOBS[job_id] = job
+        asyncio.create_task(run_model_download_job(job_id, model_id))
+
+    return {
+        "status": "accepted",
+        "message": f"Started downloading {model_id} into the shared Hugging Face cache.",
+        "job": job,
+    }
+
+@app.post("/api/models/library/delete")
+async def delete_model_from_library(request: ModelDeleteRequest):
+    model_id = normalize_model_source(request.model_id)
+
+    active_job = next(
+        (
+            job for job in MODEL_DOWNLOAD_JOBS.values()
+            if job.get("model_id") == model_id and job.get("status") in {"queued", "downloading"}
+        ),
+        None,
+    )
+    if active_job:
+        raise HTTPException(status_code=409, detail=f"{model_id} is currently downloading")
+
+    if model_is_managed_by_profile(model_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{model_id} is configured as one of the runtime model profiles. Change the profile config before deleting it.",
+        )
+
+    cache_dir = model_cache_dir(model_id)
+    if not cache_dir.exists():
+        raise HTTPException(status_code=404, detail=f"No cached files found for {model_id}")
+
+    shutil.rmtree(cache_dir)
+    logger.info("Deleted model cache: %s", cache_dir)
+    return {
+        "status": "success",
+        "message": f"Deleted cached files for {model_id}.",
+        "model_id": model_id,
+    }
+
+@app.post("/api/models/library/activate")
+async def activate_model_from_library(request: ModelActivateRequest):
+    global ACTIVE_MODEL_LOCK
+
+    ensure_docker_control_enabled()
+    model_id = normalize_model_source(request.model_id)
+    if get_cache_info(model_id).get("status") == "not_downloaded":
+        raise HTTPException(status_code=404, detail=f"{model_id} is not cached yet")
+
+    if ACTIVE_MODEL_LOCK is None:
+        ACTIVE_MODEL_LOCK = asyncio.Lock()
+
+    async with ACTIVE_MODEL_LOCK:
+        if get_active_model_name() == model_id:
+            return {
+                "status": "success",
+                "message": f"{model_id} is already selected.",
+                "model_name": model_id,
+                "profile": ACTIVE_MODEL_PROFILE,
+            }
+
+        mark_model_load_started(model_id, reason="activate", profile_key="custom")
+        await recreate_vllm_container("custom", model_name=model_id)
+        persist_active_model_selection("custom", model_id)
+        return {
+            "status": "success",
+            "message": f"Switching to {model_id}. vLLM is reloading now.",
+            "model_name": model_id,
+            "profile": "custom",
+        }
 
 @app.post("/api/vllm/restart")
 async def restart_vllm():
     try:
+        ensure_docker_control_enabled()
+        mark_model_load_started(get_active_model_name(), reason="restart", profile_key=get_active_model_profile()["key"])
         resp = await docker_api_request("POST", "/containers/vllm/restart", params={"t": 10})
         if resp.status_code == 204:
             return {"status": "success", "message": "vLLM is restarting. Model will reload in a few minutes."}
@@ -6047,6 +7682,7 @@ async def restart_vllm():
 async def switch_model(request: SwitchModelRequest):
     global ACTIVE_MODEL_PROFILE, ACTIVE_MODEL_LOCK
 
+    ensure_docker_control_enabled()
     target_key = request.profile.strip().lower()
     if target_key not in MODEL_PROFILES:
         raise HTTPException(status_code=400, detail=f"Unknown model profile: {request.profile}")
@@ -6066,9 +7702,9 @@ async def switch_model(request: SwitchModelRequest):
             }
 
         logger.info("Switching vLLM profile from %s to %s", current_key, target_key)
+        mark_model_load_started(MODEL_PROFILES[target_key]["name"], reason="switch", profile_key=target_key)
         await recreate_vllm_container(target_key)
-        ACTIVE_MODEL_PROFILE = target_key
-        persist_active_model_profile(target_key)
+        persist_active_model_selection(target_key, None)
         target_profile = MODEL_PROFILES[target_key]
         return {
             "status": "success",
@@ -6080,6 +7716,8 @@ async def switch_model(request: SwitchModelRequest):
 @app.post("/api/model/redownload")
 async def redownload_model():
     try:
+        ensure_docker_control_enabled()
+        mark_model_load_started(get_active_model_name(), reason="redownload", profile_key=get_active_model_profile()["key"])
         # Stop vLLM first
         await docker_api_request("POST", "/containers/vllm/stop", params={"t": 10})
 
@@ -6100,12 +7738,16 @@ async def redownload_model():
 
 @app.on_event("startup")
 async def startup_event():
-    global ACTIVE_MODEL_LOCK
+    global ACTIVE_MODEL_LOCK, MODEL_DOWNLOAD_LOCK
     ACTIVE_MODEL_LOCK = asyncio.Lock()
+    MODEL_DOWNLOAD_LOCK = asyncio.Lock()
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
     logger.info(f"Selected model profile: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
     logger.info(f"vLLM: {VLLM_HOST}")
+    logger.info("Docker control enabled: %s", DOCKER_CONTROL_ENABLED)
+    logger.info("Interactive terminal enabled: %s", INTERACTIVE_TERMINAL_ENABLED)
+    logger.info("Execute-code endpoint enabled: %s", EXECUTE_CODE_ENABLED)
     logger.info("=" * 60)
 
     # Check model availability in background

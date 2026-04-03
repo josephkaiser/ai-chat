@@ -34,7 +34,6 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock
       - ~/.cache/huggingface:/cache/huggingface
     environment:
       - VLLM_HOST=http://vllm:8000/v1
@@ -45,6 +44,13 @@ services:
       - MODEL_8B_ARGS=--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --enforce-eager
       - DEFAULT_MODEL_PROFILE=14b
       - HF_CACHE_PATH=/cache/huggingface
+      - DOCKER_CONTROL_ENABLED=false
+      - INTERACTIVE_TERMINAL_ENABLED=false
+      - EXECUTE_CODE_ENABLED=false
+      - STRICT_WORKSPACE_COMMAND_PATHS=true
+      - VOICE_TTS_VOICE=Samantha
+      - VOICE_STT_LANGUAGE=en
+      - PIPER_MODEL=/app/data/voice/models/en_US-lessac-high.onnx
     depends_on:
       - vllm
     restart: unless-stopped

@@ -21,6 +21,8 @@ let activeModelProfileKey = '';
 let modelSwitchInFlight = false;
 let uiReadyReportInFlight = false;
 let lastReportedUiReadyKey = '';
+let dashboardRefreshTimer = null;
+let chatCommandAllowlists = {};
 let workspaceEntries = [];
 let workspaceTree = null;
 let workspaceStats = { files: 0, directories: 0 };
@@ -30,6 +32,7 @@ let terminalLiveBuffer = '';
 let terminalWs = null;
 let terminalEmulator = null;
 let terminalFitAddon = null;
+let terminalUnavailableReason = '';
 let buildSteps = [];
 let currentBuildStepIndex = null;
 let selectedWorkspaceFile = '';
@@ -37,8 +40,8 @@ let selectedSpreadsheetSheet = '';
 let workspaceRefreshTimer = null;
 let workspacePanelOpen = localStorage.getItem('workspacePanelOpen') !== 'false';
 let collapsedWorkspaceDirs = new Set();
-let featureSettings = loadFeatureSettings();
-let voiceSettings = loadVoiceSettings();
+let featureSettings = null;
+let voiceSettings = null;
 let pendingAttachments = [];
 let fileModalPath = '';
 let fileModalKind = 'text';
@@ -65,6 +68,8 @@ let slashMenuSelectedIndex = 0;
 let petProfile = null;
 let petExists = false;
 let welcomeMascotRuntime = null;
+let welcomeHintTimer = null;
+let loadingHintTimer = null;
 let currentRunId = null;
 let dictationActive = false;
 let currentAudio = null;
@@ -90,7 +95,23 @@ const SPEECH_SPEED_OPTIONS = Object.freeze([
     { value: '1', label: 'Low-Med', rate: 0.95 },
     { value: '2', label: 'Medium', rate: 1.0 },
     { value: '3', label: 'Med-Fast', rate: 1.12 },
-    { value: '4', label: 'Fast', rate: 1.25 },
+    { value: '4', label: 'Fast', rate: 1.5 },
+    { value: '5', label: 'Mid-High', rate: 2.0 },
+    { value: '6', label: 'High', rate: 3.0 },
+]);
+const WELCOME_HINT_ROTATE_MS = 120000;
+const LOADING_HINT_ROTATE_MS = 120000;
+const DISCOVERY_HINTS = Object.freeze([
+    'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
+    'I can help with logic, math, and careful reasoning from the information you give me.',
+    'Try: "Compare these options and recommend one with tradeoffs."',
+    'Prompt idea: "Summarize this and pull out the key decisions or risks."',
+    'I can analyze pasted text, notes, logs, screenshots, and attached files.',
+    'Try: "Turn this rough idea into a clear plan, checklist, or draft."',
+    'Prompt idea: "Question my assumptions and point out what I may be missing."',
+    'I can help write, revise, explain, brainstorm, and organize complex information.',
+    'Ask for depth control directly: "Give me the short version" or "Go deep on this."',
+    'When useful, I can use tools to inspect files, run checks, or verify details in the workspace.',
 ]);
 
 // Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
@@ -118,12 +139,16 @@ const PLAN_EXECUTION_MARKERS = Object.freeze([
     'run the plan',
 ]);
 
+featureSettings = loadFeatureSettings();
+voiceSettings = loadVoiceSettings();
+
 // ==================== Theme ====================
 
 function applyTheme(mode) {
     const themes = window.THEMES || {};
     const colors = themes[mode] || themes.light || {};
     const root = document.documentElement;
+    root.dataset.theme = mode;
     for (const [key, value] of Object.entries(colors)) {
         root.style.setProperty('--' + key, value);
     }
@@ -267,10 +292,23 @@ function syncModelSelector() {
     select.disabled = modelSwitchInFlight || isGenerating || !modelAvailable;
 }
 
+function extractProfileKey(profileValue) {
+    if (!profileValue) return '';
+    if (typeof profileValue === 'string') return profileValue;
+    if (typeof profileValue === 'object' && typeof profileValue.key === 'string') return profileValue.key;
+    return '';
+}
+
 function applyModelRuntime(data = {}) {
     availableModelProfiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
-    selectedModelProfileKey = data.selected_profile?.key || data.active_profile?.key || selectedModelProfileKey;
-    activeModelProfileKey = data.active_profile?.key || selectedModelProfileKey || activeModelProfileKey;
+    selectedModelProfileKey = extractProfileKey(data.selected_profile) || extractProfileKey(data.selected_profile_key) || selectedModelProfileKey;
+    activeModelProfileKey = extractProfileKey(data.active_profile) || extractProfileKey(data.active_profile_key) || activeModelProfileKey;
+    if (!selectedModelProfileKey && Array.isArray(availableModelProfiles)) {
+        selectedModelProfileKey = availableModelProfiles.find(profile => profile.selected)?.key || '';
+    }
+    if (!activeModelProfileKey && Array.isArray(availableModelProfiles)) {
+        activeModelProfileKey = availableModelProfiles.find(profile => profile.active)?.key || selectedModelProfileKey;
+    }
     setModelNote(data.selected_model_name || data.model_name || data.loaded_model_name || window.MODEL_NAME);
     syncModelSelector();
     maybeReportUiModelReady();
@@ -565,17 +603,35 @@ function messageRequestsPlanExecution(message) {
     return PLAN_EXECUTION_MARKERS.some(marker => text.includes(marker));
 }
 
+function getAllowedCommandsForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    const values = Array.isArray(chatCommandAllowlists[key]) ? chatCommandAllowlists[key] : [];
+    return [...new Set(values.map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function rememberAllowedCommand(conversationId, commandKey) {
+    const key = String(conversationId || '').trim();
+    const normalized = String(commandKey || '').trim().toLowerCase();
+    if (!key || !normalized) return;
+    chatCommandAllowlists[key] = getAllowedCommandsForConversation(key).concat(normalized)
+        .filter((value, index, items) => value && items.indexOf(value) === index);
+}
+
+function clearAllowedCommandsForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    if (!key) return;
+    delete chatCommandAllowlists[key];
+}
+
 function resolveTurnFeatures(message, attachmentPaths = []) {
     const permissions = inferTurnPermissions(message, attachmentPaths);
     const executionRequest = messageRequestsPlanExecution(message);
+    const allowedCommands = getAllowedCommandsForConversation(currentConvId);
     let workspaceWrite = false;
-    let workspaceRunCommands = false;
+    let workspaceRunCommands = permissions.wantsRun || permissions.wantsWrite || allowedCommands.length > 0;
 
     if (permissions.wantsWrite && (!deepMode || executionRequest)) {
         workspaceWrite = window.confirm('Allow the assistant to create or edit files in the workspace for this request?');
-    }
-    if (permissions.wantsRun && (!deepMode || executionRequest)) {
-        workspaceRunCommands = window.confirm('Allow the assistant to run workspace commands for this request?');
     }
 
     return {
@@ -584,6 +640,7 @@ function resolveTurnFeatures(message, attachmentPaths = []) {
         workspace_panel: true,
         workspace_write: workspaceWrite,
         workspace_run_commands: workspaceRunCommands,
+        allowed_commands: allowedCommands,
     };
 }
 
@@ -882,6 +939,7 @@ function connectWS() {
         fetch('/health').then(r => r.json()).then(health => {
             if (health.model_available) {
                 updateStatus('connected');
+                loadComposerRuntime();
             } else {
                 updateStatus('loading');
                 startHealthPolling();
@@ -901,6 +959,8 @@ function connectWS() {
             currentAssistantTurnStartedAt = Date.now();
             currentAssistantTurnArtifactPaths = new Set();
             recordWorkspaceActivity('Turn', 'Started a new assistant turn.');
+        } else if (data.type === 'reasoning_note') {
+            recordWorkspaceActivity('Think', 'Captured an internal reasoning note.');
         } else if (data.type === 'assistant_note') {
             ensureStreamingAssistantMessage();
             replaceAssistantAnswer(data.content || '');
@@ -947,6 +1007,29 @@ function connectWS() {
             scheduleWorkspaceRefresh();
         } else if (data.type === 'tool_error') {
             setLoadingText(data.content || 'Tool error');
+        } else if (data.type === 'command_approval_required') {
+            const command = Array.isArray(data.command) ? data.command : [];
+            const commandKey = String(data.command_key || command[0] || 'command').trim().toLowerCase();
+            const commandPreview = command.length ? command.join(' ') : commandKey;
+            const approved = window.confirm(
+                `Allow '${commandKey}' in this chat?\n\nRequested command:\n${commandPreview}\n\nThis approval will be remembered for this chat only.`
+            );
+            if (approved) {
+                rememberAllowedCommand(currentConvId, commandKey);
+                recordWorkspaceActivity('Approve', `Allowed '${commandKey}' for this chat.`);
+                setLoadingText(`Approved '${commandKey}'. Resuming the command...`);
+            } else {
+                recordWorkspaceActivity('Blocked', `Denied '${commandKey}' for this chat.`);
+                setLoadingText(`Command blocked: '${commandKey}' was not approved.`);
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'command_approval',
+                    conversation_id: currentConvId,
+                    command_key: commandKey,
+                    approved,
+                }));
+            }
         } else if (data.type === 'final_replace') {
             replaceAssistantAnswer(data.content);
             recordWorkspaceActivity('Draft', 'Replaced the current answer with a refined draft.');
@@ -1037,28 +1120,129 @@ function showDashboard() {
 }
 function closeDashboard() {
     document.getElementById('dashboardOverlay').classList.remove('show');
+    if (dashboardRefreshTimer) {
+        clearTimeout(dashboardRefreshTimer);
+        dashboardRefreshTimer = null;
+    }
+}
+
+function scheduleDashboardRefresh(delay = 5000) {
+    if (dashboardRefreshTimer) clearTimeout(dashboardRefreshTimer);
+    if (!document.getElementById('dashboardOverlay').classList.contains('show')) return;
+    dashboardRefreshTimer = setTimeout(() => {
+        dashboardRefreshTimer = null;
+        loadDashboard();
+    }, delay);
+}
+
+function formatDashboardDate(value) {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+    });
+}
+
+function formatDurationSeconds(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
+    const total = Math.max(0, Math.round(Number(value)));
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    if (minutes <= 0) return `${seconds}s`;
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
 async function loadDashboard() {
     const el = document.getElementById('dashboardContent');
     try {
-        const resp = await fetch('/api/dashboard');
-        const data = await resp.json();
+        const [runtimeResp, libraryResp] = await Promise.all([
+            fetch('/api/dashboard'),
+            fetch('/api/models/library'),
+        ]);
+        const data = await runtimeResp.json();
+        const library = await libraryResp.json();
 
         const statusClass = data.model_available ? 'connected' : 'loading';
         const statusText = data.model_available ? 'Connected' : 'Loading / Unavailable';
         const containerStatus = data.container ? (data.container.running ? 'Running' : data.container.status || 'Stopped') : 'Unknown';
         const cache = data.cache || {};
+        const loading = data.loading || {};
         const cacheStatus = cache.status || 'unknown';
         const cacheSize = cache.size_display || '--';
-        const cacheDate = cache.last_modified ? new Date(cache.last_modified).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '--';
+        const cacheDate = formatDashboardDate(cache.last_modified);
         const profiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
-        const switchButtons = profiles.map(profile => `
-            <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(profile.label)}, ${JSON.stringify(profile.name)})'>
-                Switch to ${profile.label}
-                <div class="btn-desc">${profile.active ? 'Currently active' : profile.name}</div>
-            </button>
-        `).join('');
+        const jobs = Array.isArray(library.jobs) ? library.jobs : [];
+        const models = Array.isArray(library.models) ? library.models : [];
+        const dockerControlAvailable = Boolean(data.docker_control_available);
+        const switchButtons = dockerControlAvailable
+            ? profiles.filter(profile => profile.key !== 'custom').map(profile => `
+                <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(profile.label)}, ${JSON.stringify(profile.name)})'>
+                    Switch to ${profile.label}
+                    <div class="btn-desc">${profile.active ? 'Currently active' : profile.name}</div>
+                </button>
+            `).join('')
+            : '';
+        const actionBody = dockerControlAvailable
+            ? `
+                <button class="dash-btn" onclick="dashRestart()">
+                    Restart vLLM
+                    <div class="btn-desc">Restart the inference server (keeps cached model)</div>
+                </button>
+                ${switchButtons}
+                <button class="dash-btn danger" onclick="dashRedownload()">
+                    Redownload Model
+                    <div class="btn-desc">Delete cache and re-download from HuggingFace</div>
+                </button>
+            `
+            : `
+                <div class="dash-card">
+                    <div class="dash-row"><span class="label">Runtime control</span><span class="value">Disabled</span></div>
+                    <div style="color:var(--text_secondary);font-size:13px;margin-top:10px;">
+                        Docker-backed restart, profile switch, and re-download actions are disabled unless the server enables Docker control explicitly.
+                    </div>
+                </div>
+            `;
+        const modelCards = models.length
+            ? models.map(model => `
+                <div class="model-library-card">
+                    <div class="model-library-head">
+                        <div>
+                            <div class="model-library-title">${escapeHtml(model.model_id || 'Unknown model')}</div>
+                            <div class="model-library-meta">
+                                ${escapeHtml(model.size_display || '--')} • ${escapeHtml(model.status || 'unknown')} • Updated ${escapeHtml(formatDashboardDate(model.last_modified))}
+                            </div>
+                        </div>
+                        <div class="model-library-badges">
+                            ${model.active_profile ? '<span class="model-badge active">Active</span>' : ''}
+                            ${model.managed_by_profile ? '<span class="model-badge">Profile</span>' : ''}
+                            ${model.download_job && ['queued', 'downloading'].includes(model.download_job.status) ? '<span class="model-badge">Downloading</span>' : ''}
+                        </div>
+                    </div>
+                    <div class="model-library-actions">
+                        <button class="dash-btn dash-btn-compact" onclick='window.open(${JSON.stringify(model.download_url)}, "_blank", "noopener")'>View</button>
+                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${dockerControlAvailable ? '' : 'disabled'}>${model.active_profile ? 'Active' : 'Use Model'}</button>
+                        <button class="dash-btn dash-btn-compact danger" onclick='dashDeleteModel(${JSON.stringify(model.model_id)})' ${model.managed_by_profile ? 'disabled' : ''}>Delete</button>
+                    </div>
+                </div>
+            `).join('')
+            : '<div class="dash-empty">No Hugging Face model caches found yet.</div>';
+        const jobCards = jobs.length
+            ? jobs.map(job => `
+                <div class="model-job ${job.status === 'error' ? 'is-error' : ''}">
+                    <div class="model-job-head">
+                        <span class="model-job-id">${escapeHtml(job.model_id || 'Unknown model')}</span>
+                        <span class="model-job-status">${escapeHtml(job.status || 'queued')}</span>
+                    </div>
+                    <div class="model-job-meta">Started ${escapeHtml(formatDashboardDate(job.started_at || job.created_at))}</div>
+                    ${job.error ? `<div class="model-job-error">${escapeHtml(job.error)}</div>` : ''}
+                </div>
+            `).join('')
+            : '<div class="dash-empty">No active or recent downloads yet.</div>';
 
         el.innerHTML = `
             <div class="dash-section">
@@ -1068,6 +1252,13 @@ async function loadDashboard() {
                     <div class="dash-row"><span class="label">Selected</span><span class="value">${data.selected_model_name || data.model_name}</span></div>
                     <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
                     <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
+                    <div class="dash-row"><span class="label">Load Phase</span><span class="value">${escapeHtml(loading.phase || (data.model_available ? 'ready' : 'loading'))}</span></div>
+                    <div class="dash-row"><span class="label">Progress</span><span class="value">${loading.progress !== null && loading.progress !== undefined ? `${Math.round(Number(loading.progress) * 100)}%` : '--'}</span></div>
+                    <div class="dash-row"><span class="label">Elapsed</span><span class="value">${escapeHtml(formatDurationSeconds(loading.elapsed_seconds))}</span></div>
+                    <div class="dash-row"><span class="label">ETA</span><span class="value">${escapeHtml(formatDurationSeconds(loading.eta_seconds))}</span></div>
+                    <div class="dash-row"><span class="label">Avg Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.average_seconds))}</span></div>
+                    <div class="dash-row"><span class="label">Last Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.last_seconds))}</span></div>
+                    <div class="dash-row"><span class="label">History</span><span class="value">${escapeHtml(String(loading.history?.sample_count || 0))} samples</span></div>
                 </div>
             </div>
             <div class="dash-section">
@@ -1085,15 +1276,26 @@ async function loadDashboard() {
                         Validate Cache
                         <div class="btn-desc">Check model files are present and complete</div>
                     </button>
-                    <button class="dash-btn" onclick="dashRestart()">
-                        Restart vLLM
-                        <div class="btn-desc">Restart the inference server (keeps cached model)</div>
-                    </button>
-                    ${switchButtons}
-                    <button class="dash-btn danger" onclick="dashRedownload()">
-                        Redownload Model
-                        <div class="btn-desc">Delete cache and re-download from HuggingFace</div>
-                    </button>
+                    ${actionBody}
+                </div>
+            </div>
+            <div class="dash-section">
+                <h4>Model Library</h4>
+                <div class="dash-card model-library-shell">
+                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download it into the shared cache used by this app.</div>
+                    <div class="model-library-form">
+                        <input id="modelLibraryInput" class="dash-input" placeholder="e.g. Qwen/Qwen3-8B or https://huggingface.co/Qwen/Qwen3-8B">
+                        <button class="dash-btn" onclick="dashDownloadModel()">Download Model</button>
+                    </div>
+                    <div class="model-library-subhead">
+                        <span>Cached Models</span>
+                        <button class="dash-link-btn" onclick="loadDashboard()">Refresh</button>
+                    </div>
+                    <div class="model-library-list">${modelCards}</div>
+                    <div class="model-library-subhead">
+                        <span>Downloads</span>
+                    </div>
+                    <div class="model-jobs">${jobCards}</div>
                 </div>
             </div>
             <div class="dash-section">
@@ -1101,8 +1303,14 @@ async function loadDashboard() {
                 <div class="dash-logs" id="dashLogs"></div>
             </div>
         `;
+        if (jobs.some(job => ['queued', 'downloading'].includes(job.status))) {
+            scheduleDashboardRefresh(3000);
+        } else {
+            scheduleDashboardRefresh(12000);
+        }
     } catch (e) {
         el.innerHTML = `<div style="padding:20px;color:var(--text_secondary)">Failed to load dashboard: ${e.message}</div>`;
+        scheduleDashboardRefresh(12000);
     }
 }
 
@@ -1190,6 +1398,83 @@ async function dashRedownload() {
     setTimeout(() => { btn.disabled = false; }, 10000);
 }
 
+async function dashDownloadModel() {
+    const input = document.getElementById('modelLibraryInput');
+    const source = (input?.value || '').trim();
+    if (!source) {
+        alert('Enter a Hugging Face model URL or repo id first.');
+        return;
+    }
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Starting download...';
+    try {
+        const resp = await fetch('/api/models/library/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.message || 'Download failed');
+        input.value = '';
+        btn.textContent = data.message || 'Download started';
+        loadDashboard();
+    } catch (e) {
+        btn.textContent = 'Failed: ' + e.message;
+    }
+    setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = 'Download Model';
+    }, 3000);
+}
+
+async function dashDeleteModel(modelId) {
+    const confirmed = confirm(`Delete the cached files for ${modelId}?\n\nThis only removes the local Hugging Face cache for that model.`);
+    if (!confirmed) return;
+
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Deleting...';
+    try {
+        const resp = await fetch('/api/models/library/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_id: modelId }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.message || 'Delete failed');
+        loadDashboard();
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Failed: ' + e.message;
+    }
+}
+
+async function dashActivateModel(modelId) {
+    const confirmed = confirm(`Switch to ${modelId}?\n\nThis will restart vLLM and load that cached model.`);
+    if (!confirmed) return;
+
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = 'Activating...';
+    try {
+        const resp = await fetch('/api/models/library/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_id: modelId }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.message || 'Activation failed');
+        setModelNote(data.model_name || modelId);
+        updateStatus('loading');
+        startHealthPolling();
+        loadDashboard();
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Failed: ' + e.message;
+    }
+}
+
 // ==================== Settings ====================
 
 function showSettings() {
@@ -1217,6 +1502,88 @@ function showAboutPage() {
     if (main) main.classList.add('settings-view-hidden');
     if (about) about.classList.remove('settings-view-hidden');
     if (title) title.textContent = 'About';
+}
+
+function setResetButtonState(isBusy) {
+    const button = document.getElementById('resetAppButton');
+    if (!button) return;
+    button.disabled = isBusy;
+    button.innerHTML = isBusy
+        ? '<span class="settings-icon">&#8635;</span><span>Resetting...</span>'
+        : '<span class="settings-icon">&#128465;</span><span>Delete All Data</span>';
+}
+
+function deleteIndexedDbDatabase(name) {
+    return new Promise(resolve => {
+        if (!name || !window.indexedDB) {
+            resolve();
+            return;
+        }
+        try {
+            const request = window.indexedDB.deleteDatabase(name);
+            request.onsuccess = () => resolve();
+            request.onerror = () => resolve();
+            request.onblocked = () => resolve();
+        } catch (error) {
+            resolve();
+        }
+    });
+}
+
+async function clearBrowserPersistence() {
+    try {
+        window.localStorage.clear();
+    } catch (error) {
+        console.warn('Failed to clear localStorage:', error);
+    }
+    try {
+        window.sessionStorage.clear();
+    } catch (error) {
+        console.warn('Failed to clear sessionStorage:', error);
+    }
+
+    if (!window.indexedDB || typeof window.indexedDB.databases !== 'function') {
+        return;
+    }
+
+    try {
+        const databases = await window.indexedDB.databases();
+        await Promise.all(
+            (databases || [])
+                .map(entry => entry?.name)
+                .filter(Boolean)
+                .map(name => deleteIndexedDbDatabase(name))
+        );
+    } catch (error) {
+        console.warn('Failed to clear IndexedDB state:', error);
+    }
+}
+
+async function resetAllAppData() {
+    const firstConfirmation = confirm(
+        'Delete all chats, workspaces, artifacts, pet memory, and saved browser preferences?\n\nThis also removes packages and files installed inside conversation workspaces.'
+    );
+    if (!firstConfirmation) return;
+
+    const secondConfirmation = confirm(
+        'This reset is permanent and cannot be undone.\n\nContinue with a full app reset?'
+    );
+    if (!secondConfirmation) return;
+
+    setResetButtonState(true);
+    try {
+        const resp = await fetch('/api/reset-all', { method: 'POST' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || data.message || `HTTP ${resp.status}`);
+
+        stopSpeaking();
+        await clearBrowserPersistence();
+        closeSettings();
+        window.location.reload();
+    } catch (error) {
+        alert(`Reset failed: ${error.message}`);
+        setResetButtonState(false);
+    }
 }
 
 async function loadPet() {
@@ -1259,7 +1626,7 @@ async function promoteWorkspaceFile(path) {
 function buildWelcomeMarkup() {
     return `<div class="welcome">
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
-                <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click to pet." data-pose="sit">
+                <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
                     <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 128 112" role="img" aria-hidden="true">
                         <defs>
                             <style>
@@ -1275,29 +1642,42 @@ function buildWelcomeMarkup() {
                         <rect class="px-bg3" x="0" y="96" width="128" height="16"/>
                         <g class="dog-drawing" shape-rendering="crispEdges">
                             <g class="dog-bark-lines" aria-hidden="true">
-                                <rect class="px-accent" x="96" y="24" width="8" height="8"/>
+                                <rect class="px-accent" x="112" y="24" width="8" height="8"/>
                                 <rect class="px-accent" x="104" y="32" width="8" height="8"/>
-                                <rect class="px-accent" x="96" y="40" width="8" height="8"/>
+                                <rect class="px-accent" x="112" y="40" width="8" height="8"/>
                             </g>
-                            <rect class="dog-shadow px-bg2" x="24" y="88" width="56" height="8"/>
-                            <rect class="dog-tail px-bg4" x="16" y="48" width="8" height="16"/>
-                            <rect class="px-bg4" x="24" y="40" width="48" height="32"/>
-                            <rect class="px-bg3" x="32" y="48" width="32" height="16"/>
+                            <rect class="dog-shadow px-bg2" x="16" y="88" width="80" height="8"/>
+                            <g class="dog-tail">
+                                <rect class="px-bg4" x="16" y="40" width="8" height="8"/>
+                                <rect class="px-bg4" x="24" y="32" width="8" height="16"/>
+                                <rect class="px-bg3" x="32" y="32" width="8" height="24"/>
+                            </g>
+                            <rect class="px-bg4" x="32" y="40" width="48" height="24"/>
+                            <rect class="px-bg4" x="72" y="48" width="16" height="16"/>
+                            <rect class="px-bg3" x="40" y="48" width="32" height="8"/>
+                            <rect class="px-bg0" x="56" y="56" width="12" height="8"/>
+                            <rect class="px-bg3" x="68" y="56" width="12" height="8"/>
                             <g class="dog-head-group">
-                                <rect class="px-bg4" x="64" y="24" width="24" height="24"/>
-                                <rect class="dog-ear-left px-bg4" x="64" y="16" width="8" height="8"/>
-                                <rect class="dog-ear-right px-bg4" x="80" y="16" width="8" height="8"/>
-                                <rect class="px-bg0" x="68" y="32" width="4" height="4"/>
+                                <rect class="px-bg4" x="72" y="24" width="24" height="24"/>
+                                <rect class="px-bg4" x="88" y="32" width="24" height="16"/>
+                                <rect class="dog-ear-left px-bg4" x="72" y="16" width="8" height="8"/>
+                                <rect class="dog-ear-right px-bg4" x="88" y="12" width="8" height="12"/>
+                                <rect class="px-bg3" x="76" y="24" width="16" height="4"/>
+                                <rect class="px-bg3" x="76" y="28" width="8" height="4"/>
+                                <rect class="px-bg3" x="88" y="32" width="8" height="4"/>
                                 <rect class="px-bg0" x="80" y="32" width="4" height="4"/>
-                                <rect class="dog-mouth-neutral px-bg3" x="80" y="40" width="8" height="8"/>
-                                <rect class="dog-mouth-bark px-accent" x="80" y="40" width="8" height="8"/>
-                                <rect class="px-accent" x="68" y="48" width="16" height="8"/>
+                                <rect class="px-bg0" x="92" y="36" width="4" height="4"/>
+                                <rect class="dog-mouth-neutral px-bg3" x="100" y="44" width="8" height="4"/>
+                                <rect class="dog-mouth-bark px-accent" x="100" y="40" width="8" height="8"/>
+                                <rect class="px-accent" x="92" y="48" width="16" height="4"/>
                             </g>
                             <g class="dog-leg-group dog-leg-back-group">
-                                <rect class="px-bg4" x="32" y="72" width="8" height="16"/>
+                                <rect class="px-bg4" x="40" y="64" width="8" height="24"/>
+                                <rect class="px-bg3" x="48" y="72" width="8" height="16"/>
                             </g>
                             <g class="dog-leg-group dog-leg-front-group">
-                                <rect class="px-bg4" x="56" y="72" width="8" height="16"/>
+                                <rect class="px-bg4" x="76" y="64" width="8" height="24"/>
+                                <rect class="px-bg3" x="84" y="72" width="8" height="16"/>
                             </g>
                         </g>
                     </svg>
@@ -1305,6 +1685,7 @@ function buildWelcomeMarkup() {
                 </button>
                 <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
                 <span class="bond-note" id="bondNote"></span>
+                <div class="welcome-hint" id="welcomeHint" aria-live="polite"></div>
             </div>
         </div>`;
 }
@@ -1314,6 +1695,56 @@ function destroyWelcomeMascot() {
     window.clearInterval(welcomeMascotRuntime.cycleTimer);
     window.clearTimeout(welcomeMascotRuntime.poseTimer);
     welcomeMascotRuntime = null;
+}
+
+function stopWelcomeHintRotation() {
+    if (!welcomeHintTimer) return;
+    window.clearInterval(welcomeHintTimer);
+    welcomeHintTimer = null;
+}
+
+function stopLoadingHintRotation() {
+    if (!loadingHintTimer) return;
+    window.clearInterval(loadingHintTimer);
+    loadingHintTimer = null;
+}
+
+function pickRotatingHint(previousHint = '') {
+    if (!DISCOVERY_HINTS.length) return '';
+    const pool = DISCOVERY_HINTS.filter(hint => hint !== previousHint);
+    const candidates = pool.length ? pool : DISCOVERY_HINTS;
+    return candidates[Math.floor(Math.random() * candidates.length)] || DISCOVERY_HINTS[0];
+}
+
+function startWelcomeHintRotation() {
+    stopWelcomeHintRotation();
+    const hint = document.getElementById('welcomeHint');
+    if (!hint) return;
+
+    let currentHint = '';
+    const renderHint = () => {
+        currentHint = pickRotatingHint(currentHint);
+        hint.textContent = currentHint;
+    };
+
+    renderHint();
+    welcomeHintTimer = window.setInterval(renderHint, WELCOME_HINT_ROTATE_MS);
+}
+
+function startLoadingHintRotation() {
+    stopLoadingHintRotation();
+    const hint = document.getElementById('loadingHintText');
+    if (!hint) return;
+
+    let currentHint = '';
+    const renderHint = () => {
+        currentHint = pickRotatingHint(currentHint);
+        hint.textContent = currentHint;
+        scrollToBottom();
+    };
+
+    renderHint();
+    loadingHintTimer = window.setInterval(renderHint, LOADING_HINT_ROTATE_MS);
 }
 
 let currentBond = { affection: 50, pets_today: 0, streak: 0, mood: 'content', capped: false, max_pets_per_day: 12 };
@@ -1431,6 +1862,7 @@ function autoResizeTextarea(textarea) {
 
 function exitWelcomeMode() {
     destroyWelcomeMascot();
+    stopWelcomeHintRotation();
     const area = document.getElementById('inputArea');
     if (area) area.classList.remove('welcome-mode');
     const chat = document.querySelector('.chat');
@@ -1450,6 +1882,7 @@ function enterWelcomeMode() {
     const input = document.getElementById('input');
     if (input) input.style.height = '';
     initWelcomeMascot();
+    startWelcomeHintRotation();
 }
 
 function toggleDeepMode() {
@@ -1524,6 +1957,66 @@ function getSlashCommandQuery(textarea) {
 function setDraftFromSlash(template) {
     const value = `${template}\n`;
     setInputValue(value, value.length);
+}
+
+function getRecoverableAssistantMessages() {
+    return [...document.querySelectorAll('#messages .message.assistant')]
+        .filter(msg => String(msg.dataset.originalContent || '').trim());
+}
+
+function getLatestRecoverableAssistantMessage() {
+    const messages = getRecoverableAssistantMessages();
+    return messages.length ? messages[messages.length - 1] : null;
+}
+
+async function recoverAssistantMessage(messageEl, button = null) {
+    if (!currentConvId || !messageEl) return;
+    const content = String(messageEl.dataset.originalContent || '').trim();
+    const messageId = Number.parseInt(messageEl.dataset.messageId || '', 10);
+    if (!content) {
+        alert('This assistant message does not contain recoverable content yet.');
+        return;
+    }
+
+    const originalLabel = button ? button.innerHTML : '';
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = '&#128190; Adding...';
+    }
+
+    try {
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/recover`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message_id: Number.isFinite(messageId) ? messageId : null,
+                content,
+            }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        await refreshWorkspace(true);
+        recordWorkspaceActivity(
+            'Add',
+            `Recovered ${data.count || 0} code file${(data.count || 0) === 1 ? '' : 's'} and notes into ${data.target_dir || 'the workspace'}.`
+        );
+        if (data.readme_path) {
+            openWorkspaceFile(data.readme_path, { modal: true });
+        }
+        if (button) {
+            button.innerHTML = '&#10003; Added';
+            setTimeout(() => {
+                button.disabled = false;
+                button.innerHTML = originalLabel;
+            }, 1800);
+        }
+    } catch (error) {
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalLabel;
+        }
+        alert(`Failed to add this message to the workspace: ${error.message}`);
+    }
 }
 
 function buildSlashCommands() {
@@ -1635,6 +2128,23 @@ function buildSlashCommands() {
             onSelect: () => {
                 if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
                 setDraftFromSlash('Explain how the relevant local code works, including key files and flow, for:');
+            },
+        },
+        {
+            name: 'add',
+            label: '/add',
+            description: 'Recover the latest assistant reply into the workspace as staged files plus a README.',
+            kind: 'action',
+            keywords: ['recover chat output', 'promote response', 'workspace object'],
+            onSelect: async () => {
+                hideSlashMenu();
+                const latest = getLatestRecoverableAssistantMessage();
+                if (!latest) {
+                    alert('No assistant reply with recoverable content is visible in this chat yet.');
+                    return;
+                }
+                await recoverAssistantMessage(latest);
+                document.getElementById('input')?.focus();
             },
         },
         {
@@ -2250,6 +2760,11 @@ function renderTerminalOutput() {
     const outputEl = document.getElementById('terminalOutput');
     const statusEl = document.getElementById('terminalStatusLabel');
     if (!outputEl) return;
+    if (terminalUnavailableReason) {
+        outputEl.innerHTML = `<div class="workspace-empty terminal-empty">${escapeHtml(terminalUnavailableReason)}</div>`;
+        if (statusEl) statusEl.textContent = 'Interactive workspace shell unavailable';
+        return;
+    }
     if (terminalEmulator) {
         const emptyEl = outputEl.querySelector('.workspace-empty');
         if (emptyEl) emptyEl.hidden = true;
@@ -2315,10 +2830,12 @@ function recordTerminalCommandStart(command, cwd) {
 
 function connectTerminalWS() {
     if (!featureSettings.agent_tools || !featureSettings.workspace_panel || !currentConvId) return;
+    if (terminalUnavailableReason) return;
     if (terminalWs && (terminalWs.readyState === WebSocket.OPEN || terminalWs.readyState === WebSocket.CONNECTING)) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     terminalWs = new WebSocket(`${protocol}//${window.location.host}/ws/terminal/${encodeURIComponent(currentConvId)}`);
     terminalWs.onopen = () => {
+        terminalUnavailableReason = '';
         initializeTerminalEmulator();
         if (terminalEmulator) {
             terminalEmulator.clear();
@@ -2336,6 +2853,12 @@ function connectTerminalWS() {
         } else if (data.type === 'terminal_status') {
             const statusEl = document.getElementById('terminalStatusLabel');
             if (statusEl) statusEl.textContent = data.content || 'Interactive workspace shell';
+        } else if (data.type === 'terminal_unavailable') {
+            terminalUnavailableReason = data.content || 'Interactive terminal is unavailable on this server.';
+            if (terminalWs) {
+                try { terminalWs.close(); } catch (e) {}
+            }
+            renderTerminalOutput();
         } else if (data.type === 'terminal_cleared') {
             terminalLiveBuffer = '';
             if (terminalEmulator) terminalEmulator.clear();
@@ -2345,7 +2868,7 @@ function connectTerminalWS() {
     terminalWs.onclose = () => {
         renderTerminalOutput();
         setTimeout(() => {
-            if (currentConvId && featureSettings.agent_tools && featureSettings.workspace_panel) connectTerminalWS();
+            if (!terminalUnavailableReason && currentConvId && featureSettings.agent_tools && featureSettings.workspace_panel) connectTerminalWS();
         }, 1500);
     };
     terminalWs.onerror = () => {
@@ -3397,9 +3920,8 @@ function sendMessage() {
     activeStreamConversationId = currentConvId;
     streamingAssistantMessage = null;
     syncSendButton();
-
     ws.send(JSON.stringify({
-        message: message,
+        message,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
@@ -3504,6 +4026,21 @@ function attachThinkToolbarHandlers(box, toolbar) {
     });
 }
 
+function formatReasoningDuration(durationMs) {
+    const totalSeconds = Math.max(1, Math.round((Number(durationMs) || 0) / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    const parts = [];
+    if (minutes) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`);
+    if (seconds || !parts.length) parts.push(`${seconds} second${seconds === 1 ? '' : 's'}`);
+    return parts.join(' ');
+}
+
+function updateThinkLabel(box, labelText) {
+    const label = box?.querySelector('.think-label');
+    if (label) label.textContent = labelText;
+}
+
 function buildThinkBoxCollapsed(text) {
     const box = document.createElement('div');
     box.className = 'think-box';
@@ -3534,9 +4071,12 @@ function hydrateAssistantFromRaw(msg, raw) {
     if (contentDiv) contentDiv.textContent = trimmed;
 }
 
-function createMessageElement(content, role, timestamp = null) {
+function createMessageElement(content, role, timestamp = null, options = {}) {
     const msg = document.createElement('div');
     msg.className = `message ${role}`;
+    if (options.messageId !== undefined && options.messageId !== null) {
+        msg.dataset.messageId = String(options.messageId);
+    }
 
     if (role === 'assistant') {
         const stack = document.createElement('div');
@@ -3591,11 +4131,12 @@ function onAssistantThinkStart() {
     if (!stack) return;
     const box = document.createElement('div');
     box.className = 'think-box think-box--streaming';
+    box.dataset.startedAt = String(Date.now());
     const toolbar = document.createElement('div');
     toolbar.className = 'think-toolbar';
     toolbar.innerHTML = '<span class="think-label">Reasoning\u2026</span><span class="think-chevron" aria-hidden="true">\u25be</span>';
     const body = document.createElement('div');
-    body.className = 'think-body think-body--peek';
+    body.className = 'think-body think-body--collapsed';
     box.appendChild(toolbar);
     box.appendChild(body);
     attachThinkToolbarHandlers(box, toolbar);
@@ -3617,11 +4158,12 @@ function onAssistantThinkEnd() {
     const box = msg?.querySelector('.think-box--streaming');
     if (!box) return;
     box.classList.remove('think-box--streaming');
-    const label = box.querySelector('.think-label');
-    if (label) label.textContent = 'Reasoning';
+    const startedAt = Number(box.dataset.startedAt || 0);
+    const durationMs = startedAt > 0 ? Date.now() - startedAt : 0;
+    box.dataset.durationMs = String(durationMs);
+    updateThinkLabel(box, `Reasoned for ${formatReasoningDuration(durationMs)}`);
     const body = box.querySelector('.think-body');
     if (body) {
-        body.classList.remove('think-body--peek');
         body.classList.add('think-body--collapsed');
     }
     if (msg.isConnected) scrollToBottom();
@@ -3650,13 +4192,14 @@ function replaceAssistantAnswer(content) {
     if (msg.isConnected) scrollToBottom();
 }
 
-function addMessage(content, role, timestamp = null) {
-    const msg = createMessageElement(content, role, timestamp);
+function addMessage(content, role, timestamp = null, options = {}) {
+    const msg = createMessageElement(content, role, timestamp, options);
     document.getElementById('messages').appendChild(msg);
     scrollToBottom();
     return msg;
 }
 function showLoading() {
+    removeLoading();
     const loading = document.createElement('div');
     loading.className = 'loading';
     loading.id = 'loadingIndicator';
@@ -3664,13 +4207,18 @@ function showLoading() {
         <div class="loading-spinner">
             <div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div>
         </div>
-        <div class="loading-text">Thinking...</div>
+        <div class="loading-copy">
+            <div class="loading-text">Thinking...</div>
+            <div class="loading-hint" id="loadingHintText" aria-live="polite"></div>
+        </div>
     `;
     document.getElementById('messages').appendChild(loading);
     scrollToBottom();
+    startLoadingHintRotation();
 }
 
 function removeLoading() {
+    stopLoadingHintRotation();
     document.getElementById('loadingIndicator')?.remove();
 }
 
@@ -3781,6 +4329,16 @@ function renderMarkdown() {
                 copyBtn.innerHTML = '&#128203; Copy';
                 copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(copyText, copyBtn); };
                 actions.appendChild(copyBtn);
+
+                const addBtn = document.createElement('button');
+                addBtn.className = 'action-btn';
+                addBtn.innerHTML = '&#128190; Add to WS';
+                addBtn.title = 'Recover this assistant reply into staged workspace files and notes';
+                addBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    await recoverAssistantMessage(msg, addBtn);
+                };
+                actions.appendChild(addBtn);
 
                 const tsDiv = msg.querySelector('.message-timestamp');
                 if (tsDiv) msg.insertBefore(actions, tsDiv);
@@ -4038,7 +4596,7 @@ async function loadConversation(id, options = {}) {
     messages.innerHTML = '';
     exitWelcomeMode();
     data.messages.forEach(msg => {
-        const el = addMessage(msg.content, msg.role, msg.timestamp);
+        const el = addMessage(msg.content, msg.role, msg.timestamp, { messageId: msg.id });
         if (msg.role === 'assistant') el.dataset.autoSpoken = 'true';
     });
     appendStreamingAssistantMessageIfVisible();
@@ -4049,6 +4607,7 @@ async function loadConversation(id, options = {}) {
 
 function newChat() {
     stopSpeaking();
+    clearAllowedCommandsForConversation(currentConvId);
     currentConvId = generateId();
     currentRunId = null;
     currentAssistantTurnStartedAt = null;
@@ -4154,11 +4713,17 @@ refreshVoiceRuntime();
 loadComposerRuntime();
 refreshWorkspace(true);
 initWelcomeMascot();
+startWelcomeHintRotation();
 
 setTimeout(() => {
     fetch('/health').then(r => r.json()).then(health => {
-        if (health.model_available) updateStatus('connected');
-        else { updateStatus('loading'); startHealthPolling(); }
+        if (health.model_available) {
+            updateStatus('connected');
+            loadComposerRuntime();
+        } else {
+            updateStatus('loading');
+            startHealthPolling();
+        }
     }).catch(() => { updateStatus('loading'); startHealthPolling(); });
 }, 1000);
 

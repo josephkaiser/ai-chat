@@ -41,10 +41,10 @@ ensure_data_dirs() {
 
 install_voice_model() {
     local model_dir="$PROJECT_DIR/data/voice/models"
-    local model_name="en_US-amy-medium"
+    local model_name="en_US-lessac-high"
     local model_file="$model_dir/${model_name}.onnx"
     local config_file="$model_dir/${model_name}.onnx.json"
-    local base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+    local base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high"
 
     if [[ -f "$model_file" && -f "$config_file" ]]; then
         echo "Piper voice model already installed."

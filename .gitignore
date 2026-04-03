@@ -25,9 +25,15 @@ wheels/
 
 # Data
 data/
+runs/
+workspaces/
+pet/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 
 # IDEs
 .vscode/
@@ -45,7 +51,20 @@ Thumbs.db
 
 # Environment
 .env
+.env.*
 .env.local
+!.env.example
+!.env.sample
+!.env.*.example
+!.env.*.sample
+.envrc
+
+# Secrets / local credentials
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
 
 # keyfile
 *.deb
