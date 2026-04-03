@@ -120,19 +120,19 @@ body {
     flex-direction: column;
     align-items: center;
     gap: 10px;
-    transform: translateY(-28px);
+    transform: translateY(-14px);
 }
 .welcome-mascot {
     border: none;
     background: transparent;
-    padding: 4px;
+    padding: 0;
     color: inherit;
     display: inline-flex;
     flex-direction: column;
     align-items: center;
     gap: 0;
     cursor: pointer;
-    border-radius: 8px;
+    border-radius: 12px;
     box-shadow: none;
     position: relative;
 }
@@ -146,106 +146,151 @@ body {
     color: var(--text_primary);
 }
 .welcome-logo-dog {
-    width: clamp(128px, 18vw, 180px);
+    width: clamp(164px, 22vw, 228px);
     overflow: visible;
     image-rendering: pixelated;
     display: block;
 }
-.welcome-logo-dog .px-bg0 {
-    fill: color-mix(in srgb, var(--pet_accent) 80%, var(--bg_secondary));
+.welcome-logo-dog .px-shadow {
+    fill: color-mix(in srgb, var(--pet_secondary) 16%, transparent);
 }
-.welcome-logo-dog .px-bg2 {
-    fill: color-mix(in srgb, var(--pet_primary) 60%, var(--pet_accent));
+.welcome-logo-dog .px-outline {
+    fill: color-mix(in srgb, var(--pet_secondary) 82%, black);
 }
-.welcome-logo-dog .px-bg3 {
-    fill: color-mix(in srgb, var(--pet_secondary) 50%, var(--pet_primary));
+.welcome-logo-dog .px-fur-dark {
+    fill: color-mix(in srgb, var(--pet_secondary) 72%, var(--pet_primary));
 }
-.welcome-logo-dog .px-bg4 {
-    fill: var(--pet_secondary);
+.welcome-logo-dog .px-fur-mid {
+    fill: color-mix(in srgb, var(--pet_secondary) 54%, var(--pet_primary));
 }
-.welcome-logo-dog .px-accent {
-    fill: color-mix(in srgb, var(--accent_primary) 70%, var(--pet_primary));
+.welcome-logo-dog .px-fur-light {
+    fill: color-mix(in srgb, var(--pet_primary) 72%, var(--pet_accent));
 }
-.welcome-logo-dog .px-muzzle {
-    fill: color-mix(in srgb, var(--pet_accent) 65%, var(--pet_secondary));
+.welcome-logo-dog .px-cream {
+    fill: color-mix(in srgb, var(--pet_accent) 82%, white);
+}
+.welcome-logo-dog .px-ear {
+    fill: color-mix(in srgb, #f7b7be 72%, var(--pet_primary));
+}
+.welcome-logo-dog .px-blush {
+    fill: color-mix(in srgb, #ff9aa2 68%, var(--pet_accent));
+}
+.welcome-logo-dog .px-eye {
+    fill: color-mix(in srgb, var(--pet_secondary) 82%, black);
+}
+.welcome-logo-dog .px-eye-shine {
+    fill: #fff8ef;
 }
 .welcome-logo-dog .px-nose {
-    fill: color-mix(in srgb, var(--pet_secondary) 78%, black);
+    fill: color-mix(in srgb, #4b2f37 72%, black);
 }
 .welcome-logo-dog .px-mouth {
-    fill: color-mix(in srgb, var(--pet_primary) 40%, black);
+    fill: color-mix(in srgb, #7a3141 74%, black);
 }
-/* Dog pixel art — all movement snaps to the 8px grid */
-.dog-shadow {
-    transform-origin: 56px 92px;
+.welcome-logo-dog .px-tongue {
+    fill: color-mix(in srgb, #ff8ca8 72%, var(--pet_primary));
 }
+.welcome-logo-dog .px-bark {
+    fill: color-mix(in srgb, var(--accent_primary) 68%, var(--pet_primary));
+}
+/* Wolfy uses a denser 4px grid for a cuter sprite while staying crisp. */
 .dog-drawing {
-    transform-origin: 56px 60px;
+    transform-origin: 96px 104px;
 }
+.dog-body-group,
 .dog-tail,
-.dog-leg-group,
 .dog-head-group,
+.dog-ear-left,
+.dog-ear-right,
+.dog-leg-group,
 .dog-mouth-bark,
+.dog-eyes-open,
+.dog-eye-blink,
 .dog-bark-lines rect,
 .dog-shadow {
     transition: none;
 }
+.dog-shadow {
+    transform-origin: 92px 140px;
+    opacity: 0.72;
+}
+.dog-body-group {
+    transform-origin: 84px 104px;
+}
 .dog-tail {
-    transform-origin: 32px 48px;
+    transform-origin: 64px 96px;
 }
 .dog-head-group {
-    transform-origin: 88px 40px;
+    transform-origin: 118px 64px;
 }
-.dog-mouth-neutral { opacity: 1; }
+.dog-ear-left {
+    transform-origin: 100px 28px;
+}
+.dog-ear-right {
+    transform-origin: 128px 24px;
+}
+.dog-leg-back-group {
+    transform-origin: 76px 128px;
+}
+.dog-leg-front-group {
+    transform-origin: 112px 128px;
+}
+.dog-eyes-open { opacity: 1; }
+.dog-eye-blink { opacity: 0; }
 .dog-mouth-bark { opacity: 0; }
 .dog-bark-lines rect { opacity: 0; }
 
-/* Sit: tail wags in grid-snapped steps */
+.welcome-mascot[data-pose="sit"] .dog-drawing {
+    animation: dog-idle-bob 2s steps(1, end) infinite;
+}
 .welcome-mascot[data-pose="sit"] .dog-tail {
-    animation: dog-tail-sit 1.2s steps(1, end) infinite;
+    animation: dog-tail-sit 900ms steps(1, end) infinite;
+}
+.welcome-mascot[data-pose="sit"] .dog-ear-right {
+    animation: dog-ear-twitch 3600ms steps(1, end) infinite;
 }
 
-/* Walk: all parts move in 8px increments */
 .welcome-mascot[data-pose="walk"] .dog-drawing {
-    animation: dog-walk-bob 600ms steps(1, end) infinite;
+    animation: dog-walk-bob 680ms steps(1, end) infinite;
 }
 .welcome-mascot[data-pose="walk"] .dog-leg-front-group {
-    animation: dog-front-step 600ms steps(1, end) infinite;
+    animation: dog-front-step 680ms steps(1, end) infinite;
 }
 .welcome-mascot[data-pose="walk"] .dog-leg-back-group {
-    animation: dog-back-step 600ms steps(1, end) infinite;
+    animation: dog-back-step 680ms steps(1, end) infinite;
 }
 .welcome-mascot[data-pose="walk"] .dog-tail {
-    animation: dog-tail-walk 400ms steps(1, end) infinite;
+    animation: dog-tail-walk 380ms steps(1, end) infinite;
 }
 .welcome-mascot[data-pose="walk"] .dog-head-group {
-    animation: dog-head-nod 600ms steps(1, end) infinite;
+    animation: dog-head-nod 680ms steps(1, end) infinite;
 }
 
-/* Rest: settled down, grid-snapped offsets */
 .welcome-mascot[data-pose="rest"] .dog-drawing {
-    transform: translate(0, 8px);
+    transform: translate(-4px, 8px);
 }
 .welcome-mascot[data-pose="rest"] .dog-head-group {
-    transform: translate(-8px, 8px);
+    transform: translate(-4px, 8px);
 }
 .welcome-mascot[data-pose="rest"] .dog-tail {
-    transform: translate(-8px, 0);
-}
-.welcome-mascot[data-pose="rest"] .dog-leg-front-group {
-    transform: translate(8px, 8px);
-}
-.welcome-mascot[data-pose="rest"] .dog-leg-back-group {
-    transform: translate(8px, 8px);
+    transform: translate(-8px, 4px);
 }
 .welcome-mascot[data-pose="rest"] .dog-shadow {
-    transform: scaleX(1);
-    opacity: 0.6;
+    transform: scaleX(1.08);
+    opacity: 0.52;
+}
+.welcome-mascot[data-pose="rest"] .dog-eyes-open {
+    opacity: 0;
+}
+.welcome-mascot[data-pose="rest"] .dog-eye-blink {
+    opacity: 1;
 }
 
-/* Bark: head pops forward one grid unit */
+.welcome-mascot[data-pose="bark"] .dog-drawing {
+    animation: dog-bark-bounce 260ms steps(1, end) 3 alternate;
+}
 .welcome-mascot[data-pose="bark"] .dog-head-group {
-    animation: dog-bark-head 200ms steps(1, end) 3 alternate;
+    animation: dog-bark-head 220ms steps(1, end) 3 alternate;
 }
 .welcome-mascot[data-pose="bark"] .dog-mouth-neutral {
     animation: dog-mouth-neutral-bark 320ms steps(1, end) infinite;
@@ -255,80 +300,124 @@ body {
 }
 .welcome-mascot[data-pose="bark"] .dog-bark-lines rect {
     opacity: 1;
-    animation: dog-bark-line 400ms steps(1, end) infinite;
+    animation: dog-bark-line 420ms steps(1, end) infinite;
 }
 .welcome-mascot[data-pose="bark"] .dog-tail {
-    animation: dog-tail-walk 300ms steps(1, end) infinite;
+    animation: dog-tail-walk 320ms steps(1, end) infinite;
+}
+.welcome-mascot[data-pose="bark"] .dog-ear-left,
+.welcome-mascot[data-pose="bark"] .dog-ear-right {
+    animation: dog-ear-perk 320ms steps(1, end) infinite alternate;
 }
 
-/* All keyframes use 8px grid increments only */
+.welcome-mascot[data-pose="pet"] .dog-drawing {
+    animation: dog-pet-bounce 320ms steps(1, end) 2;
+}
+.welcome-mascot[data-pose="pet"] .dog-tail {
+    animation: dog-tail-walk 220ms steps(1, end) infinite;
+}
+.welcome-mascot[data-pose="pet"] .dog-ear-right {
+    animation: dog-ear-twitch 1200ms steps(1, end) infinite;
+}
+
+.welcome-mascot[data-pose="dig"] .dog-drawing {
+    transform: translate(4px, 4px);
+}
+.welcome-mascot[data-pose="dig"] .dog-leg-front-group {
+    animation: dog-dig 360ms steps(1, end) infinite;
+}
+.welcome-mascot[data-pose="dig"] .dog-head-group {
+    transform: translate(4px, 8px);
+}
+.welcome-mascot[data-pose="dig"] .dog-tail {
+    animation: dog-tail-walk 360ms steps(1, end) infinite;
+}
+
+.welcome-mascot[data-pose="sit"] .dog-eyes-open,
+.welcome-mascot[data-pose="walk"] .dog-eyes-open,
+.welcome-mascot[data-pose="pet"] .dog-eyes-open {
+    animation: dog-eye-open-cycle 4800ms steps(1, end) infinite;
+}
+.welcome-mascot[data-pose="sit"] .dog-eye-blink,
+.welcome-mascot[data-pose="walk"] .dog-eye-blink,
+.welcome-mascot[data-pose="pet"] .dog-eye-blink {
+    animation: dog-eye-blink-cycle 4800ms steps(1, end) infinite;
+}
+
+@keyframes dog-idle-bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-4px); }
+}
 @keyframes dog-tail-sit {
-    0%, 100% { transform: translate(0, -8px); }
-    50% { transform: translate(0, 0); }
+    0%, 100% { transform: translate(0, -4px); }
+    50% { transform: translate(4px, 0); }
 }
 @keyframes dog-tail-walk {
-    0%, 100% { transform: translate(0, -8px); }
-    50% { transform: translate(0, 0); }
+    0%, 100% { transform: translate(0, -4px); }
+    50% { transform: translate(4px, 4px); }
 }
 @keyframes dog-front-step {
     0%, 100% { transform: translate(0, 0); }
-    50% { transform: translate(8px, -8px); }
+    50% { transform: translate(4px, -4px); }
 }
 @keyframes dog-back-step {
     0%, 100% { transform: translate(0, 0); }
-    50% { transform: translate(-8px, 0); }
+    50% { transform: translate(-4px, 4px); }
 }
 @keyframes dog-walk-bob {
     0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-8px); }
+    50% { transform: translateY(-4px); }
 }
 @keyframes dog-head-nod {
     0%, 100% { transform: translate(0, 0); }
-    50% { transform: translate(0, -8px); }
+    50% { transform: translate(4px, -4px); }
+}
+@keyframes dog-bark-bounce {
+    from { transform: translateY(0); }
+    to { transform: translateY(-4px); }
 }
 @keyframes dog-bark-head {
     from { transform: translate(0, 0); }
-    to { transform: translate(8px, -8px); }
+    to { transform: translate(8px, -4px); }
 }
 @keyframes dog-mouth-neutral-bark {
-    0%, 49% { opacity: 1; }
-    50%, 100% { opacity: 0; }
+    0%, 45% { opacity: 1; }
+    46%, 100% { opacity: 0; }
 }
 @keyframes dog-mouth-open-bark {
-    0%, 49% { opacity: 0; }
-    50%, 100% { opacity: 1; }
+    0%, 45% { opacity: 0; }
+    46%, 100% { opacity: 1; }
 }
 @keyframes dog-bark-line {
     0% { opacity: 0; transform: translateX(0); }
-    33% { opacity: 1; transform: translateX(0); }
-    66% { opacity: 1; transform: translateX(8px); }
-    100% { opacity: 0; transform: translateX(8px); }
-}
-/* Pet pose: bounce up one grid unit */
-.welcome-mascot[data-pose="pet"] .dog-drawing {
-    animation: dog-pet-bounce 300ms steps(1, end) 2;
-}
-.welcome-mascot[data-pose="pet"] .dog-tail {
-    animation: dog-tail-walk 200ms steps(1, end) infinite;
+    30% { opacity: 1; transform: translateX(0); }
+    65% { opacity: 1; transform: translateX(8px); }
+    100% { opacity: 0; transform: translateX(12px); }
 }
 @keyframes dog-pet-bounce {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-8px); }
 }
-
-/* Dig pose: front legs alternate digging into the ground */
-.welcome-mascot[data-pose="dig"] .dog-leg-front-group {
-    animation: dog-dig 500ms steps(1, end) infinite;
-}
-.welcome-mascot[data-pose="dig"] .dog-head-group {
-    transform: translate(0, 8px);
-}
-.welcome-mascot[data-pose="dig"] .dog-tail {
-    animation: dog-tail-walk 400ms steps(1, end) infinite;
-}
 @keyframes dog-dig {
     0%, 100% { transform: translate(0, 0); }
-    50% { transform: translate(8px, 8px); }
+    50% { transform: translate(8px, 4px); }
+}
+@keyframes dog-ear-twitch {
+    0%, 88%, 100% { transform: translateY(0); }
+    92% { transform: translateY(-4px); }
+    96% { transform: translateY(0); }
+}
+@keyframes dog-ear-perk {
+    from { transform: translateY(0); }
+    to { transform: translateY(-4px); }
+}
+@keyframes dog-eye-open-cycle {
+    0%, 92%, 100% { opacity: 1; }
+    94%, 98% { opacity: 0; }
+}
+@keyframes dog-eye-blink-cycle {
+    0%, 92%, 100% { opacity: 0; }
+    94%, 98% { opacity: 1; }
 }
 
 /* Bond reaction popup */
