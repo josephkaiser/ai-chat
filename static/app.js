@@ -222,6 +222,18 @@ function handleReasoningSelectChange(value) {
     deepMode = value === 'high';
     localStorage.setItem('deepMode', deepMode ? 'true' : 'false');
     syncReasoningSelector();
+    syncMobileReasoningBadge();
+}
+
+function toggleDeepModeMobile() {
+    handleReasoningSelectChange(deepMode ? 'low' : 'high');
+}
+
+function syncMobileReasoningBadge() {
+    const badge = document.getElementById('mobileReasoningBadge');
+    if (!badge) return;
+    badge.textContent = deepMode ? 'High' : 'Low';
+    badge.classList.toggle('is-high', deepMode);
 }
 
 function syncModelSelector() {
@@ -1247,68 +1259,52 @@ async function promoteWorkspaceFile(path) {
 function buildWelcomeMarkup() {
     return `<div class="welcome">
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
-                <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click for a bark." data-pose="sit">
-                    <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 160 144" role="img" aria-hidden="true">
+                <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click to pet." data-pose="sit">
+                    <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 128 112" role="img" aria-hidden="true">
                         <defs>
                             <style>
-                                .px-line { fill: color-mix(in srgb, var(--pet_secondary) 10%, transparent); }
-                                .px-bg0 { fill: color-mix(in srgb, #d9f3d0 72%, var(--pet_accent)); }
-                                .px-bg1 { fill: color-mix(in srgb, #b7d8ae 72%, var(--pet_accent)); }
-                                .px-bg2 { fill: color-mix(in srgb, #7f9f7b 70%, var(--pet_primary)); }
-                                .px-bg3 { fill: color-mix(in srgb, #4f6350 72%, var(--pet_secondary)); }
-                                .px-bg4 { fill: color-mix(in srgb, #2b332c 80%, var(--pet_secondary)); }
-                                .px-accent { fill: color-mix(in srgb, #e58f62 70%, var(--accent_primary)); }
+                                .px-bg0 { fill: color-mix(in srgb, var(--pet_accent) 80%, var(--bg_secondary)); }
+                                .px-bg2 { fill: color-mix(in srgb, var(--pet_primary) 60%, var(--pet_accent)); }
+                                .px-bg3 { fill: color-mix(in srgb, var(--pet_secondary) 50%, var(--pet_primary)); }
+                                .px-bg4 { fill: var(--pet_secondary); }
+                                .px-accent { fill: color-mix(in srgb, var(--accent_primary) 70%, var(--pet_primary)); }
                             </style>
                         </defs>
-                        <rect class="px-bg4" x="8" y="8" width="144" height="128" rx="8"></rect>
-                        <rect class="px-bg0" x="16" y="16" width="128" height="112" rx="4"></rect>
-                        <g class="lcd-grid" aria-hidden="true">
-                            <path class="px-line" d="M24 16h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1z"></path>
-                            <path class="px-line" d="M16 24h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16z"></path>
-                        </g>
-                        <g class="stage-ground" aria-hidden="true">
-                            <rect class="px-bg2" x="24" y="104" width="112" height="8"></rect>
-                            <rect class="px-bg3" x="24" y="112" width="112" height="8"></rect>
-                            <rect class="px-bg1" x="24" y="96" width="24" height="8"></rect>
-                            <rect class="px-bg1" x="72" y="96" width="16" height="8"></rect>
-                            <rect class="px-bg1" x="112" y="96" width="16" height="8"></rect>
-                        </g>
+                        <rect class="px-bg0" width="128" height="112" rx="4"/>
+                        <rect class="px-bg2" x="0" y="88" width="128" height="8"/>
+                        <rect class="px-bg3" x="0" y="96" width="128" height="16"/>
                         <g class="dog-drawing" shape-rendering="crispEdges">
                             <g class="dog-bark-lines" aria-hidden="true">
-                                <rect class="px-accent" x="120" y="40" width="8" height="8"></rect>
-                                <rect class="px-accent" x="128" y="48" width="8" height="8"></rect>
-                                <rect class="px-accent" x="120" y="56" width="8" height="8"></rect>
+                                <rect class="px-accent" x="96" y="24" width="8" height="8"/>
+                                <rect class="px-accent" x="104" y="32" width="8" height="8"/>
+                                <rect class="px-accent" x="96" y="40" width="8" height="8"/>
                             </g>
-                            <rect class="dog-shadow px-bg2" x="40" y="104" width="56" height="8"></rect>
-                            <rect class="dog-tail px-bg4" x="32" y="64" width="8" height="16"></rect>
-                            <rect class="dog-tail-tip px-bg3" x="32" y="56" width="8" height="8"></rect>
-                            <rect class="px-bg4" x="40" y="56" width="48" height="32"></rect>
-                            <rect class="px-bg3" x="48" y="64" width="32" height="16"></rect>
-                            <rect class="px-bg2" x="56" y="72" width="16" height="8"></rect>
+                            <rect class="dog-shadow px-bg2" x="24" y="88" width="56" height="8"/>
+                            <rect class="dog-tail px-bg4" x="16" y="48" width="8" height="16"/>
+                            <rect class="px-bg4" x="24" y="40" width="48" height="32"/>
+                            <rect class="px-bg3" x="32" y="48" width="32" height="16"/>
                             <g class="dog-head-group">
-                                <rect class="px-bg4" x="80" y="40" width="32" height="24"></rect>
-                                <rect class="px-bg3" x="88" y="48" width="16" height="8"></rect>
-                                <rect class="px-bg2" x="96" y="56" width="8" height="8"></rect>
-                                <rect class="dog-ear-left px-bg4" x="80" y="32" width="8" height="8"></rect>
-                                <rect class="dog-ear-right px-bg4" x="104" y="32" width="8" height="8"></rect>
-                                <rect class="px-bg4" x="88" y="48" width="8" height="8"></rect>
-                                <rect class="px-bg4" x="104" y="48" width="8" height="8"></rect>
-                                <rect class="dog-mouth-neutral px-bg4" x="104" y="56" width="8" height="8"></rect>
-                                <rect class="dog-mouth-bark px-accent" x="104" y="56" width="8" height="8"></rect>
-                                <rect class="px-accent" x="88" y="64" width="16" height="8"></rect>
+                                <rect class="px-bg4" x="64" y="24" width="24" height="24"/>
+                                <rect class="dog-ear-left px-bg4" x="64" y="16" width="8" height="8"/>
+                                <rect class="dog-ear-right px-bg4" x="80" y="16" width="8" height="8"/>
+                                <rect class="px-bg0" x="68" y="32" width="4" height="4"/>
+                                <rect class="px-bg0" x="80" y="32" width="4" height="4"/>
+                                <rect class="dog-mouth-neutral px-bg3" x="80" y="40" width="8" height="8"/>
+                                <rect class="dog-mouth-bark px-accent" x="80" y="40" width="8" height="8"/>
+                                <rect class="px-accent" x="68" y="48" width="16" height="8"/>
                             </g>
                             <g class="dog-leg-group dog-leg-back-group">
-                                <rect class="dog-leg dog-leg-back px-bg4" x="48" y="88" width="8" height="16"></rect>
-                                <rect class="dog-paw px-bg4" x="48" y="104" width="16" height="8"></rect>
+                                <rect class="px-bg4" x="32" y="72" width="8" height="16"/>
                             </g>
                             <g class="dog-leg-group dog-leg-front-group">
-                                <rect class="dog-leg dog-leg-front px-bg4" x="72" y="88" width="8" height="16"></rect>
-                                <rect class="dog-paw px-bg4" x="72" y="104" width="16" height="8"></rect>
+                                <rect class="px-bg4" x="56" y="72" width="8" height="16"/>
                             </g>
                         </g>
                     </svg>
+                    <span class="bond-reaction" id="bondReaction" hidden></span>
                 </button>
                 <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
+                <span class="bond-note" id="bondNote"></span>
             </div>
         </div>`;
 }
@@ -1320,49 +1316,110 @@ function destroyWelcomeMascot() {
     welcomeMascotRuntime = null;
 }
 
+let currentBond = { affection: 50, pets_today: 0, streak: 0, mood: 'content', capped: false, max_pets_per_day: 12 };
+
+function updateBondNote() {
+    const el = document.getElementById('bondNote');
+    if (!el) return;
+    const b = currentBond;
+    if (b.mood === 'happy') el.textContent = `Streak ${b.streak}d`;
+    else if (b.mood === 'content') el.textContent = b.streak > 0 ? `Streak ${b.streak}d` : '';
+    else if (b.mood === 'lonely') el.textContent = 'Lonely...';
+    else el.textContent = 'Neglected';
+}
+
+function getMoodCycle(mood) {
+    switch (mood) {
+        case 'happy': return { poses: ['walk', 'sit', 'bark', 'sit', 'walk', 'sit'], interval: 2800, durations: { walk: 1200, bark: 800 } };
+        case 'content': return { poses: ['sit', 'sit', 'walk', 'sit'], interval: 5000, durations: { walk: 1400 } };
+        case 'lonely': return { poses: ['rest', 'rest', 'sit', 'rest'], interval: 6000, durations: { sit: 2000 } };
+        case 'neglected': return { poses: ['dig', 'rest', 'dig', 'rest', 'rest'], interval: 4500, durations: { dig: 1800 } };
+        default: return { poses: ['sit'], interval: 5000, durations: {} };
+    }
+}
+
+async function loadBondState() {
+    try {
+        const resp = await fetch('/api/pet/bond');
+        if (resp.ok) currentBond = await resp.json();
+    } catch (e) { /* offline */ }
+    updateBondNote();
+}
+
+function showBondReaction(text) {
+    const el = document.getElementById('bondReaction');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = false;
+    el.classList.remove('pop');
+    void el.offsetWidth;
+    el.classList.add('pop');
+    setTimeout(() => { el.hidden = true; }, 900);
+}
+
 function initWelcomeMascot() {
     destroyWelcomeMascot();
 
     const mascot = document.querySelector('.welcome-mascot');
     if (!mascot) return;
-    const cycle = ['walk', 'sit', 'walk', 'rest'];
-    let cycleIndex = 0;
 
-    const setPose = (pose) => {
-        mascot.dataset.pose = pose;
-    };
+    const runtime = { cycleTimer: null, poseTimer: null, cycleIndex: 0, petting: false };
 
-    const runtime = {
-        cycleTimer: null,
-        poseTimer: null,
-    };
+    const setPose = (pose) => { mascot.dataset.pose = pose; };
 
     const queuePose = (pose, duration, nextPose = 'sit') => {
         window.clearTimeout(runtime.poseTimer);
         setPose(pose);
         if (duration) {
-            runtime.poseTimer = window.setTimeout(() => {
-                setPose(nextPose);
-            }, duration);
+            runtime.poseTimer = window.setTimeout(() => setPose(nextPose), duration);
         }
     };
 
-    mascot.addEventListener('click', () => {
-        queuePose('bark', 1200, 'sit');
-        cycleIndex = 1;
-    });
-    mascot.addEventListener('pointerenter', () => queuePose('walk', 1500, 'sit'));
-    mascot.addEventListener('focus', () => queuePose('sit'));
+    function startCycle() {
+        window.clearInterval(runtime.cycleTimer);
+        const mc = getMoodCycle(currentBond.mood);
+        runtime.cycleIndex = 0;
+        runtime.cycleTimer = window.setInterval(() => {
+            if (runtime.petting) return;
+            const pose = mc.poses[runtime.cycleIndex % mc.poses.length];
+            runtime.cycleIndex++;
+            const dur = mc.durations[pose] || mc.interval * 0.6;
+            queuePose(pose, dur, currentBond.mood === 'lonely' || currentBond.mood === 'neglected' ? 'rest' : 'sit');
+        }, mc.interval);
+    }
 
-    runtime.cycleTimer = window.setInterval(() => {
-        if (mascot.dataset.pose === 'bark') return;
-        const nextPose = cycle[cycleIndex % cycle.length];
-        cycleIndex += 1;
-        queuePose(nextPose, nextPose === 'rest' ? 2800 : 1800, 'sit');
-    }, 4200);
+    mascot.addEventListener('click', async () => {
+        runtime.petting = true;
+        if (currentBond.capped) {
+            queuePose('bark', 800, 'sit');
+            showBondReaction('Full!');
+            setTimeout(() => { runtime.petting = false; }, 1000);
+            return;
+        }
+        queuePose('pet', 600, 'bark');
+        try {
+            const resp = await fetch('/api/pet/bond/pet', { method: 'POST' });
+            if (resp.ok) {
+                const prev = currentBond.mood;
+                currentBond = await resp.json();
+                updateBondNote();
+                showBondReaction(currentBond.capped ? 'Full!' : '+');
+                if (currentBond.mood !== prev) startCycle();
+            }
+        } catch (e) { /* offline */ }
+        setTimeout(() => {
+            runtime.petting = false;
+            queuePose('sit', 0);
+        }, 1200);
+    });
+
+    loadBondState().then(() => {
+        const defaultPose = currentBond.mood === 'lonely' || currentBond.mood === 'neglected' ? 'rest' : 'sit';
+        setPose(defaultPose);
+        startCycle();
+    });
 
     welcomeMascotRuntime = runtime;
-    setPose('sit');
 }
 
 // ==================== Chat ====================
@@ -4092,6 +4149,7 @@ connectWS();
 loadPet();
 loadConversations();
 applyFeatureSettingsToUI();
+syncMobileReasoningBadge();
 refreshVoiceRuntime();
 loadComposerRuntime();
 refreshWorkspace(true);

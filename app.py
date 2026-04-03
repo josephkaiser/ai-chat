@@ -883,6 +883,132 @@ def feed_pet(kind: str = "snack", note: str = "", source_run_id: Optional[str] =
     return load_pet_profile()
 
 
+BOND_MAX_PETS_PER_DAY = 12
+BOND_AFFECTION_PER_PET = 3
+BOND_DAILY_DECAY = 8
+BOND_MAX_AFFECTION = 100
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _bond_mood(affection: int, streak: int) -> str:
+    if affection >= 70 and streak >= 3:
+        return "happy"
+    if affection >= 40:
+        return "content"
+    if affection >= 15:
+        return "lonely"
+    return "neglected"
+
+
+def get_pet_bond() -> Dict[str, Any]:
+    """Load bond state, apply daily decay, and persist."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        'SELECT affection, pets_today, last_pet_date, streak, last_visit_date FROM pet_profile WHERE id = 1'
+    )
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {"affection": 50, "pets_today": 0, "streak": 0, "mood": "content",
+                "max_pets_per_day": BOND_MAX_PETS_PER_DAY, "capped": False}
+
+    affection, pets_today, last_pet_date, streak, last_visit_date = (
+        int(row[0] or 50), int(row[1] or 0), row[2], int(row[3] or 0), row[4],
+    )
+    today = _today_str()
+    changed = False
+
+    # Reset daily pet count if new day
+    if last_pet_date != today:
+        pets_today = 0
+        changed = True
+
+    # Apply decay for missed days
+    if last_visit_date and last_visit_date != today:
+        try:
+            last_dt = datetime.strptime(last_visit_date, "%Y-%m-%d")
+            days_away = (datetime.strptime(today, "%Y-%m-%d") - last_dt).days
+        except ValueError:
+            days_away = 1
+        if days_away > 0:
+            affection = max(0, affection - BOND_DAILY_DECAY * days_away)
+            changed = True
+        if days_away > 1:
+            streak = 0
+            changed = True
+
+    if last_visit_date != today:
+        last_visit_date = today
+        changed = True
+
+    if changed:
+        conn.execute(
+            '''UPDATE pet_profile
+               SET affection = ?, pets_today = ?, streak = ?, last_visit_date = ?, updated_at = ?
+               WHERE id = 1''',
+            (affection, pets_today, streak, today, utcnow_iso()),
+        )
+        conn.commit()
+    conn.close()
+
+    return {
+        "affection": affection,
+        "pets_today": pets_today,
+        "streak": streak,
+        "mood": _bond_mood(affection, streak),
+        "max_pets_per_day": BOND_MAX_PETS_PER_DAY,
+        "capped": pets_today >= BOND_MAX_PETS_PER_DAY,
+    }
+
+
+def register_pet_action() -> Dict[str, Any]:
+    """Record a single petting interaction."""
+    bond = get_pet_bond()
+    if bond["capped"]:
+        return bond
+
+    today = _today_str()
+    affection = min(BOND_MAX_AFFECTION, bond["affection"] + BOND_AFFECTION_PER_PET)
+    pets_today = bond["pets_today"] + 1
+    streak = bond["streak"]
+
+    conn = sqlite3.connect(DB_PATH)
+    # Advance streak if first pet of the day
+    c = conn.cursor()
+    c.execute('SELECT last_pet_date FROM pet_profile WHERE id = 1')
+    row = c.fetchone()
+    last_pet_date = row[0] if row else None
+    if last_pet_date != today:
+        streak += 1
+
+    conn.execute(
+        '''UPDATE pet_profile
+           SET affection = ?, pets_today = ?, last_pet_date = ?, streak = ?,
+               last_visit_date = ?, updated_at = ?
+           WHERE id = 1''',
+        (affection, pets_today, today, streak, today, utcnow_iso()),
+    )
+    conn.execute(
+        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
+        ("petted", json.dumps({"affection": affection, "streak": streak, "pets_today": pets_today}), utcnow_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "affection": affection,
+        "pets_today": pets_today,
+        "streak": streak,
+        "mood": _bond_mood(affection, streak),
+        "max_pets_per_day": BOND_MAX_PETS_PER_DAY,
+        "capped": pets_today >= BOND_MAX_PETS_PER_DAY,
+    }
+
+
 def list_pet_memories(limit: int = 200) -> List[Dict[str, Any]]:
     """Return stored long-term memories for the pet."""
     conn = sqlite3.connect(DB_PATH)
@@ -2534,6 +2660,11 @@ def init_db():
             'ALTER TABLE pet_profile ADD COLUMN llm_frequency_penalty REAL NOT NULL DEFAULT 0.2',
             'ALTER TABLE pet_profile ADD COLUMN llm_presence_penalty REAL NOT NULL DEFAULT 0.15',
             'ALTER TABLE pet_profile ADD COLUMN llm_max_tokens INTEGER NOT NULL DEFAULT 4096',
+            'ALTER TABLE pet_profile ADD COLUMN affection INTEGER NOT NULL DEFAULT 50',
+            'ALTER TABLE pet_profile ADD COLUMN pets_today INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE pet_profile ADD COLUMN last_pet_date TEXT',
+            'ALTER TABLE pet_profile ADD COLUMN streak INTEGER NOT NULL DEFAULT 0',
+            'ALTER TABLE pet_profile ADD COLUMN last_visit_date TEXT',
         ):
             try:
                 c.execute(statement)
@@ -3401,6 +3532,18 @@ async def delete_capability(capability_id: int):
     if not delete_pet_capability_record(capability_id):
         raise HTTPException(status_code=404, detail="Capability not found")
     return {"status": "success"}
+
+@app.get("/api/pet/bond")
+async def get_bond():
+    ensure_default_agent_profile()
+    return get_pet_bond()
+
+
+@app.post("/api/pet/bond/pet")
+async def pet_the_dog():
+    ensure_default_agent_profile()
+    return register_pet_action()
+
 
 @app.get("/api/conversations")
 async def get_conversations():
