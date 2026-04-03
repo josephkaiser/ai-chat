@@ -1744,7 +1744,12 @@ function connectWS() {
     };
 
     ws.onmessage = (event) => {
-        handleChatEvent(JSON.parse(event.data));
+        const data = JSON.parse(event.data);
+        if (data.type === 'ping') {
+            ws.send(JSON.stringify({ type: 'pong' }));
+            return;
+        }
+        handleChatEvent(data);
     };
 
     ws.onerror = () => {
@@ -6125,6 +6130,23 @@ setTimeout(() => {
         startHealthPolling();
     });
 }, 1000);
+
+// Safety-net: if the UI is stuck in a non-connected state for more than a few
+// seconds, re-check health and restart polling if needed.  This covers edge
+// cases where the one-shot health checks and WS-triggered polls all missed the
+// model becoming available (e.g. WS idle-disconnect race, transient fetch
+// failures, or applyModelRuntime overwriting a ready state with stale data).
+setInterval(() => {
+    if (modelAvailable) return;
+    fetch('/health').then(r => r.json()).then(health => {
+        if (health.model_available) {
+            updateStatus('connected');
+            loadComposerRuntime();
+        } else if (!healthPollInterval) {
+            startHealthPolling();
+        }
+    }).catch(() => {});
+}, 10000);
 
 const _input = document.getElementById('input');
 if (_input) {
