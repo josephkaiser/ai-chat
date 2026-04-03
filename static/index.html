@@ -78,7 +78,7 @@
         <div class="settings-panel" onclick="event.stopPropagation()">
             <div class="panel-header settings-header">
                 <div class="settings-heading">
-                    <span class="settings-eyebrow">Workspace Preferences</span>
+                    <span class="settings-eyebrow">Preferences</span>
                     <span id="settingsTitle">Settings</span>
                 </div>
                 <button onclick="closeSettings()" aria-label="Close settings">&times;</button>
@@ -86,146 +86,137 @@
             <div class="settings-content">
                 <div class="settings-view" id="settingsMainView">
                     <div class="settings-intro">
-                        <p>Dial in the look, voice behavior, and how much room the agent gets to work without leaving the chat.</p>
+                        <p>Adjust appearance, workspace behavior, voice playback, and local data from one place.</p>
                     </div>
-                    <div class="settings-action-grid">
-                        <button class="settings-entry" onclick="toggleTheme()">
-                            <span class="settings-entry-copy">
-                                <span class="settings-entry-label">Appearance</span>
-                                <span class="settings-entry-note">Switch between light and dark presentation.</span>
-                            </span>
-                            <span class="settings-entry-meta" id="themeIcon">Light</span>
-                        </button>
-                        <button class="settings-entry" onclick="closeSettings(); openSystemPromptEditor()">
-                            <span class="settings-entry-copy">
-                                <span class="settings-entry-label">System Prompt</span>
-                                <span class="settings-entry-note">Tune the assistant&rsquo;s default behavior and response style.</span>
-                            </span>
-                            <span class="settings-entry-meta">Edit</span>
-                        </button>
-                        <button class="settings-entry" onclick="showAboutPage()">
-                            <span class="settings-entry-copy">
-                                <span class="settings-entry-label">About Wolfy</span>
-                                <span class="settings-entry-note">Read the project intent and the philosophy behind the UI.</span>
-                            </span>
-                            <span class="settings-entry-meta">Read</span>
-                        </button>
-                    </div>
-                    <div class="settings-layout">
-                        <section class="settings-section settings-section-voice">
-                            <div class="settings-section-title">Voice</div>
-                            <label class="settings-toggle">
-                                <span class="settings-toggle-copy">
-                                    <span class="settings-toggle-label">Auto-Speak Replies</span>
-                                    <span class="settings-toggle-note">Read assistant replies aloud on supported browsers.</span>
+                    <section class="settings-sheet" aria-label="Settings">
+                        <div class="settings-group">
+                            <div class="settings-group-title">General</div>
+                            <button class="settings-row settings-row-button" onclick="toggleTheme()">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Appearance</span>
+                                    <span class="settings-row-note">Switch between light and dark presentation.</span>
                                 </span>
-                                <input type="checkbox" id="settingAutoSpeak" onchange="updateVoiceSetting('autoSpeakReplies', this.checked)">
+                                <span class="settings-row-meta" id="themeIcon">Light</span>
+                            </button>
+                            <button class="settings-row settings-row-button" onclick="closeSettings(); openSystemPromptEditor()">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">System Prompt</span>
+                                    <span class="settings-row-note">Tune the assistant&rsquo;s default behavior and response style.</span>
+                                </span>
+                                <span class="settings-row-meta">Edit</span>
+                            </button>
+                        </div>
+                        <div class="settings-group">
+                            <div class="settings-group-title">Features</div>
+                            <label class="settings-row settings-row-check">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Agent Dev Tools</span>
+                                    <span class="settings-row-note">Let the agent inspect files, create artifacts, edit workspace code, and run commands to self-check its work.</span>
+                                </span>
+                                <input class="settings-check" type="checkbox" id="settingAgentTools" onchange="updateFeatureSetting('agent_tools', this.checked)">
                             </label>
-                            <div class="settings-control-card">
-                                <div class="settings-control-copy">
-                                    <span class="settings-toggle-label">Speech Speed</span>
-                                    <span class="settings-toggle-note">Choose a slower or faster playback pace for spoken replies.</span>
+                            <label class="settings-row settings-row-check">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Workspace Panel</span>
+                                    <span class="settings-row-note">Show the optional workspace browser so you can inspect files and artifacts the agent creates.</span>
+                                </span>
+                                <input class="settings-check" type="checkbox" id="settingWorkspacePanel" onchange="updateFeatureSetting('workspace_panel', this.checked)">
+                            </label>
+                            <label class="settings-row settings-row-check">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Local RAG</span>
+                                    <span class="settings-row-note">Search the current conversation when a prompt needs recall or local context.</span>
+                                </span>
+                                <input class="settings-check" type="checkbox" id="settingLocalRag" onchange="updateFeatureSetting('local_rag', this.checked)">
+                            </label>
+                            <label class="settings-row settings-row-check">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Web Search</span>
+                                    <span class="settings-row-note">Allow optional current-web lookups for freshness-sensitive questions.</span>
+                                </span>
+                                <input class="settings-check" type="checkbox" id="settingWebSearch" onchange="updateFeatureSetting('web_search', this.checked)">
+                            </label>
+                        </div>
+                        <div class="settings-group">
+                            <div class="settings-group-title">Voice</div>
+                            <label class="settings-row settings-row-check">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Auto-Speak Replies</span>
+                                    <span class="settings-row-note">Read assistant replies aloud on supported browsers.</span>
+                                </span>
+                                <input class="settings-check" type="checkbox" id="settingAutoSpeak" onchange="updateVoiceSetting('autoSpeakReplies', this.checked)">
+                            </label>
+                            <div class="settings-row settings-row-control">
+                                <div class="settings-row-copy">
+                                    <span class="settings-row-label">Speech Speed</span>
+                                    <span class="settings-row-note">Choose a slower or faster playback pace for spoken replies.</span>
                                 </div>
-                                <div class="speed-control" id="speechSpeedControl">
-                                    <div class="speed-control-labels" aria-hidden="true">
-                                        <span>Low</span>
-                                        <span>Med</span>
-                                        <span>Fast</span>
+                                <div class="settings-control-inline">
+                                    <div class="speed-control" id="speechSpeedControl">
+                                        <div class="speed-control-labels" aria-hidden="true">
+                                            <span>Low</span>
+                                            <span>Med</span>
+                                            <span>Fast</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            id="settingSpeechSpeed"
+                                            min="0"
+                                            max="6"
+                                            step="1"
+                                            list="speechSpeedTicks"
+                                            value="2"
+                                            oninput="updateSpeechSpeed(this.value)"
+                                            aria-label="Speech speed"
+                                        >
+                                        <datalist id="speechSpeedTicks">
+                                            <option value="0"></option>
+                                            <option value="1"></option>
+                                            <option value="2"></option>
+                                            <option value="3"></option>
+                                            <option value="4"></option>
+                                            <option value="5"></option>
+                                            <option value="6"></option>
+                                        </datalist>
+                                        <div class="speed-control-scale" aria-hidden="true">
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                            <span></span>
+                                        </div>
+                                        <div class="speed-control-readout" id="speechSpeedReadout">Medium</div>
                                     </div>
-                                    <input
-                                        type="range"
-                                        id="settingSpeechSpeed"
-                                        min="0"
-                                        max="6"
-                                        step="1"
-                                        list="speechSpeedTicks"
-                                        value="2"
-                                        oninput="updateSpeechSpeed(this.value)"
-                                        aria-label="Speech speed"
-                                    >
-                                    <datalist id="speechSpeedTicks">
-                                        <option value="0"></option>
-                                        <option value="1"></option>
-                                        <option value="2"></option>
-                                        <option value="3"></option>
-                                        <option value="4"></option>
-                                        <option value="5"></option>
-                                        <option value="6"></option>
-                                    </datalist>
-                                    <div class="speed-control-scale" aria-hidden="true">
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                    </div>
-                                    <div class="speed-control-readout" id="speechSpeedReadout">Medium</div>
                                 </div>
                             </div>
-                        </section>
-                        <section class="settings-section settings-section-features">
-                            <div class="settings-section-title">Features</div>
-                            <div class="settings-toggle-grid">
-                                <label class="settings-toggle">
-                                    <span class="settings-toggle-copy">
-                                        <span class="settings-toggle-label">Agent Dev Tools</span>
-                                        <span class="settings-toggle-note">Let the agent inspect files, create artifacts, edit workspace code, and run commands to self-check its work.</span>
-                                    </span>
-                                    <input type="checkbox" id="settingAgentTools" onchange="updateFeatureSetting('agent_tools', this.checked)">
-                                </label>
-                                <label class="settings-toggle">
-                                    <span class="settings-toggle-copy">
-                                        <span class="settings-toggle-label">Workspace Panel</span>
-                                        <span class="settings-toggle-note">Show the optional workspace browser so you can inspect files and artifacts the agent creates.</span>
-                                    </span>
-                                    <input type="checkbox" id="settingWorkspacePanel" onchange="updateFeatureSetting('workspace_panel', this.checked)">
-                                </label>
-                                <label class="settings-toggle">
-                                    <span class="settings-toggle-copy">
-                                        <span class="settings-toggle-label">Local RAG</span>
-                                        <span class="settings-toggle-note">Search the current conversation when a prompt needs recall or local context.</span>
-                                    </span>
-                                    <input type="checkbox" id="settingLocalRag" onchange="updateFeatureSetting('local_rag', this.checked)">
-                                </label>
-                                <label class="settings-toggle">
-                                    <span class="settings-toggle-copy">
-                                        <span class="settings-toggle-label">Web Search</span>
-                                        <span class="settings-toggle-note">Allow optional current-web lookups for freshness-sensitive questions.</span>
-                                    </span>
-                                    <input type="checkbox" id="settingWebSearch" onchange="updateFeatureSetting('web_search', this.checked)">
-                                </label>
-                            </div>
-                        </section>
-                        <section class="settings-section settings-danger-zone settings-section-wide">
-                            <div class="settings-section-title">Danger Zone</div>
-                            <div class="settings-danger-row">
-                                <div class="settings-danger-copy">
-                                    <div class="settings-toggle-label">Reset App Data</div>
-                                    <div class="settings-toggle-note">Delete all chats, workspaces, installed workspace packages, artifacts, pet memory, and saved browser preferences to return to a fresh base state.</div>
+                        </div>
+                        <div class="settings-group">
+                            <div class="settings-group-title">About Wolfy</div>
+                            <div class="settings-about">
+                                <div class="settings-about-aside">
+                                    <div class="settings-about-heading">Why Wolfy exists</div>
+                                    <div class="settings-about-signoff">Joseph Kaiser</div>
                                 </div>
-                                <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">
-                                    <span class="settings-icon">&#128465;</span>
-                                    <span>Delete All Data</span>
-                                </button>
+                                <div class="settings-about-copy">
+                                    <p>Thank you for trying Wolfy. It means you are part of a small group willing to set up an obscure repository in 2026 after AI-powered development exploded.</p>
+                                    <p>The project is meant to be enjoyable to use, honest about what it is, respectful of the user, and economical with hardware while still being genuinely useful.</p>
+                                    <p>If you run into bugs or have ideas to improve it, please post an issue on GitHub. Your attention and contributions are incredibly valuable.</p>
+                                </div>
                             </div>
-                        </section>
-                    </div>
-                </div>
-                <div class="settings-view settings-view-hidden" id="settingsAboutView">
-                    <button class="settings-back" onclick="showSettingsHome()">
-                        <span class="settings-back-arrow" aria-hidden="true">&#8592;</span>
-                        <span>Back to settings</span>
-                    </button>
-                    <div class="about-card">
-                        <div class="about-eyebrow">From the author</div>
-                        <h2>Hi there, dear user!</h2>
-                        <p>I cannot thank you enough for trying Wolfy. It means you are a select few who have the hardware and gumption to set up some obscure repository built in 2026 when AI-powered development has exploded.</p>
-                        <p>Thank you for spending time with this project. I hope you enjoy using it and that it helps you do your best work. I have created it with the intent of being a joyful tool to use, one that does not pretend to be more than what it is, that does not antagonize the user or work against the user, and that is economical with the hardware to accomplish useful tasks.</p>
-                        <p>If you run into bugs or have ideas to improve it, please feel free to post issues on GitHub. Your attention and contributions are incredibly valuable.</p>
-                        <p>Joseph Kaiser</p>
-                    </div>
+                        </div>
+                        <div class="settings-group settings-group-danger">
+                            <div class="settings-group-title">Data</div>
+                            <div class="settings-row settings-row-danger">
+                                <div class="settings-row-copy">
+                                    <span class="settings-row-label">Reset App Data</span>
+                                    <span class="settings-row-note">Delete all chats, workspaces, installed workspace packages, artifacts, pet memory, and saved browser preferences to return to a fresh base state.</span>
+                                </div>
+                                <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">Delete All Data</button>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
         </div>
@@ -245,118 +236,15 @@
                     <div class="welcome">
                         <div class="welcome-brand" aria-label="{{ app_title }}">
                             <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
-                                <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 192 160" role="img" aria-hidden="true">
-                                    <rect class="dog-shadow px-shadow" x="52" y="136" width="80" height="4"/>
-                                    <rect class="dog-shadow px-shadow" x="48" y="140" width="88" height="4"/>
-                                    <g class="dog-drawing" shape-rendering="crispEdges">
-                                        <g class="dog-bark-lines" aria-hidden="true">
-                                            <rect class="px-bark" x="156" y="32" width="4" height="12"/>
-                                            <rect class="px-bark" x="164" y="40" width="4" height="12"/>
-                                            <rect class="px-bark" x="156" y="52" width="4" height="8"/>
-                                        </g>
-                                        <g class="dog-tail">
-                                            <rect class="px-outline" x="32" y="92" width="8" height="8"/>
-                                            <rect class="px-outline" x="40" y="88" width="12" height="8"/>
-                                            <rect class="px-outline" x="52" y="84" width="12" height="8"/>
-                                            <rect class="px-outline" x="64" y="80" width="12" height="8"/>
-                                            <rect class="px-outline" x="56" y="92" width="8" height="4"/>
-                                            <rect class="px-fur-dark" x="36" y="92" width="4" height="4"/>
-                                            <rect class="px-fur-mid" x="44" y="88" width="8" height="4"/>
-                                            <rect class="px-fur-light" x="56" y="84" width="8" height="8"/>
-                                            <rect class="px-fur-light" x="68" y="80" width="4" height="8"/>
-                                        </g>
-                                        <g class="dog-leg-group dog-leg-back-group">
-                                            <rect class="px-outline" x="56" y="96" width="12" height="12"/>
-                                            <rect class="px-outline" x="60" y="108" width="12" height="4"/>
-                                            <rect class="px-outline" x="60" y="112" width="12" height="12"/>
-                                            <rect class="px-outline" x="56" y="124" width="16" height="4"/>
-                                            <rect class="px-fur-mid" x="60" y="100" width="4" height="8"/>
-                                            <rect class="px-fur-dark" x="64" y="112" width="4" height="8"/>
-                                            <rect class="px-fur-light" x="60" y="124" width="8" height="4"/>
-                                            <rect class="px-outline" x="72" y="100" width="12" height="12"/>
-                                            <rect class="px-outline" x="76" y="112" width="12" height="12"/>
-                                            <rect class="px-outline" x="72" y="124" width="16" height="4"/>
-                                            <rect class="px-fur-dark" x="76" y="104" width="4" height="8"/>
-                                            <rect class="px-fur-mid" x="80" y="112" width="4" height="8"/>
-                                            <rect class="px-fur-light" x="76" y="124" width="8" height="4"/>
-                                        </g>
-                                        <g class="dog-body-group">
-                                            <rect class="px-outline" x="68" y="76" width="48" height="4"/>
-                                            <rect class="px-outline" x="60" y="80" width="60" height="4"/>
-                                            <rect class="px-outline" x="56" y="84" width="64" height="4"/>
-                                            <rect class="px-outline" x="52" y="88" width="68" height="8"/>
-                                            <rect class="px-outline" x="56" y="96" width="60" height="8"/>
-                                            <rect class="px-outline" x="64" y="104" width="44" height="4"/>
-                                            <rect class="px-fur-dark" x="72" y="80" width="36" height="4"/>
-                                            <rect class="px-fur-mid" x="60" y="84" width="52" height="12"/>
-                                            <rect class="px-fur-mid" x="64" y="96" width="40" height="4"/>
-                                            <rect class="px-fur-light" x="84" y="80" width="16" height="8"/>
-                                            <rect class="px-fur-light" x="96" y="84" width="8" height="12"/>
-                                            <rect class="px-cream" x="72" y="84" width="20" height="20"/>
-                                            <rect class="px-fur-light" x="68" y="104" width="24" height="4"/>
-                                        </g>
-                                        <g class="dog-head-group">
-                                            <g class="dog-ear-left">
-                                                <rect class="px-outline" x="108" y="36" width="8" height="8"/>
-                                                <rect class="px-outline" x="112" y="32" width="8" height="8"/>
-                                                <rect class="px-ear" x="112" y="36" width="4" height="4"/>
-                                            </g>
-                                            <g class="dog-ear-right">
-                                                <rect class="px-outline" x="124" y="40" width="8" height="8"/>
-                                                <rect class="px-outline" x="128" y="36" width="8" height="8"/>
-                                                <rect class="px-ear" x="128" y="40" width="4" height="4"/>
-                                            </g>
-                                            <rect class="px-outline" x="108" y="40" width="16" height="4"/>
-                                            <rect class="px-outline" x="100" y="44" width="32" height="4"/>
-                                            <rect class="px-outline" x="96" y="48" width="44" height="8"/>
-                                            <rect class="px-outline" x="96" y="56" width="48" height="8"/>
-                                            <rect class="px-outline" x="100" y="64" width="40" height="4"/>
-                                            <rect class="px-outline" x="108" y="68" width="28" height="4"/>
-                                            <rect class="px-outline" x="112" y="72" width="24" height="4"/>
-                                            <rect class="px-fur-dark" x="108" y="44" width="16" height="4"/>
-                                            <rect class="px-fur-mid" x="100" y="48" width="32" height="12"/>
-                                            <rect class="px-fur-mid" x="100" y="60" width="28" height="4"/>
-                                            <rect class="px-fur-light" x="116" y="48" width="8" height="8"/>
-                                            <rect class="px-fur-light" x="108" y="52" width="8" height="4"/>
-                                            <rect class="px-fur-light" x="100" y="60" width="8" height="8"/>
-                                            <rect class="px-cream" x="124" y="56" width="16" height="8"/>
-                                            <rect class="px-cream" x="120" y="64" width="16" height="8"/>
-                                            <g class="dog-eyes-open">
-                                                <rect class="px-eye" x="116" y="56" width="8" height="8"/>
-                                                <rect class="px-eye-shine" x="120" y="56" width="4" height="4"/>
-                                            </g>
-                                            <g class="dog-eye-blink">
-                                                <rect class="px-eye" x="116" y="60" width="8" height="4"/>
-                                            </g>
-                                            <rect class="px-nose" x="136" y="60" width="4" height="4"/>
-                                            <rect class="px-nose" x="132" y="64" width="4" height="4"/>
-                                            <g class="dog-mouth-neutral">
-                                                <rect class="px-mouth" x="128" y="72" width="8" height="4"/>
-                                                <rect class="px-mouth" x="132" y="76" width="4" height="4"/>
-                                            </g>
-                                            <g class="dog-mouth-bark">
-                                                <rect class="px-nose" x="136" y="60" width="4" height="4"/>
-                                                <rect class="px-mouth" x="128" y="68" width="12" height="12"/>
-                                                <rect class="px-tongue" x="132" y="76" width="4" height="4"/>
-                                                <rect class="px-cream" x="124" y="80" width="12" height="4"/>
-                                            </g>
-                                        </g>
-                                        <g class="dog-leg-group dog-leg-front-group">
-                                            <rect class="px-outline" x="96" y="96" width="12" height="16"/>
-                                            <rect class="px-outline" x="96" y="112" width="12" height="12"/>
-                                            <rect class="px-outline" x="92" y="124" width="16" height="4"/>
-                                            <rect class="px-fur-mid" x="100" y="100" width="4" height="8"/>
-                                            <rect class="px-fur-dark" x="100" y="112" width="4" height="8"/>
-                                            <rect class="px-fur-light" x="96" y="124" width="8" height="4"/>
-                                            <rect class="px-outline" x="112" y="96" width="12" height="14"/>
-                                            <rect class="px-outline" x="112" y="110" width="12" height="14"/>
-                                            <rect class="px-outline" x="108" y="124" width="16" height="4"/>
-                                            <rect class="px-fur-light" x="116" y="100" width="4" height="8"/>
-                                            <rect class="px-fur-mid" x="116" y="110" width="4" height="10"/>
-                                            <rect class="px-fur-light" x="112" y="124" width="8" height="4"/>
-                                        </g>
-                                    </g>
-                                </svg>
+                                <span class="wolfy-stage" aria-hidden="true">
+                                    <span class="wolfy-shadow"></span>
+                                    <span class="wolfy-sprite"></span>
+                                    <span class="wolfy-bark-lines">
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                    </span>
+                                </span>
                                 <span class="bond-reaction" id="bondReaction" hidden></span>
                             </button>
                             <h1 class="welcome-title">{{ app_title }}</h1>
@@ -376,18 +264,26 @@
                         <div class="plan-approval-panel" id="planApprovalPanel" hidden>
                             <div class="plan-approval-header">
                                 <div>
-                                    <div class="plan-approval-title" id="planApprovalTitle">Plan</div>
-                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Review the next steps here. Keep it moving with a simple yes or no.</div>
+                                    <div class="plan-approval-title" id="planApprovalTitle">Build Steps</div>
+                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Press Enter from the prompt to start, or use Up Arrow there to revise these steps first.</div>
                                 </div>
                                 <button type="button" class="plan-approval-dismiss" id="planApprovalDismiss" onclick="dismissExecutionPlan()" aria-label="Dismiss execution plan">&times;</button>
                             </div>
-                            <pre class="plan-approval-summary" id="planApprovalSummary"></pre>
+                            <div class="plan-approval-editor" id="planApprovalEditor" hidden>
+                                <label class="plan-approval-editor-label" for="planApprovalDraft">Editable build steps</label>
+                                <textarea class="plan-approval-draft" id="planApprovalDraft" spellcheck="false" oninput="handleExecutionPlanDraftChange(this)" onkeydown="handleExecutionPlanDraftKeyDown(event)"></textarea>
+                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter here to start with the edited steps.</div>
+                            </div>
+                            <details class="plan-approval-reasoning" id="planApprovalReasoning" hidden>
+                                <summary>Reasoning for this turn</summary>
+                                <pre class="plan-approval-summary" id="planApprovalSummary"></pre>
+                            </details>
                             <div class="plan-approval-checklist" id="planApprovalChecklist" hidden>
                                 <ol class="plan-approval-steps" id="planApprovalSteps"></ol>
                             </div>
                             <div class="plan-approval-actions">
                                 <button type="button" class="plan-approval-button primary" id="planApprovalRunButton" onclick="approveExecutionPlan()">Yes, Start Step 1</button>
-                                <button type="button" class="plan-approval-button" id="planApprovalEditButton" onclick="editExecutionPlanDraft()">Copy To Composer</button>
+                                <button type="button" class="plan-approval-button" id="planApprovalResetButton" onclick="resetExecutionPlanDraft()">Reset Steps</button>
                             </div>
                         </div>
                         <div class="input-container" onclick="focusInput()">
@@ -395,12 +291,23 @@
                             <textarea id="input" placeholder="What can I help you with?" rows="3" onkeydown="handleKeyDown(event)" oninput="handleInputChange(this)"></textarea>
                             <div class="composer-footer" onclick="event.stopPropagation()">
                                 <div class="composer-actions">
-                                    <button id="attachButton" class="composer-control attach-toggle" onclick="openAttachmentPicker()" title="Attach files" aria-label="Attach files">+</button>
+                                    <button id="attachButton" class="composer-control attach-toggle" onclick="openAttachmentPicker()" title="Attach files" aria-label="Attach files">
+                                        <span class="composer-icon" aria-hidden="true">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M12 7v10"></path>
+                                                <path d="M7 12h10"></path>
+                                            </svg>
+                                        </span>
+                                    </button>
                                     <div class="model-select-wrap">
                                         <select id="modelSelect" class="composer-select" onchange="handleModelSelectChange(this.value)" aria-label="Select model">
                                             <option value="">Loading model...</option>
                                         </select>
-                                        <span class="model-select-caret" aria-hidden="true">▾</span>
+                                        <span class="model-select-caret" aria-hidden="true">
+                                            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M2.5 4.25 6 7.75l3.5-3.5"></path>
+                                            </svg>
+                                        </span>
                                     </div>
                                     <button id="dashboardButton" class="composer-control dashboard-toggle" onclick="showDashboard()" title="Open model dashboard" aria-label="Open model dashboard">Models</button>
                                     <div class="model-select-wrap">
@@ -408,12 +315,31 @@
                                             <option value="high">High</option>
                                             <option value="low">Low</option>
                                         </select>
-                                        <span class="model-select-caret" aria-hidden="true">▾</span>
+                                        <span class="model-select-caret" aria-hidden="true">
+                                            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M2.5 4.25 6 7.75l3.5-3.5"></path>
+                                            </svg>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="composer-actions composer-actions-right">
-                                    <button id="micButton" class="composer-control voice-toggle" onclick="toggleDictation()" title="Record audio" aria-label="Record audio">&#127908;</button>
-                                    <button id="send" onclick="handlePrimaryAction()" aria-label="Send message" title="Send message">&#10148;</button>
+                                    <button id="micButton" class="composer-control voice-toggle" onclick="toggleDictation()" title="Record audio" aria-label="Record audio">
+                                        <span class="composer-icon" aria-hidden="true">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                <rect x="9" y="4.5" width="6" height="10" rx="3"></rect>
+                                                <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0"></path>
+                                                <path d="M12 17v2.5"></path>
+                                                <path d="M9.5 19.5h5"></path>
+                                            </svg>
+                                        </span>
+                                    </button>
+                                    <button id="send" onclick="handlePrimaryAction()" aria-label="Send message" title="Send message">
+                                        <span class="composer-icon" aria-hidden="true">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>
+                                            </svg>
+                                        </span>
+                                    </button>
                                 </div>
                             </div>
                         </div>

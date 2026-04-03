@@ -82,10 +82,10 @@ let recordedChunks = [];
 let audioAttachmentUploadInFlight = false;
 let dictationStartedAt = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
-const SEND_BUTTON_ICON = '&#10148;';
-const STOP_BUTTON_ICON = '&#9632;';
-const MIC_BUTTON_ICON = '&#127908;';
-const MIC_ACTIVE_BUTTON_ICON = '&#9209;';
+const SEND_BUTTON_ICON = buildComposerIconMarkup('<path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>');
+const STOP_BUTTON_ICON = buildComposerIconMarkup('<rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.8"></rect>');
+const MIC_BUTTON_ICON = buildComposerIconMarkup('<rect x="9" y="4.5" width="6" height="10" rx="3"></rect><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0"></path><path d="M12 17v2.5"></path><path d="M9.5 19.5h5"></path>');
+const MIC_ACTIVE_BUTTON_ICON = buildComposerIconMarkup('<circle cx="12" cy="12" r="7.5"></circle><rect x="9.2" y="9.2" width="5.6" height="5.6" rx="1.2"></rect>');
 const MAX_PENDING_ATTACHMENTS = 8;
 const MIN_CHAT_SURFACE_WIDTH = 520;
 const CHAT_SURFACE_GAP_PX = 14;
@@ -246,6 +246,10 @@ voiceSettings = loadVoiceSettings();
 
 // ==================== Theme ====================
 
+function buildComposerIconMarkup(paths, viewBox = '0 0 24 24') {
+    return `<span class="composer-icon" aria-hidden="true"><svg viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg></span>`;
+}
+
 function applyTheme(mode) {
     const themes = window.THEMES || {};
     const colors = themes[mode] || themes.light || {};
@@ -368,9 +372,27 @@ function setModelNote(modelName) {
     if (modelName) window.MODEL_NAME = modelName;
 }
 
+function formatCompactModelName(modelName) {
+    const raw = String(modelName || '').trim();
+    if (!raw) return '';
+
+    let compact = raw.split('/').pop() || raw;
+    compact = compact.replace(/_/g, '-');
+    compact = compact.replace(/^meta-llama-/i, 'Llama-');
+    compact = compact.replace(/^meta-/i, '');
+    compact = compact.replace(/^deepseek-ai-/i, 'DeepSeek-');
+    compact = compact.replace(
+        /(?:-(?:instruct|instruction|chat|assistant|reasoning|thinking|preview|beta|distill|coder|it|awq(?:[-_a-z0-9]*)?|gptq(?:[-_a-z0-9]*)?|gguf|fp8|bf16|int4|int8|sft|rlhf))+$/ig,
+        '',
+    );
+    compact = compact.replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+    if (!compact) return '';
+    return compact.charAt(0).toUpperCase() + compact.slice(1);
+}
+
 function getProfileDisplayLabel(profile) {
     if (!profile || typeof profile !== 'object') return '';
-    return profile.display_label || profile.label || profile.key || '';
+    return formatCompactModelName(profile.name) || profile.display_label || profile.label || profile.key || '';
 }
 
 function getModelSelectDisabledReason(profiles = availableModelProfiles) {
@@ -420,19 +442,21 @@ function syncModelSelector() {
     if (!profiles.length) {
         const option = document.createElement('option');
         option.value = '';
-        option.textContent = modelSwitchInFlight ? 'Switching model...' : (window.MODEL_NAME || 'Loading model...');
+        option.textContent = modelSwitchInFlight
+            ? 'Switching model...'
+            : (formatCompactModelName(window.MODEL_NAME) || 'Loading model...');
         select.appendChild(option);
         select.disabled = true;
-        select.title = 'No model profiles available.';
+        select.title = window.MODEL_NAME || 'No model profiles available.';
         return;
     }
 
     profiles.forEach(profile => {
         const option = document.createElement('option');
         option.value = profile.key;
-        const status = profile.active ? 'Active' : (profile.selected ? 'Selected' : '');
         const displayLabel = getProfileDisplayLabel(profile);
-        option.textContent = status ? `${displayLabel} (${status})` : displayLabel;
+        option.textContent = displayLabel;
+        option.title = profile.name || displayLabel;
         select.appendChild(option);
     });
 
@@ -440,7 +464,8 @@ function syncModelSelector() {
         ? nextValue
         : (profiles.find(profile => profile.selected)?.key || profiles[0].key);
     select.disabled = Boolean(disabledReason);
-    select.title = disabledReason || 'Choose the active model profile.';
+    const selectedProfile = profiles.find(profile => profile.key === select.value);
+    select.title = disabledReason || selectedProfile?.name || 'Choose the active model profile.';
 }
 
 function extractProfileKey(profileValue) {
@@ -1349,7 +1374,7 @@ function connectWS() {
             replaceAssistantAnswer(data.content || '');
             recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
         } else if (data.type === 'plan_ready') {
-            storeExecutionPlan(data.plan || '', data.execute_prompt || '');
+            storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
             recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
         } else if (data.type === 'build_steps') {
             updateBuildSteps(data.steps || [], data.active_index ?? null, data.completed_count || 0);
@@ -1905,38 +1930,17 @@ async function dashActivateModel(modelId) {
 
 function showSettings() {
     syncFeatureControls();
-    showSettingsHome();
     document.getElementById('settingsOverlay').classList.add('show');
 }
 function closeSettings() {
     document.getElementById('settingsOverlay').classList.remove('show');
 }
 
-function showSettingsHome() {
-    const main = document.getElementById('settingsMainView');
-    const about = document.getElementById('settingsAboutView');
-    const title = document.getElementById('settingsTitle');
-    if (main) main.classList.remove('settings-view-hidden');
-    if (about) about.classList.add('settings-view-hidden');
-    if (title) title.textContent = 'Settings';
-}
-
-function showAboutPage() {
-    const main = document.getElementById('settingsMainView');
-    const about = document.getElementById('settingsAboutView');
-    const title = document.getElementById('settingsTitle');
-    if (main) main.classList.add('settings-view-hidden');
-    if (about) about.classList.remove('settings-view-hidden');
-    if (title) title.textContent = 'About';
-}
-
 function setResetButtonState(isBusy) {
     const button = document.getElementById('resetAppButton');
     if (!button) return;
     button.disabled = isBusy;
-    button.innerHTML = isBusy
-        ? '<span class="settings-icon">&#8635;</span><span>Resetting...</span>'
-        : '<span class="settings-icon">&#128465;</span><span>Delete All Data</span>';
+    button.textContent = isBusy ? 'Resetting...' : 'Delete All Data';
 }
 
 function deleteIndexedDbDatabase(name) {
@@ -2053,107 +2057,15 @@ function buildWelcomeMarkup() {
     return `<div class="welcome">
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
                 <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
-                    <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 192 160" role="img" aria-hidden="true">
-                        <rect class="dog-shadow px-shadow" x="52" y="136" width="80" height="4"/>
-                        <rect class="dog-shadow px-shadow" x="48" y="140" width="88" height="4"/>
-                        <g class="dog-drawing" shape-rendering="crispEdges">
-                            <g class="dog-bark-lines" aria-hidden="true">
-                                <rect class="px-bark" x="156" y="32" width="4" height="12"/>
-                                <rect class="px-bark" x="164" y="40" width="4" height="12"/>
-                                <rect class="px-bark" x="156" y="52" width="4" height="8"/>
-                            </g>
-                            <g class="dog-tail">
-                                <rect class="px-outline" x="40" y="80" width="8" height="8"/>
-                                <rect class="px-outline" x="48" y="76" width="8" height="8"/>
-                                <rect class="px-outline" x="56" y="72" width="8" height="12"/>
-                                <rect class="px-outline" x="64" y="68" width="8" height="12"/>
-                                <rect class="px-outline" x="72" y="64" width="4" height="12"/>
-                                <rect class="px-outline" x="60" y="84" width="4" height="12"/>
-                                <rect class="px-fur-dark" x="44" y="80" width="4" height="4"/>
-                                <rect class="px-fur-mid" x="52" y="76" width="4" height="8"/>
-                                <rect class="px-fur-light" x="60" y="72" width="4" height="12"/>
-                                <rect class="px-fur-light" x="68" y="68" width="4" height="8"/>
-                            </g>
-                            <g class="dog-body-group">
-                                <rect class="px-outline" x="68" y="76" width="40" height="4"/>
-                                <rect class="px-outline" x="60" y="80" width="52" height="4"/>
-                                <rect class="px-outline" x="56" y="84" width="60" height="4"/>
-                                <rect class="px-outline" x="52" y="88" width="64" height="8"/>
-                                <rect class="px-outline" x="56" y="96" width="56" height="8"/>
-                                <rect class="px-outline" x="64" y="104" width="40" height="4"/>
-                                <rect class="px-fur-dark" x="68" y="80" width="36" height="4"/>
-                                <rect class="px-fur-mid" x="60" y="84" width="48" height="12"/>
-                                <rect class="px-fur-mid" x="64" y="96" width="40" height="4"/>
-                                <rect class="px-fur-light" x="84" y="80" width="12" height="8"/>
-                                <rect class="px-cream" x="72" y="84" width="16" height="20"/>
-                                <rect class="px-fur-light" x="68" y="104" width="20" height="4"/>
-                            </g>
-                            <g class="dog-leg-group dog-leg-back-group">
-                                <rect class="px-outline" x="60" y="92" width="8" height="36"/>
-                                <rect class="px-outline" x="76" y="96" width="8" height="32"/>
-                                <rect class="px-fur-mid" x="64" y="96" width="4" height="24"/>
-                                <rect class="px-fur-dark" x="80" y="100" width="4" height="20"/>
-                                <rect class="px-outline" x="56" y="128" width="12" height="4"/>
-                                <rect class="px-outline" x="72" y="128" width="12" height="4"/>
-                                <rect class="px-fur-light" x="60" y="128" width="8" height="4"/>
-                                <rect class="px-fur-light" x="76" y="128" width="8" height="4"/>
-                            </g>
-                            <g class="dog-head-group">
-                                <g class="dog-ear-left">
-                                    <rect class="px-outline" x="116" y="28" width="8" height="16"/>
-                                    <rect class="px-outline" x="120" y="24" width="8" height="8"/>
-                                    <rect class="px-ear" x="120" y="32" width="4" height="8"/>
-                                </g>
-                                <g class="dog-ear-right">
-                                    <rect class="px-outline" x="132" y="32" width="8" height="12"/>
-                                    <rect class="px-outline" x="136" y="28" width="4" height="8"/>
-                                    <rect class="px-ear" x="132" y="36" width="4" height="4"/>
-                                </g>
-                                <rect class="px-outline" x="116" y="44" width="16" height="4"/>
-                                <rect class="px-outline" x="108" y="48" width="36" height="4"/>
-                                <rect class="px-outline" x="104" y="52" width="48" height="8"/>
-                                <rect class="px-outline" x="100" y="60" width="56" height="8"/>
-                                <rect class="px-outline" x="104" y="68" width="48" height="4"/>
-                                <rect class="px-outline" x="112" y="72" width="40" height="4"/>
-                                <rect class="px-fur-dark" x="116" y="48" width="16" height="4"/>
-                                <rect class="px-fur-mid" x="108" y="52" width="36" height="12"/>
-                                <rect class="px-fur-mid" x="104" y="64" width="40" height="4"/>
-                                <rect class="px-fur-light" x="124" y="52" width="8" height="8"/>
-                                <rect class="px-fur-light" x="116" y="56" width="12" height="4"/>
-                                <rect class="px-cream" x="136" y="60" width="16" height="8"/>
-                                <rect class="px-cream" x="132" y="68" width="16" height="8"/>
-                                <g class="dog-eyes-open">
-                                    <rect class="px-eye" x="124" y="60" width="8" height="8"/>
-                                    <rect class="px-eye-shine" x="128" y="60" width="4" height="4"/>
-                                </g>
-                                <g class="dog-eye-blink">
-                                    <rect class="px-eye" x="124" y="64" width="8" height="4"/>
-                                </g>
-                                <rect class="px-nose" x="148" y="64" width="4" height="4"/>
-                                <rect class="px-nose" x="144" y="68" width="4" height="4"/>
-                                <g class="dog-mouth-neutral">
-                                    <rect class="px-mouth" x="140" y="76" width="8" height="4"/>
-                                    <rect class="px-mouth" x="144" y="80" width="4" height="4"/>
-                                </g>
-                                <g class="dog-mouth-bark">
-                                    <rect class="px-nose" x="148" y="64" width="4" height="4"/>
-                                    <rect class="px-mouth" x="140" y="72" width="12" height="12"/>
-                                    <rect class="px-tongue" x="144" y="80" width="4" height="4"/>
-                                    <rect class="px-cream" x="136" y="84" width="12" height="4"/>
-                                </g>
-                            </g>
-                            <g class="dog-leg-group dog-leg-front-group">
-                                <rect class="px-outline" x="100" y="92" width="8" height="36"/>
-                                <rect class="px-outline" x="116" y="96" width="8" height="32"/>
-                                <rect class="px-fur-mid" x="104" y="96" width="4" height="24"/>
-                                <rect class="px-fur-dark" x="120" y="100" width="4" height="20"/>
-                                <rect class="px-outline" x="96" y="128" width="12" height="4"/>
-                                <rect class="px-outline" x="112" y="128" width="12" height="4"/>
-                                <rect class="px-fur-light" x="100" y="128" width="8" height="4"/>
-                                <rect class="px-fur-light" x="116" y="128" width="8" height="4"/>
-                            </g>
-                        </g>
-                    </svg>
+                    <span class="wolfy-stage" aria-hidden="true">
+                        <span class="wolfy-shadow"></span>
+                        <span class="wolfy-sprite"></span>
+                        <span class="wolfy-bark-lines">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </span>
+                    </span>
                     <span class="bond-reaction" id="bondReaction" hidden></span>
                 </button>
                 <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
@@ -2211,8 +2123,8 @@ function updateBondNote() {
 
 function getMoodCycle(mood) {
     switch (mood) {
-        case 'happy': return { poses: ['walk', 'sit', 'bark', 'sit', 'walk', 'sit'], interval: 2800, durations: { walk: 1200, bark: 800 } };
-        case 'content': return { poses: ['sit', 'sit', 'walk', 'sit'], interval: 5000, durations: { walk: 1400 } };
+        case 'happy': return { poses: ['walk', 'sit', 'jump', 'bark', 'sit', 'walk', 'sit'], interval: 2800, durations: { walk: 1200, bark: 800, jump: 600 } };
+        case 'content': return { poses: ['sit', 'sit', 'walk', 'jump', 'sit'], interval: 5000, durations: { walk: 1400, jump: 600 } };
         case 'lonely': return { poses: ['rest', 'rest', 'sit', 'rest'], interval: 6000, durations: { sit: 2000 } };
         case 'neglected': return { poses: ['dig', 'rest', 'dig', 'rest', 'rest'], interval: 4500, durations: { dig: 1800 } };
         default: return { poses: ['sit'], interval: 5000, durations: {} };
@@ -2345,6 +2257,85 @@ function focusInput() {
     if (input) input.focus();
 }
 
+function focusInputAtStart() {
+    const input = document.getElementById('input');
+    if (!input) return;
+    input.focus();
+    input.setSelectionRange(0, 0);
+}
+
+function normalizeExecutionPlanSteps(steps) {
+    if (!Array.isArray(steps)) return [];
+    return steps
+        .map(step => String(step || '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
+}
+
+function extractExecutionPlanStepsFromPrompt(executePrompt) {
+    const prompt = String(executePrompt || '');
+    if (!prompt) return [];
+    const match = prompt.match(/\nSteps:\n([\s\S]*?)(?:\n\nVerification:\n|$)/);
+    if (!match) return [];
+    return match[1]
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => line.replace(/^\d+[.)]?\s+/, '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
+}
+
+function formatExecutionPlanDraft(steps) {
+    return normalizeExecutionPlanSteps(steps)
+        .map((step, index) => `${index + 1}. ${step}`)
+        .join('\n');
+}
+
+function parseExecutionPlanDraft(value) {
+    return String(value || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => line.replace(/^[-*]\s+/, '').replace(/^\d+[.)]?\s+/, '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
+}
+
+function getExecutionPlanSourceSteps() {
+    return normalizeExecutionPlanSteps(
+        pendingExecutionPlan?.builderSteps?.length
+            ? pendingExecutionPlan.builderSteps
+            : extractExecutionPlanStepsFromPrompt(pendingExecutionPlan?.executePrompt || ''),
+    );
+}
+
+function getExecutionPlanDraftSteps() {
+    const draft = document.getElementById('planApprovalDraft');
+    if (draft) {
+        return parseExecutionPlanDraft(draft.value);
+    }
+    if (pendingExecutionPlan && typeof pendingExecutionPlan.draftText === 'string') {
+        return parseExecutionPlanDraft(pendingExecutionPlan.draftText);
+    }
+    return getExecutionPlanSourceSteps();
+}
+
+function hasExecutionPlanDraftChanges() {
+    const source = JSON.stringify(getExecutionPlanSourceSteps());
+    const draft = JSON.stringify(getExecutionPlanDraftSteps());
+    return source !== draft;
+}
+
+function focusExecutionPlanDraft(position = 'end') {
+    const draft = document.getElementById('planApprovalDraft');
+    if (!draft || draft.offsetParent === null) return false;
+    draft.focus();
+    const caretPosition = position === 'start' ? 0 : draft.value.length;
+    draft.setSelectionRange(caretPosition, caretPosition);
+    return true;
+}
+
 function syncInterveneButton() {
     const textarea = document.getElementById('interveneInput');
     const button = document.getElementById('interveneButton');
@@ -2374,11 +2365,12 @@ function syncSendButton() {
 
     send.innerHTML = SEND_BUTTON_ICON;
     send.classList.remove('is-stop');
-    send.setAttribute('aria-label', 'Send message');
-    send.title = 'Send message';
     const hasDraft = Boolean(input && input.value.trim());
     const hasPendingContent = hasDraft || pendingAttachments.length > 0;
-    send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !hasPendingContent;
+    const canApprovePlan = Boolean(pendingExecutionPlan?.executePrompt) && !hasPendingContent;
+    send.setAttribute('aria-label', canApprovePlan ? 'Approve plan and continue' : 'Send message');
+    send.title = canApprovePlan ? 'Approve plan and continue' : 'Send message';
+    send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !(hasPendingContent || canApprovePlan);
     syncModelSelector();
     syncInterveneButton();
     renderExecutionPlanApproval();
@@ -2948,12 +2940,15 @@ function renderExecutionPlanApproval() {
     const title = document.getElementById('planApprovalTitle');
     const subtitle = document.getElementById('planApprovalSubtitle');
     const dismissButton = document.getElementById('planApprovalDismiss');
+    const editor = document.getElementById('planApprovalEditor');
+    const draft = document.getElementById('planApprovalDraft');
+    const reasoning = document.getElementById('planApprovalReasoning');
     const summary = document.getElementById('planApprovalSummary');
     const checklist = document.getElementById('planApprovalChecklist');
     const checklistList = document.getElementById('planApprovalSteps');
     const actions = panel?.querySelector('.plan-approval-actions');
     const runButton = document.getElementById('planApprovalRunButton');
-    const editButton = document.getElementById('planApprovalEditButton');
+    const resetButton = document.getElementById('planApprovalResetButton');
     if (!panel || !summary || !checklist || !checklistList) return;
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
@@ -2961,16 +2956,32 @@ function renderExecutionPlanApproval() {
     panel.hidden = !hasPlan && !hasChecklist;
 
     if (title) {
-        title.textContent = hasChecklist ? 'Plan Progress' : 'Plan';
+        title.textContent = hasChecklist ? 'Plan Progress' : 'Build Steps';
     }
     if (subtitle) {
         subtitle.textContent = hasChecklist
             ? 'Working one step at a time. The assistant will pause between steps for a yes or no.'
-            : 'Review the next steps here. Keep it moving with a simple yes or no.';
+            : 'Press Enter from the prompt to start, or use Up Arrow there to revise these steps first.';
     }
 
-    summary.hidden = !hasPlan;
-    summary.textContent = hasPlan ? (pendingExecutionPlan.summary || 'Execution plan ready.') : '';
+    if (editor) {
+        editor.hidden = !hasPlan || hasChecklist;
+    }
+    if (draft) {
+        const nextDraftText = hasPlan ? String(pendingExecutionPlan?.draftText || '') : '';
+        if (draft.value !== nextDraftText) {
+            draft.value = nextDraftText;
+        }
+        if (!editor?.hidden) {
+            autoResizeTextarea(draft);
+        }
+    }
+
+    const hasSummary = Boolean(hasPlan && pendingExecutionPlan?.summary);
+    if (reasoning) {
+        reasoning.hidden = !hasSummary || hasChecklist;
+    }
+    summary.textContent = hasSummary ? pendingExecutionPlan.summary : '';
 
     checklist.hidden = !hasChecklist;
     checklistList.innerHTML = '';
@@ -2998,45 +3009,85 @@ function renderExecutionPlanApproval() {
     if (actions) {
         actions.hidden = !hasPlan;
     }
+    const hasEditableSteps = getExecutionPlanDraftSteps().length > 0;
     if (runButton) {
-        runButton.disabled = !hasPlan || isGenerating || !modelAvailable || !ws || ws.readyState !== WebSocket.OPEN;
+        runButton.disabled = !hasPlan || !hasEditableSteps || isGenerating || !modelAvailable || !ws || ws.readyState !== WebSocket.OPEN;
     }
-    if (editButton) {
-        editButton.disabled = !hasPlan;
+    if (resetButton) {
+        resetButton.disabled = !hasPlan || !hasExecutionPlanDraftChanges();
     }
 }
 
-function storeExecutionPlan(summary, executePrompt) {
+function handleExecutionPlanDraftChange(textarea) {
+    if (pendingExecutionPlan) {
+        pendingExecutionPlan.draftText = textarea.value;
+    }
+    autoResizeTextarea(textarea);
+    syncSendButton();
+}
+
+function handleExecutionPlanDraftKeyDown(event) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        focusInputAtStart();
+        return;
+    }
+    if (event.key === 'ArrowDown') {
+        const target = event.target;
+        const atEnd = (target.selectionStart ?? 0) === target.value.length && (target.selectionEnd ?? 0) === target.value.length;
+        if (atEnd) {
+            event.preventDefault();
+            focusInputAtStart();
+            return;
+        }
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        approveExecutionPlan();
+    }
+}
+
+function resetExecutionPlanDraft() {
+    if (!pendingExecutionPlan) return;
+    pendingExecutionPlan.draftText = formatExecutionPlanDraft(getExecutionPlanSourceSteps());
+    renderExecutionPlanApproval();
+    focusExecutionPlanDraft('end');
+    syncSendButton();
+}
+
+function storeExecutionPlan(summary, executePrompt, builderSteps = [], options = {}) {
     const cleanedPrompt = String(executePrompt || '').trim();
     if (!cleanedPrompt) return;
+    const normalizedBuilderSteps = normalizeExecutionPlanSteps(builderSteps);
     pendingExecutionPlan = {
         summary: String(summary || '').trim(),
         executePrompt: cleanedPrompt,
+        builderSteps: normalizedBuilderSteps.length ? normalizedBuilderSteps : extractExecutionPlanStepsFromPrompt(cleanedPrompt),
+        draftText: formatExecutionPlanDraft(
+            normalizedBuilderSteps.length ? normalizedBuilderSteps : extractExecutionPlanStepsFromPrompt(cleanedPrompt),
+        ),
     };
     renderExecutionPlanApproval();
+    syncSendButton();
+
+    if (options.focusComposer !== false) {
+        const input = document.getElementById('input');
+        const hasDraft = Boolean(input && input.value.trim());
+        if (!hasDraft && !pendingAttachments.length) {
+            focusInputAtStart();
+        }
+    }
 }
 
 function dismissExecutionPlan() {
     pendingExecutionPlan = null;
     renderExecutionPlanApproval();
-}
-
-function loadExecutionPlanDraft(executePrompt) {
-    const draft = String(executePrompt || '').trim();
-    const input = document.getElementById('input');
-    if (!draft || !input) return;
-    setInputValue(draft, draft.length);
-    focusInput();
-}
-
-function editExecutionPlanDraft() {
-    if (!pendingExecutionPlan?.executePrompt) return;
-    loadExecutionPlanDraft(pendingExecutionPlan.executePrompt);
-    recordWorkspaceActivity('Plan', 'Copied the execution draft into the composer.');
+    syncSendButton();
 }
 
 function approveExecutionPlan() {
-    if (!pendingExecutionPlan?.executePrompt || isGenerating || !ws || ws.readyState !== WebSocket.OPEN || !modelAvailable) {
+    const builderSteps = getExecutionPlanDraftSteps();
+    if (!pendingExecutionPlan?.executePrompt || !builderSteps.length || isGenerating || !ws || ws.readyState !== WebSocket.OPEN || !modelAvailable) {
         return;
     }
 
@@ -3064,6 +3115,7 @@ function approveExecutionPlan() {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: deepMode ? 'deep' : 'normal',
         features: turnFeatures,
+        plan_override_steps: builderSteps,
         slash_command: null,
     }));
 }
@@ -4571,6 +4623,10 @@ function handlePrimaryAction() {
         }
         return;
     }
+    if (!draft && !hasPendingAttachments && pendingExecutionPlan?.executePrompt) {
+        approveExecutionPlan();
+        return;
+    }
     sendMessage();
 }
 
@@ -4989,6 +5045,21 @@ function handleKeyDown(event) {
         return;
     }
 
+    if (
+        event.key === 'ArrowUp' &&
+        target?.id === 'input' &&
+        pendingExecutionPlan?.executePrompt &&
+        !buildSteps.length &&
+        target.value === '' &&
+        (target.selectionStart ?? 0) === 0 &&
+        (target.selectionEnd ?? 0) === 0
+    ) {
+        if (focusExecutionPlanDraft('end')) {
+            event.preventDefault();
+            return;
+        }
+    }
+
     if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         handlePrimaryAction();
@@ -5286,7 +5357,12 @@ async function loadConversation(id, options = {}) {
         if (msg.role === 'assistant') el.dataset.autoSpoken = 'true';
     });
     if (data.pending_plan?.execute_prompt) {
-        storeExecutionPlan(data.pending_plan.summary || '', data.pending_plan.execute_prompt || '');
+        storeExecutionPlan(
+            data.pending_plan.summary || '',
+            data.pending_plan.execute_prompt || '',
+            data.pending_plan.builder_steps || [],
+            { focusComposer: false },
+        );
     } else {
         dismissExecutionPlan();
     }
