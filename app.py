@@ -8307,7 +8307,7 @@ async def handle_direct_code_command(
         return (
             "I planned the code change, but write access was not granted for this turn.\n\n"
             f"{format_deep_plan_note(session.plan)}\n\n"
-            "Approve workspace edits and resend the execution draft to run it."
+            "Approve workspace edits and run the saved plan again, or copy the draft into the composer if you want to edit it first."
         )
 
     await deep_build_workspace(session)
