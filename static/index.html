@@ -7,6 +7,23 @@
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/keymap/vim.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/meta.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/mode/loadmode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/indent-fold.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/comment-fold.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -52,38 +69,263 @@
     <div class="overlay" id="settingsOverlay" onclick="closeSettings()">
         <div class="settings-panel" onclick="event.stopPropagation()">
             <div class="panel-header">
-                <span>Settings</span>
+                <span id="settingsTitle">Settings</span>
                 <button onclick="closeSettings()">&times;</button>
             </div>
             <div class="settings-content">
-                <button onclick="toggleTheme()">
-                    <span class="settings-icon" id="themeIcon">&#127769;</span>
-                    <span>Toggle Theme</span>
-                </button>
-                <button onclick="closeSettings(); openSystemPromptEditor()">
-                    <span class="settings-icon">&#9881;</span>
-                    <span>System Prompt</span>
-                </button>
+                    <div class="settings-view" id="settingsMainView">
+                    <button onclick="toggleTheme()">
+                        <span class="settings-icon" id="themeIcon">&#127769;</span>
+                        <span>Toggle Theme</span>
+                    </button>
+                    <button onclick="closeSettings(); openSystemPromptEditor()">
+                        <span class="settings-icon">&#9881;</span>
+                        <span>System Prompt</span>
+                    </button>
+                    <button onclick="showAboutPage()">
+                        <span class="settings-icon">&#8505;</span>
+                        <span>About</span>
+                    </button>
+                        <div class="settings-section">
+                            <div class="settings-section-title">Voice</div>
+                            <label class="settings-toggle">
+                                <input type="checkbox" id="settingAutoSpeak" onchange="updateVoiceSetting('autoSpeakReplies', this.checked)">
+                                <span class="settings-toggle-copy">
+                                    <span class="settings-toggle-label">Auto-Speak Replies</span>
+                                    <span class="settings-toggle-note">Read assistant replies aloud on supported browsers.</span>
+                                </span>
+                            </label>
+                            <div class="settings-control-card">
+                                <div class="settings-control-copy">
+                                    <span class="settings-toggle-label">Speech Speed</span>
+                                    <span class="settings-toggle-note">Choose a slower or faster playback pace for spoken replies.</span>
+                                </div>
+                                <div class="speed-control" id="speechSpeedControl">
+                                    <div class="speed-control-labels" aria-hidden="true">
+                                        <span>Low</span>
+                                        <span>Med</span>
+                                        <span>Fast</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        id="settingSpeechSpeed"
+                                        min="0"
+                                        max="4"
+                                        step="1"
+                                        list="speechSpeedTicks"
+                                        value="2"
+                                        oninput="updateSpeechSpeed(this.value)"
+                                        aria-label="Speech speed"
+                                    >
+                                    <datalist id="speechSpeedTicks">
+                                        <option value="0"></option>
+                                        <option value="1"></option>
+                                        <option value="2"></option>
+                                        <option value="3"></option>
+                                        <option value="4"></option>
+                                    </datalist>
+                                    <div class="speed-control-scale" aria-hidden="true">
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                        <span></span>
+                                    </div>
+                                    <div class="speed-control-readout" id="speechSpeedReadout">Medium</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="settings-section">
+                            <div class="settings-section-title">Features</div>
+                            <label class="settings-toggle">
+                                <input type="checkbox" id="settingAgentTools" onchange="updateFeatureSetting('agent_tools', this.checked)">
+                            <span class="settings-toggle-copy">
+                                <span class="settings-toggle-label">Agent Dev Tools</span>
+                                <span class="settings-toggle-note">Let the agent inspect files, create artifacts, edit workspace code, and run commands to self-check its work.</span>
+                            </span>
+                        </label>
+                        <label class="settings-toggle">
+                            <input type="checkbox" id="settingWorkspacePanel" onchange="updateFeatureSetting('workspace_panel', this.checked)">
+                            <span class="settings-toggle-copy">
+                                <span class="settings-toggle-label">Workspace Panel</span>
+                                <span class="settings-toggle-note">Show the optional workspace browser so you can inspect files and artifacts the agent creates.</span>
+                            </span>
+                        </label>
+                        <label class="settings-toggle">
+                            <input type="checkbox" id="settingLocalRag" onchange="updateFeatureSetting('local_rag', this.checked)">
+                            <span class="settings-toggle-copy">
+                                <span class="settings-toggle-label">Local RAG</span>
+                                <span class="settings-toggle-note">Search the current conversation when a prompt needs recall or local context.</span>
+                            </span>
+                        </label>
+                        <label class="settings-toggle">
+                            <input type="checkbox" id="settingWebSearch" onchange="updateFeatureSetting('web_search', this.checked)">
+                            <span class="settings-toggle-copy">
+                                <span class="settings-toggle-label">Web Search</span>
+                                <span class="settings-toggle-note">Allow optional current-web lookups for freshness-sensitive questions.</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-view settings-view-hidden" id="settingsAboutView">
+                    <button class="settings-back" onclick="showSettingsHome()">
+                        <span class="settings-icon">&#8592;</span>
+                        <span>Back</span>
+                    </button>
+                    <div class="about-card">
+                        <div class="about-eyebrow">From the author</div>
+                        <h2>Thanks for using {{ app_title }}</h2>
+                        <p>Thank you for spending time with this project. I hope you enjoy using it and that it helps you do your best work.</p>
+                        <p>If you run into bugs or have ideas to improve it, please feel free to post issues on GitHub.</p>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
     <!-- Main chat area -->
-    <div class="chat welcome-layout">
-        <div class="messages" id="messages">
-            <div class="welcome">
-                <h1 class="welcome-title">{{ app_title }}</h1>
-            </div>
-        </div>
-        <div class="input-area welcome-mode" id="inputArea">
-            <div class="input-area-stack">
-                <div class="input-container" onclick="focusInput()">
-                    <textarea id="input" placeholder="What can I help you with?" rows="1" onkeydown="handleKeyDown(event)" oninput="autoResizeTextarea(this)"></textarea>
-                    <button id="deepToggle" class="deep-toggle" onclick="toggleDeepMode()" title="Deep mode: multi-agent pipeline">Deep</button>
-                    <button id="send" onclick="sendMessage()">&#10148;</button>
+    <div class="chat welcome-layout" id="chatRoot">
+        <button class="workspace-toggle" id="workspaceToggle" onclick="toggleWorkspacePanel()" title="Toggle workspace" aria-label="Toggle workspace">
+            <svg class="workspace-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3.5 5.5L6.6 18.5H9.3L12 9.9L14.7 18.5H17.4L20.5 5.5H17.8L15.9 14.8L13.2 5.5H10.8L8.1 14.8L6.2 5.5Z"></path>
+            </svg>
+        </button>
+        <div class="chat-shell">
+            <div class="chat-main">
+                <div class="messages" id="messages">
+                    <div class="welcome">
+                        <div class="welcome-brand" aria-label="{{ app_title }}">
+                            <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click for a bark." data-pose="sit">
+                                <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 160 144" role="img" aria-hidden="true">
+                                    <defs>
+                                        <style>
+                                            .px-line { fill: color-mix(in srgb, var(--pet_secondary) 10%, transparent); }
+                                            .px-bg0 { fill: color-mix(in srgb, #d9f3d0 72%, var(--pet_accent)); }
+                                            .px-bg1 { fill: color-mix(in srgb, #b7d8ae 72%, var(--pet_accent)); }
+                                            .px-bg2 { fill: color-mix(in srgb, #7f9f7b 70%, var(--pet_primary)); }
+                                            .px-bg3 { fill: color-mix(in srgb, #4f6350 72%, var(--pet_secondary)); }
+                                            .px-bg4 { fill: color-mix(in srgb, #2b332c 80%, var(--pet_secondary)); }
+                                            .px-accent { fill: color-mix(in srgb, #e58f62 70%, var(--accent_primary)); }
+                                        </style>
+                                    </defs>
+                                    <rect class="px-bg4" x="8" y="8" width="144" height="128" rx="8"></rect>
+                                    <rect class="px-bg0" x="16" y="16" width="128" height="112" rx="4"></rect>
+                                    <g class="lcd-grid" aria-hidden="true">
+                                        <path class="px-line" d="M24 16h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1z"></path>
+                                        <path class="px-line" d="M16 24h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16z"></path>
+                                    </g>
+                                    <g class="stage-ground" aria-hidden="true">
+                                        <rect class="px-bg2" x="24" y="104" width="112" height="8"></rect>
+                                        <rect class="px-bg3" x="24" y="112" width="112" height="8"></rect>
+                                        <rect class="px-bg1" x="24" y="96" width="24" height="8"></rect>
+                                        <rect class="px-bg1" x="72" y="96" width="16" height="8"></rect>
+                                        <rect class="px-bg1" x="112" y="96" width="16" height="8"></rect>
+                                    </g>
+                                    <g class="dog-drawing" shape-rendering="crispEdges">
+                                        <g class="dog-bark-lines" aria-hidden="true">
+                                            <rect class="px-accent" x="120" y="40" width="8" height="8"></rect>
+                                            <rect class="px-accent" x="128" y="48" width="8" height="8"></rect>
+                                            <rect class="px-accent" x="120" y="56" width="8" height="8"></rect>
+                                        </g>
+                                        <rect class="dog-shadow px-bg2" x="40" y="104" width="56" height="8"></rect>
+                                        <rect class="dog-tail px-bg4" x="32" y="64" width="8" height="16"></rect>
+                                        <rect class="dog-tail-tip px-bg3" x="32" y="56" width="8" height="8"></rect>
+                                        <rect class="px-bg4" x="40" y="56" width="48" height="32"></rect>
+                                        <rect class="px-bg3" x="48" y="64" width="32" height="16"></rect>
+                                        <rect class="px-bg2" x="56" y="72" width="16" height="8"></rect>
+                                        <g class="dog-head-group">
+                                            <rect class="px-bg4" x="80" y="40" width="32" height="24"></rect>
+                                            <rect class="px-bg3" x="88" y="48" width="16" height="8"></rect>
+                                            <rect class="px-bg2" x="96" y="56" width="8" height="8"></rect>
+                                            <rect class="dog-ear-left px-bg4" x="80" y="32" width="8" height="8"></rect>
+                                            <rect class="dog-ear-right px-bg4" x="104" y="32" width="8" height="8"></rect>
+                                            <rect class="px-bg4" x="88" y="48" width="8" height="8"></rect>
+                                            <rect class="px-bg4" x="104" y="48" width="8" height="8"></rect>
+                                            <rect class="dog-mouth-neutral px-bg4" x="104" y="56" width="8" height="8"></rect>
+                                            <rect class="dog-mouth-bark px-accent" x="104" y="56" width="8" height="8"></rect>
+                                            <rect class="px-accent" x="88" y="64" width="16" height="8"></rect>
+                                        </g>
+                                        <g class="dog-leg-group dog-leg-back-group">
+                                            <rect class="dog-leg dog-leg-back px-bg4" x="48" y="88" width="8" height="16"></rect>
+                                            <rect class="dog-paw px-bg4" x="48" y="104" width="16" height="8"></rect>
+                                        </g>
+                                        <g class="dog-leg-group dog-leg-front-group">
+                                            <rect class="dog-leg dog-leg-front px-bg4" x="72" y="88" width="8" height="16"></rect>
+                                            <rect class="dog-paw px-bg4" x="72" y="104" width="16" height="8"></rect>
+                                        </g>
+                                    </g>
+                                </svg>
+                            </button>
+                            <h1 class="welcome-title">{{ app_title }}</h1>
+                        </div>
+                    </div>
                 </div>
-                <p class="model-note">{{ model_name }}</p>
+                <div class="input-area welcome-mode" id="inputArea">
+                    <div class="input-area-stack">
+                        <div class="slash-menu" id="slashMenu" hidden>
+                            <div class="slash-menu-header">
+                                <span class="slash-menu-title">Commands</span>
+                                <span class="slash-menu-hint">Use ↑ ↓ Enter</span>
+                            </div>
+                            <div class="slash-menu-list" id="slashMenuList"></div>
+                        </div>
+                        <div class="input-container" onclick="focusInput()">
+                            <input id="attachmentInput" type="file" multiple hidden onchange="handleAttachmentSelection(event)">
+                            <textarea id="input" placeholder="What can I help you with?" rows="3" onkeydown="handleKeyDown(event)" oninput="handleInputChange(this)"></textarea>
+                            <div class="composer-footer" onclick="event.stopPropagation()">
+                                <div class="composer-actions">
+                                    <button id="attachButton" class="composer-control attach-toggle" onclick="openAttachmentPicker()" title="Attach files" aria-label="Attach files">+</button>
+                                    <div class="model-select-wrap">
+                                        <select id="modelSelect" class="composer-select" onchange="handleModelSelectChange(this.value)" aria-label="Select model">
+                                            <option value="">Loading model...</option>
+                                        </select>
+                                        <span class="model-select-caret" aria-hidden="true">▾</span>
+                                    </div>
+                                    <div class="model-select-wrap">
+                                        <select id="reasoningSelect" class="composer-select reasoning-select" onchange="handleReasoningSelectChange(this.value)" aria-label="Select reasoning effort">
+                                            <option value="high">High</option>
+                                            <option value="low">Low</option>
+                                        </select>
+                                        <span class="model-select-caret" aria-hidden="true">▾</span>
+                                    </div>
+                                </div>
+                                <div class="composer-actions composer-actions-right">
+                                    <button id="micButton" class="composer-control voice-toggle" onclick="toggleDictation()" title="Start dictation" aria-label="Start dictation">&#127908;</button>
+                                    <button id="send" onclick="handlePrimaryAction()" aria-label="Send message" title="Send message">&#10148;</button>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="voice-note" id="voiceNote" hidden></p>
+                        <div class="attachment-bar" id="attachmentBar" hidden></div>
+                    </div>
+                </div>
             </div>
+            <aside class="workspace-panel" id="workspacePanel">
+                <div class="workspace-header">
+                    <div class="workspace-heading">
+                        <div class="workspace-title">Workspace</div>
+                        <div class="workspace-subtitle" id="workspacePath">No files yet</div>
+                    </div>
+                    <div class="workspace-actions">
+                        <button class="workspace-refresh" onclick="refreshWorkspace(true)" title="Refresh workspace">&#10227;</button>
+                        <button class="workspace-refresh" onclick="downloadWorkspaceZip()" title="Download workspace zip">&#8681;</button>
+                    </div>
+                </div>
+                <div class="workspace-body">
+                    <div class="workspace-section">
+                        <div class="workspace-section-title">Activity</div>
+                        <div class="workspace-activity-list" id="workspaceActivityList">
+                            <div class="workspace-empty">The assistant's workspace activity will appear here during a turn.</div>
+                        </div>
+                    </div>
+                    <div class="workspace-section">
+                        <div class="workspace-section-title">Workspace Tree</div>
+                        <div class="workspace-file-list" id="workspaceFileList">
+                            <div class="workspace-empty">Choose a chat action that creates or uploads files, and the workspace tree will appear here.</div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
         </div>
     </div>
 
@@ -103,11 +345,50 @@
     <div class="modal" id="systemPromptModal">
         <div class="modal-content" style="max-width:600px;">
             <h3>System Prompt</h3>
-            <textarea id="systemPromptInput" placeholder="Enter system prompt... (leave empty for default)"></textarea>
+            <textarea id="systemPromptInput" placeholder="Optional override. Keep it short for best speed and small-model reliability."></textarea>
             <div class="modal-buttons">
                 <button onclick="resetSystemPrompt()">Reset</button>
                 <button onclick="closeSystemPromptModal()">Cancel</button>
                 <button class="primary" onclick="saveSystemPrompt()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="fileModal" onclick="closeFileModal()">
+        <div class="modal-content file-modal-content" onclick="event.stopPropagation()">
+            <div class="file-modal-header">
+                <div class="file-modal-title-wrap">
+                    <div class="file-modal-eyebrow">Workspace Reader</div>
+                    <h3 id="fileModalTitle">File</h3>
+                    <div class="file-modal-subtitle" id="fileModalSubtitle"></div>
+                </div>
+                <button class="file-modal-close" onclick="closeFileModal()">&times;</button>
+            </div>
+            <div class="file-modal-body">
+                <aside class="file-modal-tree-panel">
+                    <div class="file-modal-tree-heading">Agent Workspace</div>
+                    <div class="file-modal-tree" id="fileModalTree">
+                        <div class="workspace-empty">The workspace tree will appear here.</div>
+                    </div>
+                </aside>
+                <div class="file-modal-content-panel">
+                    <div class="file-modal-sheet-tabs" id="fileModalSheetTabs" hidden></div>
+                    <div class="file-modal-view-tabs" id="fileModalViewTabs">
+                        <button id="fileModalEditTab" class="file-modal-tab active" onclick="setFileModalView('edit')">Edit</button>
+                        <button id="fileModalPreviewTab" class="file-modal-tab" onclick="setFileModalView('preview')">Preview</button>
+                    </div>
+                    <div class="file-modal-empty" id="fileModalEmpty">Select a file from the workspace tree to inspect it here.</div>
+                    <div class="file-modal-pane" id="fileModalEditPane">
+                        <textarea id="fileModalEditor" spellcheck="false" oninput="updateFileModalPreview()"></textarea>
+                    </div>
+                    <div class="file-modal-pane file-modal-pane-hidden" id="fileModalPreviewPane">
+                        <div id="fileModalPreview"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-buttons">
+                <button onclick="closeFileModal()">Cancel</button>
+                <button class="primary" id="fileModalSaveButton" onclick="saveFileModal()">Save</button>
             </div>
         </div>
     </div>

@@ -5,18 +5,117 @@
 let ws = null;
 let logWs = null;
 let currentConvId = generateId();
+const uiSessionId = generateId();
 let isGenerating = false;
+let activeStreamConversationId = null;
+let streamingAssistantMessage = null;
 let renameConvId = null;
 let modelAvailable = false;
 let markedReady = false;
 let healthPollInterval = null;
 let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
 let deepMode = localStorage.getItem('deepMode') === 'true';
+let availableModelProfiles = [];
+let selectedModelProfileKey = '';
+let activeModelProfileKey = '';
+let modelSwitchInFlight = false;
+let uiReadyReportInFlight = false;
+let lastReportedUiReadyKey = '';
+let workspaceEntries = [];
+let workspaceTree = null;
+let workspaceStats = { files: 0, directories: 0 };
+let workspaceActivity = [];
+let terminalEntries = [];
+let terminalLiveBuffer = '';
+let terminalWs = null;
+let terminalEmulator = null;
+let terminalFitAddon = null;
+let buildSteps = [];
+let currentBuildStepIndex = null;
+let selectedWorkspaceFile = '';
+let selectedSpreadsheetSheet = '';
+let workspaceRefreshTimer = null;
+let workspacePanelOpen = localStorage.getItem('workspacePanelOpen') !== 'false';
+let collapsedWorkspaceDirs = new Set();
+let featureSettings = loadFeatureSettings();
+let voiceSettings = loadVoiceSettings();
+let pendingAttachments = [];
+let fileModalPath = '';
+let fileModalKind = 'text';
+let fileModalEditable = false;
+let inlineViewerPath = '';
+let inlineViewerKind = 'text';
+let inlineViewerEditable = false;
+let inlineViewerView = 'edit';
+let inlineEditor = null;
+let inlineEditorReady = false;
+let inlineViewerAutosaveTimer = null;
+let inlineViewerLastSavedContent = '';
+let inlineViewerSaveState = 'idle';
+let inlineViewerUndoStacks = {};
+let inlineViewerApplyingRemoteContent = false;
+let inlineViewerPerformingUndo = false;
+let currentFileSymbols = [];
+let symbolGroupState = {};
+let currentAssistantTurnStartedAt = null;
+let currentAssistantTurnArtifactPaths = new Set();
+let latestAssistantTurnArtifactPaths = new Set();
+let slashMenuItems = [];
+let slashMenuSelectedIndex = 0;
+let petProfile = null;
+let petExists = false;
+let welcomeMascotRuntime = null;
+let currentRunId = null;
+let dictationActive = false;
+let currentAudio = null;
+let mediaRecorder = null;
+let mediaStream = null;
+let recordedChunks = [];
+const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
+const SEND_BUTTON_ICON = '&#10148;';
+const STOP_BUTTON_ICON = '&#9632;';
+const SPEAK_BUTTON_ICON = '&#128266;';
+const STOP_SPEAK_BUTTON_ICON = '&#128264;';
+const MIC_BUTTON_ICON = '&#127908;';
+const MIC_ACTIVE_BUTTON_ICON = '&#9209;';
+let voiceRuntime = {
+    tts_available: false,
+    stt_available: false,
+    tts_backend: 'unavailable',
+    stt_backend: 'unavailable',
+    tts_voice: '',
+};
+const SPEECH_SPEED_OPTIONS = Object.freeze([
+    { value: '0', label: 'Low', rate: 0.85 },
+    { value: '1', label: 'Low-Med', rate: 0.95 },
+    { value: '2', label: 'Medium', rate: 1.0 },
+    { value: '3', label: 'Med-Fast', rate: 1.12 },
+    { value: '4', label: 'Fast', rate: 1.25 },
+]);
 
 // Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
 const THINK_TAG_PAIRS = Object.freeze([
     ['<' + 'redacted_thinking' + '>', '</' + 'redacted_thinking' + '>'],
     ['<' + 'think' + '>', '</' + 'think' + '>'],
+]);
+
+const SLASH_COMMAND_KIND_LABELS = Object.freeze({
+    action: 'Action',
+    prompt: 'Prompt',
+    toggle: 'Toggle',
+});
+
+const WORKSPACE_ACTIVITY_LIMIT = 80;
+const INLINE_VIEWER_AUTOSAVE_DELAY_MS = 700;
+const INLINE_VIEWER_UNDO_LIMIT = 40;
+const PLAN_EXECUTION_MARKERS = Object.freeze([
+    'execute approved plan',
+    'execute this approved plan',
+    'execute the approved plan',
+    'execute plan now',
+    'execute this plan',
+    'run this plan',
+    'run the plan',
 ]);
 
 // ==================== Theme ====================
@@ -41,6 +140,19 @@ function applyTheme(mode) {
     // Update theme icon
     const icon = document.getElementById('themeIcon');
     if (icon) icon.innerHTML = mode === 'dark' ? '&#9728;' : '&#127769;';
+}
+
+function applyPetTheme(profile) {
+    const root = document.documentElement;
+    if (!profile) {
+        root.style.removeProperty('--pet_primary');
+        root.style.removeProperty('--pet_secondary');
+        root.style.removeProperty('--pet_accent');
+        return;
+    }
+    root.style.setProperty('--pet_primary', profile.theme_primary || '#2563eb');
+    root.style.setProperty('--pet_secondary', profile.theme_secondary || '#0f172a');
+    root.style.setProperty('--pet_accent', profile.theme_accent || '#dbeafe');
 }
 
 function toggleTheme() {
@@ -93,6 +205,160 @@ function generateId() {
     });
 }
 
+function setModelNote(modelName) {
+    const note = document.querySelector('.model-note');
+    if (note && modelName) note.textContent = modelName;
+    if (modelName) window.MODEL_NAME = modelName;
+}
+
+function syncReasoningSelector() {
+    const select = document.getElementById('reasoningSelect');
+    if (!select) return;
+    select.value = deepMode ? 'high' : 'low';
+    select.title = deepMode ? 'High reasoning effort enabled' : 'Low reasoning effort enabled';
+}
+
+function handleReasoningSelectChange(value) {
+    deepMode = value === 'high';
+    localStorage.setItem('deepMode', deepMode ? 'true' : 'false');
+    syncReasoningSelector();
+}
+
+function syncModelSelector() {
+    const select = document.getElementById('modelSelect');
+    if (!select) return;
+
+    const profiles = Array.isArray(availableModelProfiles) ? availableModelProfiles : [];
+    const nextValue = selectedModelProfileKey || activeModelProfileKey || select.value || '';
+
+    select.innerHTML = '';
+    if (!profiles.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = modelSwitchInFlight ? 'Switching model...' : (window.MODEL_NAME || 'Loading model...');
+        select.appendChild(option);
+        select.disabled = true;
+        return;
+    }
+
+    profiles.forEach(profile => {
+        const option = document.createElement('option');
+        option.value = profile.key;
+        const status = profile.active ? 'Active' : (profile.selected ? 'Selected' : '');
+        option.textContent = status ? `${profile.label} (${status})` : profile.label;
+        select.appendChild(option);
+    });
+
+    select.value = profiles.some(profile => profile.key === nextValue)
+        ? nextValue
+        : (profiles.find(profile => profile.selected)?.key || profiles[0].key);
+    select.disabled = modelSwitchInFlight || isGenerating || !modelAvailable;
+}
+
+function applyModelRuntime(data = {}) {
+    availableModelProfiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
+    selectedModelProfileKey = data.selected_profile?.key || data.active_profile?.key || selectedModelProfileKey;
+    activeModelProfileKey = data.active_profile?.key || selectedModelProfileKey || activeModelProfileKey;
+    setModelNote(data.selected_model_name || data.model_name || data.loaded_model_name || window.MODEL_NAME);
+    syncModelSelector();
+    maybeReportUiModelReady();
+}
+
+async function loadComposerRuntime() {
+    try {
+        const resp = await fetch('/api/dashboard');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        applyModelRuntime(data);
+    } catch (error) {
+        syncModelSelector();
+    }
+}
+
+async function handleModelSelectChange(profileKey) {
+    const previousKey = selectedModelProfileKey || activeModelProfileKey;
+    if (!profileKey || profileKey === previousKey || modelSwitchInFlight) {
+        syncModelSelector();
+        return;
+    }
+
+    const profile = availableModelProfiles.find(item => item.key === profileKey);
+    const confirmed = confirm(
+        `Switch to ${profile?.label || profileKey}?\n\nThis will restart the model and the chat may be unavailable for a few minutes while it loads.`
+    );
+    if (!confirmed) {
+        syncModelSelector();
+        return;
+    }
+
+    modelSwitchInFlight = true;
+    selectedModelProfileKey = profileKey;
+    syncModelSelector();
+
+    try {
+        const resp = await fetch('/api/model/switch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: profileKey }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.message || 'Switch failed');
+        setModelNote(data.model_name || profile?.name || window.MODEL_NAME);
+        updateStatus('loading');
+        startHealthPolling();
+        await loadComposerRuntime();
+    } catch (error) {
+        selectedModelProfileKey = previousKey;
+        syncModelSelector();
+        alert(`Model switch failed: ${error.message}`);
+    } finally {
+        modelSwitchInFlight = false;
+        syncModelSelector();
+    }
+}
+
+function loadFeatureSettings() {
+    return {
+        agent_tools: true,
+        workspace_panel: true,
+        local_rag: localStorage.getItem('feature.local_rag') !== 'false',
+        web_search: localStorage.getItem('feature.web_search') === 'true',
+    };
+}
+
+function loadVoiceSettings() {
+    return {
+        autoSpeakReplies: localStorage.getItem('voice.autoSpeakReplies') === 'true',
+        speechSpeed: normalizeSpeechSpeed(localStorage.getItem('voice.speechSpeed')),
+    };
+}
+
+function normalizeSpeechSpeed(value) {
+    const normalized = String(value ?? '2');
+    return SPEECH_SPEED_OPTIONS.some(option => option.value === normalized) ? normalized : '2';
+}
+
+function getSpeechSpeedOption(value = voiceSettings.speechSpeed) {
+    const normalized = normalizeSpeechSpeed(value);
+    return SPEECH_SPEED_OPTIONS.find(option => option.value === normalized) || SPEECH_SPEED_OPTIONS[2];
+}
+
+function persistFeatureSettings() {
+    Object.entries(featureSettings).forEach(([key, value]) => {
+        localStorage.setItem(`feature.${key}`, value ? 'true' : 'false');
+    });
+}
+
+function persistVoiceSettings() {
+    Object.entries(voiceSettings).forEach(([key, value]) => {
+        if (typeof value === 'boolean') {
+            localStorage.setItem(`voice.${key}`, value ? 'true' : 'false');
+            return;
+        }
+        localStorage.setItem(`voice.${key}`, String(value));
+    });
+}
+
 function formatTimestamp(isoString) {
     const date = new Date(isoString);
     const now = new Date();
@@ -119,18 +385,457 @@ function updateStatus(status) {
     if (status === 'connected') {
         dot.className = 'status-dot connected';
         modelAvailable = true;
-        const send = document.getElementById('send');
-        if (send) send.disabled = false;
+        syncSendButton();
+        maybeReportUiModelReady();
     } else if (status === 'loading') {
         dot.className = 'status-dot loading';
         modelAvailable = false;
-        const send = document.getElementById('send');
-        if (send) send.disabled = true;
+        syncSendButton();
     } else {
         dot.className = 'status-dot';
         modelAvailable = false;
-        const send = document.getElementById('send');
-        if (send) send.disabled = true;
+        syncSendButton();
+    }
+}
+
+function setLoadingText(text) {
+    const loadingText = document.querySelector('.loading-text');
+    if (loadingText) loadingText.textContent = text;
+}
+
+function isComposerAvailable() {
+    const input = document.getElementById('input');
+    return Boolean(modelAvailable && input && !input.disabled && ws && ws.readyState === WebSocket.OPEN);
+}
+
+async function maybeReportUiModelReady() {
+    const profile = selectedModelProfileKey || activeModelProfileKey || '';
+    const modelName = window.MODEL_NAME || '';
+    if (!isComposerAvailable() || !profile || !modelName || uiReadyReportInFlight) return;
+
+    const readyKey = `${uiSessionId}:${profile}:${modelName}`;
+    if (readyKey === lastReportedUiReadyKey) return;
+
+    uiReadyReportInFlight = true;
+    try {
+        const resp = await fetch('/api/ui/model-ready', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model_name: modelName,
+                profile,
+                composer_available: true,
+                websocket_connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
+            }),
+        });
+        if (resp.ok) {
+            lastReportedUiReadyKey = readyKey;
+        }
+    } catch (error) {
+        console.debug('Failed to report UI model readiness:', error);
+    } finally {
+        uiReadyReportInFlight = false;
+    }
+}
+
+function applyWorkspacePanelState() {
+    const panel = document.getElementById('workspacePanel');
+    const toggle = document.getElementById('workspaceToggle');
+    const shell = document.querySelector('.chat-shell');
+    const root = document.getElementById('chatRoot');
+    if (!panel || !toggle) return;
+    const agentToolsEnabled = featureSettings.agent_tools;
+    const workspacePanelEnabled = featureSettings.workspace_panel;
+    const mobileViewport = window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+    const workspaceAllowed = agentToolsEnabled && workspacePanelEnabled && !mobileViewport;
+    if (!workspaceAllowed) {
+        workspacePanelOpen = false;
+    }
+    toggle.style.display = workspaceAllowed ? '' : 'none';
+    const open = workspaceAllowed && workspacePanelOpen;
+    panel.classList.toggle('is-open', open);
+    toggle.classList.toggle('active', open);
+    if (shell) shell.classList.toggle('workspace-open', open);
+    if (root) {
+        root.classList.toggle('mobile-chat-mode', mobileViewport);
+    }
+    localStorage.setItem('workspacePanelOpen', open ? 'true' : 'false');
+}
+
+function toggleWorkspacePanel() {
+    if (!featureSettings.agent_tools || !featureSettings.workspace_panel || window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches) return;
+    workspacePanelOpen = !workspacePanelOpen;
+    applyWorkspacePanelState();
+}
+
+function syncFeatureControls() {
+    const agentTools = document.getElementById('settingAgentTools');
+    const workspacePanel = document.getElementById('settingWorkspacePanel');
+    const localRag = document.getElementById('settingLocalRag');
+    const webSearch = document.getElementById('settingWebSearch');
+    if (agentTools) agentTools.checked = featureSettings.agent_tools;
+    if (workspacePanel) {
+        workspacePanel.checked = featureSettings.workspace_panel;
+        workspacePanel.disabled = !featureSettings.agent_tools;
+    }
+    if (localRag) localRag.checked = featureSettings.local_rag;
+    if (webSearch) webSearch.checked = featureSettings.web_search;
+    const autoSpeak = document.getElementById('settingAutoSpeak');
+    if (autoSpeak) {
+        autoSpeak.checked = voiceSettings.autoSpeakReplies;
+        autoSpeak.disabled = !supportsSpeechSynthesis();
+    }
+    const speechSpeed = document.getElementById('settingSpeechSpeed');
+    const speechSpeedReadout = document.getElementById('speechSpeedReadout');
+    const speedOption = getSpeechSpeedOption();
+    if (speechSpeed) {
+        speechSpeed.value = speedOption.value;
+        speechSpeed.disabled = !supportsSpeechSynthesis();
+    }
+    if (speechSpeedReadout) {
+        speechSpeedReadout.textContent = speedOption.label;
+    }
+}
+
+function applyFeatureSettingsToUI() {
+    if (!featureSettings.agent_tools || !featureSettings.workspace_panel) {
+        workspacePanelOpen = false;
+    }
+    if (!featureSettings.agent_tools) {
+        if (workspaceRefreshTimer) {
+            clearTimeout(workspaceRefreshTimer);
+            workspaceRefreshTimer = null;
+        }
+    }
+    applyWorkspacePanelState();
+    syncFeatureControls();
+}
+
+function updateFeatureSetting(name, enabled) {
+    if (!(name in featureSettings)) return;
+    featureSettings[name] = enabled;
+    if (name === 'agent_tools' && !enabled) {
+        featureSettings.workspace_panel = false;
+    }
+    persistFeatureSettings();
+    applyFeatureSettingsToUI();
+    if (name === 'agent_tools' || name === 'workspace_panel') refreshWorkspace(true);
+}
+
+function downloadWorkspaceZip() {
+    if (!currentConvId) return;
+    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/download`, '_blank');
+}
+
+function inferTurnPermissions(message, attachmentPaths = []) {
+    const text = String(message || '').toLowerCase();
+    const words = new Set((text.match(/[a-z0-9_+-]+/g) || []));
+    const writeTerms = new Set([
+        'create', 'build', 'generate', 'scaffold', 'template', 'starter', 'example',
+        'sample', 'repo', 'repository', 'app', 'project', 'saas', 'mvp', 'boilerplate',
+        'skeleton', 'write', 'edit', 'update', 'patch', 'implement', 'fix',
+    ]);
+    const runTerms = new Set([
+        'run', 'test', 'verify', 'check', 'execute', 'start', 'launch', 'install',
+        'lint', 'compile', 'build',
+    ]);
+    const hasAttachment = Array.isArray(attachmentPaths) && attachmentPaths.length > 0;
+    const wantsWrite = [...writeTerms].some(term => words.has(term))
+        || /make .*app|create .*app|build .*app|starter .*project|example .*project/.test(text)
+        || (hasAttachment && [...words].some(term => ['fix', 'edit', 'update', 'patch'].includes(term)));
+    const wantsRun = [...runTerms].some(term => words.has(term))
+        || /try it|make sure it works|verify it works|test it/.test(text);
+    return { wantsWrite, wantsRun };
+}
+
+function messageRequestsPlanExecution(message) {
+    const text = String(message || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    return PLAN_EXECUTION_MARKERS.some(marker => text.includes(marker));
+}
+
+function resolveTurnFeatures(message, attachmentPaths = []) {
+    const permissions = inferTurnPermissions(message, attachmentPaths);
+    const executionRequest = messageRequestsPlanExecution(message);
+    let workspaceWrite = false;
+    let workspaceRunCommands = false;
+
+    if (permissions.wantsWrite && (!deepMode || executionRequest)) {
+        workspaceWrite = window.confirm('Allow the assistant to create or edit files in the workspace for this request?');
+    }
+    if (permissions.wantsRun && (!deepMode || executionRequest)) {
+        workspaceRunCommands = window.confirm('Allow the assistant to run workspace commands for this request?');
+    }
+
+    return {
+        ...featureSettings,
+        agent_tools: true,
+        workspace_panel: true,
+        workspace_write: workspaceWrite,
+        workspace_run_commands: workspaceRunCommands,
+    };
+}
+
+function updateVoiceSetting(name, enabled) {
+    if (!(name in voiceSettings)) return;
+    voiceSettings[name] = enabled;
+    persistVoiceSettings();
+    syncVoiceSupportUI();
+    if (!enabled) stopSpeaking();
+}
+
+function updateSpeechSpeed(value) {
+    voiceSettings.speechSpeed = normalizeSpeechSpeed(value);
+    persistVoiceSettings();
+    syncFeatureControls();
+    if (currentAudio) {
+        currentAudio.playbackRate = getSpeechSpeedOption().rate;
+    }
+}
+
+function supportsDictation() {
+    return Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder && voiceRuntime.stt_available);
+}
+
+function supportsSpeechSynthesis() {
+    return Boolean(window.Audio && voiceRuntime.tts_available);
+}
+
+async function refreshVoiceRuntime() {
+    try {
+        const resp = await fetch('/api/voice/status');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        voiceRuntime = await resp.json();
+    } catch (error) {
+        voiceRuntime = {
+            tts_available: false,
+            stt_available: false,
+            tts_backend: 'unavailable',
+            stt_backend: 'unavailable',
+            tts_voice: '',
+        };
+    }
+    syncVoiceSupportUI();
+}
+
+function updateVoiceNote(text = '') {
+    const note = document.getElementById('voiceNote');
+    if (!note) return;
+    note.hidden = !text;
+    note.textContent = text;
+}
+
+function syncVoiceSupportUI() {
+    const micButton = document.getElementById('micButton');
+    if (micButton) {
+        micButton.disabled = !supportsDictation();
+        micButton.classList.toggle('is-active', dictationActive);
+        micButton.innerHTML = dictationActive ? MIC_ACTIVE_BUTTON_ICON : MIC_BUTTON_ICON;
+        micButton.setAttribute('aria-label', dictationActive ? 'Stop dictation' : 'Start dictation');
+        micButton.title = dictationActive ? 'Stop dictation' : (supportsDictation() ? 'Record audio for server transcription' : 'Server dictation is unavailable');
+    }
+
+    const autoSpeak = document.getElementById('settingAutoSpeak');
+    if (autoSpeak) autoSpeak.disabled = !supportsSpeechSynthesis();
+    const speechSpeed = document.getElementById('settingSpeechSpeed');
+    if (speechSpeed) speechSpeed.disabled = !supportsSpeechSynthesis();
+
+    if (!supportsDictation() && !supportsSpeechSynthesis()) {
+        updateVoiceNote('Server voice is unavailable. Install native STT/TTS tools on the server, then reload.');
+    } else if (!supportsDictation()) {
+        updateVoiceNote('Server transcription is unavailable. Reply playback is still available.');
+    } else if (!supportsSpeechSynthesis()) {
+        updateVoiceNote('Server speech playback is unavailable. Dictation is still available.');
+    } else {
+        updateVoiceNote('');
+    }
+}
+
+function appendDictationTranscript(transcript) {
+    const text = String(transcript || '').trim();
+    const input = document.getElementById('input');
+    if (!input) return;
+    const existing = input.value || '';
+    const separator = existing && text && !/\s$/.test(existing) ? ' ' : '';
+    input.value = text ? `${existing}${separator}${text}` : existing;
+    handleInputChange(input);
+}
+
+function mediaRecorderMimeType() {
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+    return candidates.find(type => window.MediaRecorder?.isTypeSupported?.(type)) || '';
+}
+
+async function transcribeRecordedAudio(blob) {
+    const formData = new FormData();
+    const extension = blob.type.includes('ogg') ? 'ogg' : (blob.type.includes('mp4') ? 'mp4' : 'webm');
+    formData.append('file', blob, `dictation.${extension}`);
+    const resp = await fetch('/api/voice/transcribe', { method: 'POST', body: formData });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
+    return data;
+}
+
+async function stopDictationAndUpload() {
+    if (!mediaRecorder) return;
+    const recorder = mediaRecorder;
+    if (recorder.state !== 'inactive') recorder.stop();
+}
+
+async function toggleDictation() {
+    if (dictationActive) {
+        await stopDictationAndUpload();
+        return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        updateVoiceNote('Audio capture is not available in this browser.');
+        return;
+    }
+    if (!voiceRuntime.stt_available) {
+        updateVoiceNote('Server transcription is unavailable right now.');
+        return;
+    }
+    updateVoiceNote('');
+    try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordedChunks = [];
+        const mimeType = mediaRecorderMimeType();
+        mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size) recordedChunks.push(event.data);
+        };
+        mediaRecorder.onerror = () => {
+            dictationActive = false;
+            mediaRecorder = null;
+            mediaStream?.getTracks?.().forEach(track => track.stop());
+            mediaStream = null;
+            syncVoiceSupportUI();
+            updateVoiceNote('Recording failed before transcription could start.');
+        };
+        mediaRecorder.onstop = async () => {
+            dictationActive = false;
+            syncVoiceSupportUI();
+            const chunks = recordedChunks.slice();
+            recordedChunks = [];
+            mediaRecorder = null;
+            mediaStream?.getTracks?.().forEach(track => track.stop());
+            mediaStream = null;
+            if (!chunks.length) return;
+            updateVoiceNote('Uploading audio for server transcription...');
+            try {
+                const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || mimeType || 'audio/webm' });
+                const result = await transcribeRecordedAudio(blob);
+                appendDictationTranscript(result.transcript || '');
+                updateVoiceNote('');
+            } catch (error) {
+                updateVoiceNote(`Transcription failed: ${error.message}`);
+            }
+        };
+        mediaRecorder.start();
+        dictationActive = true;
+        syncVoiceSupportUI();
+    } catch (error) {
+        dictationActive = false;
+        syncVoiceSupportUI();
+        updateVoiceNote('Recording could not start. Allow microphone access and use HTTPS if the page is remote.');
+    }
+}
+
+function extractMessageSpeechText(msg) {
+    if (!msg) return '';
+    let text = String(msg.dataset.originalContent || msg.querySelector('.message-content')?.innerText || '');
+    // Strip fenced code blocks (```...```)
+    text = text.replace(/```[\s\S]*?```/g, '');
+    // Strip inline code (`...`)
+    text = text.replace(/`[^`]*`/g, '');
+    // Strip markdown image syntax ![alt](url)
+    text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+    // Strip markdown link URLs but keep link text: [text](url) -> text
+    text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    // Strip markdown heading markers
+    text = text.replace(/^#{1,6}\s+/gm, '');
+    // Strip markdown bold/italic markers
+    text = text.replace(/(\*{1,3}|_{1,3})(.*?)\1/g, '$2');
+    // Strip markdown horizontal rules
+    text = text.replace(/^[-*_]{3,}\s*$/gm, '');
+    // Strip emojis and other symbol characters
+    text = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu, '');
+    // Strip remaining special characters (keep letters, numbers, basic punctuation, whitespace)
+    text = text.replace(/[^\w\s.,;:!?''""\-()\/&%$#@+=%\n]/g, '');
+    // Collapse whitespace
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+}
+
+function syncSpeakButtons() {
+    document.querySelectorAll('.message.assistant .action-btn.speak-btn').forEach(button => {
+        const msg = button.closest('.message.assistant');
+        const isActive = msg && currentAudio && currentAudio._messageElement === msg;
+        button.innerHTML = isActive ? `${STOP_SPEAK_BUTTON_ICON} Stop` : `${SPEAK_BUTTON_ICON} Speak`;
+        button.classList.toggle('is-active', Boolean(isActive));
+    });
+}
+
+function stopSpeaking() {
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+    }
+    currentAudio = null;
+    syncSpeakButtons();
+}
+
+async function requestServerSpeech(text) {
+    const resp = await fetch('/api/voice/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
+    return data;
+}
+
+async function speakAssistantMessage(msg) {
+    if (!supportsSpeechSynthesis() || !msg) {
+        updateVoiceNote('Server speech playback is not available right now.');
+        return;
+    }
+    const text = extractMessageSpeechText(msg);
+    if (!text) return;
+
+    if (currentAudio && currentAudio._messageElement === msg) {
+        stopSpeaking();
+        return;
+    }
+
+    stopSpeaking();
+    updateVoiceNote('Generating server speech...');
+    try {
+        const result = await requestServerSpeech(text);
+        const audio = new Audio(result.audio_url);
+        audio._messageElement = msg;
+        audio.playbackRate = getSpeechSpeedOption().rate;
+        audio.onended = () => {
+            if (currentAudio === audio) {
+                currentAudio = null;
+                syncSpeakButtons();
+            }
+        };
+        audio.onerror = () => {
+            if (currentAudio === audio) {
+                currentAudio = null;
+                syncSpeakButtons();
+            }
+            updateVoiceNote('Audio playback failed.');
+        };
+        currentAudio = audio;
+        syncSpeakButtons();
+        updateVoiceNote('');
+        await audio.play();
+    } catch (error) {
+        currentAudio = null;
+        syncSpeakButtons();
+        updateVoiceNote(`Speech generation failed: ${error.message}`);
     }
 }
 
@@ -142,6 +847,8 @@ function startHealthPolling() {
             const health = await resp.json();
             if (health.model_available) {
                 updateStatus('connected');
+                modelSwitchInFlight = false;
+                loadComposerRuntime();
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
             } else {
@@ -177,7 +884,20 @@ function connectWS() {
         const data = JSON.parse(event.data);
         if (data.type === 'start') {
             removeLoading();
-            addMessage('', 'assistant');
+            ensureStreamingAssistantMessage();
+            clearTerminalOutput();
+            currentAssistantTurnStartedAt = Date.now();
+            currentAssistantTurnArtifactPaths = new Set();
+            recordWorkspaceActivity('Turn', 'Started a new assistant turn.');
+        } else if (data.type === 'assistant_note') {
+            ensureStreamingAssistantMessage();
+            replaceAssistantAnswer(data.content || '');
+            recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
+        } else if (data.type === 'plan_ready') {
+            loadExecutionPlanDraft(data.execute_prompt || '');
+            recordWorkspaceActivity('Plan', 'Loaded an editable execution draft into the composer.');
+        } else if (data.type === 'build_steps') {
+            updateBuildSteps(data.steps || [], data.active_index ?? null, data.completed_count || 0);
         } else if (data.type === 'think_start') {
             onAssistantThinkStart();
         } else if (data.type === 'think_token') {
@@ -187,28 +907,83 @@ function connectWS() {
         } else if (data.type === 'token') {
             appendAssistantAnswerToken(data.content);
         } else if (data.type === 'status') {
-            const loadingText = document.querySelector('.loading-text');
-            if (loadingText) loadingText.textContent = data.content;
+            setLoadingText(data.content);
+        } else if (data.type === 'activity') {
+            if (data.content) setLoadingText(data.content);
+            recordWorkspaceActivity(
+                data.label || 'Activity',
+                data.content || 'Working...',
+                {
+                    phase: data.phase || 'status',
+                    stepLabel: data.step_label || '',
+                },
+            );
+        } else if (data.type === 'tool_start') {
+            setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
+            if (data.name === 'workspace.run_command') {
+                const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
+                recordTerminalCommandStart(command, data.arguments?.cwd || '.');
+            }
+        } else if (data.type === 'tool_result') {
+            const prefix = data.ok === false ? 'Tool failed' : 'Tool finished';
+            setLoadingText(data.content ? `${prefix}: ${data.content}` : prefix);
+            if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
+            if (data.name === 'workspace.run_command') {
+                const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
+                recordTerminalCommandResult(command, data.payload || {});
+            }
+            scheduleWorkspaceRefresh();
+        } else if (data.type === 'tool_error') {
+            setLoadingText(data.content || 'Tool error');
+        } else if (data.type === 'final_replace') {
+            replaceAssistantAnswer(data.content);
+            recordWorkspaceActivity('Draft', 'Replaced the current answer with a refined draft.');
         } else if (data.type === 'done') {
+            const finishedConvId = activeStreamConversationId;
             isGenerating = false;
-            document.getElementById('send').disabled = false;
+            syncSendButton();
             document.getElementById('input').focus();
             renderMarkdown();
             loadConversations();
+            finalizeAssistantTurnArtifacts();
+            refreshWorkspace(true);
+            recordWorkspaceActivity('Done', 'Finished the assistant turn.');
+            activeStreamConversationId = null;
+            streamingAssistantMessage = null;
+            if (finishedConvId && currentConvId === finishedConvId) {
+                loadConversation(finishedConvId, { preserveActivity: true });
+            }
+        } else if (data.type === 'canceled') {
+            removeLoading();
+            isGenerating = false;
+            syncSendButton();
+            recordWorkspaceActivity('Canceled', data.content || 'Stopped');
         } else if (data.type === 'error') {
             removeLoading();
             isGenerating = false;
-            document.getElementById('send').disabled = false;
-            const errorMsg = document.createElement('div');
-            errorMsg.className = 'message assistant';
-            errorMsg.innerHTML = `<div class="message-content" style="color:#ef4444;">${data.content}</div>`;
-            document.getElementById('messages').appendChild(errorMsg);
-            scrollToBottom();
+            syncSendButton();
+            recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
+            const errorMsg = streamingAssistantMessage || createMessageElement('', 'assistant');
+            const contentDiv = errorMsg.querySelector('.message-content');
+            if (contentDiv) {
+                contentDiv.style.color = '#ef4444';
+                contentDiv.textContent = data.content;
+            }
+            streamingAssistantMessage = errorMsg;
+            appendStreamingAssistantMessageIfVisible();
+            if (currentConvId === activeStreamConversationId) {
+                activeStreamConversationId = null;
+                streamingAssistantMessage = null;
+            }
         }
     };
 
-    ws.onerror = () => updateStatus('disconnected');
+    ws.onerror = () => {
+        isGenerating = false;
+        updateStatus('disconnected');
+    };
     ws.onclose = () => {
+        isGenerating = false;
         updateStatus('disconnected');
         setTimeout(connectWS, 2000);
     };
@@ -265,12 +1040,20 @@ async function loadDashboard() {
         const cacheStatus = cache.status || 'unknown';
         const cacheSize = cache.size_display || '--';
         const cacheDate = cache.last_modified ? new Date(cache.last_modified).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '--';
+        const profiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
+        const switchButtons = profiles.map(profile => `
+            <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(profile.label)}, ${JSON.stringify(profile.name)})'>
+                Switch to ${profile.label}
+                <div class="btn-desc">${profile.active ? 'Currently active' : profile.name}</div>
+            </button>
+        `).join('');
 
         el.innerHTML = `
             <div class="dash-section">
                 <h4>Model</h4>
                 <div class="dash-card">
                     <div class="dash-row"><span class="label">Name</span><span class="value">${data.model_name}</span></div>
+                    <div class="dash-row"><span class="label">Selected</span><span class="value">${data.selected_model_name || data.model_name}</span></div>
                     <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
                     <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
                 </div>
@@ -294,6 +1077,7 @@ async function loadDashboard() {
                         Restart vLLM
                         <div class="btn-desc">Restart the inference server (keeps cached model)</div>
                     </button>
+                    ${switchButtons}
                     <button class="dash-btn danger" onclick="dashRedownload()">
                         Redownload Model
                         <div class="btn-desc">Delete cache and re-download from HuggingFace</div>
@@ -351,6 +1135,32 @@ async function dashRestart() {
     setTimeout(() => { btn.disabled = false; }, 5000);
 }
 
+async function dashSwitchModel(profileKey, profileLabel, modelName) {
+    const confirmed = confirm(`Switch to ${profileLabel}?\n\nThis will hard-restart vLLM and load ${modelName}. The chat will be unavailable for a few minutes while the model loads.`);
+    if (!confirmed) return;
+
+    const btn = event.target.closest('.dash-btn');
+    btn.disabled = true;
+    btn.textContent = `Switching to ${profileLabel}...`;
+    try {
+        const resp = await fetch('/api/model/switch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: profileKey }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.message || 'Switch failed');
+        btn.textContent = data.message || `Switching to ${profileLabel}...`;
+        setModelNote(data.model_name || modelName);
+        updateStatus('loading');
+        startHealthPolling();
+        loadDashboard();
+    } catch (e) {
+        btn.textContent = 'Switch failed: ' + e.message;
+    }
+    setTimeout(() => { btn.disabled = false; loadDashboard(); }, 3000);
+}
+
 async function dashRedownload() {
     if (!confirm('This will delete the cached model and re-download it from HuggingFace. This may take a while. Continue?')) return;
     const btn = event.target.closest('.dash-btn');
@@ -371,20 +1181,199 @@ async function dashRedownload() {
 // ==================== Settings ====================
 
 function showSettings() {
+    syncFeatureControls();
+    showSettingsHome();
     document.getElementById('settingsOverlay').classList.add('show');
 }
 function closeSettings() {
     document.getElementById('settingsOverlay').classList.remove('show');
 }
 
+function showSettingsHome() {
+    const main = document.getElementById('settingsMainView');
+    const about = document.getElementById('settingsAboutView');
+    const title = document.getElementById('settingsTitle');
+    if (main) main.classList.remove('settings-view-hidden');
+    if (about) about.classList.add('settings-view-hidden');
+    if (title) title.textContent = 'Settings';
+}
+
+function showAboutPage() {
+    const main = document.getElementById('settingsMainView');
+    const about = document.getElementById('settingsAboutView');
+    const title = document.getElementById('settingsTitle');
+    if (main) main.classList.add('settings-view-hidden');
+    if (about) about.classList.remove('settings-view-hidden');
+    if (title) title.textContent = 'About';
+}
+
+async function loadPet() {
+    try {
+        const resp = await fetch('/api/pet');
+        const data = await resp.json();
+        petExists = Boolean(data.exists);
+        petProfile = data.pet || null;
+        applyPetTheme(petProfile);
+    } catch (e) {
+        console.error('Failed to load agent profile:', e);
+    }
+}
+
+async function promoteWorkspaceFile(path) {
+    if (!petExists || !currentRunId || !path) return;
+    const name = prompt('Capability name:', basename(path));
+    if (!name) return;
+    const description = prompt('Capability description:', `Promoted from ${path}`) || '';
+    try {
+        const resp = await fetch('/api/pet/capabilities/promote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                run_id: currentRunId,
+                source_path: path,
+                name,
+                kind: 'artifact',
+                description,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        await loadPet();
+    } catch (e) {
+        alert(`Failed to promote artifact: ${e.message}`);
+    }
+}
+
+function buildWelcomeMarkup() {
+    return `<div class="welcome">
+            <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
+                <button class="welcome-mascot" type="button" aria-label="Dog mascot. Click for a bark." data-pose="sit">
+                    <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 160 144" role="img" aria-hidden="true">
+                        <defs>
+                            <style>
+                                .px-line { fill: color-mix(in srgb, var(--pet_secondary) 10%, transparent); }
+                                .px-bg0 { fill: color-mix(in srgb, #d9f3d0 72%, var(--pet_accent)); }
+                                .px-bg1 { fill: color-mix(in srgb, #b7d8ae 72%, var(--pet_accent)); }
+                                .px-bg2 { fill: color-mix(in srgb, #7f9f7b 70%, var(--pet_primary)); }
+                                .px-bg3 { fill: color-mix(in srgb, #4f6350 72%, var(--pet_secondary)); }
+                                .px-bg4 { fill: color-mix(in srgb, #2b332c 80%, var(--pet_secondary)); }
+                                .px-accent { fill: color-mix(in srgb, #e58f62 70%, var(--accent_primary)); }
+                            </style>
+                        </defs>
+                        <rect class="px-bg4" x="8" y="8" width="144" height="128" rx="8"></rect>
+                        <rect class="px-bg0" x="16" y="16" width="128" height="112" rx="4"></rect>
+                        <g class="lcd-grid" aria-hidden="true">
+                            <path class="px-line" d="M24 16h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1zm8 0h1v112h-1z"></path>
+                            <path class="px-line" d="M16 24h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16zm0 8h128v1H16z"></path>
+                        </g>
+                        <g class="stage-ground" aria-hidden="true">
+                            <rect class="px-bg2" x="24" y="104" width="112" height="8"></rect>
+                            <rect class="px-bg3" x="24" y="112" width="112" height="8"></rect>
+                            <rect class="px-bg1" x="24" y="96" width="24" height="8"></rect>
+                            <rect class="px-bg1" x="72" y="96" width="16" height="8"></rect>
+                            <rect class="px-bg1" x="112" y="96" width="16" height="8"></rect>
+                        </g>
+                        <g class="dog-drawing" shape-rendering="crispEdges">
+                            <g class="dog-bark-lines" aria-hidden="true">
+                                <rect class="px-accent" x="120" y="40" width="8" height="8"></rect>
+                                <rect class="px-accent" x="128" y="48" width="8" height="8"></rect>
+                                <rect class="px-accent" x="120" y="56" width="8" height="8"></rect>
+                            </g>
+                            <rect class="dog-shadow px-bg2" x="40" y="104" width="56" height="8"></rect>
+                            <rect class="dog-tail px-bg4" x="32" y="64" width="8" height="16"></rect>
+                            <rect class="dog-tail-tip px-bg3" x="32" y="56" width="8" height="8"></rect>
+                            <rect class="px-bg4" x="40" y="56" width="48" height="32"></rect>
+                            <rect class="px-bg3" x="48" y="64" width="32" height="16"></rect>
+                            <rect class="px-bg2" x="56" y="72" width="16" height="8"></rect>
+                            <g class="dog-head-group">
+                                <rect class="px-bg4" x="80" y="40" width="32" height="24"></rect>
+                                <rect class="px-bg3" x="88" y="48" width="16" height="8"></rect>
+                                <rect class="px-bg2" x="96" y="56" width="8" height="8"></rect>
+                                <rect class="dog-ear-left px-bg4" x="80" y="32" width="8" height="8"></rect>
+                                <rect class="dog-ear-right px-bg4" x="104" y="32" width="8" height="8"></rect>
+                                <rect class="px-bg4" x="88" y="48" width="8" height="8"></rect>
+                                <rect class="px-bg4" x="104" y="48" width="8" height="8"></rect>
+                                <rect class="dog-mouth-neutral px-bg4" x="104" y="56" width="8" height="8"></rect>
+                                <rect class="dog-mouth-bark px-accent" x="104" y="56" width="8" height="8"></rect>
+                                <rect class="px-accent" x="88" y="64" width="16" height="8"></rect>
+                            </g>
+                            <g class="dog-leg-group dog-leg-back-group">
+                                <rect class="dog-leg dog-leg-back px-bg4" x="48" y="88" width="8" height="16"></rect>
+                                <rect class="dog-paw px-bg4" x="48" y="104" width="16" height="8"></rect>
+                            </g>
+                            <g class="dog-leg-group dog-leg-front-group">
+                                <rect class="dog-leg dog-leg-front px-bg4" x="72" y="88" width="8" height="16"></rect>
+                                <rect class="dog-paw px-bg4" x="72" y="104" width="16" height="8"></rect>
+                            </g>
+                        </g>
+                    </svg>
+                </button>
+                <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
+            </div>
+        </div>`;
+}
+
+function destroyWelcomeMascot() {
+    if (!welcomeMascotRuntime) return;
+    window.clearInterval(welcomeMascotRuntime.cycleTimer);
+    window.clearTimeout(welcomeMascotRuntime.poseTimer);
+    welcomeMascotRuntime = null;
+}
+
+function initWelcomeMascot() {
+    destroyWelcomeMascot();
+
+    const mascot = document.querySelector('.welcome-mascot');
+    if (!mascot) return;
+    const cycle = ['walk', 'sit', 'walk', 'rest'];
+    let cycleIndex = 0;
+
+    const setPose = (pose) => {
+        mascot.dataset.pose = pose;
+    };
+
+    const runtime = {
+        cycleTimer: null,
+        poseTimer: null,
+    };
+
+    const queuePose = (pose, duration, nextPose = 'sit') => {
+        window.clearTimeout(runtime.poseTimer);
+        setPose(pose);
+        if (duration) {
+            runtime.poseTimer = window.setTimeout(() => {
+                setPose(nextPose);
+            }, duration);
+        }
+    };
+
+    mascot.addEventListener('click', () => {
+        queuePose('bark', 1200, 'sit');
+        cycleIndex = 1;
+    });
+    mascot.addEventListener('pointerenter', () => queuePose('walk', 1500, 'sit'));
+    mascot.addEventListener('focus', () => queuePose('sit'));
+
+    runtime.cycleTimer = window.setInterval(() => {
+        if (mascot.dataset.pose === 'bark') return;
+        const nextPose = cycle[cycleIndex % cycle.length];
+        cycleIndex += 1;
+        queuePose(nextPose, nextPose === 'rest' ? 2800 : 1800, 'sit');
+    }, 4200);
+
+    welcomeMascotRuntime = runtime;
+    setPose('sit');
+}
+
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
     textarea.style.height = 'auto';
-    textarea.style.height = Math.max(textarea.scrollHeight, 24) + 'px';
+    textarea.style.height = Math.max(textarea.scrollHeight, 72) + 'px';
 }
 
 function exitWelcomeMode() {
+    destroyWelcomeMascot();
     const area = document.getElementById('inputArea');
     if (area) area.classList.remove('welcome-mode');
     const chat = document.querySelector('.chat');
@@ -403,13 +1392,13 @@ function enterWelcomeMode() {
     if (chat) chat.classList.add('welcome-layout');
     const input = document.getElementById('input');
     if (input) input.style.height = '';
+    initWelcomeMascot();
 }
 
 function toggleDeepMode() {
     deepMode = !deepMode;
     localStorage.setItem('deepMode', deepMode);
-    const btn = document.getElementById('deepToggle');
-    if (btn) btn.classList.toggle('active', deepMode);
+    syncReasoningSelector();
 }
 
 function focusInput() {
@@ -417,10 +1406,1912 @@ function focusInput() {
     if (input) input.focus();
 }
 
+function syncInterveneButton() {
+    const textarea = document.getElementById('interveneInput');
+    const button = document.getElementById('interveneButton');
+    const panel = document.getElementById('buildStepsIntervene');
+    if (!textarea || !button || !panel) return;
+    panel.hidden = !(isGenerating && buildSteps.length);
+    button.disabled = !textarea.value.trim() || !isGenerating || !ws || ws.readyState !== WebSocket.OPEN;
+}
+
+function syncSendButton() {
+    const send = document.getElementById('send');
+    const input = document.getElementById('input');
+    if (!send) return;
+
+    if (isGenerating) {
+        send.disabled = false;
+        const hasDraft = Boolean(input && input.value.trim());
+        send.innerHTML = hasDraft ? SEND_BUTTON_ICON : STOP_BUTTON_ICON;
+        send.classList.add('is-stop');
+        send.setAttribute('aria-label', hasDraft ? 'Interrupt with prompt' : 'Stop response');
+        send.title = hasDraft ? 'Interrupt with prompt' : 'Stop response';
+        syncModelSelector();
+        syncInterveneButton();
+        return;
+    }
+
+    send.innerHTML = SEND_BUTTON_ICON;
+    send.classList.remove('is-stop');
+    send.setAttribute('aria-label', 'Send message');
+    send.title = 'Send message';
+    send.disabled = !modelAvailable || !input || !input.value.trim();
+    syncModelSelector();
+    syncInterveneButton();
+}
+
+function handleInputChange(textarea) {
+    autoResizeTextarea(textarea);
+    syncSendButton();
+    updateSlashMenu(textarea);
+}
+
+function setInputValue(value, cursorPosition = value.length) {
+    const input = document.getElementById('input');
+    if (!input) return;
+    input.value = value;
+    input.focus();
+    input.setSelectionRange(cursorPosition, cursorPosition);
+    handleInputChange(input);
+}
+
+function getSlashCommandQuery(textarea) {
+    if (!textarea) return null;
+    const caret = textarea.selectionStart ?? textarea.value.length;
+    const beforeCaret = textarea.value.slice(0, caret);
+    const match = beforeCaret.match(/^\s*\/([^\s\n]*)$/);
+    return match ? match[1].toLowerCase() : null;
+}
+
+function setDraftFromSlash(template) {
+    const value = `${template}\n`;
+    setInputValue(value, value.length);
+}
+
+function buildSlashCommands() {
+    return [
+        {
+            name: 'new',
+            label: '/new',
+            description: 'Start a fresh chat and clear the current conversation context.',
+            kind: 'action',
+            keywords: ['clear context', 'reset', 'new chat'],
+            onSelect: () => {
+                newChat();
+                setInputValue('');
+            },
+        },
+        {
+            name: 'clear',
+            label: '/clear',
+            description: 'Clear the current draft without sending it.',
+            kind: 'action',
+            keywords: ['erase', 'draft'],
+            onSelect: () => setInputValue(''),
+        },
+        {
+            name: 'web',
+            label: '/web',
+            description: featureSettings.web_search
+                ? 'Insert a web-search-oriented prompt.'
+                : 'Enable Web Search and insert a web-search-oriented prompt.',
+            kind: 'toggle',
+            keywords: ['search internet', 'browse', 'current'],
+            onSelect: () => {
+                if (!featureSettings.web_search) updateFeatureSetting('web_search', true);
+                setInputValue('Use web search when needed to answer this:\n');
+            },
+        },
+        {
+            name: 'files',
+            label: '/files',
+            description: 'Ask the assistant to inspect local files before answering.',
+            kind: 'prompt',
+            keywords: ['open files', 'local artifacts', 'workspace'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Inspect the relevant local files first, then help me with:');
+            },
+        },
+        {
+            name: 'read',
+            label: '/read',
+            description: 'Ask the assistant to inspect files and summarize what matters.',
+            kind: 'prompt',
+            keywords: ['inspect', 'summarize', 'review files'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Inspect the relevant workspace files and summarize what matters for:');
+            },
+        },
+        {
+            name: 'edit',
+            label: '/edit',
+            description: 'Insert a code-editing prompt for implementing a change.',
+            kind: 'prompt',
+            keywords: ['change', 'implement', 'modify code'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Edit the relevant workspace files to implement this change:');
+            },
+        },
+        {
+            name: 'review',
+            label: '/review',
+            description: 'Ask for a code review focused on bugs, regressions, and missing tests.',
+            kind: 'prompt',
+            keywords: ['audit', 'find bugs', 'regression'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Review the relevant changes or files for bugs, regressions, and missing tests:');
+            },
+        },
+        {
+            name: 'fix',
+            label: '/fix',
+            description: 'Ask the assistant to diagnose and fix a bug in local code.',
+            kind: 'prompt',
+            keywords: ['debug', 'repair', 'broken'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Diagnose the root cause in the local codebase and fix this bug:');
+            },
+        },
+        {
+            name: 'plan',
+            label: '/plan',
+            description: 'Ask the assistant to inspect the codebase and propose an implementation plan.',
+            kind: 'prompt',
+            keywords: ['approach', 'design', 'scoping'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Inspect the relevant local code and propose a concrete implementation plan for:');
+            },
+        },
+        {
+            name: 'explain',
+            label: '/explain',
+            description: 'Ask the assistant to explain how local code works.',
+            kind: 'prompt',
+            keywords: ['walkthrough', 'understand', 'code explanation'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setDraftFromSlash('Explain how the relevant local code works, including key files and flow, for:');
+            },
+        },
+        {
+            name: 'attach',
+            label: '/attach',
+            description: 'Open the file picker so you can add attachments to this chat.',
+            kind: 'action',
+            keywords: ['upload', 'file', 'image'],
+            onSelect: () => {
+                hideSlashMenu();
+                openAttachmentPicker();
+                document.getElementById('input')?.focus();
+            },
+        },
+    ];
+}
+
+function filterSlashCommands(query) {
+    const normalized = (query || '').trim().toLowerCase();
+    const commands = buildSlashCommands();
+    if (!normalized) return commands;
+    return commands.filter(command => {
+        const haystack = [
+            command.name,
+            command.label,
+            command.description,
+            ...(command.keywords || []),
+        ].join(' ').toLowerCase();
+        return haystack.includes(normalized);
+    });
+}
+
+function renderSlashMenu() {
+    const menu = document.getElementById('slashMenu');
+    const list = document.getElementById('slashMenuList');
+    if (!menu || !list) return;
+
+    if (!slashMenuItems.length) {
+        menu.hidden = false;
+        positionSlashMenu();
+        list.innerHTML = '<div class="slash-menu-empty">No matching commands</div>';
+        return;
+    }
+
+    menu.hidden = false;
+    list.innerHTML = '';
+    slashMenuItems.forEach((command, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'slash-menu-item' + (index === slashMenuSelectedIndex ? ' active' : '');
+        button.innerHTML = `
+            <div class="slash-menu-copy">
+                <div class="slash-menu-command">${escapeHtml(command.label)}</div>
+                <div class="slash-menu-description">${escapeHtml(command.description)}</div>
+            </div>
+            <div class="slash-menu-meta">${escapeHtml(SLASH_COMMAND_KIND_LABELS[command.kind] || 'Command')}</div>
+        `;
+        button.onmouseenter = () => {
+            slashMenuSelectedIndex = index;
+            renderSlashMenu();
+        };
+        button.onmousedown = (event) => {
+            event.preventDefault();
+            executeSlashCommand(index);
+        };
+        list.appendChild(button);
+    });
+    positionSlashMenu();
+    scrollActiveSlashItemIntoView();
+}
+
+function hideSlashMenu() {
+    slashMenuItems = [];
+    slashMenuSelectedIndex = 0;
+    const menu = document.getElementById('slashMenu');
+    const list = document.getElementById('slashMenuList');
+    if (menu) menu.hidden = true;
+    if (list) list.innerHTML = '';
+}
+
+function positionSlashMenu() {
+    const menu = document.getElementById('slashMenu');
+    const inputArea = document.getElementById('inputArea');
+    if (!menu || !inputArea || menu.hidden) return;
+
+    const rect = inputArea.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const safeMargin = 12;
+    const spaceAbove = Math.max(140, Math.floor(rect.top - safeMargin));
+    const spaceBelow = Math.max(140, Math.floor(viewportHeight - rect.bottom - safeMargin));
+    const placeBelow = spaceBelow > spaceAbove && spaceBelow >= 220;
+    const available = placeBelow ? spaceBelow : spaceAbove;
+
+    menu.classList.toggle('slash-menu-below', placeBelow);
+    menu.style.setProperty('--slash-menu-max-height', `${available}px`);
+}
+
+function scrollActiveSlashItemIntoView() {
+    const list = document.getElementById('slashMenuList');
+    const activeItem = list?.querySelector('.slash-menu-item.active');
+    if (!list || !activeItem) return;
+
+    const itemTop = activeItem.offsetTop;
+    const itemBottom = itemTop + activeItem.offsetHeight;
+    const viewTop = list.scrollTop;
+    const viewBottom = viewTop + list.clientHeight;
+
+    if (itemTop < viewTop) {
+        list.scrollTop = itemTop;
+        return;
+    }
+    if (itemBottom > viewBottom) {
+        list.scrollTop = itemBottom - list.clientHeight;
+    }
+}
+
+function updateSlashMenu(textarea = document.getElementById('input')) {
+    const query = getSlashCommandQuery(textarea);
+    if (query == null) {
+        hideSlashMenu();
+        return;
+    }
+
+    slashMenuItems = filterSlashCommands(query);
+    if (slashMenuSelectedIndex >= slashMenuItems.length) {
+        slashMenuSelectedIndex = 0;
+    }
+    renderSlashMenu();
+}
+
+function moveSlashSelection(direction) {
+    if (!slashMenuItems.length) return;
+    const total = slashMenuItems.length;
+    slashMenuSelectedIndex = (slashMenuSelectedIndex + direction + total) % total;
+    renderSlashMenu();
+}
+
+function executeSlashCommand(index = slashMenuSelectedIndex) {
+    const command = slashMenuItems[index];
+    if (!command) return;
+    command.onSelect();
+    updateSlashMenu();
+}
+
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 1024) return `${bytes || 0} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRelativeTime(isoString) {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) return '';
+    const diffMs = Date.now() - date.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.round(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.round(diffHr / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function noteAssistantTurnArtifactPath(path) {
+    if (!path) return;
+    currentAssistantTurnArtifactPaths.add(path);
+}
+
+function noteAssistantArtifactsFromToolResult(data) {
+    const payload = data?.payload || {};
+    if (!payload || typeof payload !== 'object') return;
+    if (typeof payload.path === 'string' && payload.path) {
+        noteAssistantTurnArtifactPath(payload.path);
+    }
+    if (Array.isArray(payload.items)) {
+        payload.items.forEach(item => {
+            if (item && typeof item.path === 'string') noteAssistantTurnArtifactPath(item.path);
+        });
+    }
+}
+
+function finalizeAssistantTurnArtifacts() {
+    latestAssistantTurnArtifactPaths = new Set(currentAssistantTurnArtifactPaths);
+    currentAssistantTurnArtifactPaths = new Set();
+}
+
+function artifactBadgeForPath(path) {
+    const lower = String(path || '').toLowerCase();
+    if (/\.(html?)$/.test(lower)) return 'Web';
+    if (/\.(png|jpg|jpeg|gif|svg|webp)$/.test(lower)) return 'Media';
+    if (/\.(md|txt|pdf)$/.test(lower)) return 'Doc';
+    if (/\.(json|ya?ml|toml|csv|tsv|xlsx|xls|xlsm)$/.test(lower)) return 'Data';
+    if (/\.(js|jsx|ts|tsx|py|rb|go|rs|java|c|cc|cpp|hpp|css|sh|sql)$/.test(lower)) return 'Code';
+    return 'File';
+}
+
+function sortWorkspaceFilesByRecent(entries) {
+    return [...entries].sort((a, b) => {
+        const aTime = new Date(a.modified_at || 0).getTime() || 0;
+        const bTime = new Date(b.modified_at || 0).getTime() || 0;
+        return bTime - aTime;
+    });
+}
+
+function normalizeWorkspacePath(path) {
+    const value = String(path || '.').trim();
+    return value === '' || value === '.' ? '.' : value.replace(/^\.\/+/, '').replace(/\/+/g, '/');
+}
+
+function compareWorkspacePaths(a, b) {
+    return normalizeWorkspacePath(a) === normalizeWorkspacePath(b);
+}
+
+function isWorkspaceEntryRecentlyChanged(entry) {
+    if (!entry || entry.type !== 'file') return false;
+    if (latestAssistantTurnArtifactPaths.has(entry.path)) return true;
+    if (!currentAssistantTurnStartedAt) return false;
+    const modified = new Date(entry.modified_at || 0).getTime() || 0;
+    return modified >= currentAssistantTurnStartedAt - 1500;
+}
+
+function flattenWorkspaceFiles(node, files = []) {
+    if (!node) return files;
+    if (node.type === 'file') {
+        files.push(node);
+        return files;
+    }
+    (node.children || []).forEach(child => flattenWorkspaceFiles(child, files));
+    return files;
+}
+
+function collectWorkspaceStats(node) {
+    const totals = { files: 0, directories: 0 };
+    if (!node) return totals;
+    const walk = current => {
+        if (current.type === 'directory') {
+            if (!compareWorkspacePaths(current.path, '.')) totals.directories += 1;
+            (current.children || []).forEach(walk);
+            return;
+        }
+        totals.files += 1;
+    };
+    walk(node);
+    return totals;
+}
+
+function toggleWorkspaceDirectory(path) {
+    const normalized = normalizeWorkspacePath(path);
+    if (compareWorkspacePaths(normalized, '.')) return;
+    if (collapsedWorkspaceDirs.has(normalized)) collapsedWorkspaceDirs.delete(normalized);
+    else collapsedWorkspaceDirs.add(normalized);
+    renderWorkspaceTrees();
+}
+
+function workspaceTreeNodeMeta(entry) {
+    if (entry.type === 'directory') {
+        const childCount = Array.isArray(entry.children) ? entry.children.length : 0;
+        return `${childCount} item${childCount === 1 ? '' : 's'}`;
+    }
+    const parts = [formatBytes(entry.size || 0)];
+    if (entry.modified_at) parts.push(formatRelativeTime(entry.modified_at));
+    return parts.join(' • ');
+}
+
+function renderWorkspaceTreeNode(entry, options = {}) {
+    const node = document.createElement('div');
+    const isDirectory = entry.type === 'directory';
+    const normalizedPath = normalizeWorkspacePath(entry.path);
+    const collapsed = isDirectory && !compareWorkspacePaths(normalizedPath, '.') && collapsedWorkspaceDirs.has(normalizedPath);
+    const isActive = !isDirectory && compareWorkspacePaths(entry.path, selectedWorkspaceFile);
+    const isChanged = isWorkspaceEntryRecentlyChanged(entry);
+    node.className = `workspace-tree-node ${isDirectory ? 'is-directory' : 'is-file'}${isActive ? ' active' : ''}${isChanged ? ' is-changed' : ''}`;
+
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'workspace-tree-row';
+    row.style.setProperty('--workspace-depth', String(options.depth || 0));
+    row.onclick = () => {
+        if (isDirectory) {
+            toggleWorkspaceDirectory(entry.path);
+            return;
+        }
+        openWorkspaceFile(entry.path, { modal: options.modal !== false });
+    };
+
+    const caret = document.createElement('span');
+    caret.className = `workspace-tree-caret${isDirectory ? '' : ' is-placeholder'}${collapsed ? ' is-collapsed' : ''}`;
+    caret.innerHTML = isDirectory ? '&#9656;' : '&#8226;';
+    row.appendChild(caret);
+
+    const icon = document.createElement('span');
+    icon.className = 'workspace-tree-icon';
+    icon.innerHTML = isDirectory ? (collapsed ? '&#128193;' : '&#128194;') : '&#128196;';
+    row.appendChild(icon);
+
+    const copy = document.createElement('span');
+    copy.className = 'workspace-tree-copy';
+    copy.innerHTML = `
+        <span class="workspace-tree-name">${escapeHtml(entry.name || basename(entry.path) || 'workspace')}</span>
+        <span class="workspace-tree-meta">${escapeHtml(workspaceTreeNodeMeta(entry))}</span>
+    `;
+    row.appendChild(copy);
+
+    if (isChanged) {
+        const badge = document.createElement('span');
+        badge.className = 'workspace-tree-status';
+        badge.textContent = 'Live';
+        row.appendChild(badge);
+    }
+
+    node.appendChild(row);
+
+    if (isDirectory && !collapsed && Array.isArray(entry.children) && entry.children.length) {
+        const children = document.createElement('div');
+        children.className = 'workspace-tree-children';
+        entry.children.forEach(child => {
+            children.appendChild(renderWorkspaceTreeNode(child, { ...options, depth: (options.depth || 0) + 1 }));
+        });
+        node.appendChild(children);
+    }
+
+    return node;
+}
+
+function renderWorkspaceTree(containerId, options = {}) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    if (!workspaceTree) {
+        container.innerHTML = '<div class="workspace-empty">Choose a chat action that creates or uploads files, and the workspace tree will appear here.</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    container.appendChild(renderWorkspaceTreeNode(workspaceTree, { depth: 0, ...options }));
+}
+
+function renderWorkspaceTrees() {
+    renderWorkspaceTree('workspaceFileList', { modal: true });
+    renderWorkspaceTree('fileModalTree', { modal: true });
+}
+
+function isSpreadsheetPath(path) {
+    return /\.(csv|tsv|xlsx|xls|xlsm)$/i.test(path || '');
+}
+
+function isHtmlPath(path) {
+    return /\.(html?)$/i.test(path || '');
+}
+
+function isMarkdownPath(path) {
+    return /\.(md|markdown)$/i.test(path || '');
+}
+
+function basename(path) {
+    const parts = String(path || '').split('/');
+    return parts[parts.length - 1] || path || '';
+}
+
+function insertAtCursor(text) {
+    const input = document.getElementById('input');
+    if (!input) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    input.value = before + text + after;
+    const caret = start + text.length;
+    input.setSelectionRange(caret, caret);
+    input.focus();
+    autoResizeTextarea(input);
+    syncSendButton();
+}
+
+function insertArtifactReference(path) {
+    const token = `[[artifact:${path}]]`;
+    const input = document.getElementById('input');
+    const needsLeadingSpace = input && input.value && !/\s$/.test(input.value);
+    insertAtCursor(`${needsLeadingSpace ? ' ' : ''}${token}`);
+}
+
+function isEditableTextPath(path) {
+    return !/\.(xlsx|xls|xlsm)$/i.test(path || '');
+}
+
+function getLanguageForPath(path) {
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    const map = {
+        js: 'javascript',
+        mjs: 'javascript',
+        cjs: 'javascript',
+        ts: 'typescript',
+        jsx: 'javascript',
+        tsx: 'typescript',
+        py: 'python',
+        rb: 'ruby',
+        go: 'go',
+        rs: 'rust',
+        java: 'java',
+        c: 'c',
+        h: 'c',
+        cpp: 'cpp',
+        cc: 'cpp',
+        hpp: 'cpp',
+        cs: 'csharp',
+        php: 'php',
+        swift: 'swift',
+        kt: 'kotlin',
+        html: 'xml',
+        htm: 'xml',
+        xml: 'xml',
+        css: 'css',
+        json: 'json',
+        yml: 'yaml',
+        yaml: 'yaml',
+        md: 'markdown',
+        sh: 'bash',
+        sql: 'sql',
+    };
+    return map[ext] || '';
+}
+
+function renderBuildSteps() {
+    const panel = document.getElementById('buildStepsPanel');
+    const list = document.getElementById('buildStepsList');
+    if (!panel || !list) return;
+    panel.hidden = true;
+    list.innerHTML = '';
+}
+
+function clearBuildSteps() {
+    buildSteps = [];
+    currentBuildStepIndex = null;
+    renderBuildSteps();
+    syncInterveneButton();
+}
+
+function updateBuildSteps(steps, activeIndex = null, completedCount = 0) {
+    buildSteps = (steps || []).map((text, index) => {
+        let state = 'pending';
+        if (index < completedCount) state = 'complete';
+        else if (activeIndex !== null && index === activeIndex) state = 'active';
+        return { text, state };
+    });
+    currentBuildStepIndex = activeIndex !== null ? activeIndex : null;
+    renderBuildSteps();
+    syncInterveneButton();
+}
+
+function loadExecutionPlanDraft(executePrompt) {
+    const draft = String(executePrompt || '').trim();
+    const input = document.getElementById('input');
+    if (!draft || !input) return;
+    setInputValue(draft, draft.length);
+    focusInput();
+}
+
+function renderWorkspaceActivity() {
+    const activityEl = document.getElementById('workspaceActivityList');
+    if (!activityEl) return;
+
+    if (!featureSettings.agent_tools) {
+        activityEl.innerHTML = '<div class="workspace-empty">Agent dev tools are turned off.</div>';
+        return;
+    }
+
+    if (!workspaceActivity.length) {
+        activityEl.innerHTML = '<div class="workspace-empty">The assistant\'s workspace activity will appear here during a turn.</div>';
+        return;
+    }
+
+    activityEl.innerHTML = '';
+    workspaceActivity.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = `workspace-activity-item${entry.error ? ' is-error' : ''}${entry.phase ? ` is-${entry.phase}` : ''}`;
+        const repeatBadge = entry.repeats > 1
+            ? `<span class="workspace-activity-repeat">${entry.collapsedSummary ? `${entry.repeats} events` : `x${entry.repeats}`}</span>`
+            : '';
+        const stepMeta = entry.stepLabel
+            ? `<div class="workspace-activity-step">${escapeHtml(entry.stepLabel)}</div>`
+            : '';
+        row.innerHTML = `
+            <div class="workspace-activity-time">${escapeHtml(entry.time || '')}</div>
+            <div class="workspace-activity-kind">${escapeHtml(entry.kind || 'Activity')}${repeatBadge}</div>
+            <div class="workspace-activity-text-wrap">
+                ${stepMeta}
+                <div class="workspace-activity-text">${escapeHtml(entry.text || '')}</div>
+            </div>
+        `;
+        activityEl.appendChild(row);
+    });
+    activityEl.scrollTop = activityEl.scrollHeight;
+}
+
+function clearWorkspaceActivity() {
+    workspaceActivity = [];
+    renderWorkspaceActivity();
+}
+
+function classifyWorkspaceActivity(kind, text) {
+    const normalizedKind = String(kind || '').trim();
+    const normalizedText = String(text || '').trim();
+    const lower = normalizedText.toLowerCase();
+
+    if (normalizedKind === 'Status') {
+        if (lower.includes('analyzing query')) return { kind: 'Analyze', phase: 'analyze' };
+        if (lower.includes('inspecting workspace')) return { kind: 'Inspect', phase: 'inspect' };
+        if (lower.includes('planning deep mode')) return { kind: 'Plan', phase: 'plan' };
+        if (lower.includes('build step') || lower.includes('building from task board')) return { kind: 'Execute', phase: 'execute' };
+        if (lower.includes('verifying workspace') || lower.includes('quality check')) return { kind: 'Verify', phase: 'verify' };
+        if (lower.includes('synthesizing from artifacts')) return { kind: 'Synthesize', phase: 'synthesize' };
+        if (lower.includes('audit')) return { kind: 'Audit', phase: 'audit' };
+        if (lower.includes('thinking carefully') || lower === 'thinking...') return { kind: 'Think', phase: 'think' };
+    }
+
+    if (normalizedKind === 'Tool') {
+        if (lower.startsWith('inspect:')) return { kind: 'Inspect Tool', phase: 'inspect' };
+        if (lower.startsWith('build ')) return { kind: 'Build Tool', phase: 'execute' };
+        if (lower.startsWith('verify:')) return { kind: 'Verify Tool', phase: 'verify' };
+        if (lower.startsWith('synthesize:')) return { kind: 'Synthesize Tool', phase: 'synthesize' };
+        return { kind: 'Tool', phase: 'tool' };
+    }
+
+    if (normalizedKind === 'Tool Result') {
+        if (lower.startsWith('inspect:')) return { kind: 'Inspect Result', phase: 'inspect' };
+        if (lower.startsWith('build ')) return { kind: 'Build Result', phase: 'execute' };
+        if (lower.startsWith('verify:')) return { kind: 'Verify Result', phase: 'verify' };
+        if (lower.startsWith('synthesize:')) return { kind: 'Synthesize Result', phase: 'synthesize' };
+        return { kind: 'Tool Result', phase: 'tool' };
+    }
+
+    if (normalizedKind === 'Tool Error') return { kind: 'Tool Error', phase: 'error' };
+    if (normalizedKind === 'Plan') return { kind: 'Plan', phase: 'plan' };
+    if (normalizedKind === 'Note') return { kind: 'Note', phase: 'note' };
+    if (normalizedKind === 'Draft') return { kind: 'Draft', phase: 'synthesize' };
+    if (normalizedKind === 'Done') return { kind: 'Done', phase: 'done' };
+    if (normalizedKind === 'Error') return { kind: 'Error', phase: 'error' };
+    if (normalizedKind === 'Turn') return { kind: 'Turn', phase: 'status' };
+    if (normalizedKind === 'Request') return { kind: 'Request', phase: 'status' };
+    if (normalizedKind === 'Interrupt') return { kind: 'Interrupt', phase: 'status' };
+    if (normalizedKind === 'Canceled') return { kind: 'Canceled', phase: 'status' };
+    return { kind: normalizedKind || 'Status', phase: 'status' };
+}
+
+function currentBuildStepLabel() {
+    if (currentBuildStepIndex === null || currentBuildStepIndex === undefined) return '';
+    const step = buildSteps[currentBuildStepIndex];
+    if (!step || !step.text) return `Step ${currentBuildStepIndex + 1}`;
+    return `Step ${currentBuildStepIndex + 1}: ${step.text}`;
+}
+
+function shouldCollapseWorkspaceActivity(entry) {
+    return ['tool', 'inspect', 'execute', 'verify', 'synthesize'].includes(entry.phase)
+        && /tool|result/i.test(entry.kind);
+}
+
+function collapseWorkspaceActivityEntries(entries, nextEntry) {
+    if (!entries.length) return entries.concat(nextEntry);
+    const previous = entries[entries.length - 1];
+    const sameSignature = previous.kind === nextEntry.kind
+        && previous.phase === nextEntry.phase
+        && previous.text === nextEntry.text
+        && previous.error === nextEntry.error;
+    if (sameSignature) {
+        const merged = {
+            ...previous,
+            repeats: (previous.repeats || 1) + 1,
+            time: nextEntry.time,
+        };
+        return entries.slice(0, -1).concat(merged);
+    }
+
+    if (shouldCollapseWorkspaceActivity(previous) && shouldCollapseWorkspaceActivity(nextEntry)) {
+        const previousCount = previous.repeats || 1;
+        const merged = {
+            ...nextEntry,
+            kind: `${nextEntry.kind}`,
+            repeats: previousCount + 1,
+            collapsedSummary: true,
+        };
+        return entries.slice(0, -1).concat(merged);
+    }
+
+    return entries.concat(nextEntry);
+}
+
+function recordWorkspaceActivity(kind, text, options = {}) {
+    if (!text) return;
+    const timestamp = new Date();
+    const classified = options.phase
+        ? { kind: String(kind || 'Activity').trim() || 'Activity', phase: options.phase }
+        : classifyWorkspaceActivity(kind, text);
+    const entry = {
+        kind: classified.kind,
+        phase: classified.phase,
+        text,
+        error: Boolean(options.error),
+        stepLabel: options.stepLabel || (
+            ['execute', 'tool', 'verify', 'synthesize'].includes(classified.phase)
+                ? currentBuildStepLabel()
+                : ''
+        ),
+        repeats: 1,
+        time: timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }),
+    };
+    workspaceActivity = collapseWorkspaceActivityEntries(workspaceActivity, entry).slice(-WORKSPACE_ACTIVITY_LIMIT);
+    renderWorkspaceActivity();
+}
+
+function renderTerminalOutput() {
+    const outputEl = document.getElementById('terminalOutput');
+    const statusEl = document.getElementById('terminalStatusLabel');
+    if (!outputEl) return;
+    if (terminalEmulator) {
+        const emptyEl = outputEl.querySelector('.workspace-empty');
+        if (emptyEl) emptyEl.hidden = true;
+        if (statusEl) {
+            const connected = terminalWs && terminalWs.readyState === WebSocket.OPEN;
+            statusEl.textContent = connected ? 'Interactive workspace shell connected' : 'Interactive workspace shell disconnected';
+        }
+        return;
+    }
+    if (!terminalEntries.length && !terminalLiveBuffer) {
+        outputEl.innerHTML = '<div class="workspace-empty terminal-empty">Workspace command output will appear here during a turn.</div>';
+        if (statusEl) statusEl.textContent = 'Interactive workspace shell';
+        return;
+    }
+
+    outputEl.innerHTML = '';
+    if (terminalLiveBuffer) {
+        const live = document.createElement('div');
+        live.className = 'terminal-live';
+        live.textContent = terminalLiveBuffer;
+        outputEl.appendChild(live);
+    }
+    terminalEntries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'terminal-entry';
+        const stdout = entry.stdout ? `<div class="terminal-stream">${escapeHtml(entry.stdout)}</div>` : '';
+        const stderr = entry.stderr ? `<div class="terminal-stream is-error">${escapeHtml(entry.stderr)}</div>` : '';
+        row.innerHTML = `
+            <div class="terminal-command">$ ${escapeHtml(entry.command || '')}</div>
+            ${stdout}
+            ${stderr}
+            <div class="terminal-meta">${escapeHtml(entry.meta || '')}</div>
+        `;
+        outputEl.appendChild(row);
+    });
+    if (statusEl) {
+        const connected = terminalWs && terminalWs.readyState === WebSocket.OPEN;
+        statusEl.textContent = connected ? 'Interactive workspace shell connected' : 'Interactive workspace shell disconnected';
+    }
+    outputEl.scrollTop = outputEl.scrollHeight;
+}
+
+function clearTerminalOutput() {
+    terminalEntries = [];
+    terminalLiveBuffer = '';
+    if (terminalEmulator) terminalEmulator.clear();
+    renderTerminalOutput();
+}
+
+function recordTerminalCommandStart(command, cwd) {
+    if (!command) return;
+    const meta = [`Running in ${cwd || '.'}`];
+    terminalEntries = terminalEntries.concat({
+        id: Date.now() + Math.random(),
+        command,
+        stdout: '',
+        stderr: '',
+        meta: meta.join(' • '),
+        pending: true,
+    }).slice(-WORKSPACE_ACTIVITY_LIMIT);
+    renderTerminalOutput();
+}
+
+function connectTerminalWS() {
+    if (!featureSettings.agent_tools || !featureSettings.workspace_panel || !currentConvId) return;
+    if (terminalWs && (terminalWs.readyState === WebSocket.OPEN || terminalWs.readyState === WebSocket.CONNECTING)) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    terminalWs = new WebSocket(`${protocol}//${window.location.host}/ws/terminal/${encodeURIComponent(currentConvId)}`);
+    terminalWs.onopen = () => {
+        initializeTerminalEmulator();
+        if (terminalEmulator) {
+            terminalEmulator.clear();
+            fitTerminalEmulator();
+            sendTerminalResize();
+        }
+        renderTerminalOutput();
+    };
+    terminalWs.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'terminal_output') {
+            terminalLiveBuffer += data.content || '';
+            if (terminalEmulator) terminalEmulator.write(data.content || '');
+            renderTerminalOutput();
+        } else if (data.type === 'terminal_status') {
+            const statusEl = document.getElementById('terminalStatusLabel');
+            if (statusEl) statusEl.textContent = data.content || 'Interactive workspace shell';
+        } else if (data.type === 'terminal_cleared') {
+            terminalLiveBuffer = '';
+            if (terminalEmulator) terminalEmulator.clear();
+            renderTerminalOutput();
+        }
+    };
+    terminalWs.onclose = () => {
+        renderTerminalOutput();
+        setTimeout(() => {
+            if (currentConvId && featureSettings.agent_tools && featureSettings.workspace_panel) connectTerminalWS();
+        }, 1500);
+    };
+    terminalWs.onerror = () => {
+        renderTerminalOutput();
+    };
+}
+
+function closeTerminalWS() {
+    if (terminalWs) {
+        try { terminalWs.close(); } catch (e) {}
+    }
+    terminalWs = null;
+}
+
+function initializeTerminalEmulator() {
+    if (terminalEmulator) return terminalEmulator;
+    const mount = document.getElementById('terminalCanvas');
+    if (!mount || !window.Terminal) return null;
+    terminalEmulator = new window.Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: '"IBM Plex Mono", "Courier New", monospace',
+        fontSize: 12,
+        theme: {
+            background: '#0b1220',
+            foreground: '#dce7f6',
+        },
+    });
+    if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+        terminalFitAddon = new window.FitAddon.FitAddon();
+        terminalEmulator.loadAddon(terminalFitAddon);
+    }
+    terminalEmulator.open(mount);
+    terminalEmulator.onData((data) => {
+        sendTerminalMessage({ type: 'input', content: data });
+    });
+    terminalEmulator.onResize((size) => {
+        sendTerminalMessage({ type: 'resize', cols: size.cols, rows: size.rows });
+    });
+    fitTerminalEmulator();
+    return terminalEmulator;
+}
+
+function fitTerminalEmulator() {
+    if (terminalFitAddon && typeof terminalFitAddon.fit === 'function') {
+        try { terminalFitAddon.fit(); } catch (e) {}
+    }
+}
+
+function sendTerminalResize() {
+    if (!terminalEmulator) return;
+    sendTerminalMessage({ type: 'resize', cols: terminalEmulator.cols, rows: terminalEmulator.rows });
+}
+
+function sendTerminalMessage(payload) {
+    if (!terminalWs || terminalWs.readyState !== WebSocket.OPEN) return false;
+    terminalWs.send(JSON.stringify(payload));
+    return true;
+}
+
+function interruptTerminal() {
+    sendTerminalMessage({ type: 'signal', signal: 'interrupt' });
+}
+
+function restartTerminal() {
+    sendTerminalMessage({ type: 'restart' });
+}
+
+function recordTerminalCommandResult(command, payload = {}) {
+    if (!command && !terminalEntries.length) return;
+    const returncode = payload.returncode;
+    const cwd = payload.cwd || '.';
+    const next = {
+        command: command || terminalEntries[terminalEntries.length - 1]?.command || '',
+        stdout: payload.stdout || '',
+        stderr: payload.stderr || payload.error || '',
+        meta: returncode == null ? `Command failed • ${cwd}` : `Exit ${returncode} • ${cwd}`,
+        pending: false,
+    };
+    const lastEntry = terminalEntries[terminalEntries.length - 1];
+    if (lastEntry?.pending && (!command || lastEntry.command === command)) {
+        terminalEntries[terminalEntries.length - 1] = { ...lastEntry, ...next };
+    } else {
+        terminalEntries = terminalEntries.concat({ id: Date.now() + Math.random(), ...next }).slice(-WORKSPACE_ACTIVITY_LIMIT);
+    }
+    renderTerminalOutput();
+}
+
+function renderFileList() {
+    const listEl = document.getElementById('workspaceFileList');
+    const pathEl = document.getElementById('workspacePath');
+    if (!listEl || !pathEl) return;
+
+    if (!workspaceTree) {
+        pathEl.textContent = 'No files yet';
+        listEl.innerHTML = '<div class="workspace-empty">Choose a chat action that creates or uploads files, and the workspace tree will appear here.</div>';
+        return;
+    }
+
+    pathEl.textContent = `${workspaceStats.files} file${workspaceStats.files === 1 ? '' : 's'} • ${workspaceStats.directories} folder${workspaceStats.directories === 1 ? '' : 's'}`;
+    renderWorkspaceTrees();
+}
+
+function getCodeMirrorModeForPath(path) {
+    if (!(window.CodeMirror && Array.isArray(window.CodeMirror.modeInfo))) return null;
+    return window.CodeMirror.findModeByFileName(path || '') || null;
+}
+
+function configureInlineEditorLanguage(path) {
+    const editor = ensureInlineEditor();
+    if (!editor) return;
+    const modeInfo = getCodeMirrorModeForPath(path);
+    if (!modeInfo) {
+        editor.setOption('mode', null);
+        return;
+    }
+    editor.setOption('mode', modeInfo.mime || modeInfo.mode || null);
+    if (window.CodeMirror.autoLoadMode && modeInfo.mode) {
+        window.CodeMirror.autoLoadMode(editor, modeInfo.mode);
+    }
+}
+
+function normalizeIndentLevel(indent) {
+    const size = Number(indent) || 0;
+    return Math.max(0, Math.floor(size / 4));
+}
+
+function symbolGroupForKind(kind) {
+    if (['class', 'interface', 'struct', 'enum', 'type', 'module', 'namespace', 'heading'].includes(kind)) return 'Structures';
+    if (['function', 'method', 'hook'].includes(kind)) return 'Functions';
+    if (['property', 'constant', 'field', 'selector'].includes(kind)) return 'Members';
+    if (['key', 'route', 'section'].includes(kind)) return 'Data';
+    return 'Other';
+}
+
+function extractSymbolsForPath(path, content) {
+    const text = String(content || '');
+    const ext = ((path || '').split('.').pop() || '').toLowerCase();
+    const symbols = [];
+    const lines = text.split(/\r?\n/);
+    const addSymbol = (name, kind, line, indent = 0, extra = {}) => {
+        if (!name) return;
+        symbols.push({
+            name: name.trim(),
+            kind,
+            line,
+            indent,
+            level: normalizeIndentLevel(indent),
+            group: symbolGroupForKind(kind),
+            ...extra,
+        });
+    };
+
+    lines.forEach((lineText, index) => {
+        let match = null;
+        const indent = (lineText.match(/^\s*/) || [''])[0].replace(/\t/g, '    ').length;
+        if (['js', 'jsx', 'ts', 'tsx'].includes(ext)) {
+            match = lineText.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)/);
+            if (match) return addSymbol(match[1], 'function', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?\(/);
+            if (match) return addSymbol(match[1], 'function', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?class\s+([A-Za-z0-9_$]+)/);
+            if (match) return addSymbol(match[1], 'class', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?interface\s+([A-Za-z0-9_$]+)/);
+            if (match) return addSymbol(match[1], 'interface', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?type\s+([A-Za-z0-9_$]+)/);
+            if (match) return addSymbol(match[1], 'type', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?enum\s+([A-Za-z0-9_$]+)/);
+            if (match) return addSymbol(match[1], 'enum', index + 1, indent);
+            match = lineText.match(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/);
+            if (match && /=>/.test(lineText)) return addSymbol(match[1], 'function', index + 1, indent);
+            match = lineText.match(/^\s*([A-Za-z0-9_$]+)\s*\([^)]*\)\s*\{/);
+            if (match && indent > 0) return addSymbol(match[1], 'method', index + 1, indent);
+            match = lineText.match(/^\s*(?:get|set)\s+([A-Za-z0-9_$]+)\s*\(/);
+            if (match) return addSymbol(match[1], 'property', index + 1, indent);
+        } else if (ext === 'py') {
+            match = lineText.match(/^\s*def\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], indent > 0 ? 'method' : 'function', index + 1, indent);
+            match = lineText.match(/^\s*async\s+def\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], indent > 0 ? 'method' : 'function', index + 1, indent);
+            match = lineText.match(/^\s*class\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'class', index + 1, indent);
+        } else if (['rb'].includes(ext)) {
+            match = lineText.match(/^\s*def\s+([A-Za-z0-9_?!]+)/);
+            if (match) return addSymbol(match[1], 'method', index + 1, indent);
+            match = lineText.match(/^\s*module\s+([A-Za-z0-9_:]+)/);
+            if (match) return addSymbol(match[1], 'module', index + 1, indent);
+            match = lineText.match(/^\s*class\s+([A-Za-z0-9_:]+)/);
+            if (match) return addSymbol(match[1], 'class', index + 1, indent);
+        } else if (['go'].includes(ext)) {
+            match = lineText.match(/^\s*func\s+(?:\([^)]+\)\s+)?([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], lineText.includes('(') && /^\s*func\s+\([^)]+\)\s+/.test(lineText) ? 'method' : 'function', index + 1, indent);
+            match = lineText.match(/^\s*type\s+([A-Za-z0-9_]+)\s+struct/);
+            if (match) return addSymbol(match[1], 'struct', index + 1, indent);
+            match = lineText.match(/^\s*type\s+([A-Za-z0-9_]+)\s+interface/);
+            if (match) return addSymbol(match[1], 'interface', index + 1, indent);
+        } else if (['java', 'kt', 'swift', 'rs', 'c', 'cc', 'cpp', 'hpp', 'h', 'cs', 'php'].includes(ext)) {
+            match = lineText.match(/^\s*(?:public|private|protected|internal|static|final|open|abstract|\s)*\s*class\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'class', index + 1, indent);
+            match = lineText.match(/^\s*(?:public|private|protected|internal|static|final|open|abstract|\s)*\s*(?:interface|protocol|trait)\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'interface', index + 1, indent);
+            match = lineText.match(/^\s*(?:public|private|protected|internal|static|final|open|abstract|\s)*\s*enum\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'enum', index + 1, indent);
+            match = lineText.match(/^\s*(?:public|private|protected|internal|static|final|open|abstract|\s)*\s*(?:struct|record)\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'struct', index + 1, indent);
+            match = lineText.match(/^\s*(?:public|private|protected|internal|static|final|open|abstract|\s)*\s*(?:fn|func|void|int|float|double|bool|boolean|char|String|auto|const\s+auto|[A-Za-z0-9_:<>~*&]+\s+)+([A-Za-z0-9_~]+)\s*\(/);
+            if (match) return addSymbol(match[1], indent > 0 ? 'method' : 'function', index + 1, indent);
+        } else if (['json', 'yml', 'yaml', 'toml'].includes(ext)) {
+            match = lineText.match(/^\s*([A-Za-z0-9_.-]+)\s*[:=]/);
+            if (match) return addSymbol(match[1], 'key', index + 1, indent);
+        } else if (['css', 'scss', 'sass', 'less'].includes(ext)) {
+            match = lineText.match(/^\s*([^{][^{]+)\s*\{/);
+            if (match) return addSymbol(match[1], 'selector', index + 1, indent);
+        } else if (['md'].includes(ext)) {
+            match = lineText.match(/^\s*(#{1,6})\s+(.+)/);
+            if (match) return addSymbol(match[2], 'heading', index + 1, 0, { level: Math.max(0, match[1].length - 1), headingLevel: match[1].length });
+        } else if (['sh', 'bash', 'zsh'].includes(ext)) {
+            match = lineText.match(/^\s*([A-Za-z0-9_]+)\s*\(\)\s*\{/);
+            if (match) return addSymbol(match[1], 'function', index + 1, indent);
+            match = lineText.match(/^\s*function\s+([A-Za-z0-9_]+)/);
+            if (match) return addSymbol(match[1], 'function', index + 1, indent);
+        } else if (['sql'].includes(ext)) {
+            match = lineText.match(/^\s*create\s+(?:or\s+replace\s+)?(?:view|table|function|procedure)\s+([A-Za-z0-9_."]+)/i);
+            if (match) return addSymbol(match[1].replace(/"/g, ''), 'section', index + 1, indent);
+        }
+        return null;
+    });
+
+    return symbols.slice(0, 200);
+}
+
+function renderCurrentFileSymbols() {
+    const listEl = document.getElementById('workspaceSymbolList');
+    if (!listEl) return;
+    if (!inlineViewerPath || !currentFileSymbols.length) {
+        listEl.innerHTML = '<div class="workspace-empty">Open a code file to jump between symbols.</div>';
+        return;
+    }
+
+    listEl.innerHTML = '';
+    const groups = new Map();
+    currentFileSymbols.forEach(symbol => {
+        const key = symbol.group || 'Other';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(symbol);
+    });
+
+    Array.from(groups.entries()).forEach(([groupName, items]) => {
+        const groupEl = document.createElement('div');
+        groupEl.className = 'workspace-symbol-group';
+        const collapsed = Boolean(symbolGroupState[groupName]);
+        const header = document.createElement('button');
+        header.type = 'button';
+        header.className = 'workspace-symbol-group-toggle';
+        header.innerHTML = `
+            <span class="workspace-symbol-group-caret">${collapsed ? '▸' : '▾'}</span>
+            <span>${escapeHtml(groupName)}</span>
+            <span class="workspace-symbol-group-count">${items.length}</span>
+        `;
+        header.onclick = () => {
+            symbolGroupState[groupName] = !symbolGroupState[groupName];
+            renderCurrentFileSymbols();
+        };
+        groupEl.appendChild(header);
+
+        const body = document.createElement('div');
+        body.className = `workspace-symbol-group-body${collapsed ? ' is-collapsed' : ''}`;
+        items.forEach(symbol => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'workspace-symbol-item';
+            button.style.setProperty('--symbol-level', String(Math.min(symbol.level || 0, 6)));
+            button.innerHTML = `
+                <div class="workspace-symbol-name">${escapeHtml(symbol.name)}</div>
+                <div class="workspace-symbol-meta">${escapeHtml(`${symbol.kind} • line ${symbol.line}`)}</div>
+            `;
+            button.onclick = () => jumpToInlineSymbol(symbol.line);
+            body.appendChild(button);
+        });
+        groupEl.appendChild(body);
+        listEl.appendChild(groupEl);
+    });
+}
+
+function updateCurrentFileSymbols(path, content) {
+    currentFileSymbols = extractSymbolsForPath(path, content);
+    renderCurrentFileSymbols();
+}
+
+function jumpToInlineSymbol(line) {
+    const editor = ensureInlineEditor();
+    if (!editor || !Number.isFinite(line)) return;
+    setInlineViewerView('edit');
+    const targetLine = Math.max(0, Number(line) - 1);
+    editor.focus();
+    editor.setCursor({ line: targetLine, ch: 0 });
+    editor.scrollIntoView({ line: targetLine, ch: 0 }, 120);
+}
+
+function ensureInlineEditor() {
+    if (inlineEditorReady) return inlineEditor;
+    const textarea = document.getElementById('inlineViewerEditor');
+    if (!textarea) return null;
+    if (!(window.CodeMirror && typeof window.CodeMirror.fromTextArea === 'function')) return null;
+    if (window.CodeMirror.modeURL === undefined) {
+        window.CodeMirror.modeURL = 'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/%N/%N.min.js';
+    }
+
+    inlineEditor = window.CodeMirror.fromTextArea(textarea, {
+        lineNumbers: true,
+        keyMap: 'vim',
+        lineWrapping: false,
+        indentUnit: 4,
+        tabSize: 4,
+        viewportMargin: Infinity,
+        gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+        foldGutter: true,
+        autoCloseBrackets: true,
+        matchBrackets: true,
+        styleActiveLine: true,
+    });
+    textarea.dataset.editorReady = 'true';
+    inlineEditor.on('change', () => {
+        if (inlineViewerApplyingRemoteContent) return;
+        updateInlineViewerPreview();
+        scheduleInlineViewerAutosave();
+        updateCurrentFileSymbols(inlineViewerPath, inlineEditor.getValue());
+        syncInlineSelectionAction();
+    });
+    inlineEditor.on('focus', () => {
+        if (inlineViewerSaveState === 'saved') setInlineViewerSaveState('idle');
+    });
+    inlineEditor.on('cursorActivity', () => {
+        syncInlineSelectionAction();
+    });
+    inlineEditorReady = true;
+    return inlineEditor;
+}
+
+function getViewerContent(prefix) {
+    if (prefix === 'inlineViewer') {
+        const editor = ensureInlineEditor();
+        if (editor) return editor.getValue();
+    }
+    const textarea = document.getElementById(`${prefix}Editor`);
+    return textarea ? (textarea.value || '') : '';
+}
+
+function setViewerContent(prefix, content) {
+    if (prefix === 'inlineViewer') {
+        const editor = ensureInlineEditor();
+        if (editor) {
+            inlineViewerApplyingRemoteContent = true;
+            const current = editor.getValue();
+            if (current !== (content || '')) editor.setValue(content || '');
+            inlineViewerApplyingRemoteContent = false;
+            configureInlineEditorLanguage(inlineViewerPath);
+            updateCurrentFileSymbols(inlineViewerPath, content || '');
+            editor.refresh();
+            return;
+        }
+    }
+    const textarea = document.getElementById(`${prefix}Editor`);
+    if (textarea) textarea.value = content || '';
+}
+
+function setInlineViewerSaveState(state, text = '') {
+    inlineViewerSaveState = state;
+    const el = document.getElementById('inlineViewerStatus');
+    if (!el) return;
+    el.classList.remove('is-dirty', 'is-saving', 'is-saved', 'is-error');
+    if (state === 'dirty') {
+        el.textContent = text || 'Unsaved';
+        el.classList.add('is-dirty');
+        return;
+    }
+    if (state === 'saving') {
+        el.textContent = text || 'Autosaving...';
+        el.classList.add('is-saving');
+        return;
+    }
+    if (state === 'saved') {
+        el.textContent = text || 'Saved';
+        el.classList.add('is-saved');
+        return;
+    }
+    if (state === 'error') {
+        el.textContent = text || 'Save failed';
+        el.classList.add('is-error');
+        return;
+    }
+    el.textContent = text || 'Idle';
+}
+
+function syncInlineUndoButton() {
+    const button = document.getElementById('inlineViewerUndoButton');
+    if (!button) return;
+    const stack = inlineViewerUndoStacks[inlineViewerPath] || [];
+    button.disabled = !inlineViewerPath || !stack.length || !inlineViewerEditable;
+}
+
+function getInlineSelection() {
+    if (!inlineViewerEditable || !inlineViewerPath) return '';
+    const editor = ensureInlineEditor();
+    if (editor) return editor.getSelection() || '';
+    const textarea = document.getElementById('inlineViewerEditor');
+    if (!textarea) return '';
+    const start = textarea.selectionStart ?? 0;
+    const end = textarea.selectionEnd ?? start;
+    return (textarea.value || '').slice(start, end);
+}
+
+function syncInlineSelectionAction() {
+    const button = document.getElementById('inlineViewerAskAgentButton');
+    if (!button) return;
+    button.disabled = !inlineViewerEditable || !inlineViewerPath || !getInlineSelection().trim();
+}
+
+function buildSelectionPrompt(path, selection) {
+    const language = getLanguageForPath(path) || '';
+    const fence = language || '';
+    return [
+        `Help me work on this selection from \`${path}\`:`,
+        '',
+        `\`\`\`${fence}`,
+        selection,
+        '```',
+        '',
+        'Please explain what matters, suggest the right change, and edit the relevant workspace files if needed.'
+    ].join('\n');
+}
+
+function sendInlineSelectionToChat() {
+    const selection = getInlineSelection().trim();
+    if (!selection || !inlineViewerPath) return;
+    const prompt = buildSelectionPrompt(inlineViewerPath, selection);
+    const input = document.getElementById('input');
+    if (!input) return;
+    const existing = input.value.trim();
+    const nextValue = existing ? `${existing}\n\n${prompt}` : prompt;
+    setInputValue(nextValue, nextValue.length);
+    focusInput();
+}
+
+function pushInlineUndoSnapshot(path, content) {
+    if (!path) return;
+    const stack = inlineViewerUndoStacks[path] || [];
+    if (stack[stack.length - 1] === content) return;
+    stack.push(content);
+    while (stack.length > INLINE_VIEWER_UNDO_LIMIT) stack.shift();
+    inlineViewerUndoStacks[path] = stack;
+    syncInlineUndoButton();
+}
+
+function scheduleInlineViewerAutosave() {
+    if (!inlineViewerEditable || !inlineViewerPath || inlineViewerView !== 'edit') return;
+    const current = getViewerContent('inlineViewer');
+    if (current === inlineViewerLastSavedContent) {
+        if (inlineViewerAutosaveTimer) {
+            clearTimeout(inlineViewerAutosaveTimer);
+            inlineViewerAutosaveTimer = null;
+        }
+        setInlineViewerSaveState('saved');
+        return;
+    }
+    setInlineViewerSaveState('dirty');
+    if (inlineViewerAutosaveTimer) clearTimeout(inlineViewerAutosaveTimer);
+    inlineViewerAutosaveTimer = setTimeout(() => {
+        inlineViewerAutosaveTimer = null;
+        saveInlineViewer({ autosave: true }).catch(() => {});
+    }, INLINE_VIEWER_AUTOSAVE_DELAY_MS);
+}
+
+async function undoInlineViewerChange() {
+    if (!inlineViewerPath) return;
+    const stack = inlineViewerUndoStacks[inlineViewerPath] || [];
+    if (!stack.length) return;
+    const previousContent = stack.pop();
+    inlineViewerUndoStacks[inlineViewerPath] = stack;
+    inlineViewerPerformingUndo = true;
+    setViewerContent('inlineViewer', previousContent || '');
+    updateInlineViewerPreview();
+    syncInlineUndoButton();
+    await saveInlineViewer({ autosave: true, skipUndoSnapshot: true });
+    inlineViewerPerformingUndo = false;
+}
+
+function getViewerState(prefix) {
+    if (prefix === 'inlineViewer') {
+        return {
+            editable: inlineViewerEditable,
+            kind: inlineViewerKind,
+            path: inlineViewerPath,
+            view: inlineViewerView,
+        };
+    }
+    return {
+        editable: fileModalEditable,
+        kind: fileModalKind,
+        path: fileModalPath,
+        view: 'edit',
+    };
+}
+
+function setViewerState(prefix, updates = {}) {
+    if (prefix === 'inlineViewer') {
+        if (updates.editable !== undefined) inlineViewerEditable = updates.editable;
+        if (updates.kind !== undefined) inlineViewerKind = updates.kind;
+        if (updates.path !== undefined) inlineViewerPath = updates.path;
+        if (updates.view !== undefined) inlineViewerView = updates.view;
+        return;
+    }
+    if (updates.editable !== undefined) fileModalEditable = updates.editable;
+    if (updates.kind !== undefined) fileModalKind = updates.kind;
+    if (updates.path !== undefined) fileModalPath = updates.path;
+}
+
+function setViewerView(prefix, view) {
+    const editTab = document.getElementById(`${prefix}EditTab`);
+    const previewTab = document.getElementById(`${prefix}PreviewTab`);
+    const editPane = document.getElementById(`${prefix}EditPane`);
+    const previewPane = document.getElementById(`${prefix}PreviewPane`);
+    const state = getViewerState(prefix);
+    if (!editTab || !previewTab || !editPane || !previewPane) return;
+
+    const editing = view === 'edit' && state.editable;
+    editTab.classList.toggle('active', editing);
+    previewTab.classList.toggle('active', !editing);
+    editPane.classList.toggle('file-modal-pane-hidden', !editing);
+    previewPane.classList.toggle('file-modal-pane-hidden', editing);
+    if (prefix === 'inlineViewer') inlineViewerView = editing ? 'edit' : 'preview';
+    if (prefix === 'inlineViewer' && editing) {
+        const editor = ensureInlineEditor();
+        if (editor) {
+            setTimeout(() => editor.refresh(), 0);
+        }
+    }
+}
+
+function setFileModalView(view) {
+    setViewerView('fileModal', view);
+}
+
+function setInlineViewerView(view) {
+    setViewerView('inlineViewer', view);
+}
+
+function toggleViewerEmptyState(prefix, hasFile) {
+    const emptyEl = document.getElementById(`${prefix}Empty`);
+    const editPane = document.getElementById(`${prefix}EditPane`);
+    const previewPane = document.getElementById(`${prefix}PreviewPane`);
+    if (!emptyEl) return;
+    emptyEl.hidden = hasFile;
+    if (!hasFile) {
+        if (editPane) editPane.classList.add('file-modal-pane-hidden');
+        if (previewPane) previewPane.classList.add('file-modal-pane-hidden');
+    }
+}
+
+function renderCodePreview(targetId, content, path) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const pre = document.createElement('pre');
+    pre.className = 'file-modal-code';
+    const code = document.createElement('code');
+    code.textContent = content || '';
+    const language = getLanguageForPath(path);
+    if (language) code.className = `language-${language}`;
+    pre.appendChild(code);
+    previewEl.appendChild(pre);
+    if (typeof hljs !== 'undefined') {
+        try { hljs.highlightElement(code); } catch (e) {}
+    }
+}
+
+function renderHtmlPreview(targetId, content) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.className = 'file-modal-html';
+    iframe.setAttribute('sandbox', 'allow-same-origin');
+    iframe.srcdoc = content || '';
+    previewEl.appendChild(iframe);
+}
+
+function renderMarkdownPreview(targetId, content) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.add('file-modal-markdown');
+    if (typeof marked === 'undefined' || !markedReady) {
+        previewEl.textContent = content || '';
+        return;
+    }
+    previewEl.innerHTML = (content && content.trim()) ? marked.parse(content) : '<p class="workspace-empty">Nothing to preview.</p>';
+    if (typeof hljs !== 'undefined') {
+        previewEl.querySelectorAll('pre code').forEach(block => {
+            try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
+        });
+    }
+}
+
+function renderDelimitedPreview(targetId, content, path) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const delimiter = /\.tsv$/i.test(path || '') ? '\t' : ',';
+    const lines = String(content || '').split(/\r?\n/).filter(line => line.length);
+    if (!lines.length) {
+        previewEl.textContent = 'No rows to preview.';
+        return;
+    }
+    const rows = lines.slice(0, 30).map(line => line.split(delimiter));
+    const wrap = document.createElement('div');
+    wrap.className = 'file-modal-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'file-modal-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    (rows[0] || []).forEach(cell => {
+        const th = document.createElement('th');
+        th.textContent = cell;
+        headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.slice(1).forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach(cell => {
+            const td = document.createElement('td');
+            td.textContent = cell;
+            tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    previewEl.appendChild(wrap);
+}
+
+function renderSpreadsheetPreview(targetId, data) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const meta = document.createElement('div');
+    meta.className = 'file-modal-subtitle';
+    meta.style.marginBottom = '10px';
+    meta.textContent = `${data.file_type?.toUpperCase() || 'SHEET'} • ${data.row_count || 0} rows • ${data.column_count || 0} columns`;
+    previewEl.appendChild(meta);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'file-modal-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'file-modal-table';
+    const thead = document.createElement('thead');
+    const tr = document.createElement('tr');
+    (data.columns || []).forEach(column => {
+        const th = document.createElement('th');
+        th.textContent = column.name || '';
+        tr.appendChild(th);
+    });
+    thead.appendChild(tr);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    (data.preview_rows || []).forEach(row => {
+        const rowEl = document.createElement('tr');
+        (data.columns || []).forEach(column => {
+            const td = document.createElement('td');
+            const value = row?.[column.name];
+            td.textContent = value == null ? '' : String(value);
+            rowEl.appendChild(td);
+        });
+        tbody.appendChild(rowEl);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    previewEl.appendChild(wrap);
+}
+
+function renderViewerSheetTabs(prefix, sheetNames, activeSheet) {
+    const tabs = document.getElementById(`${prefix}SheetTabs`);
+    if (!tabs) return;
+    if (!Array.isArray(sheetNames) || sheetNames.length <= 1) {
+        tabs.hidden = true;
+        tabs.innerHTML = '';
+        return;
+    }
+    tabs.hidden = false;
+    tabs.innerHTML = '';
+    sheetNames.forEach(name => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `file-modal-tab${name === activeSheet ? ' active' : ''}`;
+        button.textContent = name;
+        button.onclick = () => {
+            selectedSpreadsheetSheet = name;
+            openWorkspaceFile(getViewerState(prefix).path, { preserveSheet: true, modal: prefix === 'fileModal' });
+        };
+        tabs.appendChild(button);
+    });
+}
+
+function renderFileModalCodePreview(content, path) {
+    renderCodePreview('fileModalPreview', content, path);
+}
+
+function renderFileModalHtmlPreview(content) {
+    renderHtmlPreview('fileModalPreview', content);
+}
+
+function renderFileModalDelimitedPreview(content, path) {
+    renderDelimitedPreview('fileModalPreview', content, path);
+}
+
+function renderFileModalSpreadsheetPreview(data) {
+    renderSpreadsheetPreview('fileModalPreview', data);
+}
+
+function renderFileModalSheetTabs(sheetNames, activeSheet) {
+    renderViewerSheetTabs('fileModal', sheetNames, activeSheet);
+}
+
+function updateViewerPreview(prefix) {
+    const state = getViewerState(prefix);
+    if (!state.editable) return;
+    const content = getViewerContent(prefix);
+    const previewId = `${prefix}Preview`;
+    if (state.kind === 'html') renderHtmlPreview(previewId, content);
+    else if (state.kind === 'markdown') renderMarkdownPreview(previewId, content);
+    else if (state.kind === 'csv') renderDelimitedPreview(previewId, content, state.path);
+    else renderCodePreview(previewId, content, state.path);
+}
+
+function updateFileModalPreview() {
+    updateViewerPreview('fileModal');
+}
+
+function updateInlineViewerPreview() {
+    updateViewerPreview('inlineViewer');
+}
+
+function openFileModal() {
+    renderWorkspaceTrees();
+    document.getElementById('fileModal')?.classList.add('show');
+}
+
+function closeFileModal() {
+    document.getElementById('fileModal')?.classList.remove('show');
+    fileModalPath = '';
+    fileModalKind = 'text';
+    fileModalEditable = false;
+    applyViewerMetadata('fileModal', '');
+    renderWorkspaceTrees();
+}
+
+async function saveViewer(prefix, options = {}) {
+    const state = getViewerState(prefix);
+    if (!state.editable || !state.path) return;
+    const editor = prefix === 'inlineViewer' ? ensureInlineEditor() : document.getElementById(`${prefix}Editor`);
+    const saveButton = document.getElementById(`${prefix}SaveButton`);
+    if (!editor || !saveButton) return;
+    const content = getViewerContent(prefix);
+
+    saveButton.disabled = true;
+    if (prefix === 'inlineViewer') setInlineViewerSaveState('saving', options.autosave ? 'Autosaving...' : 'Saving...');
+    else saveButton.textContent = 'Saving...';
+    try {
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: state.path, content }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        if (prefix === 'fileModal') {
+            await refreshWorkspace(true);
+            closeFileModal();
+        } else {
+            if (!options.skipUndoSnapshot && !inlineViewerPerformingUndo && inlineViewerLastSavedContent !== content) {
+                pushInlineUndoSnapshot(state.path, inlineViewerLastSavedContent);
+            }
+            inlineViewerLastSavedContent = content;
+            setInlineViewerSaveState('saved');
+            syncInlineUndoButton();
+            await refreshWorkspace(false);
+        }
+    } catch (e) {
+        if (prefix === 'inlineViewer') {
+            setInlineViewerSaveState('error', 'Save failed');
+        } else {
+            alert(`Save failed: ${e.message}`);
+        }
+        throw e;
+    } finally {
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save';
+    }
+}
+
+async function saveFileModal() {
+    await saveViewer('fileModal');
+}
+
+async function saveInlineViewer(options = {}) {
+    await saveViewer('inlineViewer', options);
+}
+
+function applyViewerMetadata(prefix, path) {
+    const titleEl = document.getElementById(`${prefix}Title`);
+    const subtitleEl = document.getElementById(`${prefix}Subtitle`);
+    const preview = document.getElementById(`${prefix}Preview`);
+    if (titleEl) titleEl.textContent = path ? basename(path) : 'File Viewer';
+    if (subtitleEl) subtitleEl.textContent = path || 'Select a workspace file to inspect or edit it here.';
+    if (!path) {
+        setViewerContent(prefix, '');
+        if (preview) preview.innerHTML = '';
+        renderViewerSheetTabs(prefix, [], '');
+        if (prefix === 'inlineViewer') {
+            currentFileSymbols = [];
+            renderCurrentFileSymbols();
+            inlineViewerLastSavedContent = '';
+            setInlineViewerSaveState('idle');
+            syncInlineUndoButton();
+            syncInlineSelectionAction();
+        }
+    }
+    toggleViewerEmptyState(prefix, Boolean(path));
+}
+
+function syncViewerControls(prefix, editable, defaultView = 'edit') {
+    const editTab = document.getElementById(`${prefix}EditTab`);
+    const saveButton = document.getElementById(`${prefix}SaveButton`);
+    if (editTab) editTab.hidden = !editable;
+    if (saveButton) saveButton.hidden = !editable;
+    setViewerView(prefix, editable ? defaultView : 'preview');
+    if (prefix === 'inlineViewer') {
+        syncInlineUndoButton();
+        syncInlineSelectionAction();
+    }
+}
+
+function openInlineViewerInModal() {
+    if (!inlineViewerPath) return;
+    openWorkspaceFile(inlineViewerPath, { preserveSheet: true, modal: true });
+}
+
+async function openWorkspaceFile(path, options = {}) {
+    if (!featureSettings.agent_tools || !path) return;
+    const preserveSheet = Boolean(options.preserveSheet);
+    const openModal = options.modal ?? true;
+    if (!preserveSheet) selectedSpreadsheetSheet = '';
+    selectedWorkspaceFile = path;
+    inlineViewerPath = path;
+    fileModalPath = path;
+    renderFileList();
+    applyViewerMetadata('inlineViewer', path);
+    applyViewerMetadata('fileModal', path);
+    const modalEditor = document.getElementById('fileModalEditor');
+    setViewerContent('inlineViewer', '');
+    if (modalEditor) modalEditor.value = '';
+    renderViewerSheetTabs('inlineViewer', [], '');
+    renderViewerSheetTabs('fileModal', [], '');
+    if (openModal) openFileModal();
+
+    try {
+        if (/\.(xlsx|xls|xlsm)$/i.test(path)) {
+            setViewerState('inlineViewer', { kind: 'spreadsheet', editable: false, path });
+            setViewerState('fileModal', { kind: 'spreadsheet', editable: false, path });
+            const params = new URLSearchParams({ path });
+            if (selectedSpreadsheetSheet) params.set('sheet', selectedSpreadsheetSheet);
+            const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?${params.toString()}`);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+            selectedSpreadsheetSheet = data.sheet || '';
+            renderViewerSheetTabs('inlineViewer', data.sheet_names || [], selectedSpreadsheetSheet);
+            renderViewerSheetTabs('fileModal', data.sheet_names || [], selectedSpreadsheetSheet);
+            renderSpreadsheetPreview('inlineViewerPreview', data);
+            renderSpreadsheetPreview('fileModalPreview', data);
+            syncViewerControls('inlineViewer', false, 'preview');
+            syncViewerControls('fileModal', false, 'preview');
+            return;
+        }
+
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file?path=${encodeURIComponent(path)}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+        const editable = isEditableTextPath(path);
+        const kind = isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'));
+        setViewerState('inlineViewer', { editable, kind, path });
+        setViewerState('fileModal', { editable, kind, path });
+        setViewerContent('inlineViewer', data.content || '');
+        if (modalEditor) modalEditor.value = data.content || '';
+        inlineViewerLastSavedContent = data.content || '';
+        setInlineViewerSaveState('idle');
+        syncInlineUndoButton();
+
+        if (kind === 'html') {
+            renderHtmlPreview('inlineViewerPreview', data.content || '');
+            renderFileModalHtmlPreview(data.content || '');
+        }
+        else if (kind === 'markdown') {
+            renderMarkdownPreview('inlineViewerPreview', data.content || '');
+            renderMarkdownPreview('fileModalPreview', data.content || '');
+        }
+        else if (kind === 'csv') {
+            const summaryResp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?path=${encodeURIComponent(path)}`);
+            const summaryData = await summaryResp.json();
+            if (summaryResp.ok) {
+                renderSpreadsheetPreview('inlineViewerPreview', summaryData);
+                renderFileModalSpreadsheetPreview(summaryData);
+            } else {
+                renderDelimitedPreview('inlineViewerPreview', data.content || '', path);
+                renderFileModalDelimitedPreview(data.content || '', path);
+            }
+        } else {
+            renderCodePreview('inlineViewerPreview', data.content || '', path);
+            renderFileModalCodePreview(data.content || '', path);
+        }
+
+        syncViewerControls('inlineViewer', editable, inlineViewerView || 'edit');
+        syncViewerControls('fileModal', editable, 'preview');
+        configureInlineEditorLanguage(path);
+        updateCurrentFileSymbols(path, data.content || '');
+        updateInlineViewerPreview();
+        updateFileModalPreview();
+    } catch (e) {
+        alert(`Failed to open ${path}: ${e.message}`);
+        closeFileModal();
+    }
+}
+
+function renderPendingAttachments() {
+    const bar = document.getElementById('attachmentBar');
+    if (!bar) return;
+
+    if (!pendingAttachments.length) {
+        bar.hidden = true;
+        bar.innerHTML = '';
+        return;
+    }
+
+    bar.hidden = false;
+    bar.innerHTML = '';
+    pendingAttachments.forEach((file, index) => {
+        const chip = document.createElement('div');
+        chip.className = 'attachment-chip';
+        chip.innerHTML = `
+            <div class="attachment-chip-copy">
+                <span class="attachment-chip-name">${escapeHtml(file.name || file.path)}</span>
+                <span class="attachment-chip-meta">${escapeHtml(file.kind || 'file')} • ${escapeHtml(formatBytes(file.size || 0))}</span>
+            </div>
+            <button type="button" class="attachment-chip-remove" title="Remove attachment" aria-label="Remove attachment">&times;</button>
+        `;
+        chip.querySelector('.attachment-chip-remove').onclick = () => {
+            pendingAttachments.splice(index, 1);
+            renderPendingAttachments();
+        };
+        bar.appendChild(chip);
+    });
+}
+
+function clearPendingAttachments() {
+    pendingAttachments = [];
+    const input = document.getElementById('attachmentInput');
+    if (input) input.value = '';
+    renderPendingAttachments();
+}
+
+function openAttachmentPicker() {
+    document.getElementById('attachmentInput')?.click();
+}
+
+async function handleAttachmentSelection(event) {
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
+    if (!featureSettings.agent_tools) {
+        featureSettings.agent_tools = true;
+        persistFeatureSettings();
+        applyFeatureSettingsToUI();
+    }
+
+    const formData = new FormData();
+    files.slice(0, 8).forEach(file => formData.append('files', file));
+    formData.append('target_path', '.');
+
+    const attachButton = document.getElementById('attachButton');
+    if (attachButton) attachButton.disabled = true;
+
+    try {
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/upload`, {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+        pendingAttachments = pendingAttachments.concat(data.files || []).slice(0, 8);
+        renderPendingAttachments();
+        if (data.files?.length) {
+            selectedWorkspaceFile = data.files[0].path || '';
+        }
+        refreshWorkspace(true);
+    } catch (e) {
+        alert(`Attachment upload failed: ${e.message}`);
+    } finally {
+        if (attachButton) attachButton.disabled = false;
+        input.value = '';
+    }
+}
+
 function sendMessage() {
     const input = document.getElementById('input');
     const displayText = input.value.trim();
     if (!modelAvailable || !displayText || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+    hideSlashMenu();
 
     // Resolve any collapsed paste placeholders to actual content
     let message = displayText;
@@ -430,21 +3321,90 @@ function sendMessage() {
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    addMessage(displayText, 'user');
+    const attachmentNote = pendingAttachments.length
+        ? `\n\nAttached files:\n${pendingAttachments.map(file => `- ${file.path || file.name}`).join('\n')}`
+        : '';
+    addMessage(displayText + attachmentNote, 'user');
     input.value = '';
     pastedBlocks = [];
+    const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
+    const turnFeatures = resolveTurnFeatures(message, attachmentPaths);
+    clearPendingAttachments();
     autoResizeTextarea(input);
     showLoading();
+    clearBuildSteps();
+    clearWorkspaceActivity();
+    recordWorkspaceActivity('Request', displayText);
 
     isGenerating = true;
-    document.getElementById('send').disabled = true;
+    activeStreamConversationId = currentConvId;
+    streamingAssistantMessage = null;
+    syncSendButton();
 
     ws.send(JSON.stringify({
         message: message,
+        attachments: attachmentPaths,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
-        mode: deepMode ? 'deep' : 'normal'
+        mode: deepMode ? 'deep' : 'normal',
+        features: turnFeatures,
     }));
+}
+
+function sendInterruptMessage(messageText) {
+    const text = String(messageText || '').trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
+    const turnFeatures = resolveTurnFeatures(text, attachmentPaths);
+    const attachmentNote = pendingAttachments.length
+        ? `\n\nAttached files:\n${pendingAttachments.map(file => `- ${file.path || file.name}`).join('\n')}`
+        : '';
+    addMessage(text + attachmentNote, 'user');
+    clearPendingAttachments();
+    document.querySelector('.welcome')?.remove();
+    exitWelcomeMode();
+    recordWorkspaceActivity('Interrupt', text);
+    ws.send(JSON.stringify({
+        type: 'interrupt',
+        message: text,
+        attachments: attachmentPaths,
+        conversation_id: currentConvId,
+        system_prompt: localStorage.getItem('customSystemPrompt') || null,
+        mode: deepMode ? 'deep' : 'normal',
+        features: turnFeatures,
+    }));
+}
+
+function sendIntervention() {
+    const textarea = document.getElementById('interveneInput');
+    if (!textarea) return;
+    const intervention = textarea.value.trim();
+    if (!intervention) return;
+    textarea.value = '';
+    syncInterveneButton();
+    sendInterruptMessage(`Continue from the current task board with this intervention:\n${intervention}`);
+}
+
+function handlePrimaryAction() {
+    const input = document.getElementById('input');
+    const draft = input?.value.trim() || '';
+    if (isGenerating) {
+        if (draft) {
+            input.value = '';
+            autoResizeTextarea(input);
+            syncSendButton();
+            sendInterruptMessage(draft);
+        } else {
+            stopMessage();
+        }
+        return;
+    }
+    sendMessage();
+}
+
+function stopMessage() {
+    if (!isGenerating || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'stop' }));
 }
 
 function parseAssistantRaw(raw) {
@@ -517,14 +3477,58 @@ function hydrateAssistantFromRaw(msg, raw) {
     if (contentDiv) contentDiv.textContent = trimmed;
 }
 
-function latestAssistantMessage() {
+function createMessageElement(content, role, timestamp = null) {
+    const msg = document.createElement('div');
+    msg.className = `message ${role}`;
+
+    if (role === 'assistant') {
+        const stack = document.createElement('div');
+        stack.className = 'think-stack';
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        msg.appendChild(stack);
+        msg.appendChild(contentDiv);
+        msg.dataset.needsMarkdown = 'true';
+        msg.dataset.originalContent = '';
+        msg.dataset.autoSpoken = 'false';
+        if (content && content.trim()) hydrateAssistantFromRaw(msg, content);
+    } else {
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        contentDiv.textContent = content;
+        msg.appendChild(contentDiv);
+    }
+
+    const tsDiv = document.createElement('div');
+    tsDiv.className = 'message-timestamp';
+    tsDiv.textContent = formatTimestamp(timestamp || new Date().toISOString());
+    msg.appendChild(tsDiv);
+
+    return msg;
+}
+
+function appendStreamingAssistantMessageIfVisible() {
+    if (!streamingAssistantMessage || activeStreamConversationId !== currentConvId) return;
     const messages = document.getElementById('messages');
-    const nodes = messages.querySelectorAll('.message.assistant');
-    return nodes.length ? nodes[nodes.length - 1] : null;
+    if (!messages || streamingAssistantMessage.parentElement === messages) return;
+    messages.appendChild(streamingAssistantMessage);
+    scrollToBottom();
+}
+
+function ensureStreamingAssistantMessage() {
+    if (!streamingAssistantMessage) {
+        streamingAssistantMessage = createMessageElement('', 'assistant');
+    }
+    appendStreamingAssistantMessageIfVisible();
+    return streamingAssistantMessage;
+}
+
+function currentStreamingAssistantMessage() {
+    return streamingAssistantMessage;
 }
 
 function onAssistantThinkStart() {
-    const msg = latestAssistantMessage();
+    const msg = currentStreamingAssistantMessage();
     if (!msg) return;
     const stack = msg.querySelector('.think-stack');
     if (!stack) return;
@@ -539,20 +3543,20 @@ function onAssistantThinkStart() {
     box.appendChild(body);
     attachThinkToolbarHandlers(box, toolbar);
     stack.appendChild(box);
-    scrollToBottom();
+    if (msg.isConnected) scrollToBottom();
 }
 
 function onAssistantThinkToken(text) {
-    const msg = latestAssistantMessage();
+    const msg = currentStreamingAssistantMessage();
     const box = msg?.querySelector('.think-box--streaming');
     const body = box?.querySelector('.think-body');
     if (!body) return;
     body.appendChild(document.createTextNode(text));
-    scrollToBottom();
+    if (msg.isConnected) scrollToBottom();
 }
 
 function onAssistantThinkEnd() {
-    const msg = latestAssistantMessage();
+    const msg = currentStreamingAssistantMessage();
     const box = msg?.querySelector('.think-box--streaming');
     if (!box) return;
     box.classList.remove('think-box--streaming');
@@ -563,45 +3567,34 @@ function onAssistantThinkEnd() {
         body.classList.remove('think-body--peek');
         body.classList.add('think-body--collapsed');
     }
-    scrollToBottom();
+    if (msg.isConnected) scrollToBottom();
 }
 
 function appendAssistantAnswerToken(text) {
-    const msg = latestAssistantMessage();
+    const msg = currentStreamingAssistantMessage();
     if (!msg) return;
     const contentDiv = msg.querySelector('.message-content');
     if (!contentDiv) return;
     msg.dataset.originalContent = (msg.dataset.originalContent || '') + text;
     contentDiv.textContent = msg.dataset.originalContent;
-    scrollToBottom();
+    if (msg.isConnected) scrollToBottom();
+}
+
+function replaceAssistantAnswer(content) {
+    const msg = currentStreamingAssistantMessage();
+    if (!msg) return;
+    const stack = msg.querySelector('.think-stack');
+    const contentDiv = msg.querySelector('.message-content');
+    if (!stack || !contentDiv) return;
+    stack.innerHTML = '';
+    msg.dataset.originalContent = '';
+    msg.dataset.autoSpoken = 'false';
+    hydrateAssistantFromRaw(msg, content || '');
+    if (msg.isConnected) scrollToBottom();
 }
 
 function addMessage(content, role, timestamp = null) {
-    const msg = document.createElement('div');
-    msg.className = `message ${role}`;
-
-    if (role === 'assistant') {
-        const stack = document.createElement('div');
-        stack.className = 'think-stack';
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
-        msg.appendChild(stack);
-        msg.appendChild(contentDiv);
-        msg.dataset.needsMarkdown = 'true';
-        msg.dataset.originalContent = '';
-        if (content && content.trim()) hydrateAssistantFromRaw(msg, content);
-    } else {
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
-        contentDiv.textContent = content;
-        msg.appendChild(contentDiv);
-    }
-
-    const tsDiv = document.createElement('div');
-    tsDiv.className = 'message-timestamp';
-    tsDiv.textContent = formatTimestamp(timestamp || new Date().toISOString());
-    msg.appendChild(tsDiv);
-
+    const msg = createMessageElement(content, role, timestamp);
     document.getElementById('messages').appendChild(msg);
     scrollToBottom();
     return msg;
@@ -630,9 +3623,61 @@ function scrollToBottom() {
 }
 
 function handleKeyDown(event) {
+    const slashMenuOpen = !document.getElementById('slashMenu')?.hidden;
+    if (slashMenuOpen) {
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            event.stopPropagation();
+            moveSlashSelection(1);
+            return;
+        }
+        if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            event.stopPropagation();
+            moveSlashSelection(-1);
+            return;
+        }
+        if (event.key === 'Tab') {
+            event.preventDefault();
+            event.stopPropagation();
+            moveSlashSelection(event.shiftKey ? -1 : 1);
+            return;
+        }
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            event.stopPropagation();
+            executeSlashCommand();
+            return;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            hideSlashMenu();
+            return;
+        }
+    }
+
+    if (event.key === 'Escape' && isGenerating) {
+        event.preventDefault();
+        stopMessage();
+        return;
+    }
+
     if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
-        sendMessage();
+        handlePrimaryAction();
+    }
+}
+
+function handleInterveneKeyDown(event) {
+    if (event.key === 'Escape' && isGenerating) {
+        event.preventDefault();
+        stopMessage();
+        return;
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        sendIntervention();
     }
 }
 
@@ -667,6 +3712,13 @@ function renderMarkdown() {
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
 
+                const speakBtn = document.createElement('button');
+                speakBtn.className = 'action-btn speak-btn';
+                speakBtn.innerHTML = `${SPEAK_BUTTON_ICON} Speak`;
+                speakBtn.disabled = !supportsSpeechSynthesis();
+                speakBtn.onclick = (e) => { e.stopPropagation(); speakAssistantMessage(msg); };
+                actions.appendChild(speakBtn);
+
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn';
                 copyBtn.innerHTML = '&#128203; Copy';
@@ -694,6 +3746,11 @@ function renderMarkdown() {
                 btn.onclick = (e) => { e.stopPropagation(); copyToClipboard(codeText, btn); };
                 pre.appendChild(btn);
             });
+            syncSpeakButtons();
+            if (voiceSettings.autoSpeakReplies && supportsSpeechSynthesis() && msg.dataset.autoSpoken !== 'true') {
+                msg.dataset.autoSpoken = 'true';
+                speakAssistantMessage(msg);
+            }
         } catch (e) {
             contentDiv.textContent = content;
         }
@@ -725,6 +3782,88 @@ function fallbackCopy(text, onSuccess) {
     ta.select();
     try { if (document.execCommand('copy')) onSuccess(); } catch (e) {}
     document.body.removeChild(ta);
+}
+
+function scheduleWorkspaceRefresh() {
+    if (!featureSettings.agent_tools) return;
+    if (workspaceRefreshTimer) clearTimeout(workspaceRefreshTimer);
+    workspaceRefreshTimer = setTimeout(() => {
+        refreshWorkspace(true);
+        workspaceRefreshTimer = null;
+    }, 150);
+}
+
+async function fetchWorkspaceDirectory(path = '.') {
+    const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/files?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    return data;
+}
+
+async function buildWorkspaceTree(path = '.', workspacePathHint = '') {
+    const listing = await fetchWorkspaceDirectory(path);
+    const children = await Promise.all((listing.items || []).map(async item => {
+        if (item.type === 'directory') {
+            return buildWorkspaceTree(item.path, workspacePathHint || listing.workspace_path || '');
+        }
+        return item;
+    }));
+    return {
+        name: compareWorkspacePaths(path, '.') ? basename(workspacePathHint || listing.workspace_path || 'workspace') : basename(listing.path),
+        path: normalizeWorkspacePath(listing.path || path || '.'),
+        type: 'directory',
+        children,
+        run_id: listing.run_id || null,
+        workspace_path: listing.workspace_path || workspacePathHint || '',
+    };
+}
+
+async function refreshWorkspace(force = false) {
+    const pathEl = document.getElementById('workspacePath');
+    const listEl = document.getElementById('workspaceFileList');
+    if (!pathEl || !listEl) return;
+
+    if (!featureSettings.agent_tools) {
+        workspaceEntries = [];
+        workspaceTree = null;
+        workspaceStats = { files: 0, directories: 0 };
+        workspaceActivity = [];
+        buildSteps = [];
+        selectedWorkspaceFile = '';
+        selectedSpreadsheetSheet = '';
+        inlineViewerPath = '';
+        pathEl.textContent = 'Agent tools disabled';
+        listEl.innerHTML = '<div class="workspace-empty">Agent dev tools are turned off.</div>';
+        renderBuildSteps();
+        renderWorkspaceActivity();
+        applyViewerMetadata('inlineViewer', '');
+        return;
+    }
+
+    if (force) pathEl.textContent = 'Refreshing workspace...';
+
+    try {
+        const tree = await buildWorkspaceTree('.');
+        workspaceTree = tree;
+        workspaceEntries = flattenWorkspaceFiles(tree, []);
+        workspaceStats = collectWorkspaceStats(tree);
+        currentRunId = tree.run_id || null;
+        if (!workspaceEntries.some(item => item.path === selectedWorkspaceFile)) {
+            selectedWorkspaceFile = workspaceEntries[0]?.path || '';
+        }
+        if (workspaceEntries.length) {
+            applyWorkspacePanelState();
+        } else {
+            applyViewerMetadata('inlineViewer', '');
+        }
+        renderFileList();
+    } catch (e) {
+        currentRunId = null;
+        workspaceTree = null;
+        workspaceStats = { files: 0, directories: 0 };
+        pathEl.textContent = 'Workspace unavailable';
+        listEl.innerHTML = `<div class="workspace-empty">Workspace is unavailable: ${escapeHtml(e.message)}</div>`;
+    }
 }
 
 // ==================== Search ====================
@@ -821,24 +3960,54 @@ async function loadConversations() {
     }
 }
 
-async function loadConversation(id) {
+async function loadConversation(id, options = {}) {
+    const preserveActivity = Boolean(options.preserveActivity);
     currentConvId = id;
+    currentRunId = null;
+    currentAssistantTurnStartedAt = null;
+    currentAssistantTurnArtifactPaths = new Set();
+    latestAssistantTurnArtifactPaths = new Set();
+    selectedWorkspaceFile = '';
+    selectedSpreadsheetSheet = '';
+    clearBuildSteps();
+    if (!preserveActivity) clearWorkspaceActivity();
+    if (!preserveActivity) clearTerminalOutput();
+    closeFileModal();
+    clearPendingAttachments();
     const resp = await fetch(`/api/conversation/${id}`);
     const data = await resp.json();
     const messages = document.getElementById('messages');
+    stopSpeaking();
     messages.innerHTML = '';
     exitWelcomeMode();
-    data.messages.forEach(msg => addMessage(msg.content, msg.role, msg.timestamp));
+    data.messages.forEach(msg => {
+        const el = addMessage(msg.content, msg.role, msg.timestamp);
+        if (msg.role === 'assistant') el.dataset.autoSpoken = 'true';
+    });
+    appendStreamingAssistantMessageIfVisible();
     setTimeout(() => renderMarkdown(), 100);
     loadConversations();
+    refreshWorkspace(true);
 }
 
 function newChat() {
+    stopSpeaking();
     currentConvId = generateId();
-    document.getElementById('messages').innerHTML =
-        `<div class="welcome"><h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1></div>`;
+    currentRunId = null;
+    currentAssistantTurnStartedAt = null;
+    currentAssistantTurnArtifactPaths = new Set();
+    latestAssistantTurnArtifactPaths = new Set();
+    selectedWorkspaceFile = '';
+    selectedSpreadsheetSheet = '';
+    clearBuildSteps();
+    clearWorkspaceActivity();
+    clearTerminalOutput();
+    closeFileModal();
+    clearPendingAttachments();
+    document.getElementById('messages').innerHTML = buildWelcomeMarkup();
     enterWelcomeMode();
     loadConversations();
+    refreshWorkspace(true);
 }
 
 // ==================== Modals ====================
@@ -894,7 +4063,21 @@ function resetSystemPrompt() {
 // ==================== Escape Key ====================
 
 document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'a' && inlineViewerEditable && inlineViewerPath && inlineViewerView === 'edit') {
+        const selection = getInlineSelection().trim();
+        if (selection) {
+            e.preventDefault();
+            sendInlineSelectionToChat();
+            return;
+        }
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && inlineViewerEditable && inlineViewerPath && inlineViewerView === 'edit') {
+        e.preventDefault();
+        saveInlineViewer().catch(() => {});
+        return;
+    }
     if (e.key !== 'Escape') return;
+    if (document.getElementById('fileModal').classList.contains('show')) { closeFileModal(); return; }
     if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
     if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
@@ -906,7 +4089,13 @@ document.addEventListener('keydown', (e) => {
 
 updateStatus('loading');
 connectWS();
+loadPet();
 loadConversations();
+applyFeatureSettingsToUI();
+refreshVoiceRuntime();
+loadComposerRuntime();
+refreshWorkspace(true);
+initWelcomeMascot();
 
 setTimeout(() => {
     fetch('/health').then(r => r.json()).then(health => {
@@ -917,9 +4106,18 @@ setTimeout(() => {
 
 const _input = document.getElementById('input');
 if (_input) {
-    autoResizeTextarea(_input);
+    handleInputChange(_input);
     window.addEventListener('resize', () => autoResizeTextarea(_input));
+    window.addEventListener('resize', positionSlashMenu);
+    window.addEventListener('scroll', positionSlashMenu, true);
     _input.focus();
+    _input.addEventListener('focus', () => updateSlashMenu(_input));
+    _input.addEventListener('blur', () => {
+        setTimeout(() => {
+            if (document.activeElement?.closest?.('#slashMenu')) return;
+            hideSlashMenu();
+        }, 120);
+    });
 
     // Collapse long pastes (>10 lines) into a placeholder; actual text is sent on submit
     _input.addEventListener('paste', (e) => {
@@ -936,10 +4134,23 @@ if (_input) {
             const after = _input.value.substring(end);
             _input.value = before + placeholder + after;
             _input.selectionStart = _input.selectionEnd = start + placeholder.length;
-            autoResizeTextarea(_input);
+            handleInputChange(_input);
         }
     });
 }
 
-const _deepBtn = document.getElementById('deepToggle');
-if (_deepBtn) _deepBtn.classList.toggle('active', deepMode);
+syncReasoningSelector();
+syncModelSelector();
+renderWorkspaceActivity();
+renderTerminalOutput();
+applyViewerMetadata('inlineViewer', '');
+window.addEventListener('resize', () => {
+    fitTerminalEmulator();
+    sendTerminalResize();
+});
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        stopSpeaking();
+        if (dictationActive) stopDictationAndUpload();
+    }
+});

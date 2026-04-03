@@ -5,12 +5,22 @@ WORKDIR /app
 # Install dependencies
 RUN pip install --no-cache-dir \
     fastapi \
+    python-multipart \
     uvicorn[standard] \
     websockets \
     httpx \
     beautifulsoup4 \
     jinja2 \
-    aiofiles
+    aiofiles \
+    pandas \
+    openpyxl
+
+# System deps for voice tools (STT/TTS)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Voice: OpenAI Whisper (STT) and Piper (TTS)
+RUN pip install --no-cache-dir openai-whisper piper-tts
 
 # Copy application (app imports themes, prompts, thinking_stream)
 COPY app.py themes.py prompts.py thinking_stream.py .
