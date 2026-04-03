@@ -11434,9 +11434,22 @@ async def chat_websocket(websocket: WebSocket):
     logger.info("WebSocket connected")
     active_task: Optional[asyncio.Task] = None
 
+    async def _keepalive():
+        """Send periodic pings so idle connections are not dropped."""
+        try:
+            while True:
+                await asyncio.sleep(15)
+                await websocket.send_json({"type": "ping"})
+        except Exception:
+            pass
+
+    keepalive_task = asyncio.create_task(_keepalive())
+
     try:
         while True:
             data = await websocket.receive_json()
+            if data.get('type') == 'pong':
+                continue
             if data.get('type') == 'stop':
                 if active_task and not active_task.done():
                     active_task.cancel()
@@ -11494,8 +11507,10 @@ async def chat_websocket(websocket: WebSocket):
                 future.set_result(False)
         if active_task and not active_task.done():
             active_task.cancel()
+        keepalive_task.cancel()
         logger.info("WebSocket disconnected")
     except Exception as e:
+        keepalive_task.cancel()
         logger.error(f"WebSocket error: {e}")
 
 @app.websocket("/ws/logs")
