@@ -24,6 +24,7 @@ The checked-in Docker setup assumes a local host that can run GPU-backed vLLM:
 - **GPU runtime** — NVIDIA GPU support exposed to Docker. The sample compose file reserves an NVIDIA device for the `vllm` service.
 - **VRAM target** — the default `14B` AWQ profile is meant for roughly `24GB`-class GPUs. If your machine is closer to `12GB`, start with the lighter `8B` profile and the reduced settings in [GPU Configurations](#gpu-configurations).
 - **Disk** — enough free space for Docker images, the Hugging Face cache mounted at `~/.cache/huggingface`, project data in `./data`, and optional voice models downloaded by `./chat install`.
+- **Workspace persistence** — conversation workspaces are bind-mounted to the host under `./runs` so generated files stay accessible outside Docker.
 - **Network** — required during install for container pulls, Piper voice-model download, and any later model downloads.
 
 The helper script `./chat` also assumes `bash` and `curl` are available on the host.
@@ -196,6 +197,8 @@ The application runs two containers via `docker-compose.yml`:
 - **chat-app** — FastAPI web application (port 8000)
 
 The sample compose file mounts the Docker socket into `chat-app` so dashboard runtime controls work out of the box for a trusted local machine. Remove that mount and set `DOCKER_CONTROL_ENABLED=false` if you want a read-only setup instead.
+
+It also mounts `./runs:/app/runs`, which is where per-conversation workspaces live. Without that bind mount, workspace files exist only inside the container filesystem.
 
 Both are set to `restart: unless-stopped`, so they will survive reboots.
 

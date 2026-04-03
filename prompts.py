@@ -37,6 +37,20 @@ Rules:
 - If some capability is missing, plan the best useful work still possible from the available context and leave blockers for verification notes only when unavoidable.
 - Do not include markdown or extra keys."""
 
+
+STEP_DECOMPOSE_SYSTEM_PROMPT = """Break one current build step into a compact nested execution plan.
+
+Return ONLY JSON:
+{"goal":"...","substeps":["..."],"success_signal":"..."}
+
+Rules:
+- Stay strictly inside the current build step; do not rewrite the whole top-level plan.
+- `substeps`: 2 to 4 concrete, sequential micro-steps.
+- Prefer an order like inspect, implement, then validate/tighten when that fits.
+- Keep each substep short, executable, and workspace-oriented.
+- `success_signal` should be one short sentence describing what done looks like for this build step.
+- Do not include markdown or extra keys."""
+
 CRITIQUE_SYSTEM_PROMPT = """You are a strict but practical reviewer for an AI draft response.
 
 Return ONLY valid JSON in this format:
@@ -137,6 +151,7 @@ Goal:
 Rules:
 - Be concrete and practical.
 - Follow the current step, not the whole plan at once.
+- If a nested subplan is provided, follow the current substep only and leave future substeps for later in the same top-level step.
 - Make the smallest useful file change.
 - Use tools for edits and checks.
 - Iterate inside the current step: inspect, patch, verify, and refine until the step is genuinely complete or blocked.

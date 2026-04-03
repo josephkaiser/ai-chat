@@ -52,8 +52,9 @@ import fcntl
 import termios
 
 try:
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
 except Exception:
+    hf_hub_download = None
     snapshot_download = None
 
 try:
@@ -72,6 +73,7 @@ from prompts import (
     DEEP_SYNTHESIZE_SYSTEM_PROMPT,
     DEEP_VERIFY_SYSTEM_PROMPT,
     REFINE_SYSTEM_PROMPT,
+    STEP_DECOMPOSE_SYSTEM_PROMPT,
     TOOL_USE_SYSTEM_PROMPT,
 )
 from themes import COLORS_DARK, COLORS_LIGHT
@@ -142,6 +144,7 @@ DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower(
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "6"))
+TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "2")))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
 AUTO_VERIFY_MAX_RUNS = max(0, int(os.getenv("AUTO_VERIFY_MAX_RUNS", "2")))
 WORKSPACE_FILE_SIZE_LIMIT = 1024 * 1024
@@ -3369,6 +3372,9 @@ class DeepSession:
     task_board_path: str = ".ai/task-board.md"
     task_state_path: str = ".ai/task-state.json"
     build_step_summaries: List[str] = field(default_factory=list)
+    step_subplans: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    step_substep_summaries: Dict[str, List[str]] = field(default_factory=dict)
+    step_substep_reports: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     step_reports: List[Dict[str, Any]] = field(default_factory=list)
     build_summary: str = ""
     changed_files: List[str] = field(default_factory=list)
@@ -3393,6 +3399,7 @@ class ToolLoopOutcome:
     """Result of a server-side tool loop."""
     final_text: str
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
+    hit_limit: bool = False
 
 
 @dataclass
@@ -3726,6 +3733,256 @@ def format_deep_plan_note(plan: Dict[str, Any]) -> str:
         lines.append("- Verification:")
         lines.extend(f"  {idx}. {step}" for idx, step in enumerate(verifier_checks, start=1))
     return "\n".join(lines)
+
+
+def step_plan_cache_key(step_index: int) -> str:
+    """Return a stable string key for persisted nested step plans."""
+    return str(max(0, int(step_index or 0)))
+
+
+def normalize_step_subplan(plan: Dict[str, Any], fallback_step: str) -> Dict[str, Any]:
+    """Coerce a nested step plan into the saved micro-plan structure."""
+    normalized = dict(plan or {})
+    goal = str(normalized.get("goal", "")).strip()
+    if not goal:
+        goal = f"Complete this build step: {fallback_step}"
+
+    substeps = normalized.get("substeps")
+    if not isinstance(substeps, list):
+        substeps = []
+    normalized_substeps = [
+        str(item).strip()
+        for item in substeps
+        if str(item).strip()
+    ][:4]
+    if not normalized_substeps:
+        normalized_substeps = [
+            f"Inspect the files, artifacts, or gaps most relevant to: {fallback_step}",
+            f"Implement the next useful slice needed for: {fallback_step}",
+            "Validate this slice and tighten the obvious gaps before moving on.",
+        ]
+
+    success_signal = str(normalized.get("success_signal", "")).strip()
+    if not success_signal:
+        success_signal = f"The build step is complete and reviewable: {fallback_step}"
+
+    progress_note = str(normalized.get("progress_note", "")).strip()
+    return {
+        "goal": goal,
+        "substeps": normalized_substeps,
+        "success_signal": success_signal,
+        "progress_note": progress_note,
+    }
+
+
+def build_heuristic_step_subplan(
+    session: DeepSession,
+    step: str,
+    step_index: int,
+    total_steps: int,
+) -> Dict[str, Any]:
+    """Build a deterministic nested subplan for a single top-level build step."""
+    lowered = str(step or "").strip().lower()
+    if any(term in lowered for term in ("create", "scaffold", "structure", "top-level", "starter repo")):
+        substeps = [
+            "Lay down the concrete files, folders, and wiring this step depends on.",
+            "Fill in the first working implementation slice instead of leaving placeholders.",
+            "Tighten the surrounding docs or config so this slice is runnable and reviewable.",
+        ]
+    elif any(term in lowered for term in ("tighten", "polish", "docs", "wiring", "gap")):
+        substeps = [
+            "Inspect the current output for missing wiring, docs, or sharp edges tied to this step.",
+            "Apply the smallest useful edits that close the most obvious gaps.",
+            "Re-read the touched files and check that the step now feels cohesive.",
+        ]
+    elif any(term in lowered for term in ("verify", "check", "test", "validate")):
+        substeps = [
+            "Inspect the files or commands most relevant to the verification target.",
+            "Run the narrowest useful command or direct file check for this step.",
+            "Summarize what passed, what failed, and what still needs tightening.",
+        ]
+    else:
+        substeps = [
+            "Inspect the specific files, artifacts, or gaps tied to this build step.",
+            "Implement the next concrete slice needed to move this step forward.",
+            "Validate the slice and tighten any obvious follow-up issues inside this step.",
+        ]
+
+    return normalize_step_subplan(
+        {
+            "goal": f"Complete build step {step_index + 1} of {total_steps}: {step}",
+            "substeps": substeps,
+            "success_signal": f"Step {step_index + 1} is complete, grounded in workspace evidence, and ready for the next build step.",
+        },
+        step,
+    )
+
+
+def step_substep_summaries_for_index(session: DeepSession, step_index: int) -> List[str]:
+    """Return persisted completed substep summaries for one build step."""
+    raw = session.step_substep_summaries.get(step_plan_cache_key(step_index), [])
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def store_step_substep_summaries(session: DeepSession, step_index: int, summaries: List[str]) -> None:
+    """Persist completed substep summaries for one build step."""
+    key = step_plan_cache_key(step_index)
+    normalized = [str(item).strip() for item in summaries if str(item).strip()]
+    if normalized:
+        session.step_substep_summaries[key] = normalized
+    else:
+        session.step_substep_summaries.pop(key, None)
+
+
+def step_substep_reports_for_index(session: DeepSession, step_index: int) -> List[Dict[str, Any]]:
+    """Return persisted completed substep reports for one build step."""
+    raw = session.step_substep_reports.get(step_plan_cache_key(step_index), [])
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def store_step_substep_reports(session: DeepSession, step_index: int, reports: List[Dict[str, Any]]) -> None:
+    """Persist completed substep evidence reports for one build step."""
+    key = step_plan_cache_key(step_index)
+    normalized = [item for item in reports if isinstance(item, dict)]
+    if normalized:
+        session.step_substep_reports[key] = normalized
+    else:
+        session.step_substep_reports.pop(key, None)
+
+
+def render_nested_checklist(
+    items: List[str],
+    completed_count: int = 0,
+    active_index: Optional[int] = None,
+    prefix: str = "",
+) -> List[str]:
+    """Render a markdown checklist for nested build substeps."""
+    rendered: List[str] = []
+    for idx, item in enumerate(items):
+        if idx < completed_count:
+            marker = "[x]"
+        elif active_index is not None and idx == active_index:
+            marker = "[>]"
+        else:
+            marker = "[ ]"
+        label = f"{prefix}{idx + 1}." if prefix else f"{idx + 1}."
+        rendered.append(f"{marker} {label} {item}")
+    return rendered or ["(none)"]
+
+
+def format_step_subplan_progress(
+    subplan: Dict[str, Any],
+    completed_summaries: List[str],
+    *,
+    active_substep_index: Optional[int] = None,
+    prefix: str = "",
+) -> str:
+    """Render a saved nested subplan plus progress markers for prompts/task boards."""
+    substeps = [
+        str(item).strip()
+        for item in subplan.get("substeps", [])
+        if str(item).strip()
+    ]
+    progress_lines = [
+        f"Goal: {str(subplan.get('goal', '')).strip() or '(none)'}",
+        "Substeps:",
+        *render_nested_checklist(
+            substeps,
+            completed_count=len(completed_summaries),
+            active_index=active_substep_index,
+            prefix=prefix,
+        ),
+    ]
+    if completed_summaries:
+        progress_lines.append("Completed substep notes:")
+        progress_lines.extend(f"- {summary}" for summary in completed_summaries)
+    progress_note = str(subplan.get("progress_note", "")).strip()
+    if progress_note:
+        progress_lines.extend([
+            "Current progress note:",
+            progress_note,
+        ])
+    success_signal = str(subplan.get("success_signal", "")).strip()
+    if success_signal:
+        progress_lines.extend([
+            "Done looks like:",
+            success_signal,
+        ])
+    return "\n".join(progress_lines)
+
+
+def summarize_completed_step_from_substeps(step: str, substep_summaries: List[str]) -> str:
+    """Condense nested substep summaries into the parent build-step summary."""
+    cleaned = [str(item).strip() for item in substep_summaries if str(item).strip()]
+    if not cleaned:
+        return f"Completed build step: {step}"
+    joined = " | ".join(cleaned)
+    return truncate_output(joined, limit=900)
+
+
+def build_step_details_payload(
+    session: DeepSession,
+    steps: List[str],
+    *,
+    completed_count: int = 0,
+    active_index: Optional[int] = None,
+    active_substep_index: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Build a structured UI payload for top-level build steps and nested substeps."""
+    details: List[Dict[str, Any]] = []
+    for idx, step in enumerate(steps or []):
+        if idx < completed_count:
+            state = "complete"
+        elif active_index is not None and idx == active_index:
+            state = "active"
+        else:
+            state = "pending"
+
+        subplan = session.step_subplans.get(step_plan_cache_key(idx), {})
+        completed_notes = step_substep_summaries_for_index(session, idx)
+        completed_reports = step_substep_reports_for_index(session, idx)
+        substeps = [
+            str(item).strip()
+            for item in subplan.get("substeps", [])
+            if str(item).strip()
+        ] if isinstance(subplan, dict) else []
+
+        if active_index == idx and active_substep_index is not None:
+            nested_active_index = active_substep_index
+        elif state == "active" and len(completed_notes) < len(substeps):
+            nested_active_index = len(completed_notes)
+        else:
+            nested_active_index = None
+
+        nested_items: List[Dict[str, str]] = []
+        for sub_idx, substep in enumerate(substeps):
+            if sub_idx < len(completed_notes):
+                nested_state = "complete"
+            elif nested_active_index is not None and sub_idx == nested_active_index:
+                nested_state = "active"
+            else:
+                nested_state = "pending"
+            nested_items.append({
+                "text": substep,
+                "state": nested_state,
+                "report": completed_reports[sub_idx] if sub_idx < len(completed_reports) and isinstance(completed_reports[sub_idx], dict) else {},
+            })
+
+        details.append({
+            "text": str(step).strip(),
+            "state": state,
+            "goal": str(subplan.get("goal", "")).strip() if isinstance(subplan, dict) else "",
+            "success_signal": str(subplan.get("success_signal", "")).strip() if isinstance(subplan, dict) else "",
+            "progress_note": str(subplan.get("progress_note", "")).strip() if isinstance(subplan, dict) else "",
+            "substeps": nested_items,
+            "completed_notes": completed_notes,
+            "completed_reports": completed_reports,
+        })
+    return details
 
 
 def capture_workspace_snapshot(conversation_id: str, max_entries: int = 40, max_depth: int = 4) -> Dict[str, Any]:
@@ -4130,6 +4387,30 @@ def should_auto_execute_workspace_task(message: str, features: "FeatureFlags") -
     return classify_workspace_intent(message) == "broad_write"
 
 
+def should_resume_saved_workspace_task(
+    conversation_id: str,
+    message: str,
+    features: "FeatureFlags",
+) -> bool:
+    """Auto-route short resume replies back into an existing saved task board."""
+    if not features.agent_tools:
+        return False
+    if not (
+        should_resume_task_state(message)
+        or is_plan_approval_reply(message)
+        or is_bare_plan_execution_request(message)
+    ):
+        return False
+    payload = load_task_state(conversation_id)
+    if not payload:
+        return False
+    if bool(payload.get("plan_preview_pending")):
+        return True
+    if task_state_has_pending_follow_up(payload):
+        return True
+    return bool(payload.get("plan"))
+
+
 def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
     """Create an editable execution draft for plan approval and execution."""
     strategy = plan.get("strategy", "Inspect, build, verify, and synthesize.")
@@ -4196,6 +4477,7 @@ def write_workspace_text(conversation_id: str, rel_path: str, content: str) -> s
     encoded = content.encode("utf-8")
     if len(encoded) > WORKSPACE_WRITE_SIZE_LIMIT:
         raise ValueError("Workspace text too large")
+    validate_workspace_text_content(target, content)
     target.write_text(content, encoding="utf-8")
     workspace = get_workspace_path(conversation_id)
     return format_workspace_path(target, workspace)
@@ -4211,7 +4493,27 @@ def read_workspace_text(conversation_id: str, rel_path: str) -> Optional[str]:
     return target.read_text(encoding="utf-8")
 
 
-def format_task_board(session: DeepSession, active_build_step: Optional[int] = None) -> str:
+def validate_workspace_text_content(target: pathlib.Path, content: str) -> Optional[Dict[str, Any]]:
+    """Validate structured text formats before writing them into the workspace."""
+    suffix = target.suffix.lower()
+    if suffix != ".json":
+        return None
+    try:
+        json.loads(content)
+    except json.JSONDecodeError as exc:
+        location = f"line {exc.lineno} column {exc.colno}"
+        raise ValueError(f"Invalid JSON in {target.name} at {location}: {exc.msg}") from exc
+    return {
+        "type": "json",
+        "status": "valid",
+    }
+
+
+def format_task_board(
+    session: DeepSession,
+    active_build_step: Optional[int] = None,
+    active_substep_index: Optional[int] = None,
+) -> str:
     """Render a durable workspace checklist for the current deep-mode turn."""
     builder_steps = session.plan.get("builder_steps", [])
     verifier_checks = session.plan.get("verifier_checks", [])
@@ -4270,6 +4572,39 @@ def format_task_board(session: DeepSession, active_build_step: Optional[int] = N
     else:
         lines.append("- No build steps completed yet.")
 
+    if session.step_subplans:
+        lines.extend([
+            "",
+            "## Nested Step Plans",
+        ])
+        for idx, step in enumerate(builder_steps):
+            subplan = session.step_subplans.get(step_plan_cache_key(idx))
+            if not isinstance(subplan, dict) or not subplan:
+                continue
+            completed_substeps = step_substep_summaries_for_index(session, idx)
+            sub_active_index = None
+            if active_build_step == idx:
+                if active_substep_index is not None:
+                    sub_active_index = active_substep_index
+                else:
+                    substeps = [
+                        str(item).strip()
+                        for item in subplan.get("substeps", [])
+                        if str(item).strip()
+                    ]
+                    if len(completed_substeps) < len(substeps):
+                        sub_active_index = len(completed_substeps)
+            lines.extend([
+                "",
+                f"### Step {idx + 1}: {step}",
+                format_step_subplan_progress(
+                    subplan,
+                    completed_substeps,
+                    active_substep_index=sub_active_index,
+                    prefix=f"{idx + 1}.",
+                ),
+            ])
+
     lines.extend([
         "",
         "## Verification Notes",
@@ -4284,6 +4619,7 @@ def format_task_board(session: DeepSession, active_build_step: Optional[int] = N
 async def persist_task_board(
     session: DeepSession,
     active_build_step: Optional[int] = None,
+    active_substep_index: Optional[int] = None,
     announce: bool = False,
 ) -> str:
     """Persist the current task board into the workspace."""
@@ -4292,7 +4628,11 @@ async def persist_task_board(
     path = write_workspace_text(
         session.conversation_id,
         session.task_board_path,
-        format_task_board(session, active_build_step=active_build_step),
+        format_task_board(
+            session,
+            active_build_step=active_build_step,
+            active_substep_index=active_substep_index,
+        ),
     )
     if announce:
         await send_assistant_note(session.websocket, f"Task board saved to `[[artifact:{path}]]`.")
@@ -4309,6 +4649,9 @@ def format_task_state_payload(session: DeepSession) -> Dict[str, Any]:
         "plan_preview_pending": session.plan_preview_pending,
         "task_board_path": session.task_board_path,
         "build_step_summaries": session.build_step_summaries,
+        "step_subplans": session.step_subplans,
+        "step_substep_summaries": session.step_substep_summaries,
+        "step_substep_reports": session.step_substep_reports,
         "step_reports": session.step_reports,
         "build_summary": session.build_summary,
         "changed_files": session.changed_files,
@@ -4551,6 +4894,35 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
     session.build_step_summaries = [
         str(item).strip() for item in payload.get("build_step_summaries", []) if str(item).strip()
     ]
+    step_subplans = payload.get("step_subplans")
+    if isinstance(step_subplans, dict):
+        builder_steps = [
+            str(item).strip()
+            for item in session.plan.get("builder_steps", [])
+            if str(item).strip()
+        ]
+        session.step_subplans = {
+            str(key): normalize_step_subplan(
+                value,
+                builder_steps[int(str(key))] if str(key).isdigit() and int(str(key)) < len(builder_steps) else str(key),
+            )
+            for key, value in step_subplans.items()
+            if isinstance(value, dict)
+        }
+    step_substep_summaries = payload.get("step_substep_summaries")
+    if isinstance(step_substep_summaries, dict):
+        session.step_substep_summaries = {
+            str(key): [str(item).strip() for item in value if str(item).strip()]
+            for key, value in step_substep_summaries.items()
+            if isinstance(value, list)
+        }
+    step_substep_reports = payload.get("step_substep_reports")
+    if isinstance(step_substep_reports, dict):
+        session.step_substep_reports = {
+            str(key): [item for item in value if isinstance(item, dict)]
+            for key, value in step_substep_reports.items()
+            if isinstance(value, list)
+        }
     step_reports = payload.get("step_reports")
     if isinstance(step_reports, list):
         session.step_reports = [item for item in step_reports if isinstance(item, dict)]
@@ -4754,6 +5126,7 @@ async def send_build_steps(
     steps: List[str],
     completed_count: int = 0,
     active_index: Optional[int] = None,
+    step_details: Optional[List[Dict[str, Any]]] = None,
 ):
     """Push the current build checklist state to the UI."""
     await websocket.send_json({
@@ -4761,6 +5134,7 @@ async def send_build_steps(
         "steps": steps,
         "completed_count": completed_count,
         "active_index": active_index,
+        "step_details": step_details or [],
     })
 
 
@@ -4848,6 +5222,196 @@ async def inspect_vllm_container() -> Dict[str, Any]:
     if resp.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Unable to inspect vLLM container (HTTP {resp.status_code})")
     return resp.json()
+
+
+def summarize_vllm_container_state(container_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the dashboard-safe subset of Docker container state fields."""
+    state = container_info.get("State") or {}
+    return {
+        "status": state.get("Status"),
+        "running": bool(state.get("Running")),
+        "restarting": bool(state.get("Restarting")),
+        "exit_code": state.get("ExitCode"),
+        "error": state.get("Error"),
+        "oom_killed": bool(state.get("OOMKilled")),
+        "started_at": state.get("StartedAt"),
+        "finished_at": state.get("FinishedAt"),
+        "restart_count": container_info.get("RestartCount"),
+    }
+
+
+def decode_docker_log_stream(payload: bytes) -> str:
+    """Decode Docker's multiplexed stdout/stderr log stream into plain text."""
+    if not payload:
+        return ""
+    if len(payload) < 8 or payload[1:4] != b"\x00\x00\x00" or payload[0] not in {0, 1, 2, 3}:
+        return payload.decode("utf-8", errors="replace")
+
+    chunks: List[str] = []
+    cursor = 0
+    total = len(payload)
+    while cursor + 8 <= total:
+        header = payload[cursor:cursor + 8]
+        if header[1:4] != b"\x00\x00\x00":
+            return payload.decode("utf-8", errors="replace")
+        frame_size = struct.unpack(">I", header[4:8])[0]
+        cursor += 8
+        frame = payload[cursor:cursor + frame_size]
+        chunks.append(frame.decode("utf-8", errors="replace"))
+        cursor += frame_size
+    if cursor < total:
+        chunks.append(payload[cursor:].decode("utf-8", errors="replace"))
+    return "".join(chunks)
+
+
+def clean_vllm_log_line(line: str) -> str:
+    """Strip Docker/vLLM prefixes so error details are readable in the UI."""
+    cleaned = line.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^\(APIServer pid=\d+\)\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:INFO|WARNING|ERROR)\s+\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[[^\]]+\]\s*", "", cleaned)
+    return cleaned.strip()
+
+
+def extract_vllm_start_failure_detail(log_text: str) -> str:
+    """Pull the most useful startup failure line out of vLLM logs."""
+    lines = [clean_vllm_log_line(line) for line in (log_text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+
+    preferred_needles = (
+        "does not recognize this architecture",
+        "Value error,",
+        "ValidationError:",
+        "RuntimeError:",
+        "ImportError:",
+        "ModuleNotFoundError:",
+        "No module named",
+        "No supported config format found",
+        "CUDA out of memory",
+        "OOM",
+        "Exception:",
+        "Error:",
+    )
+    for line in reversed(lines):
+        if any(needle in line for needle in preferred_needles):
+            if "Value error," in line:
+                return line.split("Value error,", 1)[1].strip()
+            return line
+
+    return " ".join(lines[-3:])[:600]
+
+
+async def fetch_vllm_container_logs(tail: int = 160) -> str:
+    """Fetch recent logs from the current vLLM container."""
+    try:
+        resp = await docker_api_request(
+            "GET",
+            "/containers/vllm/logs",
+            params={
+                "stdout": "1",
+                "stderr": "1",
+                "tail": str(max(1, tail)),
+            },
+        )
+    except Exception:
+        return ""
+    if resp.status_code != 200:
+        return ""
+    return decode_docker_log_stream(resp.content)
+
+
+async def get_vllm_start_failure() -> Optional[Dict[str, Any]]:
+    """Inspect the vLLM container for a clear startup failure."""
+    if not (DOCKER_CONTROL_ENABLED and os.path.exists("/var/run/docker.sock")):
+        return None
+    try:
+        container_info = await inspect_vllm_container()
+    except Exception:
+        return None
+
+    container_state = summarize_vllm_container_state(container_info)
+    status = str(container_state.get("status") or "").strip().lower()
+    restart_count_raw = container_state.get("restart_count")
+    restart_count = int(restart_count_raw) if isinstance(restart_count_raw, int) else 0
+    exit_code = container_state.get("exit_code")
+    detail = str(container_state.get("error") or "").strip()
+
+    if container_state.get("oom_killed"):
+        detail = detail or "The vLLM container was killed while starting, likely due to running out of memory."
+
+    should_fetch_logs = False
+    if status in {"dead", "exited"}:
+        should_fetch_logs = True
+    elif status == "restarting" and restart_count > 0:
+        should_fetch_logs = True
+    elif not container_state.get("running") and exit_code not in {None, 0}:
+        should_fetch_logs = True
+
+    logs = ""
+    if should_fetch_logs:
+        logs = await fetch_vllm_container_logs()
+        detail = extract_vllm_start_failure_detail(logs) or detail
+
+    if not should_fetch_logs and not detail:
+        return None
+
+    if not detail:
+        exit_suffix = f" (exit code {exit_code})" if exit_code not in {None, ""} else ""
+        detail = f"vLLM container is {status or 'unavailable'}{exit_suffix}."
+
+    return {
+        "detail": detail,
+        "container": container_state,
+        "logs": logs,
+    }
+
+
+async def wait_for_vllm_startup(
+    target_model_name: str,
+    *,
+    timeout_seconds: float = 25.0,
+    poll_interval: float = 1.0,
+) -> None:
+    """Wait for vLLM to either become healthy or fail clearly during startup."""
+    deadline = time.monotonic() + max(timeout_seconds, poll_interval)
+    while time.monotonic() < deadline:
+        if await vllm_health_check():
+            loaded_model_name = await fetch_loaded_model_name()
+            if not target_model_name or not loaded_model_name or loaded_model_name == target_model_name:
+                return
+
+        failure = await get_vllm_start_failure()
+        if failure:
+            raise HTTPException(status_code=500, detail=failure["detail"])
+
+        await asyncio.sleep(poll_interval)
+
+    failure = await get_vllm_start_failure()
+    if failure:
+        raise HTTPException(status_code=500, detail=failure["detail"])
+
+
+async def rollback_vllm_target(previous_profile: Dict[str, Any]) -> str:
+    """Restore the previously selected vLLM target after a failed switch."""
+    restore_key = str(previous_profile.get("key") or DEFAULT_MODEL_PROFILE)
+    restore_model_name = str(previous_profile.get("name") or get_active_model_name()).strip()
+    if not restore_model_name:
+        restore_key = DEFAULT_MODEL_PROFILE
+        restore_model_name = MODEL_PROFILES[restore_key]["name"]
+
+    logger.info("Rolling back vLLM to %s (%s)", restore_key, restore_model_name)
+    mark_model_load_started(restore_model_name, reason="rollback", profile_key=restore_key)
+    if restore_key == "custom":
+        await recreate_vllm_container("custom", model_name=restore_model_name)
+        persist_active_model_selection("custom", restore_model_name)
+    else:
+        await recreate_vllm_container(restore_key)
+        persist_active_model_selection(restore_key, None)
+    await wait_for_vllm_startup(restore_model_name, timeout_seconds=12.0)
+    return restore_model_name
 
 
 def build_vllm_create_payload(
@@ -5368,6 +5932,7 @@ class SwitchModelRequest(BaseModel):
 
 class ModelDownloadRequest(BaseModel):
     source: str
+    force: bool = False
 
 
 class ModelDeleteRequest(BaseModel):
@@ -6553,13 +7118,20 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
+    target_rel_path = format_workspace_path(target, workspace)
+    target_is_internal = target_rel_path == ".ai" or target_rel_path.startswith(".ai/")
+
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
             stat = item.stat()
+            item_rel_path = format_workspace_path(item, workspace)
+            item_is_internal = item_rel_path == ".ai" or item_rel_path.startswith(".ai/")
+            if item_is_internal and not target_is_internal:
+                continue
             items.append({
                 "name": item.name,
-                "path": format_workspace_path(item, workspace),
+                "path": item_rel_path,
                 "type": "directory" if item.is_dir() else "file",
                 "size": stat.st_size if item.is_file() else None,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
@@ -6637,17 +7209,25 @@ async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdat
     if len(encoded) > WORKSPACE_WRITE_SIZE_LIMIT:
         raise HTTPException(status_code=400, detail="File content too large (max 1MB)")
 
+    try:
+        validation = validate_workspace_text_content(target, request.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as f:
         f.write(request.content)
 
-    return {
+    result = {
         "conversation_id": conversation_id,
         "workspace_path": str(workspace),
         "path": format_workspace_path(target, workspace),
         "bytes_written": len(encoded),
         "lines": request.content.count("\n") + 1,
     }
+    if validation:
+        result["validation"] = validation
+    return result
 
 
 @app.get("/api/workspace/{conversation_id}/spreadsheet")
@@ -6860,12 +7440,19 @@ def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dic
     if not target.is_dir():
         raise ValueError("Path is not a directory")
 
+    target_rel_path = format_workspace_path(target, workspace)
+    target_is_internal = target_rel_path == ".ai" or target_rel_path.startswith(".ai/")
+
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
+            item_rel_path = format_workspace_path(item, workspace)
+            item_is_internal = item_rel_path == ".ai" or item_rel_path.startswith(".ai/")
+            if item_is_internal and not target_is_internal:
+                continue
             items.append({
                 "name": item.name,
-                "path": format_workspace_path(item, workspace),
+                "path": item_rel_path,
                 "type": "directory" if item.is_dir() else "file",
                 "size": item.stat().st_size if item.is_file() else None,
             })
@@ -7216,17 +7803,21 @@ def workspace_patch_file_result(
     if len(encoded) > WORKSPACE_WRITE_SIZE_LIMIT:
         raise ValueError("File content too large (max 1MB)")
 
+    validation = validate_workspace_text_content(target, updated)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as f:
         f.write(updated)
 
     workspace = get_workspace_path(conversation_id)
-    return {
+    result = {
         "path": format_workspace_path(target, workspace),
         "edits_applied": edits_applied,
         "bytes_written": len(encoded),
         "created": not target_exists,
     }
+    if validation:
+        result["validation"] = validation
+    return result
 
 
 def workspace_render_result(conversation_id: str, html: str, title: str = "") -> Dict[str, Any]:
@@ -8287,9 +8878,13 @@ def tool_result_preview(
 
     if name == "workspace.patch_file" or "edits_applied" in payload:
         path = tool_path_preview(payload.get("path", arguments.get("path", "")), "file")
+        validation = payload.get("validation", {})
+        validation_note = ""
+        if isinstance(validation, dict) and validation.get("type") == "json" and validation.get("status") == "valid":
+            validation_note = ", valid JSON"
         if payload.get("created"):
-            return f"Created {path} ({payload.get('bytes_written', 0)} bytes)"
-        return f"Edited {path} ({pluralize_tool_count(payload.get('edits_applied', 0), 'change')})"
+            return f"Created {path} ({payload.get('bytes_written', 0)} bytes{validation_note})"
+        return f"Edited {path} ({pluralize_tool_count(payload.get('edits_applied', 0), 'change')}{validation_note})"
 
     if name == "spreadsheet.describe" or "sheet_names" in payload:
         sheet = compact_tool_text(payload.get("sheet", ""), limit=40)
@@ -8315,6 +8910,152 @@ def tool_result_preview(
         return f"Fetched {target}"
 
     return "Completed"
+
+
+def tool_loop_progressed(tool_results: List[Dict[str, Any]]) -> bool:
+    """Return whether the current tool batch produced any successful work."""
+    return any(entry.get("result", {}).get("ok") for entry in tool_results)
+
+
+def summarize_tool_loop_progress(tool_results: List[Dict[str, Any]], limit: int = 8) -> str:
+    """Create a compact progress summary that can seed a continuation batch."""
+    if not tool_results:
+        return "No tool actions were recorded yet."
+
+    successful = sum(1 for entry in tool_results if entry.get("result", {}).get("ok"))
+    touched_paths: List[str] = []
+    commands: List[str] = []
+    recent: List[str] = []
+    for entry in tool_results:
+        call = entry.get("call", {})
+        result = entry.get("result", {})
+        payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+        path = str(payload.get("path", "")).strip()
+        if path and path not in touched_paths:
+            touched_paths.append(path)
+        if call.get("name") == "workspace.run_command":
+            preview = command_preview_text(call.get("arguments", {}).get("command", []))
+            if preview and preview not in commands:
+                commands.append(preview)
+        preview = tool_result_preview(result, str(call.get("name", "")).strip(), call.get("arguments", {}))
+        if preview:
+            recent.append(preview)
+
+    lines = [
+        f"Completed {successful} of {len(tool_results)} tool actions so far.",
+    ]
+    if touched_paths:
+        lines.append("Touched paths: " + ", ".join(touched_paths[:6]))
+    if commands:
+        lines.append("Commands run: " + ", ".join(commands[:4]))
+    if recent:
+        lines.append("Recent tool results:")
+        lines.extend(f"- {item}" for item in recent[-limit:])
+    return "\n".join(lines)
+
+
+def build_tool_loop_resume_message(progress_summary: str, batch_index: int) -> str:
+    """Prompt the model to continue from saved progress instead of restarting."""
+    return (
+        f"Continue the same task from the saved workspace state (resume batch {batch_index + 1}).\n\n"
+        f"Progress so far:\n{progress_summary}\n\n"
+        "Do not restart from scratch or repeat completed edits unless re-checking is necessary. "
+        "Use tools only for the remaining work, then finish with the best grounded answer."
+    )
+
+
+def tool_loop_continuation_limit_for_request(
+    message: str,
+    allowed_tools: List[str],
+    activity_phase: str = "respond",
+) -> int:
+    """Choose how many extra tool batches are worth attempting automatically."""
+    if not allowed_tools or TOOL_LOOP_MAX_CONTINUATIONS <= 0:
+        return 0
+
+    intent = classify_workspace_intent(message)
+    if activity_phase == "execute":
+        return TOOL_LOOP_MAX_CONTINUATIONS
+    if intent == "broad_write":
+        return TOOL_LOOP_MAX_CONTINUATIONS
+    if intent == "focused_write":
+        return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
+    if activity_phase in {"inspect", "verify", "synthesize"}:
+        return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
+    if any(name.startswith("workspace.") for name in allowed_tools):
+        return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
+    return 0
+
+
+async def run_resumable_tool_loop(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: Optional[FeatureFlags] = None,
+    allowed_tools: Optional[List[str]] = None,
+    status_prefix: str = "",
+    max_steps: Optional[int] = None,
+    activity_phase: str = "tool",
+    activity_step_label: Optional[str] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+    continuation_limit: int = 0,
+) -> ToolLoopOutcome:
+    """Run the tool loop in a few resumable batches before asking the user to continue."""
+    base_history = list(history)
+    combined_results: List[Dict[str, Any]] = []
+    progress_summary = ""
+
+    for batch_index in range(max(0, int(continuation_limit or 0)) + 1):
+        batch_history = list(base_history)
+        if batch_index > 0 and progress_summary:
+            batch_history.append({
+                "role": "user",
+                "content": build_tool_loop_resume_message(progress_summary, batch_index),
+            })
+
+        outcome = await run_tool_loop(
+            websocket,
+            conversation_id,
+            batch_history,
+            system_prompt,
+            max_tokens,
+            features=features,
+            allowed_tools=allowed_tools,
+            status_prefix=status_prefix,
+            max_steps=max_steps,
+            activity_phase=activity_phase,
+            activity_step_label=activity_step_label,
+            workflow_execution=workflow_execution,
+        )
+        combined_results.extend(outcome.tool_results)
+
+        if not outcome.hit_limit:
+            outcome.tool_results = combined_results
+            return outcome
+
+        progress_summary = summarize_tool_loop_progress(combined_results)
+        if batch_index >= max(0, int(continuation_limit or 0)) or not tool_loop_progressed(outcome.tool_results):
+            outcome.tool_results = combined_results
+            if combined_results:
+                outcome.final_text = (
+                    "I made partial progress but need another turn to keep going safely.\n\n"
+                    f"{progress_summary}\n\n"
+                    "Say continue and I'll resume from the saved progress."
+                )
+            return outcome
+
+        await send_assistant_note(
+            websocket,
+            "The current tool batch is full. Continuing automatically from the saved workspace state.",
+        )
+
+    return ToolLoopOutcome(
+        final_text="I couldn't continue the tool run automatically.",
+        tool_results=combined_results,
+        hit_limit=True,
+    )
 
 
 async def execute_tool_call(
@@ -8757,6 +9498,7 @@ async def run_tool_loop(
             "Please ask me to continue, or narrow the task to one specific file or command."
         ),
         tool_results=tool_results,
+        hit_limit=True,
     )
 
 
@@ -9169,18 +9911,24 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
             "Use tools when needed, then return a concise fact summary."
         ),
     }]
-    outcome = await run_tool_loop(
+    inspect_tools = allowed_workspace_tools(session.features, include_write=False)
+    outcome = await run_resumable_tool_loop(
         session.websocket,
         session.conversation_id,
         inspect_history,
         f"{session.system_prompt}\n\n{DEEP_INSPECT_SYSTEM_PROMPT}",
         min(session.max_tokens, 1536),
         features=session.features,
-        allowed_tools=allowed_workspace_tools(session.features, include_write=False),
+        allowed_tools=inspect_tools,
         status_prefix="Inspect: ",
         max_steps=4,
         activity_phase="inspect",
         workflow_execution=session.workflow_execution,
+        continuation_limit=tool_loop_continuation_limit_for_request(
+            session.task_request or session.message,
+            inspect_tools,
+            activity_phase="inspect",
+        ),
     )
     facts = outcome.final_text.strip()
     snapshot_facts = format_workspace_snapshot(session.workspace_snapshot)
@@ -9198,6 +9946,61 @@ async def deep_confirm_understanding(session: DeepSession) -> str:
     if confirmation:
         await send_reasoning_note(session.websocket, confirmation)
     return confirmation
+
+
+async def deep_plan_step_subtasks(
+    session: DeepSession,
+    step: str,
+    step_index: int,
+    total_steps: int,
+) -> Dict[str, Any]:
+    """Generate or reuse a nested micro-plan for one top-level build step."""
+    key = step_plan_cache_key(step_index)
+    cached = session.step_subplans.get(key)
+    if isinstance(cached, dict) and cached:
+        normalized = normalize_step_subplan(cached, step)
+        session.step_subplans[key] = normalized
+        return normalized
+
+    step_label = f"Step {step_index + 1}: {step}"
+    await send_activity_event(
+        session.websocket,
+        "plan",
+        "Subplan",
+        f"Breaking build step {step_index + 1} into smaller executable substeps.",
+        step_label=step_label,
+    )
+
+    if is_fast_profile_active():
+        subplan = build_heuristic_step_subplan(session, step, step_index, total_steps)
+    else:
+        messages = [
+            {"role": "system", "content": STEP_DECOMPOSE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"User request:\n{session.task_request or session.message}\n\n"
+                    f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
+                    f"Workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
+                    f"Top-level plan strategy:\n{session.plan.get('strategy', '(none)')}\n\n"
+                    "Completed top-level build notes:\n"
+                    + ("\n".join(f"{idx + 1}. {summary}" for idx, summary in enumerate(session.build_step_summaries)) or "(none)")
+                    + "\n\n"
+                    f"Current build step ({step_index + 1}/{total_steps}):\n{step}"
+                ),
+            },
+        ]
+        raw = await vllm_chat_complete(messages, max_tokens=384, temperature=0.1)
+        try:
+            subplan = normalize_step_subplan(parse_json_object(strip_stream_special_tokens(raw)), step)
+        except Exception:
+            logger.warning("Nested step planner returned invalid JSON; using heuristic subplan instead.")
+            subplan = build_heuristic_step_subplan(session, step, step_index, total_steps)
+
+    normalized = normalize_step_subplan(subplan, step)
+    session.step_subplans[key] = normalized
+    await persist_task_state(session)
+    return normalized
 
 
 async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
@@ -9231,15 +10034,25 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
         changed_files.extend(path for path in session.changed_files if path not in changed_files)
     if not session.resumed:
         session.build_step_summaries = []
+        session.step_subplans = {}
+        session.step_substep_summaries = {}
+        session.step_substep_reports = {}
         session.step_reports = []
     session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
     steps = session.plan.get("builder_steps", [])
+    build_tools = allowed_workspace_tools(session.features, include_write=True)
     start_index = min(len(session.build_step_summaries), len(steps))
     await send_build_steps(
         session.websocket,
         steps,
         completed_count=start_index,
         active_index=(start_index if start_index < len(steps) else None),
+        step_details=build_step_details_payload(
+            session,
+            steps,
+            completed_count=start_index,
+            active_index=(start_index if start_index < len(steps) else None),
+        ),
     )
 
     if start_index >= len(steps):
@@ -9249,7 +10062,18 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
             "Execute",
             "Build checklist already completed.",
         )
-        await send_build_steps(session.websocket, steps, completed_count=len(steps), active_index=None)
+        await send_build_steps(
+            session.websocket,
+            steps,
+            completed_count=len(steps),
+            active_index=None,
+            step_details=build_step_details_payload(
+                session,
+                steps,
+                completed_count=len(steps),
+                active_index=None,
+            ),
+        )
         await persist_task_board(session, active_build_step=None)
         await persist_task_state(session)
         session.build_summary = "\n".join(session.build_step_summaries) or "(build already completed)"
@@ -9258,89 +10082,234 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
 
     for idx in range(start_index, len(steps)):
         step = steps[idx]
-        await send_build_steps(session.websocket, steps, completed_count=idx, active_index=idx)
-        await persist_task_board(session, active_build_step=idx)
         step_label = f"Step {idx + 1}: {step}"
-        await send_activity_event(
+        step_subplan = await deep_plan_step_subtasks(session, step, idx, len(steps))
+        step_key = step_plan_cache_key(idx)
+        completed_substeps = step_substep_summaries_for_index(session, idx)
+        completed_substep_reports = step_substep_reports_for_index(session, idx)
+        substeps = [
+            str(item).strip()
+            for item in step_subplan.get("substeps", [])
+            if str(item).strip()
+        ]
+        next_substep_index = len(completed_substeps) if len(completed_substeps) < len(substeps) else None
+
+        await send_build_steps(
             session.websocket,
-            "execute",
-            "Execute",
-            f"Working on build step {idx + 1} of {len(steps)}.",
-            step_label=step_label,
-        )
-        build_history = session.history_messages() + [{
-            "role": "user",
-            "content": (
-                f"Conversation context:\n{session.context or '(none)'}\n\n"
-                f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                f"Current workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
-                f"User request:\n{session.task_request or session.message}\n\n"
-                f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
-                f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
-                "Completed build step notes:\n"
-                + ("\n".join(f"{i + 1}. {summary}" for i, summary in enumerate(session.build_step_summaries)) or "(none)")
-                + "\n\n"
-                f"Current build step ({idx + 1}/{len(steps)}):\n{step}\n\n"
-                f"Build role: {agent_a.get('role', 'builder')}\n"
-                f"Build task:\n{agent_a.get('prompt', '')}\n\n"
-                "Focus on the current step only. Use the task board as external memory instead of trying to carry the whole plan in-context. "
-                "Use tools to inspect, patch, and validate as needed for this step. "
-                "When done, return a concise step result covering what changed, any artifact paths, and remaining caveats for later verification."
+            steps,
+            completed_count=idx,
+            active_index=idx,
+            step_details=build_step_details_payload(
+                session,
+                steps,
+                completed_count=idx,
+                active_index=idx,
+                active_substep_index=next_substep_index,
             ),
-        }]
-        outcome = await run_tool_loop(
-            session.websocket,
-            session.conversation_id,
-            build_history,
-            f"{session.system_prompt}\n\n{DEEP_BUILD_SYSTEM_PROMPT}",
-            min(session.max_tokens, 1536),
-            features=session.features,
-            allowed_tools=allowed_workspace_tools(session.features, include_write=True),
-            status_prefix=f"Build {idx + 1}/{len(steps)}: ",
-            max_steps=6,
-            activity_phase="execute",
-            activity_step_label=step_label,
-            workflow_execution=session.workflow_execution,
         )
-        successful_tools = sum(1 for entry in outcome.tool_results if entry.get("result", {}).get("ok"))
-        successful_commands = sum(
-            1
-            for entry in outcome.tool_results
-            if entry.get("call", {}).get("name") == "workspace.run_command"
-            and entry.get("result", {}).get("ok")
+        await persist_task_board(
+            session,
+            active_build_step=idx,
+            active_substep_index=next_substep_index,
         )
+
+        step_tool_calls = 0
+        step_successful_tools = 0
+        step_successful_commands = 0
         touched_paths: List[str] = []
-        for entry in outcome.tool_results:
-            call = entry.get("call", {})
-            result = entry.get("result", {})
-            payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-            path = payload.get("path")
-            if isinstance(path, str) and path and path not in touched_paths:
-                touched_paths.append(path)
+
+        for sub_idx in range(len(completed_substeps), len(substeps)):
+            current_substep = substeps[sub_idx]
+            substep_label = f"Step {idx + 1}.{sub_idx + 1}: {current_substep}"
+            await send_activity_event(
+                session.websocket,
+                "execute",
+                "Execute",
+                (
+                    f"Working on substep {sub_idx + 1} of {len(substeps)} "
+                    f"inside build step {idx + 1} of {len(steps)}."
+                ),
+                step_label=substep_label,
+            )
+            await persist_task_board(
+                session,
+                active_build_step=idx,
+                active_substep_index=sub_idx,
+            )
+
+            build_history = session.history_messages() + [{
+                "role": "user",
+                "content": (
+                    f"Conversation context:\n{session.context or '(none)'}\n\n"
+                    f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
+                    f"Current workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
+                    f"User request:\n{session.task_request or session.message}\n\n"
+                    f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
+                    f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
+                    "Completed build step notes:\n"
+                    + ("\n".join(f"{i + 1}. {summary}" for i, summary in enumerate(session.build_step_summaries)) or "(none)")
+                    + "\n\n"
+                    f"Current build step ({idx + 1}/{len(steps)}):\n{step}\n\n"
+                    "Nested step plan:\n"
+                    + format_step_subplan_progress(
+                        step_subplan,
+                        completed_substeps,
+                        active_substep_index=sub_idx,
+                        prefix=f"{idx + 1}.",
+                    )
+                    + "\n\n"
+                    f"Current substep ({sub_idx + 1}/{len(substeps)}):\n{current_substep}\n\n"
+                    f"Build role: {agent_a.get('role', 'builder')}\n"
+                    f"Build task:\n{agent_a.get('prompt', '')}\n\n"
+                    "Focus on the current substep only. Treat any later substeps as future work inside this same top-level build step. "
+                    "Use the task board as external memory instead of trying to carry the whole plan in-context. "
+                    "Use tools to inspect, patch, and validate as needed for this substep. "
+                    "When done, return a concise substep result covering what changed, any artifact paths, and caveats that matter for later verification."
+                ),
+            }]
+            outcome = await run_resumable_tool_loop(
+                session.websocket,
+                session.conversation_id,
+                build_history,
+                f"{session.system_prompt}\n\n{DEEP_BUILD_SYSTEM_PROMPT}",
+                min(session.max_tokens, 1536),
+                features=session.features,
+                allowed_tools=build_tools,
+                status_prefix=f"Build {idx + 1}.{sub_idx + 1}: ",
+                max_steps=6,
+                activity_phase="execute",
+                activity_step_label=substep_label,
+                workflow_execution=session.workflow_execution,
+                continuation_limit=tool_loop_continuation_limit_for_request(
+                    session.task_request or session.message,
+                    build_tools,
+                    activity_phase="execute",
+                ),
+            )
+
+            substep_successful_tools = sum(
+                1 for entry in outcome.tool_results if entry.get("result", {}).get("ok")
+            )
+            substep_successful_commands = sum(
+                1
+                for entry in outcome.tool_results
+                if entry.get("call", {}).get("name") == "workspace.run_command"
+                and entry.get("result", {}).get("ok")
+            )
+            step_tool_calls += len(outcome.tool_results)
+            step_successful_tools += substep_successful_tools
+            step_successful_commands += substep_successful_commands
+
+            substep_touched_paths: List[str] = []
+            for entry in outcome.tool_results:
+                call = entry.get("call", {})
+                result = entry.get("result", {})
+                payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+                path = payload.get("path")
+                if isinstance(path, str) and path and path not in substep_touched_paths:
+                    substep_touched_paths.append(path)
+                if isinstance(path, str) and path and path not in touched_paths:
+                    touched_paths.append(path)
+                if call.get("name") != "workspace.patch_file" or not result.get("ok"):
+                    continue
+                if isinstance(path, str) and path not in changed_files:
+                    changed_files.append(path)
+
+            substep_summary = outcome.final_text.strip() or f"Completed substep {idx + 1}.{sub_idx + 1}."
+            if substep_successful_tools == 0:
+                substep_summary = f"{substep_summary} No successful tool actions were recorded for this substep."
+
+            substep_report = {
+                "substep_index": sub_idx,
+                "substep": current_substep,
+                "tool_calls": len(outcome.tool_results),
+                "successful_tools": substep_successful_tools,
+                "successful_commands": substep_successful_commands,
+                "paths": list(substep_touched_paths),
+                "summary": substep_summary,
+            }
+
+            if outcome.hit_limit:
+                step_subplan["progress_note"] = substep_summary
+                session.step_subplans[step_key] = normalize_step_subplan(step_subplan, step)
+                session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
+                session.changed_files = changed_files
+                session.build_summary = "\n".join(session.build_step_summaries) or "(build in progress)"
+                await send_build_steps(
+                    session.websocket,
+                    steps,
+                    completed_count=idx,
+                    active_index=idx,
+                    step_details=build_step_details_payload(
+                        session,
+                        steps,
+                        completed_count=idx,
+                        active_index=idx,
+                        active_substep_index=sub_idx,
+                    ),
+                )
+                await persist_task_board(
+                    session,
+                    active_build_step=idx,
+                    active_substep_index=sub_idx,
+                )
+                await persist_task_state(session)
+                return DeepBuildResult(
+                    summary=(
+                        f"Paused during step {idx + 1}.{sub_idx + 1}: {current_substep}\n\n"
+                        f"{substep_summary}"
+                    ),
+                    needs_user_confirmation=True,
+                    build_complete=False,
+                )
+
+            completed_substeps.append(substep_summary)
+            store_step_substep_summaries(session, idx, completed_substeps)
+            completed_substep_reports.append(substep_report)
+            store_step_substep_reports(session, idx, completed_substep_reports)
+            step_subplan["progress_note"] = ""
+            session.step_subplans[step_key] = normalize_step_subplan(step_subplan, step)
+            session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
+            session.changed_files = changed_files
+            session.build_summary = "\n".join(session.build_step_summaries) or "(build in progress)"
+            next_nested_index = sub_idx + 1 if sub_idx + 1 < len(substeps) else None
+            await send_build_steps(
+                session.websocket,
+                steps,
+                completed_count=idx,
+                active_index=idx,
+                step_details=build_step_details_payload(
+                    session,
+                    steps,
+                    completed_count=idx,
+                    active_index=idx,
+                    active_substep_index=next_nested_index,
+                ),
+            )
+            await persist_task_board(
+                session,
+                active_build_step=idx,
+                active_substep_index=next_nested_index,
+            )
+            await persist_task_state(session)
+
         report = {
             "step_index": idx,
             "step": step,
-            "tool_calls": len(outcome.tool_results),
-            "successful_tools": successful_tools,
-            "successful_commands": successful_commands,
+            "tool_calls": step_tool_calls,
+            "successful_tools": step_successful_tools,
+            "successful_commands": step_successful_commands,
             "paths": touched_paths,
-            "summary": outcome.final_text.strip(),
+            "subplan": session.step_subplans.get(step_key, {}),
+            "substep_summaries": list(completed_substeps),
+            "substep_reports": list(completed_substep_reports),
+            "summary": summarize_completed_step_from_substeps(step, completed_substeps),
         }
         session.step_reports.append(report)
-        step_summary = outcome.final_text.strip() or f"Completed build step {idx + 1}."
-        if successful_tools == 0:
+        step_summary = report["summary"].strip() or f"Completed build step {idx + 1}."
+        if step_successful_tools == 0 and not completed_substeps:
             step_summary = f"{step_summary} No successful tool actions were recorded for this step."
         session.build_step_summaries.append(f"Step {idx + 1}: {step_summary}")
-
-        for entry in outcome.tool_results:
-            call = entry.get("call", {})
-            result = entry.get("result", {})
-            if call.get("name") != "workspace.patch_file" or not result.get("ok"):
-                continue
-            payload = result.get("result", {})
-            path = payload.get("path")
-            if isinstance(path, str) and path not in changed_files:
-                changed_files.append(path)
 
         session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
         session.changed_files = changed_files
@@ -9351,8 +10320,18 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
             steps,
             completed_count=idx + 1,
             active_index=next_active_index,
+            step_details=build_step_details_payload(
+                session,
+                steps,
+                completed_count=idx + 1,
+                active_index=next_active_index,
+            ),
         )
-        await persist_task_board(session, active_build_step=next_active_index)
+        await persist_task_board(
+            session,
+            active_build_step=next_active_index,
+            active_substep_index=None,
+        )
         await persist_task_state(session)
 
     await send_activity_event(
@@ -9375,6 +10354,16 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
                 session.plan.get("builder_steps", []),
                 completed_count=len(session.build_step_summaries),
                 active_index=len(session.build_step_summaries) if len(session.build_step_summaries) < len(session.plan.get("builder_steps", [])) else None,
+                step_details=build_step_details_payload(
+                    session,
+                    session.plan.get("builder_steps", []),
+                    completed_count=len(session.build_step_summaries),
+                    active_index=(
+                        len(session.build_step_summaries)
+                        if len(session.build_step_summaries) < len(session.plan.get("builder_steps", []))
+                        else None
+                    ),
+                ),
             )
             await persist_task_board(session, active_build_step=len(session.build_step_summaries))
         else:
@@ -9414,7 +10403,18 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     session.plan_preview_pending = bool(preview_only)
     await send_assistant_note(session.websocket, format_deep_plan_note(session.plan))
     if not preview_only:
-        await send_build_steps(session.websocket, session.plan.get("builder_steps", []), completed_count=0, active_index=0)
+        await send_build_steps(
+            session.websocket,
+            session.plan.get("builder_steps", []),
+            completed_count=0,
+            active_index=0,
+            step_details=build_step_details_payload(
+                session,
+                session.plan.get("builder_steps", []),
+                completed_count=0,
+                active_index=0,
+            ),
+        )
         await persist_task_board(session, active_build_step=0, announce=True)
     else:
         await persist_task_board(session, active_build_step=None)
@@ -9451,7 +10451,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
         ),
     }]
     if allowed_tools:
-        outcome = await run_tool_loop(
+        outcome = await run_resumable_tool_loop(
             session.websocket,
             session.conversation_id,
             direct_history,
@@ -9463,6 +10463,11 @@ async def deep_answer_directly(session: DeepSession) -> str:
             max_steps=4,
             activity_phase="respond",
             workflow_execution=session.workflow_execution,
+            continuation_limit=tool_loop_continuation_limit_for_request(
+                session.task_request or session.message,
+                allowed_tools,
+                activity_phase="respond",
+            ),
         )
         return outcome.final_text
 
@@ -9515,18 +10520,24 @@ async def deep_verify(session: DeepSession) -> str:
             "Return a concise verification summary."
         ),
     }]
-    outcome = await run_tool_loop(
+    verify_tools = allowed_workspace_tools(session.features, include_write=False)
+    outcome = await run_resumable_tool_loop(
         session.websocket,
         session.conversation_id,
         verify_history,
         f"{session.system_prompt}\n\n{DEEP_VERIFY_SYSTEM_PROMPT}",
         min(session.max_tokens, 1536),
         features=session.features,
-        allowed_tools=allowed_workspace_tools(session.features, include_write=False),
+        allowed_tools=verify_tools,
         status_prefix="Verify: ",
         max_steps=4,
         activity_phase="verify",
         workflow_execution=session.workflow_execution,
+        continuation_limit=tool_loop_continuation_limit_for_request(
+            session.task_request or session.message,
+            verify_tools,
+            activity_phase="verify",
+        ),
     )
     session.verification_summary = outcome.final_text
     session.scope_audit = build_scope_audit(session)
@@ -9563,18 +10574,24 @@ async def deep_review(session: DeepSession) -> str:
             "Base the final answer on what the workspace actually contains, what verification established, and which scope gaps remain."
         ),
     }]
-    outcome = await run_tool_loop(
+    synth_tools = allowed_workspace_tools(session.features, include_write=False)
+    outcome = await run_resumable_tool_loop(
         session.websocket,
         session.conversation_id,
         synth_history,
         f"{session.system_prompt}\n\n{DEEP_SYNTHESIZE_SYSTEM_PROMPT}",
         min(session.max_tokens, 2048),
         features=session.features,
-        allowed_tools=allowed_workspace_tools(session.features, include_write=False),
+        allowed_tools=synth_tools,
         status_prefix="Synthesize: ",
         max_steps=6,
         activity_phase="synthesize",
         workflow_execution=session.workflow_execution,
+        continuation_limit=tool_loop_continuation_limit_for_request(
+            session.task_request or session.message,
+            synth_tools,
+            activity_phase="synthesize",
+        ),
     )
     session.draft_response = outcome.final_text
     await persist_task_state(session)
@@ -9612,7 +10629,11 @@ async def orchestrated_chat(
         max_tokens=max_tokens,
         features=features,
         context=build_recent_context(history),
-        workspace_enabled=should_use_workspace_tools(conversation_id, message, features),
+        workspace_enabled=(
+            auto_execute
+            or should_resume_saved_workspace_task(conversation_id, message, features)
+            or should_use_workspace_tools(conversation_id, message, features)
+        ),
         execution_requested=is_explicit_plan_execution_request(message),
         auto_execute=auto_execute,
         plan_override_builder_steps=normalize_plan_override_steps(plan_override_builder_steps),
@@ -9785,7 +10806,7 @@ async def handle_direct_search_command(
         search_call,
         search_result,
     )
-    outcome = await run_tool_loop(
+    outcome = await run_resumable_tool_loop(
         websocket,
         conversation_id,
         seeded_history,
@@ -9797,6 +10818,11 @@ async def handle_direct_search_command(
         max_steps=3,
         activity_phase="respond",
         workflow_execution=workflow_execution,
+        continuation_limit=tool_loop_continuation_limit_for_request(
+            cleaned_query,
+            ["web.fetch_page"],
+            activity_phase="respond",
+        ),
     )
     return outcome.final_text
 
@@ -9843,18 +10869,24 @@ async def handle_direct_grep_command(
         grep_call,
         grep_result,
     )
-    outcome = await run_tool_loop(
+    grep_tools = ["workspace.read_file", "workspace.list_files", "spreadsheet.describe"]
+    outcome = await run_resumable_tool_loop(
         websocket,
         conversation_id,
         seeded_history,
         system_prompt,
         min(max_tokens, 2048),
         features=command_features,
-        allowed_tools=["workspace.read_file", "workspace.list_files", "spreadsheet.describe"],
+        allowed_tools=grep_tools,
         status_prefix="Slash /grep: ",
         max_steps=3,
         activity_phase="respond",
         workflow_execution=workflow_execution,
+        continuation_limit=tool_loop_continuation_limit_for_request(
+            cleaned_query,
+            grep_tools,
+            activity_phase="respond",
+        ),
     )
     return outcome.final_text
 
@@ -10087,9 +11119,16 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             select_enabled_tools(conv_id, effective_message, features, history=history)
             if TOOL_LOOP_ENABLED else []
         )
+        resume_saved_workspace = (
+            not slash_command
+            and should_resume_saved_workspace_task(conv_id, effective_message, features)
+        )
         auto_execute_workspace = (
             not slash_command
-            and should_auto_execute_workspace_task(effective_message, features)
+            and (
+                should_auto_execute_workspace_task(effective_message, features)
+                or resume_saved_workspace
+            )
         )
         plan_override_builder_steps = normalize_plan_override_steps(data.get("plan_override_steps"))
         workflow_execution = create_workflow_execution(
@@ -10215,7 +11254,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             )
 
             if enabled_tools:
-                tool_outcome = await run_tool_loop(
+                tool_outcome = await run_resumable_tool_loop(
                     websocket,
                     conv_id,
                     history,
@@ -10226,6 +11265,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     max_steps=tool_step_limit,
                     activity_phase="respond",
                     workflow_execution=workflow_execution,
+                    continuation_limit=tool_loop_continuation_limit_for_request(
+                        effective_message,
+                        enabled_tools,
+                        activity_phase="respond",
+                    ),
                 )
                 full_response = tool_outcome.final_text
                 await websocket.send_json({'type': 'start'})
@@ -10253,7 +11297,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         "Recover",
                         "The draft refused a capability that matches an available tool. Retrying with tools.",
                     )
-                    tool_outcome = await run_tool_loop(
+                    tool_outcome = await run_resumable_tool_loop(
                         websocket,
                         conv_id,
                         history,
@@ -10264,6 +11308,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         max_steps=max(2, tool_loop_step_limit_for_request(effective_message, recovery_tools)),
                         activity_phase="respond",
                         workflow_execution=workflow_execution,
+                        continuation_limit=tool_loop_continuation_limit_for_request(
+                            effective_message,
+                            recovery_tools,
+                            activity_phase="respond",
+                        ),
                     )
                     full_response = tool_outcome.final_text
                     if workflow_execution:
@@ -10492,8 +11541,11 @@ async def terminal_websocket(websocket: WebSocket, conversation_id: str):
 async def get_model_runtime_summary() -> Dict[str, Any]:
     """Collect model state for health and dashboard views."""
     loaded_model_name = await fetch_loaded_model_name()
-    active_profile_key = sync_active_profile_from_model_name(loaded_model_name)
     selected_profile = get_active_model_profile()
+    loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
+    tracked_model_name = str(loading.get("model_name") or selected_profile["name"])
+    tracked_profile_key = str(loading.get("profile_key") or selected_profile["key"])
+    active_profile_key = sync_active_profile_from_model_name(loaded_model_name)
     active_profile = (
         MODEL_PROFILES[active_profile_key]
         if active_profile_key in MODEL_PROFILES
@@ -10503,10 +11555,22 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
     if model_ok:
         mark_model_load_completed(loaded_model_name or selected_profile["name"])
     else:
-        target_name = selected_profile["name"]
-        loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
-        if loading.get("status") not in {"loading"} or loading.get("model_name") != target_name:
-            mark_model_load_started(target_name, reason="startup", profile_key=selected_profile["key"])
+        failure = await get_vllm_start_failure()
+        if failure:
+            if (
+                loading.get("status") != "failed"
+                or loading.get("model_name") != tracked_model_name
+                or loading.get("detail") != failure.get("detail")
+            ):
+                mark_model_load_failed(
+                    tracked_model_name,
+                    failure.get("detail", ""),
+                    reason=str(loading.get("reason") or "startup"),
+                    profile_key=tracked_profile_key,
+                    container=failure.get("container"),
+                )
+        elif loading.get("status") not in {"loading", "failed"} or loading.get("model_name") != tracked_model_name:
+            mark_model_load_started(tracked_model_name, reason="startup", profile_key=tracked_profile_key)
     available_profiles = [
         serialize_model_profile(
             profile,
@@ -10532,19 +11596,23 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
 async def health():
     runtime = await get_model_runtime_summary()
     voice = get_voice_runtime_summary()
+    loading = runtime["loading"]
+    if runtime["model_ok"]:
+        message = f"Model {runtime['loaded_model_name']} is ready"
+    elif loading.get("status") == "failed":
+        detail = str(loading.get("detail") or "vLLM failed to start.")
+        message = f"Model {loading.get('model_name') or runtime['selected_profile']['name']} failed to start: {detail}"
+    else:
+        message = f"Model {runtime['selected_profile']['name']} is loading or unavailable"
     return {
         "status": "healthy" if runtime["model_ok"] else "unhealthy",
         "timestamp": datetime.now().isoformat(),
         "model": runtime["loaded_model_name"],
         "model_available": runtime["model_ok"],
         "model_profile": runtime["active_profile"]["key"],
-        "loading": runtime["loading"],
+        "loading": loading,
         "voice": voice,
-        "message": (
-            f"Model {runtime['loaded_model_name']} is ready"
-            if runtime["model_ok"]
-            else f"Model {runtime['selected_profile']['name']} is loading or unavailable"
-        ),
+        "message": message,
     }
 
 
@@ -10635,6 +11703,110 @@ def normalize_model_source(source: str) -> str:
     return model_id
 
 
+KNOWN_INCOMPATIBLE_MODEL_TYPES: Dict[str, str] = {
+    "gemma4": (
+        "This app's current vLLM runtime cannot load Gemma 4 checkpoints yet because the bundled "
+        "Transformers stack does not recognize the `gemma4` architecture."
+    ),
+}
+
+
+def _normalize_string_list(value: Any) -> List[str]:
+    """Normalize a config field into a compact list of strings."""
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def infer_model_compatibility_from_name(model_id: str) -> Optional[Dict[str, Any]]:
+    """Fallback compatibility hint based on the model id when config metadata is unavailable."""
+    lowered = (model_id or "").strip().lower()
+    if "gemma-4" in lowered or lowered.endswith("/gemma4") or "gemma4" in lowered:
+        return {
+            "status": "incompatible",
+            "model_type": "gemma4",
+            "architectures": [],
+            "detail": KNOWN_INCOMPATIBLE_MODEL_TYPES["gemma4"],
+            "checked_via": "model_id",
+        }
+    return None
+
+
+async def inspect_model_compatibility(model_id: str, *, local_files_only: bool = False) -> Dict[str, Any]:
+    """Best-effort compatibility preflight for the current vLLM runtime."""
+    fallback = infer_model_compatibility_from_name(model_id)
+    result: Dict[str, Any] = {
+        "status": "unknown",
+        "model_type": None,
+        "architectures": [],
+        "detail": "",
+        "checked_via": "none",
+    }
+    if fallback:
+        result.update(fallback)
+
+    if hf_hub_download is None:
+        if not result.get("detail"):
+            result["detail"] = "Compatibility checks are unavailable because huggingface_hub is not installed."
+        return result
+
+    try:
+        config_path = await asyncio.to_thread(
+            hf_hub_download,
+            repo_id=model_id,
+            repo_type="model",
+            filename="config.json",
+            cache_dir=HF_CACHE_PATH,
+            local_files_only=local_files_only,
+        )
+    except Exception as exc:
+        if local_files_only:
+            if not result.get("detail"):
+                result["detail"] = "Compatibility has not been checked for this cached model yet."
+            return result
+        if not result.get("detail"):
+            logger.warning("Compatibility preflight failed for %s: %s", model_id, exc)
+            result["detail"] = f"Could not inspect compatibility before download: {exc}"
+        return result
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+    except Exception as exc:
+        if not result.get("detail"):
+            result["detail"] = f"Downloaded config.json but could not parse it: {exc}"
+        result["checked_via"] = "config"
+        return result
+
+    model_type = str(config.get("model_type") or "").strip() or None
+    architectures = _normalize_string_list(config.get("architectures"))
+    result.update(
+        {
+            "model_type": model_type,
+            "architectures": architectures,
+            "checked_via": "config",
+        }
+    )
+    if model_type in KNOWN_INCOMPATIBLE_MODEL_TYPES:
+        result.update(
+            {
+                "status": "incompatible",
+                "detail": KNOWN_INCOMPATIBLE_MODEL_TYPES[model_type],
+            }
+        )
+        return result
+
+    if not result.get("detail"):
+        result["detail"] = (
+            f"Config reports model_type `{model_type}`."
+            if model_type
+            else "Compatibility could not be determined from config.json."
+        )
+    return result
+
+
 def iter_model_cache_dirs() -> List[pathlib.Path]:
     """Return all Hugging Face model cache directories."""
     hub_root = pathlib.Path(HF_CACHE_PATH) / "hub"
@@ -10654,7 +11826,7 @@ def cache_dir_to_model_id(cache_dir: pathlib.Path) -> str:
     return name.replace("--", "/")
 
 
-def list_cached_models() -> List[Dict[str, Any]]:
+async def list_cached_models() -> List[Dict[str, Any]]:
     """List model repositories currently present in the Hugging Face cache."""
     runtime_model_names = {profile["name"] for profile in MODEL_PROFILES.values()}
     active_name = get_active_model_name()
@@ -10663,12 +11835,14 @@ def list_cached_models() -> List[Dict[str, Any]]:
     for cache_dir in iter_model_cache_dirs():
         model_id = cache_dir_to_model_id(cache_dir)
         info = get_cache_info(model_id)
+        compatibility = await inspect_model_compatibility(model_id, local_files_only=True)
         info.update(
             {
                 "download_url": f"https://huggingface.co/{quote_plus(model_id, safe='/')}",
                 "managed_by_profile": model_id in runtime_model_names,
                 "active_profile": model_id == active_name,
                 "download_job": jobs_by_model.get(model_id),
+                "compatibility": compatibility,
             }
         )
         items.append(info)
@@ -10760,7 +11934,7 @@ def mark_model_load_started(model_name: str, reason: str, profile_key: Optional[
     now = datetime.now().isoformat()
     MODEL_LOADING_STATUS = {
         "status": "loading",
-        "phase": "restarting" if reason in {"switch", "activate", "redownload", "restart"} else "loading",
+        "phase": "restarting" if reason in {"switch", "activate", "redownload", "restart", "rollback"} else "loading",
         "reason": reason,
         "model_name": model_name,
         "profile_key": profile_key or ACTIVE_MODEL_PROFILE,
@@ -10800,6 +11974,37 @@ def mark_model_load_completed(model_name: str):
     persist_model_state()
 
 
+def mark_model_load_failed(
+    model_name: str,
+    detail: str,
+    *,
+    reason: Optional[str] = None,
+    profile_key: Optional[str] = None,
+    container: Optional[Dict[str, Any]] = None,
+):
+    """Record a failed model load so the UI can surface the startup error."""
+    global MODEL_LOADING_STATUS
+    now_dt = datetime.now()
+    loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
+    started_at = _parse_iso_datetime(loading.get("started_at"))
+    duration = max(0.0, (now_dt - started_at).total_seconds()) if started_at else None
+
+    MODEL_LOADING_STATUS = {
+        "status": "failed",
+        "phase": "failed",
+        "reason": reason or loading.get("reason") or "startup",
+        "model_name": model_name,
+        "profile_key": profile_key or loading.get("profile_key") or ACTIVE_MODEL_PROFILE,
+        "started_at": loading.get("started_at") if started_at else None,
+        "updated_at": now_dt.isoformat(),
+        "failed_at": now_dt.isoformat(),
+        "last_duration_seconds": round(duration, 1) if duration is not None else None,
+        "detail": (detail or "").strip() or "vLLM failed to start.",
+        "container": container or loading.get("container"),
+    }
+    persist_model_state()
+
+
 def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
     """Return current loading state with historical ETA estimates."""
     history = model_load_history_summary(model_name)
@@ -10821,6 +12026,9 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
     else:
         phase = str(loading.get("phase") or "loading")
         status = str(loading.get("status") or "loading")
+        if status == "failed":
+            eta_seconds = None
+            progress = None
 
     return {
         "status": status,
@@ -10834,6 +12042,9 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
         "started_at": loading.get("started_at") if target_matches else None,
         "updated_at": loading.get("updated_at"),
         "reason": loading.get("reason"),
+        "failed_at": loading.get("failed_at"),
+        "detail": loading.get("detail"),
+        "container": loading.get("container"),
     }
 
 @app.get("/api/dashboard")
@@ -10847,12 +12058,7 @@ async def get_dashboard():
         try:
             resp = await docker_api_request("GET", "/containers/vllm/json")
             if resp.status_code == 200:
-                info = resp.json()
-                container_status = {
-                    "status": info.get("State", {}).get("Status"),
-                    "running": info.get("State", {}).get("Running"),
-                    "started_at": info.get("State", {}).get("StartedAt"),
-                }
+                container_status = summarize_vllm_container_state(resp.json())
         except Exception:
             pass
 
@@ -10880,7 +12086,7 @@ async def get_dashboard():
 async def get_model_library():
     return {
         "cache_root": str(pathlib.Path(HF_CACHE_PATH) / "hub"),
-        "models": list_cached_models(),
+        "models": await list_cached_models(),
         "jobs": current_model_download_jobs(),
         "profiles": list(MODEL_PROFILES.values()),
         "active_model_name": get_active_model_name(),
@@ -10892,6 +12098,16 @@ async def download_model_to_library(request: ModelDownloadRequest):
     global MODEL_DOWNLOAD_LOCK
 
     model_id = normalize_model_source(request.source)
+    compatibility = await inspect_model_compatibility(model_id)
+    if compatibility.get("status") == "incompatible" and not request.force:
+        return {
+            "status": "warning",
+            "message": compatibility.get("detail") or f"{model_id} is not compatible with the current runtime.",
+            "model_id": model_id,
+            "compatibility": compatibility,
+            "can_download_anyway": True,
+        }
+
     if MODEL_DOWNLOAD_LOCK is None:
         MODEL_DOWNLOAD_LOCK = asyncio.Lock()
 
@@ -10902,6 +12118,7 @@ async def download_model_to_library(request: ModelDownloadRequest):
                     "status": "accepted",
                     "message": f"{model_id} is already downloading.",
                     "job": job,
+                    "compatibility": job.get("compatibility") or compatibility,
                 }
 
         existing_cache = get_cache_info(model_id)
@@ -10910,6 +12127,7 @@ async def download_model_to_library(request: ModelDownloadRequest):
                 "status": "success",
                 "message": f"{model_id} is already cached.",
                 "cache": existing_cache,
+                "compatibility": compatibility,
             }
 
         job_id = uuid.uuid4().hex
@@ -10922,6 +12140,7 @@ async def download_model_to_library(request: ModelDownloadRequest):
             "started_at": None,
             "completed_at": None,
             "error": None,
+            "compatibility": compatibility,
         }
         MODEL_DOWNLOAD_JOBS[job_id] = job
         asyncio.create_task(run_model_download_job(job_id, model_id))
@@ -10930,6 +12149,7 @@ async def download_model_to_library(request: ModelDownloadRequest):
         "status": "accepted",
         "message": f"Started downloading {model_id} into the shared Hugging Face cache.",
         "job": job,
+        "compatibility": compatibility,
     }
 
 @app.post("/api/models/library/delete")
@@ -10972,6 +12192,9 @@ async def activate_model_from_library(request: ModelActivateRequest):
     model_id = normalize_model_source(request.model_id)
     if get_cache_info(model_id).get("status") == "not_downloaded":
         raise HTTPException(status_code=404, detail=f"{model_id} is not cached yet")
+    compatibility = await inspect_model_compatibility(model_id, local_files_only=True)
+    if compatibility.get("status") == "incompatible":
+        raise HTTPException(status_code=409, detail=compatibility.get("detail") or f"{model_id} is not compatible with the current runtime")
 
     if ACTIVE_MODEL_LOCK is None:
         ACTIVE_MODEL_LOCK = asyncio.Lock()
@@ -10985,8 +12208,29 @@ async def activate_model_from_library(request: ModelActivateRequest):
                 "profile": ACTIVE_MODEL_PROFILE,
             }
 
+        previous_profile = get_active_model_profile()
         mark_model_load_started(model_id, reason="activate", profile_key="custom")
-        await recreate_vllm_container("custom", model_name=model_id)
+        try:
+            await recreate_vllm_container("custom", model_name=model_id)
+            await wait_for_vllm_startup(model_id)
+        except HTTPException as exc:
+            logger.error("Failed to activate cached model %s: %s", model_id, exc.detail)
+            rollback_note = ""
+            try:
+                restored_model = await rollback_vllm_target(previous_profile)
+                rollback_note = f" Restored {restored_model}."
+            except Exception as rollback_exc:
+                rollback_detail = (
+                    rollback_exc.detail if isinstance(rollback_exc, HTTPException) else str(rollback_exc)
+                )
+                logger.error("Rollback after failed activation also failed: %s", rollback_detail, exc_info=True)
+                mark_model_load_failed(
+                    model_id,
+                    f"{exc.detail} Rollback also failed: {rollback_detail}",
+                    reason="activate",
+                    profile_key="custom",
+                )
+            raise HTTPException(status_code=500, detail=f"{exc.detail}{rollback_note}")
         persist_active_model_selection("custom", model_id)
         return {
             "status": "success",
@@ -11032,10 +12276,37 @@ async def switch_model(request: SwitchModelRequest):
             }
 
         logger.info("Switching vLLM profile from %s to %s", current_key, target_key)
-        mark_model_load_started(MODEL_PROFILES[target_key]["name"], reason="switch", profile_key=target_key)
-        await recreate_vllm_container(target_key)
-        persist_active_model_selection(target_key, None)
+        previous_profile = get_active_model_profile()
         target_profile = MODEL_PROFILES[target_key]
+        compatibility = await inspect_model_compatibility(target_profile["name"])
+        if compatibility.get("status") == "incompatible":
+            raise HTTPException(
+                status_code=409,
+                detail=compatibility.get("detail") or f"{target_profile['name']} is not compatible with the current runtime",
+            )
+        mark_model_load_started(target_profile["name"], reason="switch", profile_key=target_key)
+        try:
+            await recreate_vllm_container(target_key)
+            await wait_for_vllm_startup(target_profile["name"])
+        except HTTPException as exc:
+            logger.error("Failed to switch vLLM profile to %s: %s", target_key, exc.detail)
+            rollback_note = ""
+            try:
+                restored_model = await rollback_vllm_target(previous_profile)
+                rollback_note = f" Restored {restored_model}."
+            except Exception as rollback_exc:
+                rollback_detail = (
+                    rollback_exc.detail if isinstance(rollback_exc, HTTPException) else str(rollback_exc)
+                )
+                logger.error("Rollback after failed profile switch also failed: %s", rollback_detail, exc_info=True)
+                mark_model_load_failed(
+                    target_profile["name"],
+                    f"{exc.detail} Rollback also failed: {rollback_detail}",
+                    reason="switch",
+                    profile_key=target_key,
+                )
+            raise HTTPException(status_code=500, detail=f"{exc.detail}{rollback_note}")
+        persist_active_model_selection(target_key, None)
         return {
             "status": "success",
             "message": f"Switching to {target_profile['label']} ({target_profile['name']}). vLLM is reloading now.",

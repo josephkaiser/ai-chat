@@ -34,6 +34,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./runs:/app/runs
       - ~/.cache/huggingface:/cache/huggingface
       - /var/run/docker.sock:/var/run/docker.sock
     environment:

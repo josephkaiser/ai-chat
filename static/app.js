@@ -23,7 +23,8 @@ let dockerControlAvailable = false;
 let uiReadyReportInFlight = false;
 let lastReportedUiReadyKey = '';
 let dashboardRefreshTimer = null;
-let chatCommandAllowlists = {};
+let chatCommandAllowlists = loadStoredObject('chatCommandAllowlists', {});
+let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
 let workspaceEntries = [];
 let workspaceTree = null;
 let workspaceStats = { files: 0, directories: 0 };
@@ -41,6 +42,7 @@ let selectedSpreadsheetSheet = '';
 let workspaceRefreshTimer = null;
 let workspacePanelOpen = localStorage.getItem('workspacePanelOpen') !== 'false';
 let workspaceConsoleOpen = localStorage.getItem('workspaceConsoleOpen') === 'true';
+let workspaceViewMode = localStorage.getItem('workspaceViewMode') === 'reader' ? 'reader' : 'tree';
 let collapsedWorkspaceDirs = new Set();
 let featureSettings = null;
 let voiceSettings = null;
@@ -81,6 +83,8 @@ let mediaStream = null;
 let recordedChunks = [];
 let audioAttachmentUploadInFlight = false;
 let dictationStartedAt = 0;
+let mobileComposerResizeObserver = null;
+let mobileKeyboardInset = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
 const SEND_BUTTON_ICON = buildComposerIconMarkup('<path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>');
 const STOP_BUTTON_ICON = buildComposerIconMarkup('<rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.8"></rect>');
@@ -225,6 +229,20 @@ const PLAN_APPROVAL_REPLY_MARKERS = Object.freeze([
     'start with step 1',
     'start with the first step',
 ]);
+const RESUME_TURN_MARKERS = Object.freeze([
+    'continue',
+    'resume',
+    'keep going',
+    'keep working',
+    'carry on',
+    'go on',
+    'finish that',
+    'finish it',
+    'next',
+    'next step',
+    'do the next step',
+    'move to the next step',
+]);
 const APPROVED_PLAN_EXECUTION_MESSAGE = 'yes';
 const MESSAGE_FEEDBACK_OPTIONS = Object.freeze([
     Object.freeze({
@@ -246,8 +264,39 @@ voiceSettings = loadVoiceSettings();
 
 // ==================== Theme ====================
 
+function loadStoredObject(key, fallback = {}) {
+    try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return { ...fallback };
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : { ...fallback };
+    } catch (error) {
+        console.warn(`Failed to load ${key}:`, error);
+        return { ...fallback };
+    }
+}
+
+function persistStoredObject(key, value) {
+    try {
+        localStorage.setItem(key, JSON.stringify(value || {}));
+    } catch (error) {
+        console.warn(`Failed to persist ${key}:`, error);
+    }
+}
+
 function buildComposerIconMarkup(paths, viewBox = '0 0 24 24') {
     return `<span class="composer-icon" aria-hidden="true"><svg viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths}</svg></span>`;
+}
+
+function isMobileViewport() {
+    return window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+}
+
+function updateThemeChrome(mode, colors = {}) {
+    const meta = document.getElementById('themeColorMeta');
+    if (!meta) return;
+    const fallback = mode === 'dark' ? '#111827' : '#f5f0e8';
+    meta.setAttribute('content', colors.bg_secondary || colors.bg_primary || fallback);
 }
 
 function applyTheme(mode) {
@@ -273,6 +322,7 @@ function applyTheme(mode) {
     if (icon) icon.textContent = mode === 'dark' ? 'Dark' : 'Light';
 
     applyPetTheme(petProfile, mode);
+    updateThemeChrome(mode, colors);
 }
 
 function normalizeThemeColor(value) {
@@ -370,6 +420,7 @@ function setModelNote(modelName) {
     const note = document.querySelector('.model-note');
     if (note && modelName) note.textContent = modelName;
     if (modelName) window.MODEL_NAME = modelName;
+    syncModelSummaryButton();
 }
 
 function formatCompactModelName(modelName) {
@@ -390,26 +441,12 @@ function formatCompactModelName(modelName) {
     return compact.charAt(0).toUpperCase() + compact.slice(1);
 }
 
-function getProfileDisplayLabel(profile) {
-    if (!profile || typeof profile !== 'object') return '';
-    return formatCompactModelName(profile.name) || profile.display_label || profile.label || profile.key || '';
-}
-
-function getModelSelectDisabledReason(profiles = availableModelProfiles) {
-    if (modelSwitchInFlight) return 'Model switch in progress.';
-    if (isGenerating) return 'Wait for the current reply to finish before switching models.';
-    if (!modelAvailable) return 'The current model is still loading.';
-    if (!dockerControlAvailable && Array.isArray(profiles) && profiles.length > 1) {
-        return 'Profile switching is disabled on this server because Docker control is off. Use Models to browse, download, or delete Hugging Face checkpoints.';
-    }
-    return '';
-}
-
 function syncReasoningSelector() {
     const select = document.getElementById('reasoningSelect');
     if (!select) return;
     select.value = deepMode ? 'high' : 'low';
     select.title = deepMode ? 'High reasoning effort enabled' : 'Low reasoning effort enabled';
+    syncReasoningToggleButton();
 }
 
 function handleReasoningSelectChange(value) {
@@ -430,42 +467,117 @@ function syncMobileReasoningBadge() {
     badge.classList.toggle('is-high', deepMode);
 }
 
-function syncModelSelector() {
-    const select = document.getElementById('modelSelect');
-    if (!select) return;
+function syncReasoningToggleButton() {
+    const button = document.getElementById('reasoningToggleButton');
+    if (!button) return;
+    button.classList.toggle('is-active', deepMode);
+    button.dataset.mode = deepMode ? 'high' : 'low';
+    button.title = deepMode
+        ? 'High reasoning effort enabled. Tap to switch to low.'
+        : 'Low reasoning effort enabled. Tap to switch to high.';
+    button.setAttribute('aria-label', deepMode ? 'Reasoning effort: high' : 'Reasoning effort: low');
+}
 
-    const profiles = Array.isArray(availableModelProfiles) ? availableModelProfiles : [];
-    const nextValue = selectedModelProfileKey || activeModelProfileKey || select.value || '';
-    const disabledReason = getModelSelectDisabledReason(profiles);
+function getModelSummaryLabel() {
+    if (modelSwitchInFlight) return 'Switching...';
+    const fullName = String(window.MODEL_NAME || '').trim();
+    if (!fullName) return modelAvailable ? 'Model' : 'Loading model...';
+    return formatCompactModelName(fullName) || fullName;
+}
 
-    select.innerHTML = '';
-    if (!profiles.length) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = modelSwitchInFlight
-            ? 'Switching model...'
-            : (formatCompactModelName(window.MODEL_NAME) || 'Loading model...');
-        select.appendChild(option);
-        select.disabled = true;
-        select.title = window.MODEL_NAME || 'No model profiles available.';
+function syncModelSummaryButton() {
+    const button = document.getElementById('modelSummaryButton');
+    if (!button) return;
+
+    const fullName = String(window.MODEL_NAME || '').trim();
+    const label = getModelSummaryLabel();
+    const hoverCopyEl = document.querySelector('.model-summary-hover-copy');
+    const hoverMetaEl = document.querySelector('.model-summary-hover-meta');
+
+    const labelEl = button.querySelector('.model-summary-label');
+    if (labelEl) labelEl.textContent = label;
+    else button.textContent = label;
+    button.classList.toggle('is-loading', !fullName || modelSwitchInFlight);
+
+    if (hoverCopyEl) {
+        hoverCopyEl.textContent = modelSwitchInFlight
+            ? 'A model switch is in progress. Open the library to track it or pick another runtime.'
+            : 'Open the local model library to switch runtimes or add a new one.';
+    }
+    if (hoverMetaEl) {
+        hoverMetaEl.textContent = modelSwitchInFlight
+            ? 'Status: Switching model...'
+            : (
+                fullName
+                    ? `Current: ${fullName}`
+                    : (modelAvailable ? 'Current: Choose a model' : 'Current: Loading available models...')
+            );
+    }
+
+    button.title = modelSwitchInFlight
+        ? 'A model change is in progress. Open Models for status.'
+        : (
+            fullName
+                ? `Current model: ${fullName}. Open Models to switch downloaded models or add new ones.`
+                : 'Open Models to view downloaded models and add a new one.'
+        );
+    button.setAttribute(
+        'aria-label',
+        fullName ? `Open Models. Current model: ${fullName}` : 'Open Models'
+    );
+}
+
+function dismissMobileKeyboard(force = false) {
+    if (!isMobileViewport()) return;
+    const input = document.getElementById('input');
+    if (!input) return;
+    if (!force && document.activeElement !== input) return;
+    input.blur();
+}
+
+function syncMobileViewportState() {
+    const root = document.documentElement;
+    const inputArea = document.getElementById('inputArea');
+    const mobile = isMobileViewport();
+    if (!mobile) {
+        mobileKeyboardInset = 0;
+        root.classList.remove('mobile-keyboard-open');
+        root.style.setProperty('--mobile-keyboard-gap', '0px');
+        root.style.setProperty('--mobile-viewport-height', `${window.innerHeight || document.documentElement.clientHeight || 0}px`);
+        root.style.setProperty('--mobile-composer-height', inputArea ? `${Math.ceil(inputArea.getBoundingClientRect().height)}px` : '132px');
         return;
     }
 
-    profiles.forEach(profile => {
-        const option = document.createElement('option');
-        option.value = profile.key;
-        const displayLabel = getProfileDisplayLabel(profile);
-        option.textContent = displayLabel;
-        option.title = profile.name || displayLabel;
-        select.appendChild(option);
-    });
+    const viewport = window.visualViewport;
+    const viewportHeight = Math.round(viewport?.height || window.innerHeight || document.documentElement.clientHeight || 0);
+    const viewportOffsetTop = Math.round(viewport?.offsetTop || 0);
+    const layoutHeight = Math.max(
+        window.innerHeight || 0,
+        document.documentElement.clientHeight || 0,
+        viewportHeight + viewportOffsetTop,
+    );
+    const keyboardInset = Math.max(0, layoutHeight - viewportHeight - viewportOffsetTop);
+    mobileKeyboardInset = keyboardInset;
+    root.style.setProperty('--mobile-keyboard-gap', `${keyboardInset}px`);
+    root.style.setProperty('--mobile-viewport-height', `${viewportHeight}px`);
+    root.style.setProperty('--mobile-composer-height', inputArea ? `${Math.ceil(inputArea.getBoundingClientRect().height)}px` : '132px');
+    root.classList.toggle('mobile-keyboard-open', keyboardInset > 120);
+}
 
-    select.value = profiles.some(profile => profile.key === nextValue)
-        ? nextValue
-        : (profiles.find(profile => profile.selected)?.key || profiles[0].key);
-    select.disabled = Boolean(disabledReason);
-    const selectedProfile = profiles.find(profile => profile.key === select.value);
-    select.title = disabledReason || selectedProfile?.name || 'Choose the active model profile.';
+function observeMobileComposerSize() {
+    const inputArea = document.getElementById('inputArea');
+    if (!inputArea) return;
+    if (mobileComposerResizeObserver) mobileComposerResizeObserver.disconnect();
+    if (typeof ResizeObserver === 'undefined') {
+        syncMobileViewportState();
+        return;
+    }
+    mobileComposerResizeObserver = new ResizeObserver(() => {
+        syncMobileViewportState();
+        positionSlashMenu();
+    });
+    mobileComposerResizeObserver.observe(inputArea);
+    syncMobileViewportState();
 }
 
 function extractProfileKey(profileValue) {
@@ -487,7 +599,7 @@ function applyModelRuntime(data = {}) {
         activeModelProfileKey = availableModelProfiles.find(profile => profile.active)?.key || selectedModelProfileKey;
     }
     setModelNote(data.selected_model_name || data.model_name || data.loaded_model_name || window.MODEL_NAME);
-    syncModelSelector();
+    syncModelSummaryButton();
     maybeReportUiModelReady();
 }
 
@@ -498,56 +610,7 @@ async function loadComposerRuntime() {
         const data = await resp.json();
         applyModelRuntime(data);
     } catch (error) {
-        syncModelSelector();
-    }
-}
-
-async function handleModelSelectChange(profileKey) {
-    const previousKey = selectedModelProfileKey || activeModelProfileKey;
-    if (!profileKey || profileKey === previousKey || modelSwitchInFlight) {
-        syncModelSelector();
-        return;
-    }
-
-    const profile = availableModelProfiles.find(item => item.key === profileKey);
-    const profileLabel = getProfileDisplayLabel(profile) || profileKey;
-    if (!dockerControlAvailable) {
-        syncModelSelector();
-        showDashboard();
-        alert('Model profile switching is disabled on this server because Docker control is off. You can still use the Models view to download or delete Hugging Face checkpoints.');
-        return;
-    }
-    const confirmed = confirm(
-        `Switch to ${profileLabel}?\n\nThis will restart the model and the chat may be unavailable for a few minutes while it loads.`
-    );
-    if (!confirmed) {
-        syncModelSelector();
-        return;
-    }
-
-    modelSwitchInFlight = true;
-    selectedModelProfileKey = profileKey;
-    syncModelSelector();
-
-    try {
-        const resp = await fetch('/api/model/switch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile: profileKey }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.message || 'Switch failed');
-        setModelNote(data.model_name || profile?.name || window.MODEL_NAME);
-        updateStatus('loading');
-        startHealthPolling();
-        await loadComposerRuntime();
-    } catch (error) {
-        selectedModelProfileKey = previousKey;
-        syncModelSelector();
-        alert(`Model switch failed: ${error.message}`);
-    } finally {
-        modelSwitchInFlight = false;
-        syncModelSelector();
+        syncModelSummaryButton();
     }
 }
 
@@ -741,7 +804,7 @@ function applyWorkspacePanelState() {
     const agentToolsEnabled = featureSettings.agent_tools;
     const workspacePanelEnabled = featureSettings.workspace_panel;
     const mobileViewport = window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
-    const workspaceAllowed = agentToolsEnabled && workspacePanelEnabled && !mobileViewport;
+    const workspaceAllowed = agentToolsEnabled && workspacePanelEnabled;
     if (!workspaceAllowed) {
         workspacePanelOpen = false;
     }
@@ -757,6 +820,45 @@ function applyWorkspacePanelState() {
     }
     localStorage.setItem('workspacePanelOpen', open ? 'true' : 'false');
     applyWorkspaceConsoleState();
+    syncWorkspaceViewMode();
+    syncChatShellLayout();
+}
+
+function effectiveWorkspaceViewMode() {
+    if (workspaceViewMode === 'reader' && !inlineViewerPath) return 'tree';
+    return workspaceViewMode === 'reader' ? 'reader' : 'tree';
+}
+
+function syncWorkspaceViewMode() {
+    const panel = document.getElementById('workspacePanel');
+    const viewer = document.querySelector('.ide-viewer');
+    const treeButton = document.getElementById('workspaceTreeViewButton');
+    const readerButton = document.getElementById('workspaceReaderViewButton');
+    const mode = effectiveWorkspaceViewMode();
+
+    workspaceViewMode = mode;
+    if (panel) panel.classList.toggle('is-hidden', mode !== 'tree');
+    if (viewer) viewer.classList.toggle('is-hidden', mode !== 'reader');
+
+    if (treeButton) {
+        treeButton.classList.toggle('active', mode === 'tree');
+        treeButton.setAttribute('aria-pressed', mode === 'tree' ? 'true' : 'false');
+    }
+    if (readerButton) {
+        const hasReader = Boolean(inlineViewerPath);
+        readerButton.disabled = !hasReader;
+        readerButton.classList.toggle('active', mode === 'reader');
+        readerButton.setAttribute('aria-pressed', mode === 'reader' ? 'true' : 'false');
+    }
+
+    localStorage.setItem('workspaceViewMode', mode);
+}
+
+function setWorkspaceViewMode(mode) {
+    const nextMode = mode === 'reader' ? 'reader' : 'tree';
+    if (nextMode === 'reader' && !inlineViewerPath) return;
+    workspaceViewMode = nextMode;
+    syncWorkspaceViewMode();
     syncChatShellLayout();
 }
 
@@ -788,7 +890,8 @@ function closeWorkspacePanel() {
 }
 
 function toggleWorkspacePanel() {
-    if (!featureSettings.agent_tools || !featureSettings.workspace_panel || window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches) return;
+    if (!featureSettings.agent_tools || !featureSettings.workspace_panel) return;
+    dismissMobileKeyboard(true);
     if (!workspacePanelOpen) closeMenu();
     workspacePanelOpen = !workspacePanelOpen;
     applyWorkspacePanelState();
@@ -904,6 +1007,13 @@ function messageRequestsPlanExecution(message, slashCommand = null) {
     return Boolean(pendingExecutionPlan?.executePrompt || buildSteps.length) && PLAN_APPROVAL_REPLY_MARKERS.includes(approvalText);
 }
 
+function messageRequestsContinuation(message, slashCommand = null) {
+    if (messageRequestsPlanExecution(message, slashCommand)) return true;
+    const approvalText = normalizeApprovalReply(message);
+    if (!approvalText) return false;
+    return RESUME_TURN_MARKERS.includes(approvalText);
+}
+
 function messageRequestsWebSearch(message) {
     const text = normalizeTurnMessage(message);
     if (!text) return false;
@@ -950,26 +1060,71 @@ function rememberAllowedCommand(conversationId, commandKey) {
     if (!key || !normalized) return;
     chatCommandAllowlists[key] = getAllowedCommandsForConversation(key).concat(normalized)
         .filter((value, index, items) => value && items.indexOf(value) === index);
+    persistStoredObject('chatCommandAllowlists', chatCommandAllowlists);
 }
 
 function clearAllowedCommandsForConversation(conversationId) {
     const key = String(conversationId || '').trim();
     if (!key) return;
     delete chatCommandAllowlists[key];
+    persistStoredObject('chatCommandAllowlists', chatCommandAllowlists);
+}
+
+function getRememberedTurnFeatures(conversationId) {
+    const key = String(conversationId || '').trim();
+    const stored = key ? conversationTurnFeatureMemory[key] : null;
+    if (!stored || typeof stored !== 'object') {
+        return {
+            workspace_write: false,
+            workspace_run_commands: false,
+        };
+    }
+    return {
+        workspace_write: Boolean(stored.workspace_write),
+        workspace_run_commands: Boolean(stored.workspace_run_commands),
+    };
+}
+
+function rememberTurnFeatures(conversationId, features) {
+    const key = String(conversationId || '').trim();
+    if (!key || !features || typeof features !== 'object') return;
+    const previous = getRememberedTurnFeatures(key);
+    conversationTurnFeatureMemory[key] = {
+        workspace_write: Boolean(previous.workspace_write || features.workspace_write),
+        workspace_run_commands: Boolean(previous.workspace_run_commands || features.workspace_run_commands),
+    };
+    persistStoredObject('conversationTurnFeatures', conversationTurnFeatureMemory);
+}
+
+function clearRememberedTurnFeatures(conversationId) {
+    const key = String(conversationId || '').trim();
+    if (!key) return;
+    delete conversationTurnFeatureMemory[key];
+    persistStoredObject('conversationTurnFeatures', conversationTurnFeatureMemory);
 }
 
 function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null) {
     const permissions = inferTurnPermissions(message, attachmentPaths);
     const executionRequest = messageRequestsPlanExecution(message, slashCommand);
+    const continuationRequest = messageRequestsContinuation(message, slashCommand);
+    const rememberedFeatures = getRememberedTurnFeatures(currentConvId);
     const allowedCommands = getAllowedCommandsForConversation(currentConvId);
     const slashName = slashCommand?.name || '';
     const slashWantsWrite = slashName === 'code';
     const slashWantsRun = slashName === 'code';
-    let workspaceWrite = false;
-    const needsWriteApproval = permissions.wantsWrite || slashWantsWrite || executionRequest;
-    let workspaceRunCommands = permissions.wantsRun || permissions.wantsWrite || slashWantsRun || executionRequest || allowedCommands.length > 0;
+    const carryForwardWrite = continuationRequest && rememberedFeatures.workspace_write && !permissions.wantsWrite && !slashWantsWrite;
+    let workspaceWrite = carryForwardWrite;
+    const needsWriteApproval = !carryForwardWrite && (permissions.wantsWrite || slashWantsWrite || executionRequest);
+    let workspaceRunCommands = (
+        permissions.wantsRun
+        || permissions.wantsWrite
+        || slashWantsRun
+        || executionRequest
+        || allowedCommands.length > 0
+        || (continuationRequest && rememberedFeatures.workspace_run_commands)
+    );
 
-    if (needsWriteApproval && (!deepMode || executionRequest)) {
+    if (needsWriteApproval) {
         workspaceWrite = window.confirm('Allow the assistant to create or edit files in the workspace for this request?');
     }
 
@@ -1328,6 +1483,15 @@ function startHealthPolling() {
                 loadComposerRuntime();
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
+            } else if (health.loading?.status === 'failed') {
+                updateStatus('disconnected');
+                modelSwitchInFlight = false;
+                loadComposerRuntime();
+                if (document.getElementById('dashboardOverlay')?.classList.contains('show')) {
+                    loadDashboard();
+                }
+                clearInterval(healthPollInterval);
+                healthPollInterval = null;
             } else {
                 updateStatus('loading');
             }
@@ -1377,7 +1541,12 @@ function connectWS() {
             storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
             recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
         } else if (data.type === 'build_steps') {
-            updateBuildSteps(data.steps || [], data.active_index ?? null, data.completed_count || 0);
+            updateBuildSteps(
+                data.steps || [],
+                data.active_index ?? null,
+                data.completed_count || 0,
+                data.step_details || [],
+            );
         } else if (data.type === 'think_start') {
             onAssistantThinkStart();
         } else if (data.type === 'think_token') {
@@ -1526,6 +1695,7 @@ function toggleMenu() {
     const button = document.getElementById('menuBtn');
     const shell = document.querySelector('.chat-shell');
     if (!overlay) return;
+    dismissMobileKeyboard(true);
     const open = !overlay.classList.contains('show');
     if (open) closeWorkspacePanel();
     overlay.classList.toggle('show', open);
@@ -1552,6 +1722,7 @@ function closeMenu() {
 // ==================== Dashboard ====================
 
 function showDashboard() {
+    dismissMobileKeyboard(true);
     document.getElementById('dashboardOverlay').classList.add('show');
     loadDashboard();
     connectLogWS();
@@ -1606,93 +1777,124 @@ async function loadDashboard() {
         const data = await runtimeResp.json();
         const library = await libraryResp.json();
 
-        const statusClass = data.model_available ? 'connected' : 'loading';
-        const statusText = data.model_available ? 'Connected' : 'Loading / Unavailable';
-        const containerStatus = data.container ? (data.container.running ? 'Running' : data.container.status || 'Stopped') : 'Unknown';
-        const cache = data.cache || {};
         const loading = data.loading || {};
+        const loadFailed = loading.status === 'failed';
+        const statusClass = data.model_available ? 'connected' : (loadFailed ? 'error' : 'loading');
+        const statusText = data.model_available ? 'Connected' : (loadFailed ? 'Failed' : 'Loading / Unavailable');
+        const containerInfo = data.container || {};
+        const containerStatus = data.container
+            ? (containerInfo.restarting
+                ? `Restarting${containerInfo.restart_count ? ` (${containerInfo.restart_count})` : ''}`
+                : (containerInfo.running ? 'Running' : containerInfo.status || 'Stopped'))
+            : 'Unknown';
+        const cache = data.cache || {};
         const cacheStatus = cache.status || 'unknown';
         const cacheSize = cache.size_display || '--';
         const cacheDate = formatDashboardDate(cache.last_modified);
-        const profiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
+        const failureDetail = loadFailed ? String(loading.detail || 'vLLM failed to start.') : '';
+        const failureExitCode = loadFailed && loading.container ? loading.container.exit_code : null;
         const jobs = Array.isArray(library.jobs) ? library.jobs : [];
         const models = Array.isArray(library.models) ? library.models : [];
         const runtimeControlAvailable = Boolean(data.docker_control_available);
+        const currentModelName = data.model_name || '--';
+        const requestedModelName = data.selected_model_name || currentModelName;
         dockerControlAvailable = runtimeControlAvailable;
-        const switchButtons = runtimeControlAvailable
-            ? profiles.filter(profile => profile.key !== 'custom').map(profile => `
-                <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(getProfileDisplayLabel(profile))}, ${JSON.stringify(profile.name)})'>
-                    Switch to ${escapeHtml(getProfileDisplayLabel(profile))}
-                    <div class="btn-desc">${profile.active ? `Currently active - ${escapeHtml(profile.name)}` : `${escapeHtml(profile.provider || 'Provider unknown')} - ${escapeHtml(profile.name)}`}</div>
-                </button>
-            `).join('')
-            : '';
         const actionBody = runtimeControlAvailable
             ? `
                 <button class="dash-btn" onclick="dashRestart()">
                     Restart vLLM
-                    <div class="btn-desc">Restart the inference server (keeps cached model)</div>
+                    <div class="btn-desc">Restart the inference server without changing the selected model</div>
                 </button>
-                ${switchButtons}
                 <button class="dash-btn danger" onclick="dashRedownload()">
-                    Redownload Model
-                    <div class="btn-desc">Delete cache and re-download from HuggingFace</div>
+                    Redownload Active Model
+                    <div class="btn-desc">Delete the current download and fetch it again from Hugging Face</div>
                 </button>
             `
             : `
                 <div class="dash-card">
                     <div class="dash-row"><span class="label">Runtime control</span><span class="value">Disabled</span></div>
                     <div style="color:var(--text_secondary);font-size:13px;margin-top:10px;">
-                        Docker-backed restart, profile switching, and activation are disabled unless the server enables Docker control explicitly. You can still use the model library below to download checkpoints and delete non-profile caches.
+                        Restart, load-model, and redownload actions need Docker control enabled on this server. The library below still shows everything already downloaded.
                     </div>
                 </div>
             `;
         const modelCards = models.length
-            ? models.map(model => `
-                <div class="model-library-card">
+            ? models.map(model => {
+                const jobActive = Boolean(model.download_job && ['queued', 'downloading'].includes(model.download_job.status));
+                const isValid = model.status === 'valid';
+                const compatibility = model.compatibility || {};
+                const incompatible = compatibility.status === 'incompatible';
+                const statusText = jobActive
+                    ? 'Downloading'
+                    : (isValid ? 'Downloaded' : 'Incomplete download');
+                const loadDisabled = Boolean(!runtimeControlAvailable || !isValid || jobActive || model.active_profile || incompatible);
+                const deleteDisabled = Boolean(model.managed_by_profile || jobActive);
+                const loadTitle = incompatible
+                    ? (compatibility.detail || 'This model is not compatible with the current runtime.')
+                    : model.active_profile
+                    ? 'This model is already active.'
+                    : (!runtimeControlAvailable
+                        ? 'Loading a model requires Docker control on the server.'
+                        : (jobActive
+                            ? 'This model is still downloading.'
+                            : (!isValid ? 'Finish downloading this model before loading it.' : `Load ${model.model_id}`)));
+                const deleteTitle = model.managed_by_profile
+                    ? 'This download is protected because it belongs to a configured default model.'
+                    : (jobActive
+                        ? 'Wait for the download to finish before deleting it.'
+                        : `Delete downloaded files for ${model.model_id}`);
+                return `
+                <div class="model-library-card${model.active_profile ? ' is-active' : ''}">
                     <div class="model-library-head">
                         <div>
                             <div class="model-library-title">${escapeHtml(model.model_id || 'Unknown model')}</div>
                             <div class="model-library-meta">
-                                ${escapeHtml(model.size_display || '--')} • ${escapeHtml(model.status || 'unknown')} • Updated ${escapeHtml(formatDashboardDate(model.last_modified))}
+                                ${escapeHtml(statusText)} • ${escapeHtml(model.size_display || '--')} • Updated ${escapeHtml(formatDashboardDate(model.last_modified))}
                             </div>
                         </div>
                         <div class="model-library-badges">
-                            ${model.active_profile ? '<span class="model-badge active">Active</span>' : ''}
-                            ${model.managed_by_profile ? '<span class="model-badge">Profile</span>' : ''}
-                            ${model.download_job && ['queued', 'downloading'].includes(model.download_job.status) ? '<span class="model-badge">Downloading</span>' : ''}
+                            ${model.active_profile ? '<span class="model-badge active">In Use</span>' : ''}
+                            ${model.managed_by_profile ? '<span class="model-badge">Default</span>' : ''}
+                            ${jobActive ? '<span class="model-badge">Downloading</span>' : ''}
+                            ${incompatible ? '<span class="model-badge danger">Unsupported</span>' : ''}
+                            ${!isValid && !jobActive ? '<span class="model-badge warning">Incomplete</span>' : ''}
                         </div>
                     </div>
+                    ${incompatible ? `<div class="model-library-note warning">${escapeHtml(compatibility.detail || 'This model is not compatible with the current runtime.')}</div>` : ''}
                     <div class="model-library-actions">
                         <button class="dash-btn dash-btn-compact" onclick='window.open(${JSON.stringify(model.download_url)}, "_blank", "noopener")'>View</button>
-                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${runtimeControlAvailable ? '' : 'disabled'}>${model.active_profile ? 'Active' : 'Use Model'}</button>
-                        <button class="dash-btn dash-btn-compact danger" onclick='dashDeleteModel(${JSON.stringify(model.model_id)})' ${model.managed_by_profile ? 'disabled' : ''}>Delete</button>
+                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${loadDisabled ? 'disabled' : ''} title="${escapeHtml(loadTitle)}">${model.active_profile ? 'In Use' : 'Load Model'}</button>
+                        <button class="dash-btn dash-btn-compact danger" onclick='dashDeleteModel(${JSON.stringify(model.model_id)})' ${deleteDisabled ? 'disabled' : ''} title="${escapeHtml(deleteTitle)}">${model.managed_by_profile ? 'Protected' : 'Delete Download'}</button>
                     </div>
                 </div>
-            `).join('')
-            : '<div class="dash-empty">No Hugging Face model caches found yet.</div>';
+            `;
+            }).join('')
+            : '<div class="dash-empty">No downloaded models in the library yet.</div>';
         const jobCards = jobs.length
-            ? jobs.map(job => `
+            ? jobs.map(job => {
+                const compatibility = job.compatibility || {};
+                const incompatible = compatibility.status === 'incompatible';
+                return `
                 <div class="model-job ${job.status === 'error' ? 'is-error' : ''}">
                     <div class="model-job-head">
                         <span class="model-job-id">${escapeHtml(job.model_id || 'Unknown model')}</span>
                         <span class="model-job-status">${escapeHtml(job.status || 'queued')}</span>
                     </div>
                     <div class="model-job-meta">Started ${escapeHtml(formatDashboardDate(job.started_at || job.created_at))}</div>
+                    ${incompatible ? `<div class="model-job-error">${escapeHtml(compatibility.detail || 'This model is not compatible with the current runtime.')}</div>` : ''}
                     ${job.error ? `<div class="model-job-error">${escapeHtml(job.error)}</div>` : ''}
                 </div>
-            `).join('')
+            `;
+            }).join('')
             : '<div class="dash-empty">No active or recent downloads yet.</div>';
 
         el.innerHTML = `
             <div class="dash-section">
-                <h4>Model</h4>
+                <h4>Model Runtime</h4>
                 <div class="dash-card">
-                    <div class="dash-row"><span class="label">Active Profile</span><span class="value">${escapeHtml(data.active_profile?.display_label || data.active_profile?.label || '--')}</span></div>
-                    <div class="dash-row"><span class="label">Selected Profile</span><span class="value">${escapeHtml(data.selected_profile?.display_label || data.selected_profile?.label || '--')}</span></div>
-                    <div class="dash-row"><span class="label">Name</span><span class="value">${escapeHtml(data.model_name || '--')}</span></div>
-                    <div class="dash-row"><span class="label">Selected</span><span class="value">${escapeHtml(data.selected_model_name || data.model_name || '--')}</span></div>
-                    <div class="dash-row"><span class="label">Profile Switching</span><span class="value">${runtimeControlAvailable ? 'Enabled' : 'Disabled (Docker control off)'}</span></div>
+                    <div class="dash-row"><span class="label">Current Model</span><span class="value">${escapeHtml(currentModelName)}</span></div>
+                    <div class="dash-row"><span class="label">Requested Model</span><span class="value">${escapeHtml(requestedModelName)}</span></div>
+                    <div class="dash-row"><span class="label">Runtime Control</span><span class="value">${runtimeControlAvailable ? 'Enabled' : 'Disabled'}</span></div>
                     <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
                     <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
                     <div class="dash-row"><span class="label">Load Phase</span><span class="value">${escapeHtml(loading.phase || (data.model_available ? 'ready' : 'loading'))}</span></div>
@@ -1702,10 +1904,12 @@ async function loadDashboard() {
                     <div class="dash-row"><span class="label">Avg Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.average_seconds))}</span></div>
                     <div class="dash-row"><span class="label">Last Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.last_seconds))}</span></div>
                     <div class="dash-row"><span class="label">History</span><span class="value">${escapeHtml(String(loading.history?.sample_count || 0))} samples</span></div>
+                    ${loadFailed ? `<div class="dash-row"><span class="label">Failure</span><span class="value">${escapeHtml(failureDetail)}</span></div>` : ''}
+                    ${loadFailed && failureExitCode !== null && failureExitCode !== undefined ? `<div class="dash-row"><span class="label">Exit Code</span><span class="value">${escapeHtml(String(failureExitCode))}</span></div>` : ''}
                 </div>
             </div>
             <div class="dash-section">
-                <h4>Cache</h4>
+                <h4>Active Model Cache</h4>
                 <div class="dash-card">
                     <div class="dash-row"><span class="label">Status</span><span class="value">${cacheStatus}</span></div>
                     <div class="dash-row"><span class="label">Size</span><span class="value">${cacheSize}</span></div>
@@ -1716,27 +1920,31 @@ async function loadDashboard() {
                 <h4>Actions</h4>
                 <div class="dash-actions">
                     <button class="dash-btn" onclick="dashValidate()">
-                        Validate Cache
-                        <div class="btn-desc">Check model files are present and complete</div>
+                        Validate Active Cache
+                        <div class="btn-desc">Check that the currently selected model files are present and complete</div>
                     </button>
                     ${actionBody}
                 </div>
             </div>
             <div class="dash-section">
-                <h4>Model Library</h4>
+                <h4>Library</h4>
                 <div class="dash-card model-library-shell">
-                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download it into the shared cache used by this app. Try entries like <code>google/gemma-4-E4B-it</code> or <code>Qwen/Qwen3-8B</code>.</div>
+                    <div class="model-library-subhead">
+                        <span>Add Model</span>
+                    </div>
+                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download a new model into the shared library used by this app. Try entries like <code>google/gemma-4-E4B-it</code> or <code>Qwen/Qwen3-8B</code>.</div>
                     <div class="model-library-form">
                         <input id="modelLibraryInput" class="dash-input" placeholder="e.g. google/gemma-4-E4B-it or https://huggingface.co/google/gemma-4-E4B-it">
-                        <button class="dash-btn" onclick="dashDownloadModel()">Download Model</button>
+                        <button class="dash-btn" onclick="dashDownloadModel()">Add to Library</button>
                     </div>
                     <div class="model-library-subhead">
-                        <span>Cached Models</span>
+                        <span>Downloaded Models (${models.length})</span>
                         <button class="dash-link-btn" onclick="loadDashboard()">Refresh</button>
                     </div>
+                    <div class="model-library-hint">Everything listed here is already downloaded into the local shared Hugging Face cache.</div>
                     <div class="model-library-list">${modelCards}</div>
                     <div class="model-library-subhead">
-                        <span>Downloads</span>
+                        <span>Download Activity</span>
                     </div>
                     <div class="model-jobs">${jobCards}</div>
                 </div>
@@ -1798,38 +2006,8 @@ async function dashRestart() {
     setTimeout(() => { btn.disabled = false; }, 5000);
 }
 
-async function dashSwitchModel(profileKey, profileLabel, modelName) {
-    if (!dockerControlAvailable) {
-        alert('Model profile switching is disabled on this server because Docker control is off.');
-        return;
-    }
-    const confirmed = confirm(`Switch to ${profileLabel}?\n\nThis will hard-restart vLLM and load ${modelName}. The chat will be unavailable for a few minutes while the model loads.`);
-    if (!confirmed) return;
-
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = `Switching to ${profileLabel}...`;
-    try {
-        const resp = await fetch('/api/model/switch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile: profileKey }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.message || 'Switch failed');
-        btn.textContent = data.message || `Switching to ${profileLabel}...`;
-        setModelNote(data.model_name || modelName);
-        updateStatus('loading');
-        startHealthPolling();
-        loadDashboard();
-    } catch (e) {
-        btn.textContent = 'Switch failed: ' + e.message;
-    }
-    setTimeout(() => { btn.disabled = false; loadDashboard(); }, 3000);
-}
-
 async function dashRedownload() {
-    if (!confirm('This will delete the cached model and re-download it from HuggingFace. This may take a while. Continue?')) return;
+    if (!confirm('This will delete the active model download and fetch it again from Hugging Face. This may take a while. Continue?')) return;
     const btn = event.target.closest('.dash-btn');
     btn.disabled = true;
     btn.textContent = 'Clearing cache and restarting...';
@@ -1845,6 +2023,14 @@ async function dashRedownload() {
     setTimeout(() => { btn.disabled = false; }, 10000);
 }
 
+async function requestModelDownload(source, force = false) {
+    return fetch('/api/models/library/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, force }),
+    });
+}
+
 async function dashDownloadModel() {
     const input = document.getElementById('modelLibraryInput');
     const source = (input?.value || '').trim();
@@ -1856,13 +2042,21 @@ async function dashDownloadModel() {
     btn.disabled = true;
     btn.textContent = 'Starting download...';
     try {
-        const resp = await fetch('/api/models/library/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source }),
-        });
-        const data = await resp.json();
+        let resp = await requestModelDownload(source, false);
+        let data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || data.message || 'Download failed');
+        if (data.status === 'warning' && data.can_download_anyway) {
+            const detail = data.compatibility?.detail || data.message || 'This model may not work with the current runtime.';
+            const confirmed = confirm(`${detail}\n\nCancel to skip the download, or press OK to download it anyway.`);
+            if (!confirmed) {
+                btn.textContent = 'Canceled';
+                return;
+            }
+            btn.textContent = 'Starting download anyway...';
+            resp = await requestModelDownload(source, true);
+            data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || data.message || 'Download failed');
+        }
         input.value = '';
         btn.textContent = data.message || 'Download started';
         loadDashboard();
@@ -1871,12 +2065,12 @@ async function dashDownloadModel() {
     }
     setTimeout(() => {
         btn.disabled = false;
-        btn.textContent = 'Download Model';
+        btn.textContent = 'Add to Library';
     }, 3000);
 }
 
 async function dashDeleteModel(modelId) {
-    const confirmed = confirm(`Delete the cached files for ${modelId}?\n\nThis only removes the local Hugging Face cache for that model.`);
+    const confirmed = confirm(`Delete the downloaded files for ${modelId}?\n\nThis removes that model from the local library cache.`);
     if (!confirmed) return;
 
     const btn = event.target.closest('.dash-btn');
@@ -1899,10 +2093,10 @@ async function dashDeleteModel(modelId) {
 
 async function dashActivateModel(modelId) {
     if (!dockerControlAvailable) {
-        alert('Activating a cached model needs Docker control on this server.');
+        alert('Loading a downloaded model needs Docker control on this server.');
         return;
     }
-    const confirmed = confirm(`Switch to ${modelId}?\n\nThis will restart vLLM and load that cached model.`);
+    const confirmed = confirm(`Load ${modelId}?\n\nThis will restart vLLM and switch the active model to this downloaded checkpoint.`);
     if (!confirmed) return;
 
     const btn = event.target.closest('.dash-btn');
@@ -1929,6 +2123,7 @@ async function dashActivateModel(modelId) {
 // ==================== Settings ====================
 
 function showSettings() {
+    dismissMobileKeyboard(true);
     syncFeatureControls();
     document.getElementById('settingsOverlay').classList.add('show');
 }
@@ -2059,7 +2254,7 @@ function buildWelcomeMarkup() {
                 <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
                     <span class="wolfy-stage" aria-hidden="true">
                         <span class="wolfy-shadow"></span>
-                        <span class="wolfy-sprite"></span>
+                        <canvas class="wolfy-canvas" width="66" height="66"></canvas>
                         <span class="wolfy-bark-lines">
                             <span></span>
                             <span></span>
@@ -2076,8 +2271,10 @@ function buildWelcomeMarkup() {
 
 function destroyWelcomeMascot() {
     if (!welcomeMascotRuntime) return;
+    welcomeMascotRuntime.destroyed = true;
     window.clearInterval(welcomeMascotRuntime.cycleTimer);
     window.clearTimeout(welcomeMascotRuntime.poseTimer);
+    window.cancelAnimationFrame(welcomeMascotRuntime.spriteRaf);
     welcomeMascotRuntime = null;
 }
 
@@ -2107,6 +2304,148 @@ function startWelcomeHintRotation() {
 
     renderHint();
     welcomeHintTimer = window.setInterval(renderHint, WELCOME_HINT_ROTATE_MS);
+}
+
+const WOLFY_FRAME_SIZE = 66;
+const WOLFY_MATTE_DISTANCE = 18;
+const WOLFY_BASELINE_PAD = 2;
+const WOLFY_SPRITE_SPECS = Object.freeze({
+    sit: Object.freeze({ src: '/static/assets/wolfy/wolf_tail.png', frames: [0, 1], frame_ms: 450, loop: true }),
+    walk: Object.freeze({ src: '/static/assets/wolfy/wolf_run.png', frames: [0, 1, 2, 3, 4], frame_ms: 120, loop: true }),
+    rest: Object.freeze({ src: '/static/assets/wolfy/wolf_sit.png', frames: [3], frame_ms: 1000, loop: false }),
+    bark: Object.freeze({ src: '/static/assets/wolfy/wolf_tail.png', frames: [0, 1], frame_ms: 160, loop: true }),
+    pet: Object.freeze({ src: '/static/assets/wolfy/wolf_jump.png', frames: [0, 1, 2, 3], frame_ms: 150, loop: false }),
+    jump: Object.freeze({ src: '/static/assets/wolfy/wolf_jump.png', frames: [0, 1, 2, 3], frame_ms: 150, loop: false }),
+    dig: Object.freeze({ src: '/static/assets/wolfy/wolf_run.png', frames: [1, 2, 3, 4], frame_ms: 90, loop: true }),
+});
+const wolfySheetCache = new Map();
+
+function getWolfySpriteSpec(pose) {
+    return WOLFY_SPRITE_SPECS[pose] || WOLFY_SPRITE_SPECS.sit;
+}
+
+function wolfyColorDistance(data, offset, matte) {
+    return (
+        Math.abs(data[offset] - matte[0]) +
+        Math.abs(data[offset + 1] - matte[1]) +
+        Math.abs(data[offset + 2] - matte[2])
+    );
+}
+
+function loadWolfySheet(src) {
+    if (wolfySheetCache.has(src)) return wolfySheetCache.get(src);
+    const promise = new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) {
+                reject(new Error(`Failed to create canvas context for ${src}`));
+                return;
+            }
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            const matte = [data[0], data[1], data[2]];
+            for (let i = 0; i < data.length; i += 4) {
+                if (!data[i + 3]) continue;
+                if (wolfyColorDistance(data, i, matte) <= WOLFY_MATTE_DISTANCE) {
+                    data[i + 3] = 0;
+                }
+            }
+            ctx.putImageData(imageData, 0, 0);
+            const frameCount = Math.max(1, Math.floor(canvas.width / WOLFY_FRAME_SIZE));
+            const bounds = [];
+            for (let frame = 0; frame < frameCount; frame++) {
+                const frameOffsetX = frame * WOLFY_FRAME_SIZE;
+                let minX = WOLFY_FRAME_SIZE;
+                let minY = WOLFY_FRAME_SIZE;
+                let maxX = -1;
+                let maxY = -1;
+                for (let y = 0; y < WOLFY_FRAME_SIZE; y++) {
+                    for (let x = 0; x < WOLFY_FRAME_SIZE; x++) {
+                        const px = frameOffsetX + x;
+                        const offset = (y * canvas.width + px) * 4;
+                        if (data[offset + 3] === 0) continue;
+                        if (x < minX) minX = x;
+                        if (y < minY) minY = y;
+                        if (x > maxX) maxX = x;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+                if (maxX < minX || maxY < minY) {
+                    bounds.push({
+                        x: frameOffsetX,
+                        y: 0,
+                        width: WOLFY_FRAME_SIZE,
+                        height: WOLFY_FRAME_SIZE,
+                    });
+                    continue;
+                }
+                bounds.push({
+                    x: frameOffsetX + minX,
+                    y: minY,
+                    width: maxX - minX + 1,
+                    height: maxY - minY + 1,
+                });
+            }
+            resolve({ canvas, bounds });
+        };
+        img.onerror = () => reject(new Error(`Failed to load ${src}`));
+        img.src = src;
+    });
+    wolfySheetCache.set(src, promise);
+    return promise;
+}
+
+function preloadWolfySheets() {
+    const uniqueSources = [...new Set(Object.values(WOLFY_SPRITE_SPECS).map(spec => spec.src))];
+    return Promise.all(uniqueSources.map(src => loadWolfySheet(src).then(sheet => [src, sheet])));
+}
+
+function renderWolfyFrame(runtime, now = performance.now()) {
+    if (!runtime.canvasEl || !runtime.canvasCtx) return;
+    const spec = getWolfySpriteSpec(runtime.pose);
+    const sheet = runtime.loadedSheets?.get(spec.src);
+    if (!sheet) return;
+
+    const elapsed = Math.max(0, now - runtime.poseStartedAt);
+    const step = Math.floor(elapsed / spec.frame_ms);
+    const frameIndex = spec.loop ? step % spec.frames.length : Math.min(step, spec.frames.length - 1);
+    const frame = spec.frames[frameIndex];
+
+    runtime.canvasCtx.clearRect(0, 0, runtime.canvasEl.width, runtime.canvasEl.height);
+    const frameBounds = sheet.bounds?.[frame] || {
+        x: frame * WOLFY_FRAME_SIZE,
+        y: 0,
+        width: WOLFY_FRAME_SIZE,
+        height: WOLFY_FRAME_SIZE,
+    };
+    const drawX = Math.round((runtime.canvasEl.width - frameBounds.width) / 2);
+    const drawY = runtime.canvasEl.height - frameBounds.height - WOLFY_BASELINE_PAD;
+    runtime.canvasCtx.drawImage(
+        sheet.canvas,
+        frameBounds.x,
+        frameBounds.y,
+        frameBounds.width,
+        frameBounds.height,
+        drawX,
+        drawY,
+        frameBounds.width,
+        frameBounds.height,
+    );
+}
+
+function startWolfySpriteLoop(runtime) {
+    window.cancelAnimationFrame(runtime.spriteRaf);
+    const tick = (now) => {
+        if (runtime.destroyed) return;
+        renderWolfyFrame(runtime, now);
+        runtime.spriteRaf = window.requestAnimationFrame(tick);
+    };
+    runtime.spriteRaf = window.requestAnimationFrame(tick);
 }
 
 let currentBond = { affection: 50, pets_today: 0, streak: 0, mood: 'content', capped: false, max_pets_per_day: 12 };
@@ -2156,9 +2495,27 @@ function initWelcomeMascot() {
     const mascot = document.querySelector('.welcome-mascot');
     if (!mascot) return;
 
-    const runtime = { cycleTimer: null, poseTimer: null, cycleIndex: 0, petting: false };
+    const runtime = {
+        canvasEl: mascot.querySelector('.wolfy-canvas'),
+        canvasCtx: mascot.querySelector('.wolfy-canvas')?.getContext('2d'),
+        cycleTimer: null,
+        cycleIndex: 0,
+        destroyed: false,
+        loadedSheets: new Map(),
+        petting: false,
+        pose: mascot.dataset.pose || 'sit',
+        poseStartedAt: performance.now(),
+        poseTimer: null,
+        spriteRaf: 0,
+    };
+    if (runtime.canvasCtx) runtime.canvasCtx.imageSmoothingEnabled = false;
 
-    const setPose = (pose) => { mascot.dataset.pose = pose; };
+    const setPose = (pose) => {
+        runtime.pose = pose;
+        runtime.poseStartedAt = performance.now();
+        mascot.dataset.pose = pose;
+        renderWolfyFrame(runtime, runtime.poseStartedAt);
+    };
 
     const queuePose = (pose, duration, nextPose = 'sit') => {
         window.clearTimeout(runtime.poseTimer);
@@ -2211,14 +2568,31 @@ function initWelcomeMascot() {
         startCycle();
     });
 
+    preloadWolfySheets()
+        .then(entries => {
+            if (runtime.destroyed) return;
+            entries.forEach(([src, sheet]) => runtime.loadedSheets.set(src, sheet));
+            renderWolfyFrame(runtime, performance.now());
+            startWolfySpriteLoop(runtime);
+        })
+        .catch(error => {
+            console.error('Failed to load Wolfy sprite sheets', error);
+        });
+
     welcomeMascotRuntime = runtime;
 }
 
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
+    const mobile = isMobileViewport();
+    const minHeight = mobile ? (mobileKeyboardInset > 120 ? 38 : 46) : 72;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+    const maxHeight = mobile ? Math.max(96, Math.min(160, Math.round(viewportHeight * 0.26))) : 220;
     textarea.style.height = 'auto';
-    textarea.style.height = Math.max(textarea.scrollHeight, 72) + 'px';
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
 }
 
 function exitWelcomeMode() {
@@ -2254,7 +2628,10 @@ function toggleDeepMode() {
 
 function focusInput() {
     const input = document.getElementById('input');
-    if (input) input.focus();
+    if (input) {
+        input.focus();
+        syncMobileViewportState();
+    }
 }
 
 function focusInputAtStart() {
@@ -2321,12 +2698,6 @@ function getExecutionPlanDraftSteps() {
     return getExecutionPlanSourceSteps();
 }
 
-function hasExecutionPlanDraftChanges() {
-    const source = JSON.stringify(getExecutionPlanSourceSteps());
-    const draft = JSON.stringify(getExecutionPlanDraftSteps());
-    return source !== draft;
-}
-
 function focusExecutionPlanDraft(position = 'end') {
     const draft = document.getElementById('planApprovalDraft');
     if (!draft || draft.offsetParent === null) return false;
@@ -2368,8 +2739,8 @@ function syncSendButton() {
     const hasDraft = Boolean(input && input.value.trim());
     const hasPendingContent = hasDraft || pendingAttachments.length > 0;
     const canApprovePlan = Boolean(pendingExecutionPlan?.executePrompt) && !hasPendingContent;
-    send.setAttribute('aria-label', canApprovePlan ? 'Approve plan and continue' : 'Send message');
-    send.title = canApprovePlan ? 'Approve plan and continue' : 'Send message';
+    send.setAttribute('aria-label', canApprovePlan ? 'Start plan' : 'Send message');
+    send.title = canApprovePlan ? 'Start plan' : 'Send message';
     send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !(hasPendingContent || canApprovePlan);
     syncModelSelector();
     syncInterveneButton();
@@ -2746,7 +3117,8 @@ function renderWorkspaceTreeNode(entry, options = {}) {
     const mainButton = document.createElement('button');
     mainButton.type = 'button';
     mainButton.className = 'workspace-tree-main';
-    mainButton.onclick = () => {
+    mainButton.onclick = (event) => {
+        event.stopPropagation();
         if (isDirectory) {
             toggleWorkspaceDirectory(entry.path);
             return;
@@ -2923,16 +3295,59 @@ function clearBuildSteps() {
     syncInterveneButton();
 }
 
-function updateBuildSteps(steps, activeIndex = null, completedCount = 0) {
-    buildSteps = (steps || []).map((text, index) => {
+function normalizeBuildStepStatePayload(steps, activeIndex = null, completedCount = 0, stepDetails = []) {
+    return (steps || []).map((text, index) => {
+        const provided = stepDetails[index] && typeof stepDetails[index] === 'object' ? stepDetails[index] : {};
         let state = 'pending';
         if (index < completedCount) state = 'complete';
         else if (activeIndex !== null && index === activeIndex) state = 'active';
-        return { text, state };
+        const nestedSteps = Array.isArray(provided.substeps) ? provided.substeps : [];
+        return {
+            text,
+            state,
+            goal: String(provided.goal || '').trim(),
+            successSignal: String(provided.success_signal || '').trim(),
+            progressNote: String(provided.progress_note || '').trim(),
+            completedNotes: Array.isArray(provided.completed_notes)
+                ? provided.completed_notes.map(item => String(item || '').trim()).filter(Boolean)
+                : [],
+            completedReports: Array.isArray(provided.completed_reports)
+                ? provided.completed_reports.filter(item => item && typeof item === 'object')
+                : [],
+            substeps: nestedSteps.map(item => ({
+                text: String(item?.text || '').trim(),
+                state: String(item?.state || 'pending').trim() || 'pending',
+                report: item?.report && typeof item.report === 'object' ? item.report : {},
+            })).filter(item => item.text),
+        };
     });
+}
+
+function updateBuildSteps(steps, activeIndex = null, completedCount = 0, stepDetails = []) {
+    buildSteps = normalizeBuildStepStatePayload(steps, activeIndex, completedCount, stepDetails);
     currentBuildStepIndex = activeIndex !== null ? activeIndex : null;
     renderBuildSteps();
     syncInterveneButton();
+}
+
+function stepStateMarker(state) {
+    if (state === 'complete') return '✓';
+    if (state === 'active') return '•';
+    return '○';
+}
+
+function formatSubstepReportMeta(report = {}) {
+    if (!report || typeof report !== 'object') return '';
+    const parts = [];
+    if (Number.isFinite(report.tool_calls)) parts.push(`${report.tool_calls} tools`);
+    if (Number.isFinite(report.successful_tools)) parts.push(`${report.successful_tools} ok tools`);
+    if (Number.isFinite(report.successful_commands) && report.successful_commands > 0) {
+        parts.push(`${report.successful_commands} commands`);
+    }
+    if (Array.isArray(report.paths) && report.paths.length) {
+        parts.push(report.paths.slice(0, 2).join(', '));
+    }
+    return parts.join(' • ');
 }
 
 function renderExecutionPlanApproval() {
@@ -2946,9 +3361,6 @@ function renderExecutionPlanApproval() {
     const summary = document.getElementById('planApprovalSummary');
     const checklist = document.getElementById('planApprovalChecklist');
     const checklistList = document.getElementById('planApprovalSteps');
-    const actions = panel?.querySelector('.plan-approval-actions');
-    const runButton = document.getElementById('planApprovalRunButton');
-    const resetButton = document.getElementById('planApprovalResetButton');
     if (!panel || !summary || !checklist || !checklistList) return;
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
@@ -2956,12 +3368,20 @@ function renderExecutionPlanApproval() {
     panel.hidden = !hasPlan && !hasChecklist;
 
     if (title) {
-        title.textContent = hasChecklist ? 'Plan Progress' : 'Build Steps';
+        title.textContent = hasChecklist ? 'Plan Progress' : 'Plan Preview';
     }
     if (subtitle) {
+        const activeStep = currentBuildStepIndex !== null ? buildSteps[currentBuildStepIndex] : null;
+        const activeSubstep = Array.isArray(activeStep?.substeps)
+            ? activeStep.substeps.find(item => item?.state === 'active')
+            : null;
         subtitle.textContent = hasChecklist
-            ? 'Working one step at a time. The assistant will pause between steps for a yes or no.'
-            : 'Press Enter from the prompt to start, or use Up Arrow there to revise these steps first.';
+            ? (
+                activeSubstep?.text
+                    ? `Working on ${activeSubstep.text}. Use Stop to pause at any time.`
+                    : 'The assistant is running these steps now. Use Stop to pause at any time.'
+            )
+            : 'Press Enter or Send to start, or use Up Arrow there to revise these steps first.';
     }
 
     if (editor) {
@@ -2992,29 +3412,97 @@ function renderExecutionPlanApproval() {
 
             const marker = document.createElement('span');
             marker.className = 'plan-approval-step-marker';
-            marker.textContent = step.state === 'complete' ? '✓' : (step.state === 'active' ? '•' : '○');
+            marker.textContent = stepStateMarker(step.state);
 
             const label = document.createElement('span');
+            label.className = 'plan-approval-step-label';
             label.textContent = step.text || '';
 
             item.appendChild(marker);
             item.appendChild(label);
+
+            const hasNestedContent = Boolean(
+                step.goal
+                || step.successSignal
+                || step.progressNote
+                || (Array.isArray(step.substeps) && step.substeps.length)
+                || (Array.isArray(step.completedNotes) && step.completedNotes.length)
+            );
+            if (hasNestedContent) {
+                const nested = document.createElement('div');
+                nested.className = 'plan-approval-step-nested';
+
+                if (step.goal) {
+                    const goal = document.createElement('div');
+                    goal.className = 'plan-approval-step-goal';
+                    goal.textContent = step.goal;
+                    nested.appendChild(goal);
+                }
+
+                if (Array.isArray(step.substeps) && step.substeps.length) {
+                    const nestedList = document.createElement('ol');
+                    nestedList.className = 'plan-approval-substeps';
+                    step.substeps.forEach((substep, index) => {
+                        const subItem = document.createElement('li');
+                        subItem.className = `is-${substep.state || 'pending'}`;
+
+                        const subMarker = document.createElement('span');
+                        subMarker.className = 'plan-approval-substep-marker';
+                        subMarker.textContent = stepStateMarker(substep.state || 'pending');
+
+                        const subCopy = document.createElement('div');
+                        subCopy.className = 'plan-approval-substep-copy';
+
+                        const subLabel = document.createElement('span');
+                        subLabel.className = 'plan-approval-substep-label';
+                        subLabel.textContent = substep.text || `Substep ${index + 1}`;
+                        subCopy.appendChild(subLabel);
+
+                        const subReportMeta = formatSubstepReportMeta(substep.report || {});
+                        if (subReportMeta) {
+                            const subMeta = document.createElement('span');
+                            subMeta.className = 'plan-approval-substep-meta';
+                            subMeta.textContent = subReportMeta;
+                            subCopy.appendChild(subMeta);
+                        }
+
+                        const subSummary = String(substep?.report?.summary || '').trim();
+                        if (subSummary && substep.state === 'complete') {
+                            const summaryEl = document.createElement('span');
+                            summaryEl.className = 'plan-approval-substep-summary';
+                            summaryEl.textContent = subSummary;
+                            subCopy.appendChild(summaryEl);
+                        }
+
+                        subItem.appendChild(subMarker);
+                        subItem.appendChild(subCopy);
+                        nestedList.appendChild(subItem);
+                    });
+                    nested.appendChild(nestedList);
+                }
+
+                if (step.progressNote) {
+                    const progress = document.createElement('div');
+                    progress.className = 'plan-approval-step-progress';
+                    progress.textContent = step.progressNote;
+                    nested.appendChild(progress);
+                }
+
+                if (step.successSignal) {
+                    const success = document.createElement('div');
+                    success.className = 'plan-approval-step-success';
+                    success.textContent = `Success target: ${step.successSignal}`;
+                    nested.appendChild(success);
+                }
+
+                item.appendChild(nested);
+            }
             checklistList.appendChild(item);
         });
     }
 
     if (dismissButton) {
         dismissButton.hidden = !hasPlan;
-    }
-    if (actions) {
-        actions.hidden = !hasPlan;
-    }
-    const hasEditableSteps = getExecutionPlanDraftSteps().length > 0;
-    if (runButton) {
-        runButton.disabled = !hasPlan || !hasEditableSteps || isGenerating || !modelAvailable || !ws || ws.readyState !== WebSocket.OPEN;
-    }
-    if (resetButton) {
-        resetButton.disabled = !hasPlan || !hasExecutionPlanDraftChanges();
     }
 }
 
@@ -3045,14 +3533,6 @@ function handleExecutionPlanDraftKeyDown(event) {
         event.preventDefault();
         approveExecutionPlan();
     }
-}
-
-function resetExecutionPlanDraft() {
-    if (!pendingExecutionPlan) return;
-    pendingExecutionPlan.draftText = formatExecutionPlanDraft(getExecutionPlanSourceSteps());
-    renderExecutionPlanApproval();
-    focusExecutionPlanDraft('end');
-    syncSendButton();
 }
 
 function storeExecutionPlan(summary, executePrompt, builderSteps = [], options = {}) {
@@ -3093,6 +3573,7 @@ function approveExecutionPlan() {
 
     const turnFeatures = resolveTurnFeatures(APPROVED_PLAN_EXECUTION_MESSAGE, [], null);
     if (!turnFeatures.workspace_write) return;
+    rememberTurnFeatures(currentConvId, turnFeatures);
 
     hideSlashMenu();
     document.querySelector('.welcome')?.remove();
@@ -3219,6 +3700,15 @@ function currentBuildStepLabel() {
     if (currentBuildStepIndex === null || currentBuildStepIndex === undefined) return '';
     const step = buildSteps[currentBuildStepIndex];
     if (!step || !step.text) return `Step ${currentBuildStepIndex + 1}`;
+    const activeSubstepIndex = Array.isArray(step.substeps)
+        ? step.substeps.findIndex(item => item?.state === 'active')
+        : -1;
+    if (activeSubstepIndex >= 0) {
+        const activeSubstep = step.substeps[activeSubstepIndex];
+        if (activeSubstep?.text) {
+            return `Step ${currentBuildStepIndex + 1}.${activeSubstepIndex + 1}: ${activeSubstep.text}`;
+        }
+    }
     return `Step ${currentBuildStepIndex + 1}: ${step.text}`;
 }
 
@@ -3984,9 +4474,7 @@ function syncInlineViewerMode() {
 }
 
 function syncInlineViewerVisibility() {
-    const viewer = document.querySelector('.ide-viewer');
-    if (!viewer) return;
-    viewer.classList.toggle('is-hidden', !inlineViewerPath);
+    syncWorkspaceViewMode();
     syncChatShellLayout();
 }
 
@@ -4256,6 +4744,7 @@ function closeInlineViewer() {
     applyViewerMetadata('inlineViewer', '');
     renderCurrentFileSymbols();
     syncViewerControls('inlineViewer', false, 'preview');
+    setWorkspaceViewMode('tree');
     renderFileList();
 }
 
@@ -4266,18 +4755,20 @@ async function openWorkspaceFile(path, options = {}) {
         ? 'spreadsheet'
         : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text')));
     const provisionalEditable = provisionalKind !== 'spreadsheet';
+    const provisionalView = provisionalEditable ? 'edit' : 'preview';
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
-    setViewerState('inlineViewer', { editable: provisionalEditable, kind: provisionalKind, path });
+    setViewerState('inlineViewer', { editable: provisionalEditable, kind: provisionalKind, path, view: provisionalView });
     renderFileList();
     applyViewerMetadata('inlineViewer', path);
+    setWorkspaceViewMode('reader');
     setViewerContent('inlineViewer', '');
     renderViewerSheetTabs('inlineViewer', [], '');
 
     try {
         if (/\.(xlsx|xls|xlsm)$/i.test(path)) {
-            setViewerState('inlineViewer', { kind: 'spreadsheet', editable: false, path });
+            setViewerState('inlineViewer', { kind: 'spreadsheet', editable: false, path, view: 'preview' });
             const params = new URLSearchParams({ path });
             if (selectedSpreadsheetSheet) params.set('sheet', selectedSpreadsheetSheet);
             const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?${params.toString()}`);
@@ -4296,17 +4787,19 @@ async function openWorkspaceFile(path, options = {}) {
 
         const editable = isEditableTextPath(path);
         const kind = isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'));
-        setViewerState('inlineViewer', { editable, kind, path });
-        setViewerContent('inlineViewer', data.content || '');
-        inlineViewerLastSavedContent = data.content || '';
+        const defaultView = editable ? 'edit' : 'preview';
+        const content = typeof data.content === 'string' ? data.content : '';
+        setViewerState('inlineViewer', { editable, kind, path, view: defaultView });
+        setViewerContent('inlineViewer', content);
+        inlineViewerLastSavedContent = content;
         setInlineViewerSaveState('idle');
         syncInlineUndoButton();
 
         if (kind === 'html') {
-            renderHtmlPreview('inlineViewerPreview', data.content || '');
+            renderHtmlPreview('inlineViewerPreview', content);
         }
         else if (kind === 'markdown') {
-            renderMarkdownPreview('inlineViewerPreview', data.content || '');
+            renderMarkdownPreview('inlineViewerPreview', content);
         }
         else if (kind === 'csv') {
             const summaryResp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?path=${encodeURIComponent(path)}`);
@@ -4314,15 +4807,15 @@ async function openWorkspaceFile(path, options = {}) {
             if (summaryResp.ok) {
                 renderSpreadsheetPreview('inlineViewerPreview', summaryData);
             } else {
-                renderDelimitedPreview('inlineViewerPreview', data.content || '', path);
+                renderDelimitedPreview('inlineViewerPreview', content, path);
             }
         } else {
-            renderCodePreview('inlineViewerPreview', data.content || '', path);
+            renderCodePreview('inlineViewerPreview', content, path);
         }
 
-        syncViewerControls('inlineViewer', editable, inlineViewerView || 'edit');
+        syncViewerControls('inlineViewer', editable, defaultView);
         configureInlineEditorLanguage(path);
-        updateCurrentFileSymbols(path, data.content || '');
+        updateCurrentFileSymbols(path, content);
         updateInlineViewerPreview();
     } catch (e) {
         alert(`Failed to open ${path}: ${e.message}`);
@@ -4504,6 +4997,7 @@ function clearPendingAttachments() {
 }
 
 function openAttachmentPicker() {
+    dismissMobileKeyboard(true);
     document.getElementById('attachmentInput')?.click();
 }
 
@@ -4542,6 +5036,7 @@ function sendMessage() {
     input.value = '';
     pastedBlocks = [];
     const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
+    rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     clearPendingAttachments();
     autoResizeTextarea(input);
@@ -4576,6 +5071,7 @@ function sendInterruptMessage(messageText) {
     if (!outboundText || !ws || ws.readyState !== WebSocket.OPEN) return;
     const slashCommand = parseDirectSlashCommandInput(outboundText);
     const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
+    rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     addMessage(buildDisplayedMessageText(text, pendingAttachments) || outboundText, 'user');
     clearPendingAttachments();
@@ -5373,6 +5869,7 @@ async function loadConversation(id, options = {}) {
 }
 
 function newChat() {
+    dismissMobileKeyboard(true);
     stopSpeaking();
     clearAllowedCommandsForConversation(currentConvId);
     currentConvId = generateId();
@@ -5421,6 +5918,8 @@ async function confirmRename() {
 async function deleteConv(id) {
     if (!confirm('Delete this conversation?')) return;
     await fetch(`/api/conversation/${id}`, { method: 'DELETE' });
+    clearAllowedCommandsForConversation(id);
+    clearRememberedTurnFeatures(id);
     if (id === currentConvId) newChat(); else loadConversations();
 }
 
@@ -5470,13 +5969,16 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('click', (event) => {
-    if (!workspacePanelOpen || window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches) return;
-    const panel = document.getElementById('workspacePanel');
-    const viewer = document.querySelector('.ide-viewer');
+    if (!workspacePanelOpen) return;
+    const ideWorkspace = document.getElementById('ideWorkspace');
     const toggle = document.getElementById('workspaceToggle');
     const target = event.target;
     if (!(target instanceof Node)) return;
-    if (panel?.contains(target) || toggle?.contains(target) || viewer?.contains(target)) return;
+    const eventPath = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const insideWorkspace = eventPath.length
+        ? [ideWorkspace, toggle].some(node => node && eventPath.includes(node))
+        : Boolean(ideWorkspace?.contains(target) || toggle?.contains(target));
+    if (insideWorkspace) return;
     closeWorkspacePanel();
 });
 
@@ -5508,14 +6010,22 @@ setTimeout(() => {
 
 const _input = document.getElementById('input');
 if (_input) {
+    observeMobileComposerSize();
     handleInputChange(_input);
-    window.addEventListener('resize', () => autoResizeTextarea(_input));
+    window.addEventListener('resize', () => {
+        autoResizeTextarea(_input);
+        syncMobileViewportState();
+    });
     window.addEventListener('resize', positionSlashMenu);
     window.addEventListener('resize', syncChatShellLayout);
     window.addEventListener('scroll', positionSlashMenu, true);
-    _input.focus();
-    _input.addEventListener('focus', () => updateSlashMenu(_input));
+    if (!isMobileViewport()) _input.focus();
+    _input.addEventListener('focus', () => {
+        updateSlashMenu(_input);
+        syncMobileViewportState();
+    });
     _input.addEventListener('blur', () => {
+        window.setTimeout(syncMobileViewportState, 30);
         setTimeout(() => {
             if (document.activeElement?.closest?.('#slashMenu')) return;
             hideSlashMenu();
@@ -5542,11 +6052,21 @@ if (_input) {
     });
 }
 
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+        syncMobileViewportState();
+        if (_input) autoResizeTextarea(_input);
+    });
+    window.visualViewport.addEventListener('scroll', syncMobileViewportState);
+}
+
 syncReasoningSelector();
 syncModelSelector();
 renderWorkspaceActivity();
 renderTerminalOutput();
 applyViewerMetadata('inlineViewer', '');
+syncWorkspaceViewMode();
+syncMobileViewportState();
 syncChatShellLayout();
 window.addEventListener('resize', () => {
     fitTerminalEmulator();
@@ -5557,4 +6077,12 @@ document.addEventListener('visibilitychange', () => {
         stopSpeaking();
         if (dictationActive) stopDictationAndUpload();
     }
+});
+document.addEventListener('pointerdown', (event) => {
+    if (!isMobileViewport()) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    const inputArea = document.getElementById('inputArea');
+    if (inputArea?.contains(target)) return;
+    dismissMobileKeyboard();
 });

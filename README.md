@@ -75,6 +75,8 @@ If you want a stricter deployment, remove the Docker socket mount and set `DOCKE
 
 Once started, open **http://localhost:8000**. The model loads in the background on first run.
 
+Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-chat/runs) on the host via the default `/app/runs` bind mount, so files the assistant creates remain visible outside the container.
+
 ## Documentation
 
 - [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services, where to edit prompts/themes
