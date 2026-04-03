@@ -11,6 +11,7 @@ let activeStreamConversationId = null;
 let streamingAssistantMessage = null;
 let renameConvId = null;
 let modelAvailable = false;
+let runtimeAvailabilityStatus = 'loading';
 let markedReady = false;
 let healthPollInterval = null;
 let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
@@ -25,6 +26,9 @@ let lastReportedUiReadyKey = '';
 let dashboardRefreshTimer = null;
 let chatCommandAllowlists = loadStoredObject('chatCommandAllowlists', {});
 let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
+let websocketConnected = false;
+let currentTurnTransport = null;
+let httpTurnAbortController = null;
 let workspaceEntries = [];
 let workspaceTree = null;
 let workspaceStats = { files: 0, directories: 0 };
@@ -592,6 +596,10 @@ function applyModelRuntime(data = {}) {
     selectedModelProfileKey = extractProfileKey(data.selected_profile) || extractProfileKey(data.selected_profile_key) || selectedModelProfileKey;
     activeModelProfileKey = extractProfileKey(data.active_profile) || extractProfileKey(data.active_profile_key) || activeModelProfileKey;
     dockerControlAvailable = Boolean(data.docker_control_available);
+    if (Object.prototype.hasOwnProperty.call(data, 'model_available')) {
+        const loadFailed = data.loading?.status === 'failed';
+        updateStatus(data.model_available ? 'connected' : (loadFailed ? 'disconnected' : 'loading'));
+    }
     if (!selectedModelProfileKey && Array.isArray(availableModelProfiles)) {
         selectedModelProfileKey = availableModelProfiles.find(profile => profile.selected)?.key || '';
     }
@@ -675,24 +683,36 @@ function formatFullTimestamp(isoString) {
 
 // ==================== Status ====================
 
-function updateStatus(status) {
+function renderStatusDot(status) {
     const dot = document.getElementById('statusDot');
     if (!dot) return;
 
     if (status === 'connected') {
         dot.className = 'status-dot connected';
-        modelAvailable = true;
-        syncSendButton();
-        maybeReportUiModelReady();
     } else if (status === 'loading') {
         dot.className = 'status-dot loading';
-        modelAvailable = false;
-        syncSendButton();
     } else {
         dot.className = 'status-dot';
-        modelAvailable = false;
-        syncSendButton();
     }
+}
+
+function syncStatusIndicator() {
+    renderStatusDot(modelAvailable ? 'connected' : runtimeAvailabilityStatus);
+}
+
+function updateStatus(status) {
+    runtimeAvailabilityStatus = status === 'connected' ? 'connected' : (status === 'loading' ? 'loading' : 'disconnected');
+    modelAvailable = status === 'connected';
+    renderStatusDot(status);
+    syncSendButton();
+    if (modelAvailable && websocketConnected) maybeReportUiModelReady();
+}
+
+function setWebsocketConnected(connected) {
+    websocketConnected = Boolean(connected);
+    syncStatusIndicator();
+    syncSendButton();
+    if (modelAvailable && websocketConnected) maybeReportUiModelReady();
 }
 
 function setLoadingText(text) {
@@ -700,9 +720,25 @@ function setLoadingText(text) {
     if (loadingText) loadingText.textContent = text;
 }
 
+function canUseWebsocketTransport() {
+    return Boolean(ws && ws.readyState === WebSocket.OPEN);
+}
+
+function buildHttpFallbackPayload(payload = {}) {
+    const nextPayload = { ...payload };
+    if (nextPayload.features && typeof nextPayload.features === 'object') {
+        nextPayload.features = {
+            ...nextPayload.features,
+            workspace_run_commands: false,
+            allowed_commands: [],
+        };
+    }
+    return nextPayload;
+}
+
 function isComposerAvailable() {
     const input = document.getElementById('input');
-    return Boolean(modelAvailable && input && !input.disabled && ws && ws.readyState === WebSocket.OPEN);
+    return Boolean(modelAvailable && input && !input.disabled && canUseWebsocketTransport());
 }
 
 async function maybeReportUiModelReady() {
@@ -1493,179 +1529,247 @@ function startHealthPolling() {
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
             } else {
-                updateStatus('loading');
+                if (!modelAvailable) updateStatus('loading');
             }
         } catch (e) {
-            updateStatus('loading');
+            if (!modelAvailable) updateStatus('loading');
         }
     }, 3000);
 }
 
 // ==================== WebSocket ====================
 
+function handleChatEvent(data) {
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'start') {
+        removeLoading();
+        ensureStreamingAssistantMessage();
+        clearTerminalOutput();
+        currentAssistantTurnStartedAt = Date.now();
+        currentAssistantTurnArtifactPaths = new Set();
+        recordWorkspaceActivity('Turn', 'Turn started.');
+    } else if (data.type === 'reasoning_note') {
+        recordWorkspaceActivity('Think', 'Reasoning noted.');
+    } else if (data.type === 'assistant_note') {
+        ensureStreamingAssistantMessage();
+        replaceAssistantAnswer(data.content || '');
+        recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
+    } else if (data.type === 'plan_ready') {
+        storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
+        recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
+    } else if (data.type === 'build_steps') {
+        updateBuildSteps(
+            data.steps || [],
+            data.active_index ?? null,
+            data.completed_count || 0,
+            data.step_details || [],
+        );
+    } else if (data.type === 'think_start') {
+        onAssistantThinkStart();
+    } else if (data.type === 'think_token') {
+        onAssistantThinkToken(data.content);
+    } else if (data.type === 'think_end') {
+        onAssistantThinkEnd();
+    } else if (data.type === 'token') {
+        appendAssistantAnswerToken(data.content);
+    } else if (data.type === 'status') {
+        setLoadingText(data.content);
+    } else if (data.type === 'activity') {
+        if (data.content) setLoadingText(data.content);
+        recordWorkspaceActivity(
+            data.label || 'Activity',
+            data.content || 'Working...',
+            {
+                phase: data.phase || 'status',
+                stepLabel: data.step_label || '',
+            },
+        );
+    } else if (data.type === 'tool_start') {
+        setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
+        if (data.name === 'workspace.run_command') {
+            const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
+            recordTerminalCommandStart(command, data.arguments?.cwd || '.');
+        }
+    } else if (data.type === 'tool_result') {
+        setLoadingText(data.content || (data.ok === false ? 'Tool failed' : 'Tool finished'));
+        if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
+        if (data.name === 'workspace.run_command') {
+            const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
+            recordTerminalCommandResult(command, data.payload || {});
+        }
+        if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
+            openWorkspaceFile(data.payload.path);
+        }
+        scheduleWorkspaceRefresh();
+    } else if (data.type === 'tool_error') {
+        setLoadingText(data.content || 'Tool error');
+    } else if (data.type === 'command_approval_required') {
+        const command = Array.isArray(data.command) ? data.command : [];
+        const commandKey = String(data.command_key || command[0] || 'command').trim().toLowerCase();
+        const commandPreview = command.length ? command.join(' ') : commandKey;
+        const approved = window.confirm(
+            `Allow '${commandKey}' in this chat?\n\nRequested command:\n${commandPreview}\n\nThis approval will be remembered for this chat only.`
+        );
+        if (approved) {
+            rememberAllowedCommand(currentConvId, commandKey);
+            recordWorkspaceActivity('Approve', `Allowed '${commandKey}' for this chat.`);
+            setLoadingText(`Approved '${commandKey}'. Resuming the command...`);
+        } else {
+            recordWorkspaceActivity('Blocked', `Denied '${commandKey}' for this chat.`);
+            setLoadingText(`Command blocked: '${commandKey}' was not approved.`);
+        }
+        if (canUseWebsocketTransport()) {
+            ws.send(JSON.stringify({
+                type: 'command_approval',
+                conversation_id: currentConvId,
+                command_key: commandKey,
+                approved,
+            }));
+        }
+    } else if (data.type === 'final_replace') {
+        replaceAssistantAnswer(data.content);
+        recordWorkspaceActivity('Draft', 'Draft updated.');
+    } else if (data.type === 'message_id') {
+        const msg = currentStreamingAssistantMessage();
+        if (msg && data.message_id !== undefined && data.message_id !== null) {
+            msg.dataset.messageId = String(data.message_id);
+            msg.dataset.feedback = normalizeMessageFeedback(msg.dataset.feedback);
+            syncAssistantMessageActions(msg);
+        }
+    } else if (data.type === 'done') {
+        const finishedConvId = activeStreamConversationId;
+        isGenerating = false;
+        currentTurnTransport = null;
+        httpTurnAbortController = null;
+        syncSendButton();
+        document.getElementById('input').focus();
+        renderMarkdown();
+        loadConversations();
+        finalizeAssistantTurnArtifacts();
+        refreshWorkspace(true);
+        recordWorkspaceActivity('Done', 'Turn complete.');
+        activeStreamConversationId = null;
+        streamingAssistantMessage = null;
+        if (finishedConvId && currentConvId === finishedConvId) {
+            loadConversation(finishedConvId, { preserveActivity: true });
+        }
+    } else if (data.type === 'canceled') {
+        removeLoading();
+        isGenerating = false;
+        currentTurnTransport = null;
+        httpTurnAbortController = null;
+        syncSendButton();
+        recordWorkspaceActivity('Canceled', data.content || 'Stopped');
+    } else if (data.type === 'error') {
+        removeLoading();
+        isGenerating = false;
+        currentTurnTransport = null;
+        httpTurnAbortController = null;
+        syncSendButton();
+        recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
+        const errorMsg = streamingAssistantMessage || createMessageElement('', 'assistant');
+        const contentDiv = errorMsg.querySelector('.message-content');
+        if (contentDiv) {
+            contentDiv.style.color = '#ef4444';
+            contentDiv.textContent = data.content;
+        }
+        streamingAssistantMessage = errorMsg;
+        appendStreamingAssistantMessageIfVisible();
+        if (currentConvId === activeStreamConversationId) {
+            activeStreamConversationId = null;
+            streamingAssistantMessage = null;
+        }
+    }
+}
+
+async function dispatchChatPayload(payload, options = {}) {
+    if (canUseWebsocketTransport()) {
+        currentTurnTransport = 'ws';
+        ws.send(JSON.stringify(payload));
+        return;
+    }
+
+    const controller = new AbortController();
+    httpTurnAbortController = controller;
+    currentTurnTransport = 'http';
+    setLoadingText(options.fallbackStatusText || 'WebSocket unavailable. Sending over HTTP fallback...');
+    recordWorkspaceActivity('Transport', options.fallbackActivityText || 'WebSocket unavailable. Using HTTP fallback.');
+
+    try {
+        const resp = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildHttpFallbackPayload(payload)),
+            signal: controller.signal,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
+        const events = Array.isArray(data.events) ? data.events : [];
+        for (const event of events) {
+            handleChatEvent(event);
+        }
+        if (!events.some(event => ['done', 'error', 'canceled'].includes(event?.type))) {
+            handleChatEvent({ type: 'done' });
+        }
+    } catch (error) {
+        if (controller.signal.aborted) {
+            handleChatEvent({ type: 'canceled', content: 'Stopped' });
+            return;
+        }
+        handleChatEvent({ type: 'error', content: `HTTP fallback failed: ${error.message}` });
+    } finally {
+        if (httpTurnAbortController === controller) httpTurnAbortController = null;
+    }
+}
+
 function connectWS() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
+    setWebsocketConnected(false);
 
     ws.onopen = () => {
+        setWebsocketConnected(true);
         fetch('/health').then(r => r.json()).then(health => {
             if (health.model_available) {
                 updateStatus('connected');
                 loadComposerRuntime();
             } else {
-                updateStatus('loading');
+                if (!modelAvailable) updateStatus('loading');
                 startHealthPolling();
             }
         }).catch(() => {
-            updateStatus('loading');
+            if (!modelAvailable) updateStatus('loading');
             startHealthPolling();
         });
     };
 
     ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'start') {
-            removeLoading();
-            ensureStreamingAssistantMessage();
-            clearTerminalOutput();
-            currentAssistantTurnStartedAt = Date.now();
-            currentAssistantTurnArtifactPaths = new Set();
-            recordWorkspaceActivity('Turn', 'Turn started.');
-        } else if (data.type === 'reasoning_note') {
-            recordWorkspaceActivity('Think', 'Reasoning noted.');
-        } else if (data.type === 'assistant_note') {
-            ensureStreamingAssistantMessage();
-            replaceAssistantAnswer(data.content || '');
-            recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
-        } else if (data.type === 'plan_ready') {
-            storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
-            recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
-        } else if (data.type === 'build_steps') {
-            updateBuildSteps(
-                data.steps || [],
-                data.active_index ?? null,
-                data.completed_count || 0,
-                data.step_details || [],
-            );
-        } else if (data.type === 'think_start') {
-            onAssistantThinkStart();
-        } else if (data.type === 'think_token') {
-            onAssistantThinkToken(data.content);
-        } else if (data.type === 'think_end') {
-            onAssistantThinkEnd();
-        } else if (data.type === 'token') {
-            appendAssistantAnswerToken(data.content);
-        } else if (data.type === 'status') {
-            setLoadingText(data.content);
-        } else if (data.type === 'activity') {
-            if (data.content) setLoadingText(data.content);
-            recordWorkspaceActivity(
-                data.label || 'Activity',
-                data.content || 'Working...',
-                {
-                    phase: data.phase || 'status',
-                    stepLabel: data.step_label || '',
-                },
-            );
-        } else if (data.type === 'tool_start') {
-            setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
-            if (data.name === 'workspace.run_command') {
-                const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
-                recordTerminalCommandStart(command, data.arguments?.cwd || '.');
-            }
-        } else if (data.type === 'tool_result') {
-            setLoadingText(data.content || (data.ok === false ? 'Tool failed' : 'Tool finished'));
-            if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
-            if (data.name === 'workspace.run_command') {
-                const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
-                recordTerminalCommandResult(command, data.payload || {});
-            }
-            if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
-                openWorkspaceFile(data.payload.path);
-            }
-            scheduleWorkspaceRefresh();
-        } else if (data.type === 'tool_error') {
-            setLoadingText(data.content || 'Tool error');
-        } else if (data.type === 'command_approval_required') {
-            const command = Array.isArray(data.command) ? data.command : [];
-            const commandKey = String(data.command_key || command[0] || 'command').trim().toLowerCase();
-            const commandPreview = command.length ? command.join(' ') : commandKey;
-            const approved = window.confirm(
-                `Allow '${commandKey}' in this chat?\n\nRequested command:\n${commandPreview}\n\nThis approval will be remembered for this chat only.`
-            );
-            if (approved) {
-                rememberAllowedCommand(currentConvId, commandKey);
-                recordWorkspaceActivity('Approve', `Allowed '${commandKey}' for this chat.`);
-                setLoadingText(`Approved '${commandKey}'. Resuming the command...`);
-            } else {
-                recordWorkspaceActivity('Blocked', `Denied '${commandKey}' for this chat.`);
-                setLoadingText(`Command blocked: '${commandKey}' was not approved.`);
-            }
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'command_approval',
-                    conversation_id: currentConvId,
-                    command_key: commandKey,
-                    approved,
-                }));
-            }
-        } else if (data.type === 'final_replace') {
-            replaceAssistantAnswer(data.content);
-            recordWorkspaceActivity('Draft', 'Draft updated.');
-        } else if (data.type === 'message_id') {
-            const msg = currentStreamingAssistantMessage();
-            if (msg && data.message_id !== undefined && data.message_id !== null) {
-                msg.dataset.messageId = String(data.message_id);
-                msg.dataset.feedback = normalizeMessageFeedback(msg.dataset.feedback);
-                syncAssistantMessageActions(msg);
-            }
-        } else if (data.type === 'done') {
-            const finishedConvId = activeStreamConversationId;
-            isGenerating = false;
-            syncSendButton();
-            document.getElementById('input').focus();
-            renderMarkdown();
-            loadConversations();
-            finalizeAssistantTurnArtifacts();
-            refreshWorkspace(true);
-            recordWorkspaceActivity('Done', 'Turn complete.');
-            activeStreamConversationId = null;
-            streamingAssistantMessage = null;
-            if (finishedConvId && currentConvId === finishedConvId) {
-                loadConversation(finishedConvId, { preserveActivity: true });
-            }
-        } else if (data.type === 'canceled') {
-            removeLoading();
-            isGenerating = false;
-            syncSendButton();
-            recordWorkspaceActivity('Canceled', data.content || 'Stopped');
-        } else if (data.type === 'error') {
-            removeLoading();
-            isGenerating = false;
-            syncSendButton();
-            recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
-            const errorMsg = streamingAssistantMessage || createMessageElement('', 'assistant');
-            const contentDiv = errorMsg.querySelector('.message-content');
-            if (contentDiv) {
-                contentDiv.style.color = '#ef4444';
-                contentDiv.textContent = data.content;
-            }
-            streamingAssistantMessage = errorMsg;
-            appendStreamingAssistantMessageIfVisible();
-            if (currentConvId === activeStreamConversationId) {
-                activeStreamConversationId = null;
-                streamingAssistantMessage = null;
-            }
-        }
+        handleChatEvent(JSON.parse(event.data));
     };
 
     ws.onerror = () => {
-        isGenerating = false;
-        updateStatus('disconnected');
+        if (currentTurnTransport === 'ws') {
+            removeLoading();
+            isGenerating = false;
+            currentTurnTransport = null;
+            activeStreamConversationId = null;
+            streamingAssistantMessage = null;
+            syncSendButton();
+        }
+        setWebsocketConnected(false);
     };
     ws.onclose = () => {
-        isGenerating = false;
-        updateStatus('disconnected');
+        const activeWsTurn = currentTurnTransport === 'ws';
+        if (activeWsTurn) {
+            removeLoading();
+            isGenerating = false;
+            currentTurnTransport = null;
+            activeStreamConversationId = null;
+            streamingAssistantMessage = null;
+            syncSendButton();
+            recordWorkspaceActivity('Error', 'Live connection lost. You can resend; HTTP fallback will be used until streaming reconnects.', { error: true });
+        }
+        setWebsocketConnected(false);
         setTimeout(connectWS, 2000);
     };
 }
@@ -2722,12 +2826,14 @@ function syncSendButton() {
     if (!send) return;
 
     if (isGenerating) {
+        const canInterruptWithMessage = currentTurnTransport === 'ws' && canUseWebsocketTransport();
         send.disabled = false;
         const hasDraft = Boolean((input && input.value.trim()) || pendingAttachments.length);
-        send.innerHTML = hasDraft ? SEND_BUTTON_ICON : STOP_BUTTON_ICON;
+        const showInterruptAction = canInterruptWithMessage && hasDraft;
+        send.innerHTML = showInterruptAction ? SEND_BUTTON_ICON : STOP_BUTTON_ICON;
         send.classList.add('is-stop');
-        send.setAttribute('aria-label', hasDraft ? 'Interrupt with message' : 'Stop response');
-        send.title = hasDraft ? 'Interrupt with message' : 'Stop response';
+        send.setAttribute('aria-label', showInterruptAction ? 'Interrupt with message' : 'Stop response');
+        send.title = showInterruptAction ? 'Interrupt with message' : 'Stop response';
         syncModelSelector();
         syncInterveneButton();
         renderExecutionPlanApproval();
@@ -3567,7 +3673,7 @@ function dismissExecutionPlan() {
 
 function approveExecutionPlan() {
     const builderSteps = getExecutionPlanDraftSteps();
-    if (!pendingExecutionPlan?.executePrompt || !builderSteps.length || isGenerating || !ws || ws.readyState !== WebSocket.OPEN || !modelAvailable) {
+    if (!pendingExecutionPlan?.executePrompt || !builderSteps.length || isGenerating || !modelAvailable) {
         return;
     }
 
@@ -3589,7 +3695,7 @@ function approveExecutionPlan() {
     streamingAssistantMessage = null;
     dismissExecutionPlan();
     syncSendButton();
-    ws.send(JSON.stringify({
+    dispatchChatPayload({
         message: APPROVED_PLAN_EXECUTION_MESSAGE,
         attachments: [],
         conversation_id: currentConvId,
@@ -3598,7 +3704,10 @@ function approveExecutionPlan() {
         features: turnFeatures,
         plan_override_steps: builderSteps,
         slash_command: null,
-    }));
+    }, {
+        fallbackStatusText: 'WebSocket unavailable. Running the approved plan over HTTP fallback...',
+        fallbackActivityText: 'WebSocket unavailable. Running the approved plan over HTTP fallback.',
+    });
 }
 
 function renderWorkspaceActivity() {
@@ -5019,7 +5128,7 @@ function sendMessage() {
     const input = document.getElementById('input');
     const displayText = input.value.trim();
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
-    if (!modelAvailable || (!displayText && !attachmentPaths.length) || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+    if (!modelAvailable || (!displayText && !attachmentPaths.length) || isGenerating) return;
     hideSlashMenu();
     const slashCommand = parseDirectSlashCommandInput(displayText);
 
@@ -5049,7 +5158,7 @@ function sendMessage() {
     activeStreamConversationId = currentConvId;
     streamingAssistantMessage = null;
     syncSendButton();
-    ws.send(JSON.stringify({
+    dispatchChatPayload({
         message,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
@@ -5061,14 +5170,14 @@ function sendMessage() {
             raw_name: slashCommand.rawName,
             args: slashCommand.args,
         } : null,
-    }));
+    });
 }
 
 function sendInterruptMessage(messageText) {
     const text = String(messageText || '').trim();
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
     const outboundText = text || buildAttachmentOnlyMessage(pendingAttachments);
-    if (!outboundText || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!outboundText || !canUseWebsocketTransport()) return;
     const slashCommand = parseDirectSlashCommandInput(outboundText);
     const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
@@ -5109,7 +5218,8 @@ function handlePrimaryAction() {
     const draft = input?.value.trim() || '';
     const hasPendingAttachments = pendingAttachments.length > 0;
     if (isGenerating) {
-        if (draft || hasPendingAttachments) {
+        const canInterruptWithMessage = currentTurnTransport === 'ws' && canUseWebsocketTransport();
+        if (canInterruptWithMessage && (draft || hasPendingAttachments)) {
             input.value = '';
             autoResizeTextarea(input);
             syncSendButton();
@@ -5127,7 +5237,12 @@ function handlePrimaryAction() {
 }
 
 function stopMessage() {
-    if (!isGenerating || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!isGenerating) return;
+    if (currentTurnTransport === 'http' && httpTurnAbortController) {
+        httpTurnAbortController.abort();
+        return;
+    }
+    if (!canUseWebsocketTransport()) return;
     ws.send(JSON.stringify({ type: 'stop' }));
 }
 
@@ -6002,10 +6117,13 @@ setTimeout(() => {
             updateStatus('connected');
             loadComposerRuntime();
         } else {
-            updateStatus('loading');
+            if (!modelAvailable) updateStatus('loading');
             startHealthPolling();
         }
-    }).catch(() => { updateStatus('loading'); startHealthPolling(); });
+    }).catch(() => {
+        if (!modelAvailable) updateStatus('loading');
+        startHealthPolling();
+    });
 }, 1000);
 
 const _input = document.getElementById('input');

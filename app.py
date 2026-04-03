@@ -47,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import fcntl
 import termios
 
@@ -3605,6 +3605,23 @@ async def wait_for_command_approval(
     step_label: Optional[str] = None,
 ) -> bool:
     """Pause the active tool loop until the user approves or denies the command."""
+    if getattr(websocket, "supports_command_approval", True) is False:
+        await websocket.send_json({
+            "type": "command_approval_required",
+            "command": command,
+            "command_key": command_key,
+            "cwd": cwd or ".",
+            "content": f"Approve '{command_key or 'command'}' for this chat to continue.",
+        })
+        await send_activity_event(
+            websocket,
+            "blocked",
+            "Blocked",
+            f"Cannot request approval for '{command_key or 'command'}' over HTTP fallback; denying it.",
+            step_label=step_label,
+        )
+        return False
+
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bool] = loop.create_future()
     COMMAND_APPROVAL_WAITERS[conversation_id] = {
@@ -5915,6 +5932,12 @@ class CapabilityUpdateRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str
+    attachments: List[str] = Field(default_factory=list)
+    system_prompt: Optional[str] = None
+    mode: str = "normal"
+    features: Dict[str, Any] = Field(default_factory=dict)
+    slash_command: Optional[Dict[str, Any]] = None
+    plan_override_steps: List[str] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -5953,6 +5976,18 @@ class UiModelReadyRequest(BaseModel):
 class VoiceSynthesisRequest(BaseModel):
     text: str
     conversation_id: Optional[str] = None
+
+
+class BufferedChatTransport:
+    """Collect chat events for HTTP fallback requests."""
+
+    supports_command_approval = False
+
+    def __init__(self):
+        self.events: List[Dict[str, Any]] = []
+
+    async def send_json(self, payload: Dict[str, Any]) -> None:
+        self.events.append(json.loads(json.dumps(payload, default=str)))
 
 # ==================== History selection (token budget for vLLM context) ====================
 
@@ -6856,6 +6891,20 @@ async def retry_message(message_id: int, request: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/chat")
+async def chat_http(request: ChatRequest):
+    transport = BufferedChatTransport()
+    payload = request.model_dump()
+    features = payload.get("features")
+    if isinstance(features, dict):
+        payload["features"] = {
+            **features,
+            "workspace_run_commands": False,
+            "allowed_commands": [],
+        }
+    await process_chat_turn(transport, payload)
+    return {"events": transport.events}
 
 @app.get("/api/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
