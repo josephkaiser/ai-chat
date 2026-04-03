@@ -2229,12 +2229,28 @@ textarea {
 }
 .dash-row .label { color: var(--text_secondary); }
 .dash-row .value { font-weight: 500; }
+.dash-row .status-value {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
 .dash-row .status-dot {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 8px;
     height: 8px;
+    min-width: 8px;
+    min-height: 8px;
+    max-width: 8px;
+    max-height: 8px;
+    flex: 0 0 8px;
+    aspect-ratio: 1;
     border-radius: 50%;
-    margin-right: 6px;
+    line-height: 0;
+    overflow: hidden;
+    transform: translateZ(0);
 }
 .dash-row .status-dot.connected { background: var(--status_connected); }
 .dash-row .status-dot.loading { background: #f59e0b; animation: pulse 1.5s infinite; }
