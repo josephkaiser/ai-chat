@@ -9,8 +9,7 @@ A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small
 - **Chat search** — Search past messages in SQLite
 - **Agent Harness** — Shared tool loop plus deep-mode orchestration for inspect/plan/execute/verify flows
 - **Workspace Tools** — Per-turn file reads, patches, command execution, spreadsheet inspection, local RAG, and optional web search
-- **Workspace UI** — Activity timeline, workspace browser, file viewer/editor, downloads, and live terminal integration
-- **Chat Recovery** — Promote useful assistant replies into staged workspace files plus a generated `README.md` after the fact
+- **Workspace UI** — Activity timeline, workspace browser, inline file viewer/editor, downloads, and live terminal integration
 - **Attachments** — Upload files into the conversation workspace and reuse them across turns
 - **Voice** — Server-side transcription and reply playback when native STT/TTS tools are available
 - **Markdown** — Full rendering with syntax highlighting

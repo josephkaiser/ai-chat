@@ -13,6 +13,8 @@ Send JSON objects, for example:
 - `message` — User text (required)
 - `conversation_id` — Conversation UUID
 - `system_prompt` — Optional override for the default in `prompts.py`; shorter prompts usually perform better on the 8B profile
+- `features` — Per-turn tool/permission flags inferred by the UI
+- `slash_command` — Optional structured slash intent for direct flows such as `/search`, `/grep`, `/plan`, and `/code`
 
 ### `/ws/chat` (server → client)
 
@@ -48,7 +50,7 @@ Other common values:
 | `think_token`   | Thinking region text chunk |
 | `think_end`     | End of thinking region |
 | `assistant_note`| Intermediate assistant draft/note while work continues |
-| `plan_ready`    | Editable execution plan draft for the composer |
+| `plan_ready`    | Execution plan preview ready for approval or explicit copy into the composer |
 | `build_steps`   | Structured checklist state for deep-mode build steps |
 | `tool_start`    | Tool invocation started |
 | `tool_result`   | Tool finished, with summarized payload or error |

@@ -25,6 +25,7 @@ import shlex
 import shutil
 import socket
 import sqlite3
+import subprocess
 import struct
 import sys
 import signal
@@ -33,7 +34,7 @@ import traceback
 import uuid
 import zipfile
 from html import unescape
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
@@ -154,6 +155,21 @@ MAX_ATTACHMENTS_PER_MESSAGE = 8
 SPREADSHEET_PREVIEW_ROWS = 8
 SPREADSHEET_MAX_COLUMNS = 40
 SPREADSHEET_SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".xlsm"}
+TEXT_DOCUMENT_EXTENSIONS = {
+    ".c", ".cc", ".cfg", ".conf", ".cpp", ".css", ".csv", ".env", ".go", ".h", ".hpp", ".html",
+    ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".py", ".rb", ".rs", ".rst", ".sh",
+    ".sql", ".svg", ".tex", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
+}
+DOCUMENT_INDEX_SIZE_LIMIT = int(os.getenv("DOCUMENT_INDEX_SIZE_LIMIT", str(25 * 1024 * 1024)))
+DOCUMENT_TEXT_READ_LIMIT = int(os.getenv("DOCUMENT_TEXT_READ_LIMIT", str(8 * 1024 * 1024)))
+DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "2200"))
+DOCUMENT_CHUNK_OVERLAP_CHARS = int(os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", "240"))
+DOCUMENT_RETRIEVAL_CONTEXT_BUDGET = int(os.getenv("DOCUMENT_RETRIEVAL_CONTEXT_BUDGET", "9000"))
+DOCUMENT_RETRIEVAL_MAX_WINDOWS = int(os.getenv("DOCUMENT_RETRIEVAL_MAX_WINDOWS", "4"))
+DOCUMENT_RETRIEVAL_FTS_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_FTS_LIMIT", "18"))
+DOCUMENT_COMMAND_TIMEOUT_SECONDS = float(os.getenv("DOCUMENT_COMMAND_TIMEOUT_SECONDS", "30"))
+PDFTOTEXT_BIN = shutil.which("pdftotext") or ""
+PDFINFO_BIN = shutil.which("pdfinfo") or ""
 WORKSPACE_SIGNAL_VERBS = {
     "inspect", "read", "open", "show", "list", "search", "find", "grep",
     "edit", "change", "update", "patch", "refactor", "create", "write", "add",
@@ -162,7 +178,7 @@ WORKSPACE_SIGNAL_VERBS = {
 }
 WORKSPACE_SIGNAL_NOUNS = {
     "workspace", "repo", "repository", "codebase", "project", "folder", "directory",
-    "file", "files", "code", "app", "module", "script", "source", "test", "tests",
+    "file", "files", "code", "app", "application", "program", "module", "script", "source", "test", "tests",
 }
 WORKSPACE_TEMPLATE_TERMS = {
     "template", "starter", "scaffold", "boilerplate", "example", "sample",
@@ -371,7 +387,21 @@ def build_dynamic_app_title(hostname: str) -> str:
 
 
 RAW_HOSTNAME = socket.gethostname() or "localhost"
-APP_TITLE = "Compy"
+APP_TITLE = "Wolfy"
+
+LEGACY_COMPY_PROFILE_DEFAULTS = {
+    "name": "Compy",
+    "theme_primary": "#2563eb",
+    "theme_secondary": "#0f172a",
+    "theme_accent": "#dbeafe",
+}
+
+WOLFY_PROFILE_DEFAULTS = {
+    "name": "Wolfy",
+    "theme_primary": "#d97706",
+    "theme_secondary": "#6b4f2a",
+    "theme_accent": "#f5e6c8",
+}
 
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
@@ -441,132 +471,6 @@ def sanitize_relative_workspace_path(path_value: str, fallback: str = "snippet.t
     if not parts:
         return sanitize_uploaded_filename(fallback)
     return "/".join(parts[:8])
-
-
-RECOVERED_CODE_EXTENSIONS = {
-    "bash": ".sh",
-    "c": ".c",
-    "cpp": ".cpp",
-    "csharp": ".cs",
-    "css": ".css",
-    "csv": ".csv",
-    "go": ".go",
-    "html": ".html",
-    "java": ".java",
-    "javascript": ".js",
-    "js": ".js",
-    "json": ".json",
-    "jsx": ".jsx",
-    "markdown": ".md",
-    "md": ".md",
-    "python": ".py",
-    "py": ".py",
-    "ruby": ".rb",
-    "rust": ".rs",
-    "shell": ".sh",
-    "sql": ".sql",
-    "text": ".txt",
-    "toml": ".toml",
-    "ts": ".ts",
-    "tsx": ".tsx",
-    "typescript": ".ts",
-    "xml": ".xml",
-    "yaml": ".yml",
-    "yml": ".yml",
-}
-RECOVERED_CODE_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
-RECOVERED_FILENAME_HINT_RE = re.compile(
-    r"(?:save(?:\s+it)?\s+as|write(?:\s+this)?\s+to|file(?:name)?|named|call(?:ed)?|create\s+)"
-    r"\s*`?([A-Za-z0-9][A-Za-z0-9._/\-]{0,140}\.[A-Za-z0-9]{1,12})`?",
-    re.IGNORECASE,
-)
-
-
-def infer_code_extension(language_hint: str) -> str:
-    """Map a fenced-code language token to a common file extension."""
-    token = str(language_hint or "").strip().lower()
-    if not token:
-        return ".txt"
-    token = token.split()[0]
-    return RECOVERED_CODE_EXTENSIONS.get(token, ".txt")
-
-
-def infer_filename_from_text(text: str) -> Optional[str]:
-    """Extract a likely filename reference from prose near a code block."""
-    for match in RECOVERED_FILENAME_HINT_RE.finditer(text or ""):
-        candidate = match.group(1)
-        if candidate and "://" not in candidate:
-            return sanitize_relative_workspace_path(candidate)
-
-    for candidate in re.findall(r"`([A-Za-z0-9][A-Za-z0-9._/\-]{0,140}\.[A-Za-z0-9]{1,12})`", text or ""):
-        if "://" not in candidate:
-            return sanitize_relative_workspace_path(candidate)
-    return None
-
-
-def infer_filename_for_code_block(info: str, context_before: str, full_message: str, index: int, total_blocks: int) -> str:
-    """Choose a stable filename for a recovered fenced code block."""
-    info = str(info or "").strip()
-    info_tokens = [token.strip("()[]{}<>,;:") for token in info.split() if token.strip()]
-
-    if len(info_tokens) > 1:
-        for token in info_tokens[1:]:
-            if "." in token and "://" not in token:
-                return sanitize_relative_workspace_path(token)
-    elif info_tokens:
-        lone = info_tokens[0]
-        if "." in lone and "://" not in lone:
-            return sanitize_relative_workspace_path(lone)
-
-    context_candidate = infer_filename_from_text(context_before)
-    if context_candidate:
-        return context_candidate
-
-    if total_blocks == 1:
-        message_candidate = infer_filename_from_text(full_message)
-        if message_candidate:
-            return message_candidate
-
-    extension = infer_code_extension(info_tokens[0] if info_tokens else "")
-    return sanitize_relative_workspace_path(f"snippet-{index}{extension}")
-
-
-def strip_fenced_code_blocks(markdown_text: str) -> str:
-    """Remove fenced code blocks so notes can keep the surrounding explanation."""
-    return RECOVERED_CODE_BLOCK_RE.sub("", markdown_text or "")
-
-
-def build_recovered_notes_markdown(
-    source_label: str,
-    created_paths: List[str],
-    message_content: str,
-    recovered_at: str,
-) -> str:
-    """Create a README capturing the non-code guidance from a recovered chat response."""
-    notes_body = strip_fenced_code_blocks(message_content).strip()
-    lines = [
-        "# Recovered Chat Output",
-        "",
-        f"- Source: {source_label}",
-        f"- Recovered at: {recovered_at}",
-        "",
-        "## Files",
-    ]
-    if created_paths:
-        lines.extend(f"- `{path}`" for path in created_paths)
-    else:
-        lines.append("- No fenced code blocks were found in the source message.")
-
-    lines.extend([
-        "",
-        "## Notes",
-        notes_body or "No separate prose notes were present in the source message.",
-        "",
-        "## Review",
-        "Treat this folder as a staging area. Review the recovered files here before moving them into the main repo.",
-        "",
-    ])
-    return "\n".join(lines)
 
 
 def utcnow_iso() -> str:
@@ -933,6 +837,31 @@ def write_pet_profile_snapshot(profile: Dict[str, Any]):
         json.dump(snapshot, f, indent=2)
 
 
+def _normalize_theme_color(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def is_legacy_compy_profile(profile: Optional[Dict[str, Any]]) -> bool:
+    """Return whether the stored profile still uses the old built-in Compy defaults."""
+    if not profile:
+        return False
+    return (
+        str(profile.get("name", "")).strip() == LEGACY_COMPY_PROFILE_DEFAULTS["name"]
+        and _normalize_theme_color(profile.get("theme_primary")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_primary"]
+        and _normalize_theme_color(profile.get("theme_secondary")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_secondary"]
+        and _normalize_theme_color(profile.get("theme_accent")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_accent"]
+    )
+
+
+def upgrade_legacy_compy_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Rename the legacy default mascot and move it onto the built-in Wolfy palette."""
+    if not is_legacy_compy_profile(profile):
+        return profile
+    updated = dict(profile)
+    updated.update(WOLFY_PROFILE_DEFAULTS)
+    return upsert_pet_profile(updated, create=False)
+
+
 def upsert_pet_profile(payload: Dict[str, Any], create: bool = False) -> Dict[str, Any]:
     """Create or update the singleton pet profile."""
     existing = load_pet_profile()
@@ -962,12 +891,12 @@ def upsert_pet_profile(payload: Dict[str, Any], create: bool = False) -> Dict[st
     now = utcnow_iso()
     profile = {
         "id": 1,
-        "name": str(payload.get("name", base.get("name", "Compy"))).strip() or "Compy",
+        "name": str(payload.get("name", base.get("name", WOLFY_PROFILE_DEFAULTS["name"]))).strip() or WOLFY_PROFILE_DEFAULTS["name"],
         "species": str(payload.get("species", base.get("species", "agent"))).strip() or "agent",
         "status": str(payload.get("status", base.get("status", "active"))).strip() or "active",
-        "theme_primary": str(payload.get("theme_primary", base.get("theme_primary", "#2563eb"))).strip() or "#2563eb",
-        "theme_secondary": str(payload.get("theme_secondary", base.get("theme_secondary", "#0f172a"))).strip() or "#0f172a",
-        "theme_accent": str(payload.get("theme_accent", base.get("theme_accent", "#dbeafe"))).strip() or "#dbeafe",
+        "theme_primary": str(payload.get("theme_primary", base.get("theme_primary", WOLFY_PROFILE_DEFAULTS["theme_primary"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_primary"],
+        "theme_secondary": str(payload.get("theme_secondary", base.get("theme_secondary", WOLFY_PROFILE_DEFAULTS["theme_secondary"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_secondary"],
+        "theme_accent": str(payload.get("theme_accent", base.get("theme_accent", WOLFY_PROFILE_DEFAULTS["theme_accent"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_accent"],
         "avatar_style": str(payload.get("avatar_style", base.get("avatar_style", "agent"))).strip() or "agent",
         "curious": int_field("curious", 60),
         "cautious": int_field("cautious", 60),
@@ -1020,15 +949,15 @@ def ensure_default_agent_profile() -> Dict[str, Any]:
     """Ensure the install has a default productivity-agent profile."""
     existing = load_pet_profile()
     if existing:
-        return existing
+        return upgrade_legacy_compy_profile(existing)
     return upsert_pet_profile(
         {
-            "name": "Compy",
+            "name": WOLFY_PROFILE_DEFAULTS["name"],
             "species": "agent",
             "status": "active",
-            "theme_primary": "#2563eb",
-            "theme_secondary": "#0f172a",
-            "theme_accent": "#dbeafe",
+            "theme_primary": WOLFY_PROFILE_DEFAULTS["theme_primary"],
+            "theme_secondary": WOLFY_PROFILE_DEFAULTS["theme_secondary"],
+            "theme_accent": WOLFY_PROFILE_DEFAULTS["theme_accent"],
             "avatar_style": "agent",
             "curious": 62,
             "cautious": 72,
@@ -1704,6 +1633,8 @@ async def reset_application_state() -> None:
         c = conn.cursor()
         c.execute('DELETE FROM conversation_summaries')
         c.execute('DELETE FROM messages')
+        c.execute('DELETE FROM document_chunks')
+        c.execute('DELETE FROM document_sources')
         c.execute('DELETE FROM conversations')
         c.execute('DELETE FROM runs')
         c.execute('DELETE FROM pet_memories')
@@ -1712,13 +1643,17 @@ async def reset_application_state() -> None:
         c.execute('DELETE FROM pet_profile')
         try:
             c.execute(
-                "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'pet_memories', 'pet_capabilities', 'pet_events')"
+                "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'document_chunks', 'document_sources', 'pet_memories', 'pet_capabilities', 'pet_events')"
             )
         except sqlite3.OperationalError:
             pass
         if sqlite_has_fts(conn):
             try:
                 c.execute(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                c.execute(f'DELETE FROM {DOCUMENT_FTS_TABLE}')
             except sqlite3.OperationalError:
                 pass
         conn.commit()
@@ -1745,6 +1680,17 @@ def format_workspace_path(path: pathlib.Path, workspace: pathlib.Path) -> str:
 def is_spreadsheet_path(path: str) -> bool:
     """Return whether a workspace-relative path looks like a spreadsheet."""
     return pathlib.Path(path or "").suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS
+
+
+def classify_workspace_file_kind(path: str) -> str:
+    """Return a lightweight file category for UI attachment chips."""
+    if is_spreadsheet_path(path):
+        return "spreadsheet"
+    if is_pdf_path(path):
+        return "pdf"
+    if is_text_document_path(path):
+        return "document"
+    return "file"
 
 
 def serialize_spreadsheet_value(value: Any) -> Any:
@@ -1854,6 +1800,909 @@ def load_spreadsheet_summary(target: pathlib.Path, sheet: Optional[str] = None) 
     }
 
 
+def is_pdf_path(path: str | pathlib.Path) -> bool:
+    """Return whether the given path looks like a PDF."""
+    return pathlib.Path(path).suffix.lower() == ".pdf"
+
+
+def is_text_document_path(path: str | pathlib.Path) -> bool:
+    """Return whether the path extension is commonly safe to parse as text."""
+    return pathlib.Path(path).suffix.lower() in TEXT_DOCUMENT_EXTENSIONS
+
+
+def is_supported_document_path(path: str | pathlib.Path) -> bool:
+    """Return whether the app can index this file as a text-bearing document."""
+    return is_pdf_path(path) or is_text_document_path(path)
+
+
+def build_document_fingerprint(target: pathlib.Path) -> str:
+    """Summarize file identity using cheap stat information."""
+    stats = target.stat()
+    return f"{int(stats.st_size)}:{int(stats.st_mtime_ns)}"
+
+
+def run_document_command(command: List[str], timeout: float = DOCUMENT_COMMAND_TIMEOUT_SECONDS) -> tuple[int, str, str]:
+    """Run a local document utility and decode stdout/stderr safely."""
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    stdout = completed.stdout.decode("utf-8", errors="replace")
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    return completed.returncode, stdout, stderr
+
+
+def clean_document_text(text: str) -> str:
+    """Normalize extracted text while keeping paragraph boundaries intact."""
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in str(text or "").replace("\r", "").split("\n")]
+    cleaned = "\n".join(lines)
+    cleaned = re.sub(r"\n\s*\n\s*\n+", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def parse_pdfinfo_output(stdout: str) -> Dict[str, Any]:
+    """Convert `pdfinfo` key-value output into structured metadata."""
+    metadata: Dict[str, Any] = {}
+    for line in stdout.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        cleaned_key = key.strip().lower().replace(" ", "_")
+        cleaned_value = value.strip()
+        if not cleaned_key:
+            continue
+        metadata[cleaned_key] = cleaned_value
+    pages = metadata.get("pages")
+    try:
+        metadata["pages"] = int(str(pages).strip())
+    except Exception:
+        metadata["pages"] = None
+    return metadata
+
+
+def file_sample_looks_textual(target: pathlib.Path) -> bool:
+    """Best-effort check for non-binary files without depending on extensions alone."""
+    try:
+        with target.open("rb") as f:
+            sample = f.read(4096)
+    except OSError:
+        return False
+    if not sample:
+        return True
+    if b"\x00" in sample:
+        return False
+    return True
+
+
+def extract_pdf_document(target: pathlib.Path) -> Dict[str, Any]:
+    """Extract text and metadata from a PDF using local command-line tools."""
+    if not PDFTOTEXT_BIN:
+        raise ValueError("PDF text extraction is unavailable on this server")
+
+    pdfinfo_meta: Dict[str, Any] = {}
+    if PDFINFO_BIN:
+        code, stdout, stderr = run_document_command([PDFINFO_BIN, str(target)])
+        if code == 0:
+            pdfinfo_meta = parse_pdfinfo_output(stdout)
+        elif stderr.strip():
+            logger.warning("pdfinfo failed for %s: %s", target, stderr.strip())
+
+    code, stdout, stderr = run_document_command([PDFTOTEXT_BIN, "-layout", str(target), "-"])
+    if code != 0:
+        detail = stderr.strip() or "pdftotext failed"
+        raise ValueError(detail)
+
+    raw_pages = stdout.split("\f")
+    pages = [clean_document_text(page) for page in raw_pages]
+    while pages and not pages[-1]:
+        pages.pop()
+    full_text = "\n\n".join(page for page in pages if page).strip()
+    return {
+        "file_type": "pdf",
+        "extractor": "pdftotext",
+        "title": str(pdfinfo_meta.get("title") or "").strip(),
+        "page_count": pdfinfo_meta.get("pages"),
+        "pages": pages,
+        "full_text": full_text,
+        "metadata": pdfinfo_meta,
+    }
+
+
+def extract_text_document(target: pathlib.Path) -> Dict[str, Any]:
+    """Read a text-like file and normalize it for downstream chunking."""
+    if target.stat().st_size > DOCUMENT_TEXT_READ_LIMIT:
+        raise ValueError(f"Text file too large to index (max {DOCUMENT_TEXT_READ_LIMIT // (1024 * 1024)}MB)")
+    if not file_sample_looks_textual(target):
+        raise ValueError("File does not look text-decodable")
+
+    raw = target.read_text(encoding="utf-8", errors="replace")
+    cleaned = clean_document_text(raw)
+    return {
+        "file_type": "text",
+        "extractor": "utf-8",
+        "title": target.name,
+        "page_count": None,
+        "pages": [cleaned] if cleaned else [],
+        "full_text": cleaned,
+        "metadata": {
+            "line_count": raw.count("\n") + (1 if raw else 0),
+        },
+    }
+
+
+def extract_document_payload(target: pathlib.Path) -> Dict[str, Any]:
+    """Extract a supported document into normalized text plus metadata."""
+    if target.stat().st_size > DOCUMENT_INDEX_SIZE_LIMIT:
+        raise ValueError(f"File too large to index (max {DOCUMENT_INDEX_SIZE_LIMIT // (1024 * 1024)}MB)")
+    if is_pdf_path(target):
+        return extract_pdf_document(target)
+    if is_text_document_path(target) or file_sample_looks_textual(target):
+        return extract_text_document(target)
+    raise ValueError("Unsupported document type for text extraction")
+
+
+def is_section_heading(text: str) -> bool:
+    """Heuristic heading detector for chunking semi-structured text."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return False
+    if len(cleaned) > 120:
+        return False
+    if cleaned.endswith((".", ";", ":", ",")) and len(cleaned.split()) > 8:
+        return False
+    words = cleaned.split()
+    if len(words) > 14:
+        return False
+    if re.match(r"^(\d+(\.\d+){0,3}|[IVXLC]+|[A-Z])[\).\s-]+\S", cleaned):
+        return True
+    alpha_words = [word for word in words if re.search(r"[A-Za-z]", word)]
+    if not alpha_words:
+        return False
+    if cleaned.upper() == cleaned and len(alpha_words) <= 10:
+        return True
+    titleish = sum(1 for word in alpha_words if word[:1].isupper())
+    return titleish >= max(1, int(len(alpha_words) * 0.7))
+
+
+def split_chunk_text(text: str, target_chars: int = DOCUMENT_CHUNK_TARGET_CHARS) -> List[str]:
+    """Split long text into smaller retrieval chunks using paragraph/sentence boundaries."""
+    cleaned = clean_document_text(text)
+    if not cleaned:
+        return []
+    if len(cleaned) <= target_chars:
+        return [cleaned]
+
+    pieces: List[str] = []
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", cleaned) if part.strip()]
+    if not paragraphs:
+        paragraphs = [cleaned]
+
+    current = ""
+    for paragraph in paragraphs:
+        paragraph_pieces = [paragraph]
+        if len(paragraph) > target_chars * 1.35:
+            paragraph_pieces = [piece.strip() for piece in re.split(r"(?<=[.!?])\s+", paragraph) if piece.strip()]
+        for piece in paragraph_pieces:
+            separator = "\n\n" if current else ""
+            if current and len(current) + len(separator) + len(piece) > target_chars:
+                pieces.append(current.strip())
+                overlap = current[-DOCUMENT_CHUNK_OVERLAP_CHARS:].strip() if DOCUMENT_CHUNK_OVERLAP_CHARS > 0 else ""
+                current = overlap if overlap and overlap != current else ""
+                separator = "\n\n" if current else ""
+            current = f"{current}{separator}{piece}".strip()
+
+    if current:
+        pieces.append(current.strip())
+    return [piece for piece in pieces if piece]
+
+
+def build_document_chunks(payload: Dict[str, Any]) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Create retrieval chunks with section-aware grouping and a safe fallback."""
+    pages = payload.get("pages") or []
+    full_text = clean_document_text(payload.get("full_text") or "")
+    if not pages and full_text:
+        pages = [full_text]
+    if not pages:
+        return [], []
+
+    chunks: List[Dict[str, Any]] = []
+    section_titles: List[str] = []
+    active_section = ""
+    chunk_index = 0
+
+    for page_number, page_text in enumerate(pages, start=1):
+        page_clean = clean_document_text(page_text)
+        if not page_clean:
+            continue
+        blocks = [block.strip() for block in re.split(r"\n\s*\n+", page_clean) if block.strip()]
+        if not blocks:
+            blocks = [page_clean]
+
+        for block in blocks:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            first_line = lines[0]
+            block_section = active_section
+            content = block
+            if is_section_heading(first_line):
+                block_section = first_line
+                if block_section not in section_titles:
+                    section_titles.append(block_section)
+                remainder = clean_document_text("\n".join(lines[1:]))
+                if remainder:
+                    content = remainder
+                    active_section = block_section
+                else:
+                    active_section = block_section
+                    continue
+
+            content_parts = split_chunk_text(content)
+            for part in content_parts:
+                section_name = block_section or active_section or f"Page {page_number}"
+                chunks.append({
+                    "chunk_index": chunk_index,
+                    "page_start": page_number,
+                    "page_end": page_number,
+                    "section_title": section_name,
+                    "content": part,
+                    "metadata": {
+                        "page": page_number,
+                    },
+                })
+                chunk_index += 1
+
+    if not chunks and full_text:
+        for part in split_chunk_text(full_text):
+            chunks.append({
+                "chunk_index": chunk_index,
+                "page_start": 1,
+                "page_end": payload.get("page_count") or 1,
+                "section_title": payload.get("title") or "Document",
+                "content": part,
+                "metadata": {},
+            })
+            chunk_index += 1
+
+    return chunks, section_titles[:12]
+
+
+def delete_document_index(conn: sqlite3.Connection, conversation_id: str, rel_path: str):
+    """Remove all persisted chunks for a document before reindexing."""
+    c = conn.cursor()
+    chunk_ids = [
+        row[0]
+        for row in c.execute(
+            'SELECT id FROM document_chunks WHERE conversation_id = ? AND path = ?',
+            (conversation_id, rel_path),
+        ).fetchall()
+    ]
+    if chunk_ids:
+        try:
+            c.executemany(f'DELETE FROM {DOCUMENT_FTS_TABLE} WHERE rowid = ?', [(chunk_id,) for chunk_id in chunk_ids])
+        except sqlite3.OperationalError:
+            pass
+    c.execute('DELETE FROM document_chunks WHERE conversation_id = ? AND path = ?', (conversation_id, rel_path))
+    c.execute('DELETE FROM document_sources WHERE conversation_id = ? AND path = ?', (conversation_id, rel_path))
+
+
+def store_document_index(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    rel_path: str,
+    fingerprint: str,
+    target: pathlib.Path,
+    payload: Dict[str, Any],
+    chunks: List[Dict[str, Any]],
+    section_titles: List[str],
+    status: str,
+    error: str = "",
+):
+    """Persist extracted document metadata and its retrieval chunks."""
+    metadata = dict(payload.get("metadata") or {})
+    metadata["section_titles"] = section_titles[:12]
+    metadata["chunk_count"] = len(chunks)
+    indexed_at = utcnow_iso()
+    c = conn.cursor()
+    delete_document_index(conn, conversation_id, rel_path)
+    c.execute(
+        '''INSERT INTO document_sources
+           (conversation_id, path, fingerprint, file_size, modified_at, file_type, extractor, page_count, title,
+            metadata_json, status, error, indexed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            conversation_id,
+            rel_path,
+            fingerprint,
+            int(target.stat().st_size),
+            datetime.fromtimestamp(target.stat().st_mtime).isoformat(),
+            str(payload.get("file_type") or "file"),
+            str(payload.get("extractor") or ""),
+            payload.get("page_count"),
+            str(payload.get("title") or ""),
+            json.dumps(metadata),
+            status,
+            error,
+            indexed_at,
+        ),
+    )
+    for chunk in chunks:
+        c.execute(
+            '''INSERT INTO document_chunks
+               (conversation_id, path, chunk_index, page_start, page_end, section_title, content, char_count, metadata_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                conversation_id,
+                rel_path,
+                int(chunk.get("chunk_index", 0)),
+                chunk.get("page_start"),
+                chunk.get("page_end"),
+                str(chunk.get("section_title") or ""),
+                str(chunk.get("content") or ""),
+                len(str(chunk.get("content") or "")),
+                json.dumps(chunk.get("metadata") or {}),
+                indexed_at,
+            ),
+        )
+        chunk_id = c.lastrowid
+        try:
+            c.execute(
+                f'''INSERT INTO {DOCUMENT_FTS_TABLE}(rowid, content, section_title, path, conversation_id)
+                    VALUES (?, ?, ?, ?, ?)''',
+                (
+                    chunk_id,
+                    str(chunk.get("content") or ""),
+                    str(chunk.get("section_title") or ""),
+                    rel_path,
+                    conversation_id,
+                ),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+
+def get_document_source_record(conversation_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+    """Return persisted document-source metadata when available."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            '''SELECT path, fingerprint, file_size, modified_at, file_type, extractor, page_count, title,
+                      metadata_json, status, error, indexed_at
+               FROM document_sources
+               WHERE conversation_id = ? AND path = ?''',
+            (conversation_id, rel_path),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    metadata: Dict[str, Any]
+    try:
+        metadata = json.loads(row[8] or "{}")
+    except Exception:
+        metadata = {}
+    return {
+        "path": row[0],
+        "fingerprint": row[1],
+        "file_size": int(row[2] or 0),
+        "modified_at": row[3] or "",
+        "file_type": row[4] or "file",
+        "extractor": row[5] or "",
+        "page_count": row[6],
+        "title": row[7] or "",
+        "metadata": metadata,
+        "status": row[9] or "ready",
+        "error": row[10] or "",
+        "indexed_at": row[11] or "",
+    }
+
+
+def ensure_document_index(conversation_id: str, rel_path: str) -> Dict[str, Any]:
+    """Index a supported document on demand and reuse cached chunks when unchanged."""
+    workspace = get_workspace_path(conversation_id)
+    target = resolve_workspace_relative_path(conversation_id, rel_path)
+    if not target.is_file():
+        raise ValueError("File not found")
+    if not is_supported_document_path(target) and not file_sample_looks_textual(target):
+        raise ValueError("Unsupported document type")
+
+    fingerprint = build_document_fingerprint(target)
+    cached = get_document_source_record(conversation_id, format_workspace_path(target, workspace))
+    if cached and cached.get("fingerprint") == fingerprint and cached.get("status") in {"ready", "empty"}:
+        return cached
+
+    rel_file_path = format_workspace_path(target, workspace)
+    payload = {
+        "file_type": "file",
+        "extractor": "",
+        "title": target.name,
+        "page_count": None,
+        "metadata": {},
+    }
+
+    try:
+        payload = extract_document_payload(target)
+        chunks, section_titles = build_document_chunks(payload)
+        status = "ready" if chunks else "empty"
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            store_document_index(
+                conn,
+                conversation_id,
+                rel_file_path,
+                fingerprint,
+                target,
+                payload,
+                chunks,
+                section_titles,
+                status=status,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            store_document_index(
+                conn,
+                conversation_id,
+                rel_file_path,
+                fingerprint,
+                target,
+                payload,
+                [],
+                [],
+                status="error",
+                error=str(exc),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        raise
+
+    return get_document_source_record(conversation_id, rel_file_path) or {
+        "path": rel_file_path,
+        "fingerprint": fingerprint,
+        "file_size": int(target.stat().st_size),
+        "modified_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(),
+        "file_type": payload.get("file_type") or "file",
+        "extractor": payload.get("extractor") or "",
+        "page_count": payload.get("page_count"),
+        "title": payload.get("title") or target.name,
+        "metadata": payload.get("metadata") or {},
+        "status": "ready",
+        "error": "",
+        "indexed_at": utcnow_iso(),
+    }
+
+
+def fetch_document_chunk_rows(
+    conversation_id: str,
+    rel_path: str,
+    start_index: int,
+    end_index: int,
+) -> List[Dict[str, Any]]:
+    """Fetch an inclusive chunk window from the persisted document index."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            '''SELECT id, path, chunk_index, page_start, page_end, section_title, content
+               FROM document_chunks
+               WHERE conversation_id = ? AND path = ? AND chunk_index BETWEEN ? AND ?
+               ORDER BY chunk_index ASC''',
+            (conversation_id, rel_path, start_index, end_index),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": row[0],
+            "path": row[1],
+            "chunk_index": int(row[2] or 0),
+            "page_start": row[3],
+            "page_end": row[4],
+            "section_title": row[5] or "",
+            "content": row[6] or "",
+        }
+        for row in rows
+    ]
+
+
+def tokenize_retrieval_text(text: str) -> List[str]:
+    """Normalize free text into lowercase retrieval tokens."""
+    return [token for token in re.findall(r"[A-Za-z0-9_]+", str(text or "").lower()) if len(token) >= 2]
+
+
+def compute_overlap_score(query_tokens: List[str], content: str) -> float:
+    """Estimate retrieval relevance using token overlap."""
+    if not query_tokens:
+        return 0.0
+    content_tokens = set(tokenize_retrieval_text(content))
+    if not content_tokens:
+        return 0.0
+    query_token_set = set(query_tokens)
+    overlap = len(query_token_set & content_tokens)
+    return overlap / max(len(query_token_set), 1)
+
+
+def fetch_ranked_document_candidates(
+    conversation_id: str,
+    rel_paths: List[str],
+    query: str,
+    hyde_query: str = "",
+    limit: int = DOCUMENT_RETRIEVAL_FTS_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Retrieve and rerank candidate chunks across indexed attachments."""
+    if not rel_paths:
+        return []
+
+    conn = sqlite3.connect(DB_PATH)
+    candidates: Dict[int, Dict[str, Any]] = {}
+    query_tokens = tokenize_retrieval_text(query)
+    hyde_tokens = tokenize_retrieval_text(hyde_query)
+    placeholders = ", ".join("?" for _ in rel_paths)
+
+    try:
+        search_terms = []
+        normalized_query = normalize_fts_query(query)
+        normalized_hyde = normalize_fts_query(hyde_query)
+        if normalized_query:
+            search_terms.append(("query", normalized_query))
+        if normalized_hyde and normalized_hyde != normalized_query:
+            search_terms.append(("hyde", normalized_hyde))
+
+        for label, search_term in search_terms:
+            try:
+                rows = conn.execute(
+                    f'''SELECT dc.id, dc.path, dc.chunk_index, dc.page_start, dc.page_end, dc.section_title, dc.content,
+                               bm25({DOCUMENT_FTS_TABLE}) AS fts_rank
+                        FROM {DOCUMENT_FTS_TABLE}
+                        JOIN document_chunks dc ON dc.id = {DOCUMENT_FTS_TABLE}.rowid
+                        WHERE {DOCUMENT_FTS_TABLE} MATCH ?
+                          AND dc.conversation_id = ?
+                          AND dc.path IN ({placeholders})
+                        ORDER BY fts_rank ASC
+                        LIMIT ?''',
+                    [search_term, conversation_id, *rel_paths, max(4, limit)],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+
+            for position, row in enumerate(rows):
+                item = candidates.setdefault(
+                    row[0],
+                    {
+                        "id": row[0],
+                        "path": row[1],
+                        "chunk_index": int(row[2] or 0),
+                        "page_start": row[3],
+                        "page_end": row[4],
+                        "section_title": row[5] or "",
+                        "content": row[6] or "",
+                        "query_rank": None,
+                        "hyde_rank": None,
+                        "fts_rank": row[7],
+                    },
+                )
+                item[f"{label}_rank"] = position
+
+        if not candidates:
+            rows = conn.execute(
+                f'''SELECT id, path, chunk_index, page_start, page_end, section_title, content
+                    FROM document_chunks
+                    WHERE conversation_id = ?
+                      AND path IN ({placeholders})
+                    ORDER BY path ASC, chunk_index ASC
+                    LIMIT ?''',
+                [conversation_id, *rel_paths, max(50, limit * 5)],
+            ).fetchall()
+            for row in rows:
+                candidates[row[0]] = {
+                    "id": row[0],
+                    "path": row[1],
+                    "chunk_index": int(row[2] or 0),
+                    "page_start": row[3],
+                    "page_end": row[4],
+                    "section_title": row[5] or "",
+                    "content": row[6] or "",
+                    "query_rank": None,
+                    "hyde_rank": None,
+                    "fts_rank": None,
+                }
+    finally:
+        conn.close()
+
+    ranked: List[Dict[str, Any]] = []
+    normalized_query_text = " ".join(query_tokens)
+    normalized_hyde_text = " ".join(hyde_tokens)
+    for item in candidates.values():
+        content = item.get("content", "")
+        section = item.get("section_title", "")
+        score = 0.0
+        if item.get("query_rank") is not None:
+            score += 2.2 / (2 + int(item["query_rank"]))
+        if item.get("hyde_rank") is not None:
+            score += 1.6 / (2 + int(item["hyde_rank"]))
+        score += 0.9 * compute_overlap_score(query_tokens, f"{section}\n{content}")
+        score += 0.55 * compute_overlap_score(hyde_tokens, f"{section}\n{content}")
+        if normalized_query_text and normalized_query_text in " ".join(tokenize_retrieval_text(content)):
+            score += 0.35
+        if normalized_query_text and normalized_query_text in " ".join(tokenize_retrieval_text(section)):
+            score += 0.2
+        if query:
+            score += 0.2 * SequenceMatcher(None, query[:180].lower(), content[:260].lower()).ratio()
+        if hyde_query:
+            score += 0.1 * SequenceMatcher(None, normalized_hyde_text[:180], content[:260].lower()).ratio()
+        if len(content) < 120:
+            score -= 0.12
+        ranked.append({**item, "score": round(score, 4)})
+
+    ranked.sort(key=lambda row: (row.get("score", 0.0), -(row.get("page_start") or 0)), reverse=True)
+    return ranked[: max(1, limit)]
+
+
+def build_document_overview_entries(conversation_id: str, rel_paths: List[str], char_budget: int) -> List[Dict[str, Any]]:
+    """Build a compact fallback overview for indexed attachments."""
+    conn = sqlite3.connect(DB_PATH)
+    entries: List[Dict[str, Any]] = []
+    remaining = char_budget
+    try:
+        placeholders = ", ".join("?" for _ in rel_paths)
+        source_rows = conn.execute(
+            f'''SELECT path, page_count, title, metadata_json
+                FROM document_sources
+                WHERE conversation_id = ?
+                  AND path IN ({placeholders})
+                  AND status = 'ready'
+                ORDER BY path ASC''',
+            [conversation_id, *rel_paths],
+        ).fetchall()
+        for path, page_count, title, metadata_json in source_rows:
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except Exception:
+                metadata = {}
+            section_titles = [str(item).strip() for item in metadata.get("section_titles", []) if str(item).strip()]
+            first_chunk = conn.execute(
+                '''SELECT page_start, page_end, section_title, content
+                   FROM document_chunks
+                   WHERE conversation_id = ? AND path = ?
+                   ORDER BY chunk_index ASC
+                   LIMIT 1''',
+                (conversation_id, path),
+            ).fetchone()
+            preview = ""
+            preview_section = ""
+            preview_page_start = None
+            preview_page_end = None
+            if first_chunk:
+                preview_page_start, preview_page_end, preview_section, preview = first_chunk
+            header_parts = [path]
+            if title and title != path:
+                header_parts.append(f"title: {title}")
+            if page_count:
+                header_parts.append(f"pages: {page_count}")
+            if section_titles:
+                header_parts.append(f"sections: {', '.join(section_titles[:5])}")
+            block_lines = [" | ".join(header_parts)]
+            if preview:
+                label = preview_section or "Opening passage"
+                if preview_page_start:
+                    page_label = f"pages {preview_page_start}" if preview_page_start == preview_page_end else f"pages {preview_page_start}-{preview_page_end}"
+                    label = f"{label} ({page_label})"
+                block_lines.extend([label, truncate_output(preview, limit=1400)])
+            block = "\n".join(block_lines)
+            if len(block) > remaining and entries:
+                break
+            entries.append({"path": path, "text": truncate_output(block, limit=max(remaining, 400))})
+            remaining -= len(entries[-1]["text"]) + 2
+            if remaining < 300:
+                break
+    finally:
+        conn.close()
+    return entries
+
+
+def pack_document_context_windows(
+    conversation_id: str,
+    ranked_candidates: List[Dict[str, Any]],
+    char_budget: int = DOCUMENT_RETRIEVAL_CONTEXT_BUDGET,
+    max_windows: int = DOCUMENT_RETRIEVAL_MAX_WINDOWS,
+) -> List[Dict[str, Any]]:
+    """Expand top-ranked chunks with local neighbors and fit them into a prompt budget."""
+    windows: List[Dict[str, Any]] = []
+    used_chunk_ids: set[int] = set()
+    remaining = char_budget
+
+    for candidate in ranked_candidates:
+        if len(windows) >= max_windows or remaining < 400:
+            break
+        center_index = int(candidate.get("chunk_index", 0))
+        rows = fetch_document_chunk_rows(
+            conversation_id,
+            str(candidate.get("path") or ""),
+            max(center_index - 1, 0),
+            center_index + 1,
+        )
+        rows = [row for row in rows if row.get("id") not in used_chunk_ids]
+        if not rows:
+            continue
+
+        used_chunk_ids.update(int(row["id"]) for row in rows)
+        page_start = rows[0].get("page_start")
+        page_end = rows[-1].get("page_end")
+        section_label = candidate.get("section_title") or rows[0].get("section_title") or "Relevant excerpt"
+        page_label = ""
+        if page_start:
+            page_label = f"pages {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
+        header = f"{candidate.get('path')} | {section_label}"
+        if page_label:
+            header = f"{header} | {page_label}"
+        combined_text = "\n\n".join(str(row.get("content") or "").strip() for row in rows if str(row.get("content") or "").strip())
+        block = f"{header}\n{truncate_output(combined_text, limit=min(2600, max(remaining - len(header) - 1, 600)))}"
+        if len(block) > remaining and windows:
+            continue
+        windows.append({
+            "path": candidate.get("path"),
+            "header": header,
+            "text": block,
+            "score": candidate.get("score", 0.0),
+        })
+        remaining -= len(block) + 2
+
+    return windows
+
+
+def is_overview_attachment_request(message: str) -> bool:
+    """Detect high-level requests that benefit from overview snippets even without strong matches."""
+    text = str(message or "").lower()
+    signals = (
+        "summarize", "summary", "overview", "what is this", "what's this",
+        "main point", "main points", "high level", "high-level", "tl;dr", "key takeaways",
+    )
+    return any(signal in text for signal in signals)
+
+
+async def generate_hyde_query(message: str, paths: List[str]) -> str:
+    """Create a concise hypothetical answer passage to improve retrieval recall."""
+    question = str(message or "").strip()
+    if not question:
+        return ""
+    prompt = (
+        "Write a short hypothetical excerpt from the attached documents that would likely answer the user's question. "
+        "Stay factual and concise, 2-4 sentences max, and do not mention that this is hypothetical.\n\n"
+        f"Files: {', '.join(paths[:4])}\n"
+        f"Question: {question}"
+    )
+    messages = [
+        {"role": "system", "content": "You write compact retrieval probes for document search."},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        raw = await vllm_chat_complete(messages, max_tokens=160, temperature=0.1)
+    except Exception as exc:
+        logger.warning("HyDE generation failed: %s", exc)
+        return ""
+    return truncate_output(strip_stream_special_tokens(raw).strip(), limit=500)
+
+
+def format_document_source_line(source: Dict[str, Any]) -> str:
+    """Render concise source metadata for prompt grounding."""
+    path = str(source.get("path") or "")
+    metadata = source.get("metadata") or {}
+    parts = [path]
+    file_type = str(source.get("file_type") or "").strip()
+    if file_type:
+        parts.append(file_type)
+    page_count = source.get("page_count")
+    if page_count:
+        parts.append(f"{page_count} pages")
+    section_titles = [str(item).strip() for item in metadata.get("section_titles", []) if str(item).strip()]
+    if section_titles:
+        parts.append(f"sections: {', '.join(section_titles[:4])}")
+    return " | ".join(parts)
+
+
+async def build_attachment_context(conversation_id: str, paths: List[str], message: str) -> str:
+    """Index attachments, retrieve the most relevant chunks, and render a compact prompt block."""
+    cleaned = []
+    for path in paths[:MAX_ATTACHMENTS_PER_MESSAGE]:
+        candidate = str(path or "").strip()
+        if candidate and candidate not in cleaned:
+            cleaned.append(candidate)
+    if not cleaned:
+        return ""
+
+    indexed_sources: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    for rel_path in cleaned:
+        try:
+            source = ensure_document_index(conversation_id, rel_path)
+        except Exception as exc:
+            notes.append(f"- {rel_path}: {exc}")
+            continue
+        indexed_sources.append(source)
+        if source.get("status") == "empty":
+            notes.append(f"- {rel_path}: no extractable text was found")
+        elif source.get("status") == "error":
+            notes.append(f"- {rel_path}: {source.get('error') or 'indexing failed'}")
+
+    ready_paths = [str(source.get("path") or "") for source in indexed_sources if source.get("status") == "ready"]
+    lines = ["Attached files are available in the workspace:"]
+    if indexed_sources:
+        lines.extend(f"- {format_document_source_line(source)}" for source in indexed_sources[:MAX_ATTACHMENTS_PER_MESSAGE])
+    else:
+        lines.extend(f"- {path}" for path in cleaned)
+
+    if ready_paths:
+        hyde_query = await generate_hyde_query(message, ready_paths)
+        ranked = fetch_ranked_document_candidates(conversation_id, ready_paths, message, hyde_query=hyde_query)
+        windows = pack_document_context_windows(conversation_id, ranked)
+        if windows:
+            lines.extend(["", "Relevant extracted context from attachments:"])
+            lines.extend(f"---\n{window['text']}" for window in windows)
+        if (not windows or is_overview_attachment_request(message)) and ready_paths:
+            overview_entries = build_document_overview_entries(
+                conversation_id,
+                ready_paths,
+                char_budget=max(1800, DOCUMENT_RETRIEVAL_CONTEXT_BUDGET // 2),
+            )
+            if overview_entries:
+                lines.extend(["", "Attachment overview:"])
+                lines.extend(f"---\n{entry['text']}" for entry in overview_entries)
+
+    if notes:
+        lines.extend(["", "Attachment parsing notes:"])
+        lines.extend(notes[:MAX_ATTACHMENTS_PER_MESSAGE])
+
+    return "\n".join(lines)
+
+
+def build_document_preview_result(
+    target: pathlib.Path,
+    conversation_id: Optional[str] = None,
+    rel_path: Optional[str] = None,
+    limit: int = TOOL_RESULT_TEXT_LIMIT,
+) -> Dict[str, Any]:
+    """Return a text preview for a supported document, using the index when possible."""
+    if conversation_id and rel_path:
+        source = ensure_document_index(conversation_id, rel_path)
+        if source.get("status") == "error":
+            raise ValueError(source.get("error") or "Document indexing failed")
+        chunk_rows = fetch_document_chunk_rows(conversation_id, rel_path, 0, 2)
+        preview_text = "\n\n".join(str(row.get("content") or "").strip() for row in chunk_rows if str(row.get("content") or "").strip())
+        preview_text = truncate_output(preview_text, limit=limit)
+        metadata = source.get("metadata") or {}
+        return {
+            "path": rel_path,
+            "content": preview_text,
+            "size": len(preview_text),
+            "lines": preview_text.count("\n") + 1 if preview_text else 0,
+            "file_type": source.get("file_type") or "file",
+            "extractor": source.get("extractor") or "",
+            "page_count": source.get("page_count"),
+            "title": source.get("title") or target.name,
+            "metadata": metadata,
+        }
+
+    payload = extract_document_payload(target)
+    preview_text = truncate_output(payload.get("full_text") or "", limit=limit)
+    return {
+        "path": target.name,
+        "content": preview_text,
+        "size": len(preview_text),
+        "lines": preview_text.count("\n") + 1 if preview_text else 0,
+        "file_type": payload.get("file_type") or "file",
+        "extractor": payload.get("extractor") or "",
+        "page_count": payload.get("page_count"),
+        "title": payload.get("title") or target.name,
+        "metadata": payload.get("metadata") or {},
+    }
+
+
 def format_attachment_context(paths: List[str]) -> str:
     """Render uploaded file references into a compact prompt block."""
     cleaned = [str(path).strip() for path in paths if str(path).strip()]
@@ -1960,6 +2809,7 @@ class DeepSession:
     workspace_facts: str = ""
     workspace_snapshot: Dict[str, Any] = field(default_factory=dict)
     plan: Dict[str, Any] = field(default_factory=dict)
+    plan_preview_pending: bool = False
     task_board_path: str = ".ai/task-board.md"
     task_state_path: str = ".ai/task-state.json"
     build_step_summaries: List[str] = field(default_factory=list)
@@ -2092,12 +2942,16 @@ async def finalize_tool_loop_answer(
     final_text: str,
     tool_results: List[Dict[str, Any]],
     max_tokens: int,
+    features: Optional["FeatureFlags"] = None,
 ) -> ToolLoopOutcome:
     """Apply citation repair when fetched web pages informed the final answer."""
     sources = fetched_web_sources(tool_results)
     cleaned = str(final_text or "").strip()
     if sources and not answer_has_required_source_grounding(cleaned, sources):
         cleaned = await repair_answer_with_citations(cleaned, sources, max_tokens)
+    leaked_call = extract_leaked_tool_call(cleaned)
+    if leaked_call:
+        cleaned = format_leaked_tool_call_message(leaked_call, features or FeatureFlags())
     return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
 
 
@@ -2120,6 +2974,50 @@ class FeatureFlags:
     local_rag: bool = True
     web_search: bool = False
     allowed_commands: List[str] = field(default_factory=list)
+
+
+DIRECT_SLASH_COMMAND_ALIASES = {
+    "search": "search",
+    "web": "search",
+    "grep": "grep",
+    "plan": "plan",
+    "code": "code",
+    "edit": "code",
+}
+
+
+def normalize_direct_slash_command(name: str) -> str:
+    """Map supported slash aliases to their canonical command name."""
+    return DIRECT_SLASH_COMMAND_ALIASES.get(str(name or "").strip().lower(), "")
+
+
+def parse_direct_slash_command_payload(payload: Any) -> Optional[Dict[str, str]]:
+    """Validate a structured slash command payload from the client."""
+    if not isinstance(payload, dict):
+        return None
+    name = normalize_direct_slash_command(payload.get("name") or payload.get("raw_name") or "")
+    if not name:
+        return None
+    return {
+        "name": name,
+        "raw_name": str(payload.get("raw_name") or payload.get("name") or "").strip().lower(),
+        "args": str(payload.get("args") or "").strip(),
+    }
+
+
+def infer_direct_slash_command_from_message(message: str) -> Optional[Dict[str, str]]:
+    """Fallback parser so typed slash commands still work without explicit client metadata."""
+    match = re.match(r"^\s*/([a-z0-9_-]+)(?:\s+([\s\S]*\S))?\s*$", str(message or ""), re.IGNORECASE)
+    if not match:
+        return None
+    name = normalize_direct_slash_command(match.group(1))
+    if not name:
+        return None
+    return {
+        "name": name,
+        "raw_name": str(match.group(1) or "").strip().lower(),
+        "args": str(match.group(2) or "").strip(),
+    }
 
 
 async def wait_for_command_approval(
@@ -2307,6 +3205,23 @@ def workspace_is_effectively_empty(snapshot: Dict[str, Any]) -> bool:
 def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Dict[str, Any]:
     """Ground deep-mode plans in the inspected workspace and required audits."""
     normalized = normalize_deep_plan(plan)
+    if plan_looks_like_refusal(normalized, session.message):
+        normalized["strategy"] = (
+            "Use the inspected context to do the most useful work available, then call out any remaining blocker only if it materially limits the result."
+        )
+        normalized["deliverable"] = (
+            "A useful answer or workspace result grounded in inspected evidence, not a plan for refusing the request."
+        )
+        normalized["builder_steps"] = [
+            "Inspect the most relevant available files, attachments, or artifacts before deciding the next move.",
+            "Do the most useful concrete work that is still possible from the inspected context.",
+            "Tighten the result and isolate any true blocker instead of turning the blocker into the deliverable.",
+        ]
+        normalized["verifier_checks"] = [
+            "Confirm the output still addresses the user's actual request.",
+            "Call out any remaining blocker only if it is real, verified, and still affects the result.",
+        ]
+
     verifier_checks = list(normalized.get("verifier_checks", []))
     audit_check = "Compare the requested deliverable against the files changed and verification evidence."
     if audit_check not in verifier_checks:
@@ -2404,6 +3319,99 @@ def is_explicit_plan_execution_request(message: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def is_bare_plan_execution_request(message: str) -> bool:
+    """Detect short approval-style plan execution requests without an edited inline draft."""
+    if not is_explicit_plan_execution_request(message):
+        return False
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    structural_markers = (
+        "strategy:",
+        "deliverable:",
+        "steps:",
+        "verification:",
+        "1.",
+        "2.",
+    )
+    return len(text) <= 120 and not any(marker in text for marker in structural_markers)
+
+
+def request_is_about_limitations(message: str) -> bool:
+    """Return whether the user is explicitly asking about support, errors, or blockers."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    markers = (
+        "why can't",
+        "why cannot",
+        "can't do",
+        "cannot do",
+        "unable to",
+        "not able to",
+        "limitation",
+        "limitations",
+        "constraint",
+        "constraints",
+        "support",
+        "supported",
+        "unsupported",
+        "capability",
+        "capabilities",
+        "does this work",
+        "is this available",
+        "why did this fail",
+        "error",
+        "broken",
+        "workaround",
+    )
+    return any(marker in text for marker in markers)
+
+
+def plan_looks_like_refusal(plan: Dict[str, Any], message: str) -> bool:
+    """Flag plans that mainly script a refusal instead of useful work."""
+    if request_is_about_limitations(message):
+        return False
+
+    fields: List[str] = [
+        str(plan.get("strategy") or ""),
+        str(plan.get("deliverable") or ""),
+    ]
+    fields.extend(str(step) for step in plan.get("builder_steps", []) if str(step).strip())
+    fields.extend(str(step) for step in plan.get("verifier_checks", []) if str(step).strip())
+    haystack = " ".join(part.strip().lower() for part in fields if part and part.strip())
+    if not haystack:
+        return False
+
+    strong_markers = (
+        "notify user",
+        "processing constraints",
+        "explanation of processing constraints",
+        "alternative steps",
+        "suggest external",
+        "external pdf",
+        "workaround",
+        "unavailable on this server",
+        "disabled server-side",
+    )
+    weak_markers = (
+        "cannot",
+        "can't",
+        "unable to",
+        "limitation",
+        "constraint",
+        "constraints",
+        "blocked",
+        "not possible",
+        "unsupported",
+        "unavailable",
+        "redirect",
+    )
+    strong_hits = sum(1 for marker in strong_markers if marker in haystack)
+    weak_hits = sum(1 for marker in weak_markers if marker in haystack)
+    return strong_hits >= 1 or weak_hits >= 3
+
+
 def should_preview_deep_plan(session: "DeepSession") -> bool:
     """Use a separate plan/approval step only for deep workspace execution requests."""
     if not session.workspace_enabled:
@@ -2414,7 +3422,7 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
 
 
 def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
-    """Create an editable execution draft for the composer."""
+    """Create an editable execution draft that the UI can copy into the composer on demand."""
     strategy = plan.get("strategy", "Inspect, build, verify, and synthesize.")
     deliverable = plan.get("deliverable", "A strong final response grounded in the workspace.")
     steps = plan.get("builder_steps", [])
@@ -2446,7 +3454,7 @@ def render_deep_plan_preview(plan: Dict[str, Any]) -> str:
         "",
         format_deep_plan_note(plan),
         "",
-        "Edit the execution draft in the composer if you want to adjust scope or wording, then send it to approve and run.",
+        "Use the plan card to approve and run it, or copy the draft into the composer if you want to edit it first.",
     ]
     return "\n".join(lines)
 
@@ -2568,6 +3576,7 @@ def format_task_state_payload(session: DeepSession) -> Dict[str, Any]:
         "workspace_facts": session.workspace_facts,
         "workspace_snapshot": session.workspace_snapshot,
         "plan": session.plan,
+        "plan_preview_pending": session.plan_preview_pending,
         "task_board_path": session.task_board_path,
         "build_step_summaries": session.build_step_summaries,
         "step_reports": session.step_reports,
@@ -2694,10 +3703,17 @@ def should_resume_task_state(message: str) -> bool:
 
 async def maybe_resume_task_state(session: DeepSession) -> bool:
     """Restore prior task state when the user asks to continue the existing work."""
-    if not session.workspace_enabled or not should_resume_task_state(session.message):
+    if not session.workspace_enabled:
+        return False
+
+    resume_requested = should_resume_task_state(session.message)
+    execute_saved_plan = is_bare_plan_execution_request(session.message)
+    if not resume_requested and not execute_saved_plan:
         return False
     payload = load_task_state(session.conversation_id, session.task_state_path)
     if not payload:
+        return False
+    if execute_saved_plan and not bool(payload.get("plan_preview_pending")):
         return False
 
     plan = payload.get("plan")
@@ -2706,6 +3722,7 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
         session.workspace_snapshot = workspace_snapshot
     if isinstance(plan, dict):
         session.plan = apply_deep_plan_guardrails(session, plan)
+    session.plan_preview_pending = bool(payload.get("plan_preview_pending"))
     session.task_board_path = str(payload.get("task_board_path") or session.task_board_path)
     session.build_step_summaries = [
         str(item).strip() for item in payload.get("build_step_summaries", []) if str(item).strip()
@@ -2730,7 +3747,11 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
     session.resumed = True
     await send_assistant_note(
         session.websocket,
-        "Resuming from the existing task board and saved workspace state."
+        (
+            "Loaded the saved approved plan from the existing task board."
+            if execute_saved_plan else
+            "Resuming from the existing task board and saved workspace state."
+        )
         + (f" Original request: {previous_request}" if previous_request else ""),
     )
     return bool(session.plan)
@@ -2885,12 +3906,12 @@ async def send_scope_audit_event(websocket: WebSocket, audit: Dict[str, Any]):
         websocket,
         "audit",
         "Audit",
-        summary or "Recorded a scope audit for the current run.",
+        summary or "Scope audit recorded.",
     )
 
 
 async def send_plan_ready(websocket: WebSocket, plan: Dict[str, Any], execute_prompt: str):
-    """Push an editable execution draft to the web composer."""
+    """Push a plan preview plus execution draft metadata to the web UI."""
     await websocket.send_json({
         "type": "plan_ready",
         "plan": format_deep_plan_note(plan),
@@ -3066,6 +4087,7 @@ async def recreate_vllm_container(profile_key: Optional[str] = None, *, model_na
 # ==================== Database (SQLite file at DB_PATH) ====================
 
 FTS_TABLE = "messages_fts"
+DOCUMENT_FTS_TABLE = "document_chunks_fts"
 SUMMARY_TRIGGER_MESSAGE_COUNT = 16
 SUMMARY_KEEP_RECENT_MESSAGES = 8
 SUMMARY_MAX_SOURCE_MESSAGES = 40
@@ -3123,6 +4145,55 @@ def setup_message_fts(conn: sqlite3.Connection):
     count = c.execute(f"SELECT COUNT(*) FROM {FTS_TABLE}").fetchone()[0]
     if count == 0:
         c.execute(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')")
+
+
+def setup_document_tables(conn: sqlite3.Connection):
+    """Create document-source metadata and chunk indexes when supported."""
+    c = conn.cursor()
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS document_sources
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            modified_at TEXT NOT NULL DEFAULT '',
+            file_type TEXT NOT NULL DEFAULT 'file',
+            extractor TEXT NOT NULL DEFAULT '',
+            page_count INTEGER,
+            title TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'ready',
+            error TEXT NOT NULL DEFAULT '',
+            indexed_at TEXT NOT NULL,
+            UNIQUE(conversation_id, path))'''
+    )
+    c.execute(
+        '''CREATE TABLE IF NOT EXISTS document_chunks
+           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            page_start INTEGER,
+            page_end INTEGER,
+            section_title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            char_count INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE(conversation_id, path, chunk_index))'''
+    )
+    c.execute('CREATE INDEX IF NOT EXISTS idx_document_sources_lookup ON document_sources(conversation_id, path)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_document_chunks_lookup ON document_chunks(conversation_id, path, chunk_index)')
+    if sqlite_has_fts(conn):
+        c.execute(
+            f'''CREATE VIRTUAL TABLE IF NOT EXISTS {DOCUMENT_FTS_TABLE} USING fts5(
+                 content,
+                 section_title,
+                 path UNINDEXED,
+                 conversation_id UNINDEXED
+                 )'''
+        )
 
 
 def init_db():
@@ -3283,6 +4354,8 @@ def init_db():
         except sqlite3.OperationalError as exc:
             logger.warning("SQLite FTS setup failed, falling back to LIKE search: %s", exc)
 
+        setup_document_tables(conn)
+
         conn.commit()
         conn.close()
         logger.info("Database initialized")
@@ -3385,12 +4458,6 @@ class ChatRequest(BaseModel):
 class WorkspaceFileUpdateRequest(BaseModel):
     path: str
     content: str
-
-
-class RecoverAssistantMessageRequest(BaseModel):
-    message_id: Optional[int] = None
-    content: str = ""
-    target_dir: str = ""
 
 
 class SwitchModelRequest(BaseModel):
@@ -4376,6 +5443,9 @@ async def read_file_content(path: str):
             raise HTTPException(status_code=403, detail="Access denied")
         if not os.path.isfile(abs_path):
             raise HTTPException(status_code=404, detail="File not found")
+        target = pathlib.Path(abs_path)
+        if is_supported_document_path(target):
+            return build_document_preview_result(target, limit=TOOL_RESULT_TEXT_LIMIT)
         if os.path.getsize(abs_path) > 1024 * 1024:
             raise HTTPException(status_code=400, detail="File too large (max 1MB)")
 
@@ -4385,6 +5455,8 @@ async def read_file_content(path: str):
         return {'path': path, 'content': content, 'size': len(content), 'lines': content.count('\n') + 1}
     except (HTTPException):
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -4446,7 +5518,7 @@ async def upload_workspace_files(
             "path": format_workspace_path(destination, workspace),
             "size": size,
             "content_type": upload.content_type or "application/octet-stream",
-            "kind": "spreadsheet" if is_spreadsheet_path(destination.name) else "file",
+            "kind": classify_workspace_file_kind(destination.name),
         })
 
     return {
@@ -4506,19 +5578,34 @@ async def read_workspace_file(conversation_id: str, path: str):
 
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    if target.stat().st_size > 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 1MB)")
-
-    with target.open('r', encoding='utf-8', errors='replace') as f:
-        content = f.read()
+    rel_path = format_workspace_path(target, workspace)
+    try:
+        if is_supported_document_path(target):
+            preview = build_document_preview_result(
+                target,
+                conversation_id=conversation_id,
+                rel_path=rel_path,
+                limit=TOOL_RESULT_TEXT_LIMIT,
+            )
+        else:
+            if target.stat().st_size > 1024 * 1024:
+                raise HTTPException(status_code=400, detail="File too large (max 1MB)")
+            with target.open('r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            preview = {
+                "path": rel_path,
+                "content": content,
+                "size": len(content),
+                "lines": content.count('\n') + 1,
+                "file_type": "text",
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     return {
         "conversation_id": conversation_id,
         "workspace_path": str(workspace),
-        "path": format_workspace_path(target, workspace),
-        "content": content,
-        "size": len(content),
-        "lines": content.count('\n') + 1,
+        **preview,
     }
 
 
@@ -4547,82 +5634,6 @@ async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdat
         "path": format_workspace_path(target, workspace),
         "bytes_written": len(encoded),
         "lines": request.content.count("\n") + 1,
-    }
-
-
-@app.post("/api/workspace/{conversation_id}/recover")
-async def recover_assistant_message_to_workspace(conversation_id: str, request: RecoverAssistantMessageRequest):
-    workspace = get_workspace_path(conversation_id)
-    source_message = None
-
-    if request.message_id is not None:
-        source_message = get_message_by_id(request.message_id)
-        if not source_message:
-            raise HTTPException(status_code=404, detail="Message not found")
-        if source_message["conversation_id"] != conversation_id:
-            raise HTTPException(status_code=400, detail="Message does not belong to this conversation")
-        if source_message["role"] != "assistant":
-            raise HTTPException(status_code=400, detail="Only assistant messages can be recovered")
-
-    message_content = (
-        source_message["content"]
-        if source_message is not None
-        else str(request.content or "")
-    ).strip()
-    if not message_content:
-        raise HTTPException(status_code=400, detail="No assistant content was provided")
-
-    now = datetime.now()
-    source_label = f"assistant message #{source_message['id']}" if source_message else "assistant draft"
-    default_target = f"recovered/{now.strftime('%Y%m%d-%H%M%S')}"
-    base_rel = sanitize_relative_workspace_path(request.target_dir or default_target, fallback=default_target)
-    base_dir = resolve_workspace_relative_path(conversation_id, base_rel)
-    if base_dir.exists():
-        base_rel = sanitize_relative_workspace_path(f"{base_rel}-{uuid.uuid4().hex[:6]}", fallback=default_target)
-        base_dir = resolve_workspace_relative_path(conversation_id, base_rel)
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    files_dir = base_dir / "files"
-    files_dir.mkdir(parents=True, exist_ok=True)
-
-    matches = list(RECOVERED_CODE_BLOCK_RE.finditer(message_content))
-    created_paths: List[str] = []
-
-    for index, match in enumerate(matches, start=1):
-        info = (match.group(1) or "").strip()
-        code = match.group(2) or ""
-        context_before = message_content[max(0, match.start() - 500):match.start()]
-        inferred_name = infer_filename_for_code_block(info, context_before, message_content, index, len(matches))
-        safe_name = sanitize_relative_workspace_path(inferred_name, fallback=f"snippet-{index}.txt")
-        destination = files_dir / safe_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            replacement = ensure_unique_workspace_filename(destination.parent, destination.name)
-            destination = destination.parent / replacement
-        destination.write_text(code.rstrip() + "\n", encoding="utf-8")
-        created_paths.append(format_workspace_path(destination, workspace))
-
-    readme_path = base_dir / "README.md"
-    readme_path.write_text(
-        build_recovered_notes_markdown(
-            source_label=source_label,
-            created_paths=created_paths,
-            message_content=message_content,
-            recovered_at=now.isoformat(),
-        ),
-        encoding="utf-8",
-    )
-
-    all_paths = [format_workspace_path(readme_path, workspace), *created_paths]
-    return {
-        "conversation_id": conversation_id,
-        "workspace_path": str(workspace),
-        "source": source_label,
-        "target_dir": format_workspace_path(base_dir, workspace),
-        "readme_path": format_workspace_path(readme_path, workspace),
-        "created_files": created_paths,
-        "paths": all_paths,
-        "count": len(created_paths),
     }
 
 
@@ -4713,6 +5724,118 @@ def parse_tool_call(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+SUPPORTED_TOOL_NAMES = {
+    "workspace.list_files",
+    "workspace.grep",
+    "workspace.read_file",
+    "workspace.patch_file",
+    "workspace.run_command",
+    "spreadsheet.describe",
+    "conversation.search_history",
+    "web.search",
+    "web.fetch_page",
+}
+
+SUPPORTED_TOOL_NAME_PATTERN = re.compile(
+    r'"name"\s*:\s*"(?P<name>'
+    r'workspace\.(?:list_files|grep|read_file|patch_file|run_command)'
+    r'|spreadsheet\.describe'
+    r'|conversation\.search_history'
+    r'|web\.(?:search|fetch_page)'
+    r')"'
+)
+
+
+def extract_leaked_tool_call(raw: str) -> Optional[Dict[str, Any]]:
+    """Detect an internal tool payload that leaked into visible assistant text."""
+    cleaned = strip_stream_special_tokens(raw).strip()
+    if not cleaned:
+        return None
+
+    looks_like_tool_payload = (
+        cleaned.startswith("<tool_call>")
+        or (cleaned.startswith("{") and '"name"' in cleaned and '"arguments"' in cleaned)
+    )
+    if not looks_like_tool_payload:
+        return None
+
+    try:
+        call = parse_tool_call(cleaned)
+    except Exception:
+        call = None
+
+    if call and call.get("name") in SUPPORTED_TOOL_NAMES:
+        return call
+
+    name_match = SUPPORTED_TOOL_NAME_PATTERN.search(cleaned)
+    if not name_match:
+        return None
+
+    arguments: Dict[str, Any] = {}
+    path_match = re.search(r'"path"\s*:\s*"(?P<path>[^"]+)"', cleaned)
+    if path_match:
+        arguments["path"] = path_match.group("path")
+
+    return {
+        "id": "leaked_tool_call",
+        "name": name_match.group("name"),
+        "arguments": arguments,
+    }
+
+
+def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlags") -> str:
+    """Turn an internal tool payload leak into a short, user-facing explanation."""
+    name = str(call.get("name", "")).strip()
+    arguments = call.get("arguments", {}) if isinstance(call.get("arguments"), dict) else {}
+    path = str(arguments.get("path", "")).strip()
+    quoted_path = f"`{path}`" if path else "the workspace"
+
+    if name == "workspace.patch_file":
+        if not features.workspace_write:
+            return (
+                f"I tried to use an internal file-editing tool to write {quoted_path}, "
+                "but workspace editing was not enabled for this turn. Retry and allow file edits "
+                "if you want me to create it directly, or ask me to paste the code inline instead."
+            )
+        return (
+            f"I tried to create or edit {quoted_path}, but an internal tool payload leaked into the reply "
+            "instead of a normal answer. Please retry the request."
+        )
+
+    if name == "workspace.run_command":
+        if not features.workspace_run_commands:
+            return (
+                "I tried to use an internal command runner, but command execution was not enabled for this turn. "
+                "Retry and allow command execution if you want me to verify things automatically."
+            )
+        return (
+            "I tried to run an internal verification command, but the tool payload leaked into the visible reply. "
+            "Please retry the request."
+        )
+
+    if name.startswith("workspace.") or name == "spreadsheet.describe":
+        return (
+            "I accidentally exposed an internal workspace tool call instead of a normal reply. "
+            "Please retry the request."
+        )
+
+    if name.startswith("web."):
+        if not features.web_search:
+            return (
+                "I tried to use an internal web tool, but web search was not enabled for this turn. "
+                "Retry with web search enabled if you want me to fetch current information."
+            )
+        return (
+            "I accidentally exposed an internal web tool call instead of a normal reply. "
+            "Please retry the request."
+        )
+
+    return (
+        "I accidentally exposed an internal tool call instead of a normal reply. "
+        "Please retry the request."
+    )
+
+
 def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dict[str, Any]:
     """List files inside the conversation workspace."""
     workspace = get_workspace_path(conversation_id)
@@ -4796,6 +5919,59 @@ def workspace_grep_result(
             skipped_files += 1
             continue
 
+        rel_file_path = format_workspace_path(file_path, workspace)
+        if is_pdf_path(file_path):
+            try:
+                source = ensure_document_index(conversation_id, rel_file_path)
+            except Exception:
+                skipped_files += 1
+                continue
+            if source.get("status") != "ready":
+                skipped_files += 1
+                continue
+            pdf_matches = fetch_ranked_document_candidates(
+                conversation_id,
+                [rel_file_path],
+                cleaned_query,
+                hyde_query="",
+                limit=max(1, safe_limit - len(matches)),
+            )
+            if pdf_matches:
+                files_scanned += 1
+            for match in pdf_matches:
+                excerpt = build_query_excerpt(match.get("content", ""), cleaned_query, window=240)
+                page_start = match.get("page_start")
+                page_end = match.get("page_end")
+                page_label = ""
+                if page_start:
+                    page_label = f"page {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
+                matches.append({
+                    "path": rel_file_path,
+                    "line": page_start or 1,
+                    "column": 1,
+                    "text": truncate_output(
+                        f"{match.get('section_title') or 'PDF excerpt'}{f' ({page_label})' if page_label else ''}: {excerpt}".strip(),
+                        limit=240,
+                    ),
+                    "before": "",
+                    "after": "",
+                })
+                files_with_matches.add(rel_file_path)
+                if len(matches) >= safe_limit:
+                    return {
+                        "query": cleaned_query,
+                        "path": format_workspace_path(target, workspace),
+                        "glob": glob_pattern,
+                        "count": len(matches),
+                        "files_scanned": files_scanned,
+                        "matched_files": len(files_with_matches),
+                        "skipped_files": skipped_files,
+                        "truncated": True,
+                        "paths": sorted(files_with_matches),
+                        "grep_matches": matches,
+                    }
+            continue
+
         if file_size > WORKSPACE_FILE_SIZE_LIMIT or is_probably_binary_file(file_path):
             skipped_files += 1
             continue
@@ -4808,7 +5984,6 @@ def workspace_grep_result(
             continue
 
         files_scanned += 1
-        rel_file_path = format_workspace_path(file_path, workspace)
         for line_number, line in enumerate(lines, start=1):
             haystack = line if case_sensitive else line.casefold()
             column_index = haystack.find(needle)
@@ -4861,6 +6036,14 @@ def workspace_read_file_result(conversation_id: str, rel_path: str) -> Dict[str,
 
     if not target.is_file():
         raise ValueError("File not found")
+    rel_file_path = format_workspace_path(target, workspace)
+    if is_supported_document_path(target):
+        return build_document_preview_result(
+            target,
+            conversation_id=conversation_id,
+            rel_path=rel_file_path,
+            limit=TOOL_RESULT_TEXT_LIMIT,
+        )
     if target.stat().st_size > WORKSPACE_FILE_SIZE_LIMIT:
         raise ValueError("File too large (max 1MB)")
 
@@ -4868,7 +6051,7 @@ def workspace_read_file_result(conversation_id: str, rel_path: str) -> Dict[str,
         content = truncate_output(f.read(), limit=TOOL_RESULT_TEXT_LIMIT)
 
     return {
-        "path": format_workspace_path(target, workspace),
+        "path": rel_file_path,
         "content": content,
         "size": len(content),
         "lines": content.count("\n") + 1,
@@ -5891,6 +7074,51 @@ async def execute_tool_call(
     return {"id": call_id, "ok": True, "result": result}
 
 
+async def emit_direct_tool_call(
+    websocket: WebSocket,
+    conversation_id: str,
+    call: Dict[str, Any],
+    *,
+    features: Optional[FeatureFlags] = None,
+    status_prefix: str = "",
+    activity_phase: str = "respond",
+    activity_step_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute one deterministic tool call while mirroring the normal tool-loop UI events."""
+    await websocket.send_json({
+        "type": "tool_start",
+        "name": call["name"],
+        "content": f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
+        "arguments": call.get("arguments", {}),
+    })
+    await send_activity_event(
+        websocket,
+        activity_phase,
+        "Tool",
+        f"{status_prefix}{tool_status_summary(call['name'], call.get('arguments', {}))}",
+        step_label=activity_step_label,
+    )
+    result = await execute_tool_call(conversation_id, call, features)
+    await websocket.send_json({
+        "type": "tool_result",
+        "name": call["name"],
+        "ok": result.get("ok", False),
+        "content": f"{status_prefix}{tool_result_preview(result)}",
+        "arguments": call.get("arguments", {}),
+        "payload": result.get("result", {}) if result.get("ok") else {
+            "error": result.get("error", "Tool failed"),
+        },
+    })
+    await send_activity_event(
+        websocket,
+        activity_phase if result.get("ok") else "error",
+        "Tool Result" if result.get("ok") else "Tool Error",
+        f"{status_prefix}{tool_result_preview(result)}",
+        step_label=activity_step_label,
+    )
+    return result
+
+
 async def run_tool_loop(
     websocket: WebSocket,
     conversation_id: str,
@@ -5929,10 +7157,10 @@ async def run_tool_loop(
             call = parse_tool_call(cleaned)
         except Exception as exc:
             logger.warning("Tool call parse error, treating as final answer: %s", exc)
-            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens)
+            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens, features)
 
         if not call:
-            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens)
+            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens, features)
 
         if allowed_tools and call["name"] not in allowed_tools:
             return ToolLoopOutcome(
@@ -6548,6 +7776,7 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     """Create a sequential execution plan using message context plus observed workspace facts."""
     if session.plan:
         await send_assistant_note(session.websocket, "Reusing the saved execution plan from the existing task board.")
+        session.plan_preview_pending = bool(preview_only)
         if not preview_only:
             await send_build_steps(
                 session.websocket,
@@ -6556,7 +7785,9 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
                 active_index=len(session.build_step_summaries) if len(session.build_step_summaries) < len(session.plan.get("builder_steps", [])) else None,
             )
             await persist_task_board(session, active_build_step=len(session.build_step_summaries))
-            await persist_task_state(session)
+        else:
+            await persist_task_board(session, active_build_step=None)
+        await persist_task_state(session)
         return session.plan
     await send_activity_event(
         session.websocket,
@@ -6588,11 +7819,14 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
             logger.warning("Deep planner returned invalid JSON; using heuristic plan instead.")
             session.plan = build_heuristic_deep_plan(session)
     session.plan = apply_deep_plan_guardrails(session, session.plan)
+    session.plan_preview_pending = bool(preview_only)
     await send_assistant_note(session.websocket, format_deep_plan_note(session.plan))
     if not preview_only:
         await send_build_steps(session.websocket, session.plan.get("builder_steps", []), completed_count=0, active_index=0)
         await persist_task_board(session, active_build_step=0, announce=True)
-        await persist_task_state(session)
+    else:
+        await persist_task_board(session, active_build_step=None)
+    await persist_task_state(session)
     return session.plan
 
 
@@ -6602,7 +7836,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
         session.websocket,
         "respond",
         "Respond",
-        "Answering directly from the inspected context without a workspace execution plan.",
+        "Answering from inspected context.",
     )
     allowed_tools = select_enabled_tools(session.conversation_id, session.message, session.features)
     allowed_tools = [
@@ -6661,7 +7895,7 @@ async def deep_verify(session: DeepSession) -> str:
         session.websocket,
         "verify",
         "Verify",
-        "Checking the built result against the workspace and requested deliverable.",
+        "Checking the result against the workspace.",
     )
     verify_history = session.history_messages() + [{
         "role": "user",
@@ -6710,7 +7944,7 @@ async def deep_review(session: DeepSession) -> str:
         session.websocket,
         "synthesize",
         "Synthesize",
-        "Preparing the final answer from verified artifacts, notes, and audit results.",
+        "Preparing the final answer from verified artifacts.",
     )
     artifact_refs = [f"[[artifact:{session.task_board_path}]]"]
     artifact_refs.extend(f"[[artifact:{path}]]" for path in session.changed_files[:8])
@@ -6762,7 +7996,7 @@ async def orchestrated_chat(
         websocket,
         "analyze",
         "Analyze",
-        "Evaluating the prompt to choose the right execution path.",
+        "Choosing the execution path.",
     )
 
     session = DeepSession(
@@ -6786,9 +8020,9 @@ async def orchestrated_chat(
         "evaluate",
         "Evaluate",
         (
-            "Workspace-assisted deep mode selected."
+            "Workspace path selected."
             if session.workspace_enabled
-            else "Text-first deep mode selected."
+            else "Text path selected."
         ),
     )
 
@@ -6803,6 +8037,9 @@ async def orchestrated_chat(
         logger.warning("Deep mode resume failed, continuing fresh: %s", e)
 
     await deep_inspect_workspace(session)
+
+    if is_bare_plan_execution_request(session.message) and not session.plan:
+        return "I couldn't find a saved plan to execute in this chat. Ask me to generate the plan again first."
 
     if should_preview_deep_plan(session):
         await deep_decompose(session, preview_only=True)
@@ -6825,8 +8062,8 @@ async def orchestrated_chat(
     await send_activity_event(
         websocket,
         "verify",
-        "Quality Check",
-        "Reviewing the drafted answer before final delivery.",
+        "Review",
+        "Reviewing the draft.",
     )
     critique = await critique_response(message, draft_response)
     if critique["pass"]:
@@ -6838,7 +8075,7 @@ async def orchestrated_chat(
         websocket,
         "synthesize",
         "Refine",
-        "Refining the draft after quality review.",
+        "Refining the draft.",
     )
 
     refine_messages = [
@@ -6863,6 +8100,253 @@ async def orchestrated_chat(
     return refined_response
 
 
+def build_seeded_tool_history(
+    history: List[Dict[str, str]],
+    user_message: str,
+    call: Dict[str, Any],
+    result: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """Append a deterministic first tool call/result before handing control back to the tool loop."""
+    seeded = list(history)
+    seeded.append({"role": "user", "content": user_message})
+    seeded.append({"role": "assistant", "content": json.dumps(call, ensure_ascii=False)})
+    seeded.append({
+        "role": "user",
+        "content": "<tool_result>\n" + json.dumps(result, ensure_ascii=False) + "\n</tool_result>",
+    })
+    return seeded
+
+
+async def handle_direct_search_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    query: str,
+) -> str:
+    """Run a deterministic web search first, then let the model fetch pages only if needed."""
+    cleaned_query = str(query or "").strip()
+    if not cleaned_query:
+        return "Use `/search <query>` to run a direct web search."
+
+    command_features = replace(features, web_search=True)
+    search_call = {
+        "id": "direct_search",
+        "name": "web.search",
+        "arguments": {"query": cleaned_query, "limit": 5},
+    }
+    search_result = await emit_direct_tool_call(
+        websocket,
+        conversation_id,
+        search_call,
+        features=command_features,
+        status_prefix="Slash /search: ",
+        activity_phase="respond",
+    )
+    if not search_result.get("ok"):
+        return f"Search failed: {search_result.get('error', 'unknown error')}"
+
+    seeded_history = build_seeded_tool_history(
+        history,
+        (
+            f"The user invoked /search with query:\n{cleaned_query}\n\n"
+            "Start from the provided web search results. Fetch a result page only if it materially improves the answer, then respond clearly with citations."
+        ),
+        search_call,
+        search_result,
+    )
+    outcome = await run_tool_loop(
+        websocket,
+        conversation_id,
+        seeded_history,
+        system_prompt,
+        min(max_tokens, 2048),
+        features=command_features,
+        allowed_tools=["web.fetch_page"],
+        status_prefix="Slash /search: ",
+        max_steps=3,
+        activity_phase="respond",
+    )
+    return outcome.final_text
+
+
+async def handle_direct_grep_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    query: str,
+) -> str:
+    """Run grep first, then let the model inspect matching files if needed."""
+    cleaned_query = str(query or "").strip()
+    if not cleaned_query:
+        return "Use `/grep <text>` to search the workspace first."
+
+    command_features = replace(features, agent_tools=True)
+    grep_call = {
+        "id": "direct_grep",
+        "name": "workspace.grep",
+        "arguments": {"query": cleaned_query, "path": ".", "glob": "*", "limit": 20},
+    }
+    grep_result = await emit_direct_tool_call(
+        websocket,
+        conversation_id,
+        grep_call,
+        features=command_features,
+        status_prefix="Slash /grep: ",
+        activity_phase="respond",
+    )
+    if not grep_result.get("ok"):
+        return f"Grep failed: {grep_result.get('error', 'unknown error')}"
+
+    seeded_history = build_seeded_tool_history(
+        history,
+        (
+            f"The user invoked /grep with query:\n{cleaned_query}\n\n"
+            "Start from the provided grep matches. Read files only when needed to explain the relevant hits, and keep the answer grounded in the observed matches."
+        ),
+        grep_call,
+        grep_result,
+    )
+    outcome = await run_tool_loop(
+        websocket,
+        conversation_id,
+        seeded_history,
+        system_prompt,
+        min(max_tokens, 2048),
+        features=command_features,
+        allowed_tools=["workspace.read_file", "workspace.list_files", "spreadsheet.describe"],
+        status_prefix="Slash /grep: ",
+        max_steps=3,
+        activity_phase="respond",
+    )
+    return outcome.final_text
+
+
+async def handle_direct_plan_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    request_text: str,
+) -> str:
+    """Inspect first and always return a concrete execution plan draft."""
+    cleaned_request = str(request_text or "").strip()
+    if not cleaned_request:
+        return "Use `/plan <task>` to generate an execution plan."
+
+    command_features = replace(features, agent_tools=True)
+    session = DeepSession(
+        websocket=websocket,
+        conversation_id=conversation_id,
+        message=cleaned_request,
+        history=history,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens,
+        features=command_features,
+        context=build_recent_context(history),
+        workspace_enabled=True,
+    )
+    await send_activity_event(
+        websocket,
+        "analyze",
+        "Analyze",
+        "Slash /plan selected the planning flow.",
+    )
+    await deep_confirm_understanding(session)
+    await deep_inspect_workspace(session)
+    await deep_decompose(session, preview_only=True)
+    await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
+    return render_deep_plan_preview(session.plan)
+
+
+async def handle_direct_code_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    request_text: str,
+) -> str:
+    """Run the inspect-plan-build-verify pipeline directly for code work."""
+    cleaned_request = str(request_text or "").strip()
+    if not cleaned_request:
+        return "Use `/code <task>` to inspect the workspace and implement a change."
+
+    command_features = replace(features, agent_tools=True)
+    session = DeepSession(
+        websocket=websocket,
+        conversation_id=conversation_id,
+        message=cleaned_request,
+        history=history,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens,
+        features=command_features,
+        context=build_recent_context(history),
+        workspace_enabled=True,
+    )
+    await send_activity_event(
+        websocket,
+        "analyze",
+        "Analyze",
+        "Slash /code selected the direct code workflow.",
+    )
+    await deep_confirm_understanding(session)
+    await deep_inspect_workspace(session)
+    await deep_decompose(session)
+
+    if not command_features.workspace_write:
+        await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
+        return (
+            "I planned the code change, but write access was not granted for this turn.\n\n"
+            f"{format_deep_plan_note(session.plan)}\n\n"
+            "Approve workspace edits and resend the execution draft to run it."
+        )
+
+    await deep_build_workspace(session)
+    await deep_parallel_solve(session)
+    await deep_verify(session)
+    return await deep_review(session)
+
+
+async def handle_direct_slash_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    slash_command: Dict[str, str],
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+) -> str:
+    """Dispatch supported direct slash commands to their deterministic workflow."""
+    name = slash_command.get("name", "")
+    args = slash_command.get("args", "")
+    if name == "search":
+        return await handle_direct_search_command(
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+        )
+    if name == "grep":
+        return await handle_direct_grep_command(
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+        )
+    if name == "plan":
+        return await handle_direct_plan_command(
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+        )
+    if name == "code":
+        return await handle_direct_code_command(
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args
+        )
+    return f"Unsupported slash command: /{slash_command.get('raw_name') or name}"
+
+
 async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     """Process a single chat turn so the websocket loop can also handle stop requests."""
     message = data.get('message', '').strip()
@@ -6881,15 +8365,28 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     custom_system_prompt = data.get('system_prompt')
     mode = data.get('mode', 'normal')
     features = parse_feature_flags(data.get('features'))
+    slash_command = (
+        parse_direct_slash_command_payload(data.get("slash_command"))
+        or infer_direct_slash_command_from_message(message)
+    )
 
     try:
-        attachment_context = format_attachment_context(attachments)
-        effective_message = (
-            f"{message}\n\n{attachment_context}" if attachment_context else message
-        )
-
-        save_message(conv_id, 'user', effective_message)
-        history = get_conversation_history(conv_id, current_query=effective_message)
+        attachment_context = await build_attachment_context(conv_id, attachments, message)
+        saved_user_message = f"{message}\n\n{attachment_context}" if attachment_context else message
+        slash_request = ""
+        if slash_command:
+            slash_request = (
+                f"{slash_command.get('args', '')}\n\n{attachment_context}".strip()
+                if attachment_context else
+                str(slash_command.get("args", "")).strip()
+            )
+            history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
+            save_message(conv_id, 'user', saved_user_message)
+            effective_message = slash_request or saved_user_message
+        else:
+            effective_message = saved_user_message
+            save_message(conv_id, 'user', effective_message)
+            history = get_conversation_history(conv_id, current_query=effective_message)
         system_prompt = build_effective_system_prompt(
             custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
             effective_message,
@@ -6905,10 +8402,32 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             "evaluate",
             "Evaluate",
             (
-                f"Mode request: {mode}. Workspace intent: {workspace_intent}. "
-                f"Candidate tools: {', '.join(enabled_tools) if enabled_tools else 'none'}."
+                f"Slash /{slash_command.get('name')} selected."
+                if slash_command else
+                (
+                    f"Mode {mode}. Intent {workspace_intent}. "
+                    f"Tools: {', '.join(enabled_tools) if enabled_tools else 'none'}."
+                )
             ),
         )
+
+        if slash_command:
+            full_response = await handle_direct_slash_command(
+                websocket,
+                conv_id,
+                slash_command,
+                history,
+                system_prompt,
+                max_tokens,
+                features,
+            )
+            await websocket.send_json({'type': 'start'})
+            await send_final_replacement(websocket, full_response)
+            assistant_message_id = save_message(conv_id, 'assistant', full_response)
+            schedule_conversation_summary_refresh(conv_id)
+            await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
+            await websocket.send_json({'type': 'done'})
+            return
 
         if mode == 'deep':
             try:
@@ -6933,9 +8452,9 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 "respond",
                 "Respond",
                 (
-                    "Using the shared tool loop to answer."
+                    "Using tools to answer."
                     if enabled_tools
-                    else "Answering directly without tools."
+                    else "Answering directly."
                 ),
             )
             tool_step_limit = tool_loop_step_limit_for_request(effective_message, enabled_tools)
@@ -6975,6 +8494,15 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     messages,
                     max_tokens,
                 )
+                leaked_call = extract_leaked_tool_call(full_response)
+                if leaked_call:
+                    logger.warning(
+                        "Recovered leaked tool payload in direct response for conv %s: %s",
+                        conv_id,
+                        leaked_call.get("name", ""),
+                    )
+                    full_response = format_leaked_tool_call_message(leaked_call, features)
+                    await send_final_replacement(websocket, full_response)
             assistant_message_id = save_message(conv_id, 'assistant', full_response)
             schedule_conversation_summary_refresh(conv_id)
             await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})

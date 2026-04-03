@@ -16,8 +16,10 @@ RUN pip install --no-cache-dir \
     pandas \
     openpyxl
 
-# System deps for voice tools (STT/TTS)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# System deps for voice tools (STT/TTS) and text PDF extraction
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Voice: OpenAI Whisper (STT) and Piper (TTS)
