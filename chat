@@ -8,7 +8,17 @@ cd "$PROJECT_DIR"
 
 # Filter known benign Docker/Colima transport noise while preserving real errors.
 docker_compose() {
-    docker compose "$@" 2> >(
+    local -a compose_cmd
+    if docker compose version >/dev/null 2>&1; then
+        compose_cmd=(docker compose)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        compose_cmd=(docker-compose)
+    else
+        echo "ERROR: Docker Compose is unavailable. Install the Docker Compose v2 plugin or the docker-compose binary." >&2
+        exit 1
+    fi
+
+    "${compose_cmd[@]}" "$@" 2> >(
         awk '
             /^channel [0-9]+: open failed: connect failed: Connection refused$/ { next }
             /^\[\+\] Pulling [0-9]+\/[0-9]+ failed: connect failed: Connection refused$/ { next }

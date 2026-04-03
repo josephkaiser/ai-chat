@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" id="themeColorMeta" content="#f5f0e8">
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
@@ -64,7 +66,7 @@
     <div class="overlay" id="dashboardOverlay" onclick="closeDashboard()">
         <div class="dashboard-panel" onclick="event.stopPropagation()">
             <div class="panel-header">
-                <span>Dashboard</span>
+                <span>Models</span>
                 <button onclick="closeDashboard()">&times;</button>
             </div>
             <div class="dashboard-content" id="dashboardContent">
@@ -238,7 +240,7 @@
                             <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
                                 <span class="wolfy-stage" aria-hidden="true">
                                     <span class="wolfy-shadow"></span>
-                                    <span class="wolfy-sprite"></span>
+                                    <canvas class="wolfy-canvas" width="66" height="66"></canvas>
                                     <span class="wolfy-bark-lines">
                                         <span></span>
                                         <span></span>
@@ -264,15 +266,15 @@
                         <div class="plan-approval-panel" id="planApprovalPanel" hidden>
                             <div class="plan-approval-header">
                                 <div>
-                                    <div class="plan-approval-title" id="planApprovalTitle">Build Steps</div>
-                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Press Enter from the prompt to start, or use Up Arrow there to revise these steps first.</div>
+                                    <div class="plan-approval-title" id="planApprovalTitle">Plan Preview</div>
+                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Press Enter or Send to start, or use Up Arrow there to revise these steps first.</div>
                                 </div>
                                 <button type="button" class="plan-approval-dismiss" id="planApprovalDismiss" onclick="dismissExecutionPlan()" aria-label="Dismiss execution plan">&times;</button>
                             </div>
                             <div class="plan-approval-editor" id="planApprovalEditor" hidden>
                                 <label class="plan-approval-editor-label" for="planApprovalDraft">Editable build steps</label>
                                 <textarea class="plan-approval-draft" id="planApprovalDraft" spellcheck="false" oninput="handleExecutionPlanDraftChange(this)" onkeydown="handleExecutionPlanDraftKeyDown(event)"></textarea>
-                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter here to start with the edited steps.</div>
+                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter here to start with the edited steps, or use Send.</div>
                             </div>
                             <details class="plan-approval-reasoning" id="planApprovalReasoning" hidden>
                                 <summary>Reasoning for this turn</summary>
@@ -281,36 +283,50 @@
                             <div class="plan-approval-checklist" id="planApprovalChecklist" hidden>
                                 <ol class="plan-approval-steps" id="planApprovalSteps"></ol>
                             </div>
-                            <div class="plan-approval-actions">
-                                <button type="button" class="plan-approval-button primary" id="planApprovalRunButton" onclick="approveExecutionPlan()">Yes, Start Step 1</button>
-                                <button type="button" class="plan-approval-button" id="planApprovalResetButton" onclick="resetExecutionPlanDraft()">Reset Steps</button>
-                            </div>
                         </div>
                         <div class="input-container" onclick="focusInput()">
                             <input id="attachmentInput" type="file" multiple hidden onchange="handleAttachmentSelection(event)">
                             <textarea id="input" placeholder="What can I help you with?" rows="3" onkeydown="handleKeyDown(event)" oninput="handleInputChange(this)"></textarea>
                             <div class="composer-footer" onclick="event.stopPropagation()">
                                 <div class="composer-actions">
-                                    <button id="attachButton" class="composer-control attach-toggle" onclick="openAttachmentPicker()" title="Attach files" aria-label="Attach files">
-                                        <span class="composer-icon" aria-hidden="true">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M12 7v10"></path>
-                                                <path d="M7 12h10"></path>
-                                            </svg>
-                                        </span>
-                                    </button>
-                                    <div class="model-select-wrap">
-                                        <select id="modelSelect" class="composer-select" onchange="handleModelSelectChange(this.value)" aria-label="Select model">
-                                            <option value="">Loading model...</option>
-                                        </select>
-                                        <span class="model-select-caret" aria-hidden="true">
-                                            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M2.5 4.25 6 7.75l3.5-3.5"></path>
-                                            </svg>
-                                        </span>
+                                    <div class="composer-action-item">
+                                        <button id="attachButton" class="composer-control composer-control-circle attach-toggle" onclick="openAttachmentPicker()" title="Attach files" aria-label="Attach files">
+                                            <span class="composer-glyph" aria-hidden="true">+</span>
+                                            <span class="sr-only">Attach files</span>
+                                        </button>
+                                        <div class="composer-hover-card" aria-hidden="true">
+                                            <span class="composer-hover-title">Add</span>
+                                            <span class="composer-hover-text">Attach files, screenshots, audio, or workspace snippets to the next message.</span>
+                                        </div>
                                     </div>
-                                    <button id="dashboardButton" class="composer-control dashboard-toggle" onclick="showDashboard()" title="Open model dashboard" aria-label="Open model dashboard">Models</button>
-                                    <div class="model-select-wrap">
+                                    <div class="composer-action-item composer-action-item-model">
+                                        <button id="modelSummaryButton" class="composer-control composer-control-circle model-summary-button" onclick="showDashboard()" title="Open Models" aria-label="Open Models">
+                                            <span class="composer-glyph model-summary-glyph" aria-hidden="true">AI</span>
+                                            <span class="composer-icon model-summary-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                    <rect x="7" y="7" width="10" height="10" rx="2"></rect>
+                                                    <path d="M9 1.5v3"></path>
+                                                    <path d="M15 1.5v3"></path>
+                                                    <path d="M9 19.5v3"></path>
+                                                    <path d="M15 19.5v3"></path>
+                                                    <path d="M1.5 9h3"></path>
+                                                    <path d="M1.5 15h3"></path>
+                                                    <path d="M19.5 9h3"></path>
+                                                    <path d="M19.5 15h3"></path>
+                                                </svg>
+                                            </span>
+                                            <span class="sr-only model-summary-label">Loading model...</span>
+                                        </button>
+                                        <div class="composer-hover-card composer-hover-card-wide" aria-hidden="true">
+                                            <span class="composer-hover-title">Models</span>
+                                            <span class="composer-hover-text model-summary-hover-copy">Open the local model library to switch runtimes or add a new one.</span>
+                                            <span class="composer-hover-meta model-summary-hover-meta">Current: Loading model...</span>
+                                        </div>
+                                    </div>
+                                    <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button" onclick="toggleDeepModeMobile()" title="Toggle reasoning effort" aria-label="Toggle reasoning effort">
+                                        <span class="reasoning-toggle-glyph" aria-hidden="true">!</span>
+                                    </button>
+                                    <div class="model-select-wrap reasoning-select-wrap">
                                         <select id="reasoningSelect" class="composer-select reasoning-select" onchange="handleReasoningSelectChange(this.value)" aria-label="Select reasoning effort">
                                             <option value="high">High</option>
                                             <option value="low">Low</option>
@@ -350,6 +366,10 @@
                 </div>
             </div>
             <div class="ide-workspace" id="ideWorkspace">
+                <div class="workspace-view-switch" aria-label="Workspace view switcher">
+                    <button class="workspace-view-button" id="workspaceTreeViewButton" type="button" onclick="setWorkspaceViewMode('tree')">Files</button>
+                    <button class="workspace-view-button" id="workspaceReaderViewButton" type="button" onclick="setWorkspaceViewMode('reader')">Reader</button>
+                </div>
                 <div class="ide-top">
                     <aside class="workspace-panel" id="workspacePanel">
                         <div class="workspace-header">
