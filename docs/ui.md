@@ -129,7 +129,7 @@ Deep mode is no longer just "think harder." The UI now exposes several orchestra
 - a reasoning-effort control in the composer
 - streaming activity updates across inspect/plan/execute/verify phases
 - structured build-step progress
-- plan previews that stay out of the composer by default and can be approved directly or copied into the composer on demand
+- plan previews that keep the composer clear, surface editable build steps above it, and can be approved directly with Enter
 - automatic end-to-end execution for approved broad workspace build requests, so the assistant can scaffold and iterate in the workspace without stopping after step 1
 
 On mobile, the title area doubles as a quick reasoning toggle, while the workspace panel is intentionally suppressed to keep the layout manageable.

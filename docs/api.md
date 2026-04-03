@@ -50,7 +50,7 @@ Other common values:
 | `think_token`   | Thinking region text chunk |
 | `think_end`     | End of thinking region |
 | `assistant_note`| Intermediate assistant draft/note while work continues |
-| `plan_ready`    | Execution plan preview ready for approval or explicit copy into the composer (`plan` plus `execute_prompt`) |
+| `plan_ready`    | Execution plan preview ready for approval, editable build steps, and optional plan hydration (`plan`, `execute_prompt`, `builder_steps`) |
 | `build_steps`   | Structured checklist state for deep-mode build steps |
 | `tool_start`    | Tool invocation started |
 | `tool_result`   | Tool finished, with summarized payload or error |

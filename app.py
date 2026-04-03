@@ -3380,6 +3380,7 @@ class DeepSession:
     final_response: str = ""
     execution_requested: bool = False
     auto_execute: bool = False
+    plan_override_builder_steps: List[str] = field(default_factory=list)
     resumed: bool = False
     workflow_execution: Optional[WorkflowExecutionContext] = None
 
@@ -3685,6 +3686,27 @@ def normalize_deep_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
                 )
         normalized[agent_key] = {"role": role, "prompt": prompt}
 
+    return normalized
+
+
+def normalize_plan_override_steps(payload: Any) -> List[str]:
+    """Normalize a user-edited build-step override payload from the web UI."""
+    if not isinstance(payload, list):
+        return []
+    steps = [
+        str(step).strip()
+        for step in payload
+        if str(step).strip()
+    ]
+    return steps[:5]
+
+
+def apply_plan_builder_step_override(plan: Dict[str, Any], builder_steps: List[str]) -> Dict[str, Any]:
+    """Apply a UI-edited build checklist onto an already-saved deep-mode plan."""
+    normalized = normalize_deep_plan(plan)
+    override_steps = normalize_plan_override_steps(builder_steps)
+    if override_steps:
+        normalized["builder_steps"] = override_steps
     return normalized
 
 
@@ -4109,7 +4131,7 @@ def should_auto_execute_workspace_task(message: str, features: "FeatureFlags") -
 
 
 def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
-    """Create an editable execution draft that the UI can copy into the composer on demand."""
+    """Create an editable execution draft for plan approval and execution."""
     strategy = plan.get("strategy", "Inspect, build, verify, and synthesize.")
     deliverable = plan.get("deliverable", "A strong final response grounded in the workspace.")
     steps = plan.get("builder_steps", [])
@@ -4136,6 +4158,16 @@ def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_pending_execution_plan_payload(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a structured pending-plan payload for UI hydration and approval."""
+    normalized = normalize_deep_plan(plan)
+    return {
+        "summary": format_deep_plan_note(normalized),
+        "execute_prompt": format_deep_execution_prompt(normalized),
+        "builder_steps": list(normalized.get("builder_steps", [])),
+    }
+
+
 def render_deep_plan_preview(plan: Dict[str, Any]) -> str:
     """Render a short plan-preview answer for approval-first deep mode."""
     lines = [
@@ -4143,7 +4175,7 @@ def render_deep_plan_preview(plan: Dict[str, Any]) -> str:
         "",
         format_deep_plan_note(plan),
         "",
-        "If this looks right, say yes and I'll run it in the workspace and verify the result. If not, tell me what to change. You can also use the plan card above the composer to start or copy the draft into the prompt box.",
+        "If this looks right, say yes and I'll run it in the workspace and verify the result. If not, tell me what to change. You can also press Enter from the prompt to start, or edit the build steps in the plan card first.",
     ]
     return "\n".join(lines)
 
@@ -4312,7 +4344,7 @@ def load_task_state(conversation_id: str, rel_path: str = ".ai/task-state.json")
     return data if isinstance(data, dict) else None
 
 
-def load_pending_execution_plan(conversation_id: str) -> Optional[Dict[str, str]]:
+def load_pending_execution_plan(conversation_id: str) -> Optional[Dict[str, Any]]:
     """Return a pending plan preview for UI rehydration when one is saved in the workspace."""
     payload = load_task_state(conversation_id)
     if not payload or not bool(payload.get("plan_preview_pending")):
@@ -4320,10 +4352,7 @@ def load_pending_execution_plan(conversation_id: str) -> Optional[Dict[str, str]
     plan = payload.get("plan")
     if not isinstance(plan, dict) or not plan:
         return None
-    return {
-        "summary": format_deep_plan_note(plan),
-        "execute_prompt": format_deep_execution_prompt(plan),
-    }
+    return build_pending_execution_plan_payload(plan)
 
 
 def task_state_has_remaining_build_steps(payload: Dict[str, Any]) -> bool:
@@ -4710,10 +4739,13 @@ async def send_scope_audit_event(websocket: WebSocket, audit: Dict[str, Any]):
 
 async def send_plan_ready(websocket: WebSocket, plan: Dict[str, Any], execute_prompt: str):
     """Push a plan preview plus execution draft metadata to the web UI."""
+    payload = build_pending_execution_plan_payload(plan)
+    payload["execute_prompt"] = execute_prompt
     await websocket.send_json({
         "type": "plan_ready",
-        "plan": format_deep_plan_note(plan),
-        "execute_prompt": execute_prompt,
+        "plan": payload.get("summary", ""),
+        "execute_prompt": payload.get("execute_prompt", ""),
+        "builder_steps": payload.get("builder_steps", []),
     })
 
 
@@ -9559,6 +9591,7 @@ async def orchestrated_chat(
     max_tokens: int,
     features: FeatureFlags,
     auto_execute: bool = False,
+    plan_override_builder_steps: Optional[List[str]] = None,
     workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Deep-mode pipeline using explicit shared session state."""
@@ -9582,6 +9615,7 @@ async def orchestrated_chat(
         workspace_enabled=should_use_workspace_tools(conversation_id, message, features),
         execution_requested=is_explicit_plan_execution_request(message),
         auto_execute=auto_execute,
+        plan_override_builder_steps=normalize_plan_override_steps(plan_override_builder_steps),
         workflow_execution=workflow_execution,
     )
 
@@ -9609,6 +9643,19 @@ async def orchestrated_chat(
         await maybe_resume_task_state(session)
     except Exception as e:
         logger.warning("Deep mode resume failed, continuing fresh: %s", e)
+
+    if session.plan and session.plan_override_builder_steps:
+        previous_steps = [
+            str(step).strip()
+            for step in session.plan.get("builder_steps", [])
+            if str(step).strip()
+        ]
+        session.plan = apply_plan_builder_step_override(session.plan, session.plan_override_builder_steps)
+        if previous_steps != session.plan.get("builder_steps", []):
+            await send_assistant_note(
+                session.websocket,
+                "Updated the saved build steps from the plan card before execution.",
+            )
 
     await deep_inspect_workspace(session)
 
@@ -9944,7 +9991,7 @@ async def handle_direct_code_command(
         return (
             "I planned the code change, but write access was not granted for this turn.\n\n"
             f"{format_deep_plan_note(session.plan)}\n\n"
-            "Approve workspace edits and run the saved plan again, or copy the draft into the composer if you want to edit it first."
+            "Approve workspace edits and run the saved plan again, or edit the build steps in the plan card first."
         )
 
     build_result = await deep_build_workspace(session)
@@ -10044,6 +10091,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             not slash_command
             and should_auto_execute_workspace_task(effective_message, features)
         )
+        plan_override_builder_steps = normalize_plan_override_steps(data.get("plan_override_steps"))
         workflow_execution = create_workflow_execution(
             conv_id,
             user_message_id,
@@ -10112,6 +10160,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     max_tokens,
                     features,
                     auto_execute=auto_execute_workspace,
+                    plan_override_builder_steps=plan_override_builder_steps,
                     workflow_execution=workflow_execution,
                 )
                 assistant_message_id = save_message(conv_id, 'assistant', full_response)
