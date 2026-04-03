@@ -56,7 +56,7 @@ Typical flow:
 
 Two user-facing behaviors matter here:
 
-- Some deep requests return a **plan preview** first via `plan_ready`, so the composer can be populated with an execution draft before the user commits to running it.
+- Some deep requests return a **plan preview** first via `plan_ready`, so the UI can offer approval-first execution without overwriting the user's composer draft.
 - Explicit execution requests can proceed through the full inspect/build/verify path and stream step-by-step activity while work is happening.
 
 ## Tool surface

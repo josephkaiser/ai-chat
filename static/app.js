@@ -43,9 +43,6 @@ let collapsedWorkspaceDirs = new Set();
 let featureSettings = null;
 let voiceSettings = null;
 let pendingAttachments = [];
-let fileModalPath = '';
-let fileModalKind = 'text';
-let fileModalEditable = false;
 let inlineViewerPath = '';
 let inlineViewerKind = 'text';
 let inlineViewerEditable = false;
@@ -69,18 +66,20 @@ let petProfile = null;
 let petExists = false;
 let welcomeMascotRuntime = null;
 let welcomeHintTimer = null;
-let loadingHintTimer = null;
 let currentRunId = null;
+let pendingExecutionPlan = null;
 let dictationActive = false;
 let currentAudio = null;
+let speechQueue = [];
+let speechQueueBusy = false;
+let activeSpeechTask = null;
+let speechQueueVersion = 0;
 let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
 const SEND_BUTTON_ICON = '&#10148;';
 const STOP_BUTTON_ICON = '&#9632;';
-const SPEAK_BUTTON_ICON = '&#128266;';
-const STOP_SPEAK_BUTTON_ICON = '&#128264;';
 const MIC_BUTTON_ICON = '&#127908;';
 const MIC_ACTIVE_BUTTON_ICON = '&#9209;';
 let voiceRuntime = {
@@ -101,6 +100,23 @@ const SPEECH_SPEED_OPTIONS = Object.freeze([
 ]);
 const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
+const LEGACY_COMPY_THEME = Object.freeze({
+    theme_primary: '#2563eb',
+    theme_secondary: '#0f172a',
+    theme_accent: '#dbeafe',
+});
+const WOLFY_THEME_PALETTES = Object.freeze({
+    light: Object.freeze({
+        theme_primary: '#d97706',
+        theme_secondary: '#6b4f2a',
+        theme_accent: '#f5e6c8',
+    }),
+    dark: Object.freeze({
+        theme_primary: '#f59e0b',
+        theme_secondary: '#f3d7ad',
+        theme_accent: '#5b3a12',
+    }),
+});
 const DISCOVERY_HINTS = Object.freeze([
     'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
     'I can help with logic, math, and careful reasoning from the information you give me.',
@@ -124,6 +140,34 @@ const SLASH_COMMAND_KIND_LABELS = Object.freeze({
     action: 'Action',
     prompt: 'Prompt',
     toggle: 'Toggle',
+    tool: 'Tool',
+});
+
+const DIRECT_SLASH_COMMANDS = Object.freeze({
+    search: Object.freeze({
+        canonical: 'search',
+        aliases: ['search', 'web'],
+        label: '/search',
+        template: '/search ',
+    }),
+    grep: Object.freeze({
+        canonical: 'grep',
+        aliases: ['grep'],
+        label: '/grep',
+        template: '/grep ',
+    }),
+    plan: Object.freeze({
+        canonical: 'plan',
+        aliases: ['plan'],
+        label: '/plan',
+        template: '/plan ',
+    }),
+    code: Object.freeze({
+        canonical: 'code',
+        aliases: ['code', 'edit'],
+        label: '/code',
+        template: '/code ',
+    }),
 });
 
 const WORKSPACE_ACTIVITY_LIMIT = 80;
@@ -138,6 +182,7 @@ const PLAN_EXECUTION_MARKERS = Object.freeze([
     'run this plan',
     'run the plan',
 ]);
+const APPROVED_PLAN_EXECUTION_MESSAGE = 'Execute approved plan.';
 
 featureSettings = loadFeatureSettings();
 voiceSettings = loadVoiceSettings();
@@ -165,19 +210,49 @@ function applyTheme(mode) {
     // Update theme icon
     const icon = document.getElementById('themeIcon');
     if (icon) icon.innerHTML = mode === 'dark' ? '&#9728;' : '&#127769;';
+
+    applyPetTheme(petProfile, mode);
 }
 
-function applyPetTheme(profile) {
+function normalizeThemeColor(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function resolveDefaultWolfyPalette(mode) {
+    return mode === 'dark' ? WOLFY_THEME_PALETTES.dark : WOLFY_THEME_PALETTES.light;
+}
+
+function paletteMatchesProfile(profile, palette) {
+    return (
+        normalizeThemeColor(profile?.theme_primary) === palette.theme_primary &&
+        normalizeThemeColor(profile?.theme_secondary) === palette.theme_secondary &&
+        normalizeThemeColor(profile?.theme_accent) === palette.theme_accent
+    );
+}
+
+function shouldUseThemeResponsivePetPalette(profile) {
+    if (!profile) return true;
+    return (
+        paletteMatchesProfile(profile, LEGACY_COMPY_THEME) ||
+        paletteMatchesProfile(profile, WOLFY_THEME_PALETTES.light) ||
+        paletteMatchesProfile(profile, WOLFY_THEME_PALETTES.dark)
+    );
+}
+
+function applyPetTheme(profile, mode) {
     const root = document.documentElement;
-    if (!profile) {
-        root.style.removeProperty('--pet_primary');
-        root.style.removeProperty('--pet_secondary');
-        root.style.removeProperty('--pet_accent');
-        return;
-    }
-    root.style.setProperty('--pet_primary', profile.theme_primary || '#2563eb');
-    root.style.setProperty('--pet_secondary', profile.theme_secondary || '#0f172a');
-    root.style.setProperty('--pet_accent', profile.theme_accent || '#dbeafe');
+    const currentMode = mode || root.dataset.theme || localStorage.getItem('theme') || 'light';
+    const fallback = resolveDefaultWolfyPalette(currentMode);
+    const colors = shouldUseThemeResponsivePetPalette(profile)
+        ? fallback
+        : {
+            theme_primary: profile?.theme_primary || fallback.theme_primary,
+            theme_secondary: profile?.theme_secondary || fallback.theme_secondary,
+            theme_accent: profile?.theme_accent || fallback.theme_accent,
+        };
+    root.style.setProperty('--pet_primary', colors.theme_primary);
+    root.style.setProperty('--pet_secondary', colors.theme_secondary);
+    root.style.setProperty('--pet_accent', colors.theme_accent);
 }
 
 function toggleTheme() {
@@ -505,6 +580,7 @@ function applyWorkspacePanelState() {
     const open = workspaceAllowed && workspacePanelOpen;
     panel.classList.toggle('is-open', open);
     toggle.classList.toggle('active', open);
+    if (shell) shell.classList.toggle('ide-mode', open);
     if (shell) shell.classList.toggle('workspace-open', open);
     if (root) {
         root.classList.toggle('mobile-chat-mode', mobileViewport);
@@ -623,14 +699,18 @@ function clearAllowedCommandsForConversation(conversationId) {
     delete chatCommandAllowlists[key];
 }
 
-function resolveTurnFeatures(message, attachmentPaths = []) {
+function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null) {
     const permissions = inferTurnPermissions(message, attachmentPaths);
     const executionRequest = messageRequestsPlanExecution(message);
     const allowedCommands = getAllowedCommandsForConversation(currentConvId);
+    const slashName = slashCommand?.name || '';
+    const slashWantsWrite = slashName === 'code';
+    const slashWantsRun = slashName === 'code';
     let workspaceWrite = false;
-    let workspaceRunCommands = permissions.wantsRun || permissions.wantsWrite || allowedCommands.length > 0;
+    const needsWriteApproval = permissions.wantsWrite || slashWantsWrite || executionRequest;
+    let workspaceRunCommands = permissions.wantsRun || permissions.wantsWrite || slashWantsRun || executionRequest || allowedCommands.length > 0;
 
-    if (permissions.wantsWrite && (!deepMode || executionRequest)) {
+    if (needsWriteApproval && (!deepMode || executionRequest)) {
         workspaceWrite = window.confirm('Allow the assistant to create or edit files in the workspace for this request?');
     }
 
@@ -638,6 +718,7 @@ function resolveTurnFeatures(message, attachmentPaths = []) {
         ...featureSettings,
         agent_tools: true,
         workspace_panel: true,
+        web_search: featureSettings.web_search || slashName === 'search',
         workspace_write: workspaceWrite,
         workspace_run_commands: workspaceRunCommands,
         allowed_commands: allowedCommands,
@@ -811,6 +892,7 @@ async function toggleDictation() {
 
 function extractMessageSpeechText(msg) {
     if (!msg) return '';
+    // Read only the final assistant answer; reasoning is stored separately in .think-stack.
     let text = String(msg.dataset.originalContent || msg.querySelector('.message-content')?.innerText || '');
     // Strip fenced code blocks (```...```)
     text = text.replace(/```[\s\S]*?```/g, '');
@@ -835,22 +917,22 @@ function extractMessageSpeechText(msg) {
     return text;
 }
 
-function syncSpeakButtons() {
-    document.querySelectorAll('.message.assistant .action-btn.speak-btn').forEach(button => {
-        const msg = button.closest('.message.assistant');
-        const isActive = msg && currentAudio && currentAudio._messageElement === msg;
-        button.innerHTML = isActive ? `${STOP_SPEAK_BUTTON_ICON} Stop` : `${SPEAK_BUTTON_ICON} Speak`;
-        button.classList.toggle('is-active', Boolean(isActive));
-    });
-}
-
 function stopSpeaking() {
-    if (currentAudio) {
-        currentAudio.pause();
-        currentAudio.currentTime = 0;
+    speechQueueVersion += 1;
+    speechQueue = [];
+    const task = activeSpeechTask;
+    activeSpeechTask = null;
+    if (task?.audio) {
+        task.audio.onended = null;
+        task.audio.onerror = null;
+        task.audio.pause();
+        task.audio.currentTime = 0;
     }
     currentAudio = null;
-    syncSpeakButtons();
+    if (typeof task?.settle === 'function') {
+        task.settle({ stopped: true });
+    }
+    updateVoiceNote('');
 }
 
 async function requestServerSpeech(text) {
@@ -864,47 +946,96 @@ async function requestServerSpeech(text) {
     return data;
 }
 
-async function speakAssistantMessage(msg) {
-    if (!supportsSpeechSynthesis() || !msg) {
-        updateVoiceNote('Server speech playback is not available right now.');
-        return;
-    }
+function enqueueAssistantSpeech(msg) {
+    if (!supportsSpeechSynthesis() || !voiceSettings.autoSpeakReplies || !msg) return;
     const text = extractMessageSpeechText(msg);
     if (!text) return;
-
-    if (currentAudio && currentAudio._messageElement === msg) {
-        stopSpeaking();
+    if (
+        speechQueue.some(entry => entry.msg === msg) ||
+        activeSpeechTask?.message === msg ||
+        (currentAudio && currentAudio._messageElement === msg)
+    ) {
+        msg.dataset.autoSpoken = 'true';
         return;
     }
+    msg.dataset.autoSpoken = 'true';
+    speechQueue.push({ msg, text });
+    processSpeechQueue();
+}
 
-    stopSpeaking();
-    updateVoiceNote('Generating server speech...');
+async function playSpeechAudio(task, audio) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (error = null, result = {}) => {
+            if (settled) return;
+            settled = true;
+            task.settle = null;
+            audio.onended = null;
+            audio.onerror = null;
+            if (error) reject(error);
+            else resolve(result);
+        };
+        task.settle = (result = { stopped: true }) => finish(null, result);
+        audio.onended = () => finish(null, { stopped: false });
+        audio.onerror = () => finish(new Error('Audio playback failed.'));
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(error => finish(error));
+        }
+    });
+}
+
+async function processSpeechQueue() {
+    if (speechQueueBusy) return;
+    speechQueueBusy = true;
     try {
-        const result = await requestServerSpeech(text);
-        const audio = new Audio(result.audio_url);
-        audio._messageElement = msg;
-        audio.playbackRate = getSpeechSpeedOption().rate;
-        audio.onended = () => {
-            if (currentAudio === audio) {
-                currentAudio = null;
-                syncSpeakButtons();
+        while (speechQueue.length) {
+            if (!voiceSettings.autoSpeakReplies || !supportsSpeechSynthesis()) {
+                speechQueue = [];
+                break;
             }
-        };
-        audio.onerror = () => {
-            if (currentAudio === audio) {
-                currentAudio = null;
-                syncSpeakButtons();
+            const entry = speechQueue.shift();
+            if (!entry?.msg?.isConnected || !entry.text) continue;
+            const task = {
+                version: speechQueueVersion,
+                message: entry.msg,
+                audio: null,
+                settle: null,
+            };
+            activeSpeechTask = task;
+            currentAudio = null;
+            updateVoiceNote('Generating server speech...');
+            try {
+                const result = await requestServerSpeech(entry.text);
+                if (speechQueueVersion !== task.version || activeSpeechTask !== task) continue;
+                const audio = new Audio(result.audio_url);
+                audio._messageElement = entry.msg;
+                audio.playbackRate = getSpeechSpeedOption().rate;
+                task.audio = audio;
+                currentAudio = audio;
+                updateVoiceNote('');
+                await playSpeechAudio(task, audio);
+            } catch (error) {
+                if (speechQueueVersion === task.version && activeSpeechTask === task) {
+                    const prefix = task.audio ? 'Speech playback failed' : 'Speech generation failed';
+                    updateVoiceNote(`${prefix}: ${error.message}`);
+                }
+            } finally {
+                if (activeSpeechTask === task) activeSpeechTask = null;
+                if (currentAudio === task.audio) currentAudio = null;
             }
-            updateVoiceNote('Audio playback failed.');
-        };
-        currentAudio = audio;
-        syncSpeakButtons();
-        updateVoiceNote('');
-        await audio.play();
-    } catch (error) {
-        currentAudio = null;
-        syncSpeakButtons();
-        updateVoiceNote(`Speech generation failed: ${error.message}`);
+        }
+    } finally {
+        speechQueueBusy = false;
+        const note = document.getElementById('voiceNote');
+        if (
+            !currentAudio &&
+            !activeSpeechTask &&
+            !speechQueue.length &&
+            note?.textContent === 'Generating server speech...'
+        ) {
+            updateVoiceNote('');
+        }
     }
 }
 
@@ -958,16 +1089,16 @@ function connectWS() {
             clearTerminalOutput();
             currentAssistantTurnStartedAt = Date.now();
             currentAssistantTurnArtifactPaths = new Set();
-            recordWorkspaceActivity('Turn', 'Started a new assistant turn.');
+            recordWorkspaceActivity('Turn', 'Turn started.');
         } else if (data.type === 'reasoning_note') {
-            recordWorkspaceActivity('Think', 'Captured an internal reasoning note.');
+            recordWorkspaceActivity('Think', 'Reasoning noted.');
         } else if (data.type === 'assistant_note') {
             ensureStreamingAssistantMessage();
             replaceAssistantAnswer(data.content || '');
             recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
         } else if (data.type === 'plan_ready') {
-            loadExecutionPlanDraft(data.execute_prompt || '');
-            recordWorkspaceActivity('Plan', 'Loaded an editable execution draft into the composer.');
+            storeExecutionPlan(data.plan || '', data.execute_prompt || '');
+            recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
         } else if (data.type === 'build_steps') {
             updateBuildSteps(data.steps || [], data.active_index ?? null, data.completed_count || 0);
         } else if (data.type === 'think_start') {
@@ -1032,7 +1163,7 @@ function connectWS() {
             }
         } else if (data.type === 'final_replace') {
             replaceAssistantAnswer(data.content);
-            recordWorkspaceActivity('Draft', 'Replaced the current answer with a refined draft.');
+            recordWorkspaceActivity('Draft', 'Draft updated.');
         } else if (data.type === 'done') {
             const finishedConvId = activeStreamConversationId;
             isGenerating = false;
@@ -1042,7 +1173,7 @@ function connectWS() {
             loadConversations();
             finalizeAssistantTurnArtifacts();
             refreshWorkspace(true);
-            recordWorkspaceActivity('Done', 'Finished the assistant turn.');
+            recordWorkspaceActivity('Done', 'Turn complete.');
             activeStreamConversationId = null;
             streamingAssistantMessage = null;
             if (finishedConvId && currentConvId === finishedConvId) {
@@ -1628,18 +1759,7 @@ function buildWelcomeMarkup() {
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
                 <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
                     <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 128 112" role="img" aria-hidden="true">
-                        <defs>
-                            <style>
-                                .px-bg0 { fill: color-mix(in srgb, var(--pet_accent) 80%, var(--bg_secondary)); }
-                                .px-bg2 { fill: color-mix(in srgb, var(--pet_primary) 60%, var(--pet_accent)); }
-                                .px-bg3 { fill: color-mix(in srgb, var(--pet_secondary) 50%, var(--pet_primary)); }
-                                .px-bg4 { fill: var(--pet_secondary); }
-                                .px-accent { fill: color-mix(in srgb, var(--accent_primary) 70%, var(--pet_primary)); }
-                            </style>
-                        </defs>
-                        <rect class="px-bg0" width="128" height="112" rx="4"/>
-                        <rect class="px-bg2" x="0" y="88" width="128" height="8"/>
-                        <rect class="px-bg3" x="0" y="96" width="128" height="16"/>
+                        <rect class="px-bg0" width="128" height="112"/>
                         <g class="dog-drawing" shape-rendering="crispEdges">
                             <g class="dog-bark-lines" aria-hidden="true">
                                 <rect class="px-accent" x="112" y="24" width="8" height="8"/>
@@ -1662,14 +1782,18 @@ function buildWelcomeMarkup() {
                                 <rect class="px-bg4" x="88" y="32" width="24" height="16"/>
                                 <rect class="dog-ear-left px-bg4" x="72" y="16" width="8" height="8"/>
                                 <rect class="dog-ear-right px-bg4" x="88" y="12" width="8" height="12"/>
-                                <rect class="px-bg3" x="76" y="24" width="16" height="4"/>
-                                <rect class="px-bg3" x="76" y="28" width="8" height="4"/>
-                                <rect class="px-bg3" x="88" y="32" width="8" height="4"/>
+                                <rect class="px-bg3" x="76" y="24" width="12" height="4"/>
+                                <rect class="px-bg3" x="88" y="20" width="12" height="4"/>
                                 <rect class="px-bg0" x="80" y="32" width="4" height="4"/>
-                                <rect class="px-bg0" x="92" y="36" width="4" height="4"/>
+                                <rect class="px-bg0" x="92" y="28" width="4" height="4"/>
+                                <rect class="px-muzzle" x="92" y="36" width="12" height="8"/>
+                                <rect class="px-nose" x="104" y="36" width="4" height="4"/>
                                 <rect class="dog-mouth-neutral px-bg3" x="100" y="44" width="8" height="4"/>
-                                <rect class="dog-mouth-bark px-accent" x="100" y="40" width="8" height="8"/>
-                                <rect class="px-accent" x="92" y="48" width="16" height="4"/>
+                                <g class="dog-mouth-bark">
+                                    <rect class="px-bg3" x="100" y="40" width="8" height="4"/>
+                                    <rect class="px-mouth" x="96" y="44" width="12" height="8"/>
+                                    <rect class="px-muzzle" x="92" y="52" width="16" height="4"/>
+                                </g>
                             </g>
                             <g class="dog-leg-group dog-leg-back-group">
                                 <rect class="px-bg4" x="40" y="64" width="8" height="24"/>
@@ -1685,7 +1809,6 @@ function buildWelcomeMarkup() {
                 </button>
                 <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
                 <span class="bond-note" id="bondNote"></span>
-                <div class="welcome-hint" id="welcomeHint" aria-live="polite"></div>
             </div>
         </div>`;
 }
@@ -1703,12 +1826,6 @@ function stopWelcomeHintRotation() {
     welcomeHintTimer = null;
 }
 
-function stopLoadingHintRotation() {
-    if (!loadingHintTimer) return;
-    window.clearInterval(loadingHintTimer);
-    loadingHintTimer = null;
-}
-
 function pickRotatingHint(previousHint = '') {
     if (!DISCOVERY_HINTS.length) return '';
     const pool = DISCOVERY_HINTS.filter(hint => hint !== previousHint);
@@ -1718,7 +1835,7 @@ function pickRotatingHint(previousHint = '') {
 
 function startWelcomeHintRotation() {
     stopWelcomeHintRotation();
-    const hint = document.getElementById('welcomeHint');
+    const hint = document.getElementById('appHint');
     if (!hint) return;
 
     let currentHint = '';
@@ -1729,22 +1846,6 @@ function startWelcomeHintRotation() {
 
     renderHint();
     welcomeHintTimer = window.setInterval(renderHint, WELCOME_HINT_ROTATE_MS);
-}
-
-function startLoadingHintRotation() {
-    stopLoadingHintRotation();
-    const hint = document.getElementById('loadingHintText');
-    if (!hint) return;
-
-    let currentHint = '';
-    const renderHint = () => {
-        currentHint = pickRotatingHint(currentHint);
-        hint.textContent = currentHint;
-        scrollToBottom();
-    };
-
-    renderHint();
-    loadingHintTimer = window.setInterval(renderHint, LOADING_HINT_ROTATE_MS);
 }
 
 let currentBond = { affection: 50, pets_today: 0, streak: 0, mood: 'content', capped: false, max_pets_per_day: 12 };
@@ -1823,7 +1924,6 @@ function initWelcomeMascot() {
         runtime.petting = true;
         if (currentBond.capped) {
             queuePose('bark', 800, 'sit');
-            showBondReaction('Full!');
             setTimeout(() => { runtime.petting = false; }, 1000);
             return;
         }
@@ -1834,7 +1934,7 @@ function initWelcomeMascot() {
                 const prev = currentBond.mood;
                 currentBond = await resp.json();
                 updateBondNote();
-                showBondReaction(currentBond.capped ? 'Full!' : '+');
+                showBondReaction('+');
                 if (currentBond.mood !== prev) startCycle();
             }
         } catch (e) { /* offline */ }
@@ -1919,6 +2019,7 @@ function syncSendButton() {
         send.title = hasDraft ? 'Interrupt with prompt' : 'Stop response';
         syncModelSelector();
         syncInterveneButton();
+        renderExecutionPlanApproval();
         return;
     }
 
@@ -1929,6 +2030,7 @@ function syncSendButton() {
     send.disabled = !modelAvailable || !input || !input.value.trim();
     syncModelSelector();
     syncInterveneButton();
+    renderExecutionPlanApproval();
 }
 
 function handleInputChange(textarea) {
@@ -1946,6 +2048,26 @@ function setInputValue(value, cursorPosition = value.length) {
     handleInputChange(input);
 }
 
+function normalizeDirectSlashCommand(name) {
+    const candidate = String(name || '').trim().toLowerCase();
+    if (!candidate) return null;
+    return Object.values(DIRECT_SLASH_COMMANDS).find(command => command.aliases.includes(candidate)) || null;
+}
+
+function parseDirectSlashCommandInput(text) {
+    const match = String(text || '').match(/^\s*\/([a-z0-9_-]+)(?:\s+([\s\S]*\S))?\s*$/i);
+    if (!match) return null;
+    const command = normalizeDirectSlashCommand(match[1]);
+    if (!command) return null;
+    return {
+        rawName: String(match[1] || '').trim().toLowerCase(),
+        name: command.canonical,
+        label: command.label,
+        template: command.template,
+        args: String(match[2] || '').trim(),
+    };
+}
+
 function getSlashCommandQuery(textarea) {
     if (!textarea) return null;
     const caret = textarea.selectionStart ?? textarea.value.length;
@@ -1959,204 +2081,58 @@ function setDraftFromSlash(template) {
     setInputValue(value, value.length);
 }
 
-function getRecoverableAssistantMessages() {
-    return [...document.querySelectorAll('#messages .message.assistant')]
-        .filter(msg => String(msg.dataset.originalContent || '').trim());
-}
-
-function getLatestRecoverableAssistantMessage() {
-    const messages = getRecoverableAssistantMessages();
-    return messages.length ? messages[messages.length - 1] : null;
-}
-
-async function recoverAssistantMessage(messageEl, button = null) {
-    if (!currentConvId || !messageEl) return;
-    const content = String(messageEl.dataset.originalContent || '').trim();
-    const messageId = Number.parseInt(messageEl.dataset.messageId || '', 10);
-    if (!content) {
-        alert('This assistant message does not contain recoverable content yet.');
-        return;
-    }
-
-    const originalLabel = button ? button.innerHTML : '';
-    if (button) {
-        button.disabled = true;
-        button.innerHTML = '&#128190; Adding...';
-    }
-
-    try {
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/recover`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                message_id: Number.isFinite(messageId) ? messageId : null,
-                content,
-            }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-        await refreshWorkspace(true);
-        recordWorkspaceActivity(
-            'Add',
-            `Recovered ${data.count || 0} code file${(data.count || 0) === 1 ? '' : 's'} and notes into ${data.target_dir || 'the workspace'}.`
-        );
-        if (data.readme_path) {
-            openWorkspaceFile(data.readme_path, { modal: true });
-        }
-        if (button) {
-            button.innerHTML = '&#10003; Added';
-            setTimeout(() => {
-                button.disabled = false;
-                button.innerHTML = originalLabel;
-            }, 1800);
-        }
-    } catch (error) {
-        if (button) {
-            button.disabled = false;
-            button.innerHTML = originalLabel;
-        }
-        alert(`Failed to add this message to the workspace: ${error.message}`);
-    }
+function setSlashCommandDraft(commandName) {
+    const command = normalizeDirectSlashCommand(commandName);
+    if (!command) return;
+    setInputValue(command.template, command.template.length);
 }
 
 function buildSlashCommands() {
     return [
         {
-            name: 'new',
-            label: '/new',
-            description: 'Start a fresh chat and clear the current conversation context.',
-            kind: 'action',
-            keywords: ['clear context', 'reset', 'new chat'],
-            onSelect: () => {
-                newChat();
-                setInputValue('');
-            },
-        },
-        {
-            name: 'clear',
-            label: '/clear',
-            description: 'Clear the current draft without sending it.',
-            kind: 'action',
-            keywords: ['erase', 'draft'],
-            onSelect: () => setInputValue(''),
-        },
-        {
-            name: 'web',
-            label: '/web',
+            name: 'search',
+            label: '/search',
             description: featureSettings.web_search
-                ? 'Insert a web-search-oriented prompt.'
-                : 'Enable Web Search and insert a web-search-oriented prompt.',
-            kind: 'toggle',
-            keywords: ['search internet', 'browse', 'current'],
+                ? 'Run a direct web search tool flow.'
+                : 'Enable Web Search and start a direct web search tool flow.',
+            kind: 'tool',
+            keywords: ['search internet', 'browse', 'current', 'web'],
             onSelect: () => {
                 if (!featureSettings.web_search) updateFeatureSetting('web_search', true);
-                setInputValue('Use web search when needed to answer this:\n');
+                setSlashCommandDraft('search');
             },
         },
         {
-            name: 'files',
-            label: '/files',
-            description: 'Ask the assistant to inspect local files before answering.',
-            kind: 'prompt',
-            keywords: ['open files', 'local artifacts', 'workspace'],
+            name: 'code',
+            label: '/code',
+            description: 'Run the direct code workflow: inspect, plan, edit, and verify.',
+            kind: 'tool',
+            keywords: ['change', 'implement', 'modify code', 'edit'],
             onSelect: () => {
                 if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Inspect the relevant local files first, then help me with:');
+                setSlashCommandDraft('code');
             },
         },
         {
-            name: 'read',
-            label: '/read',
-            description: 'Ask the assistant to inspect files and summarize what matters.',
-            kind: 'prompt',
-            keywords: ['inspect', 'summarize', 'review files'],
+            name: 'grep',
+            label: '/grep',
+            description: 'Run workspace grep first, then summarize the relevant matches.',
+            kind: 'tool',
+            keywords: ['search code', 'find text', 'ripgrep'],
             onSelect: () => {
                 if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Inspect the relevant workspace files and summarize what matters for:');
-            },
-        },
-        {
-            name: 'edit',
-            label: '/edit',
-            description: 'Insert a code-editing prompt for implementing a change.',
-            kind: 'prompt',
-            keywords: ['change', 'implement', 'modify code'],
-            onSelect: () => {
-                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Edit the relevant workspace files to implement this change:');
-            },
-        },
-        {
-            name: 'review',
-            label: '/review',
-            description: 'Ask for a code review focused on bugs, regressions, and missing tests.',
-            kind: 'prompt',
-            keywords: ['audit', 'find bugs', 'regression'],
-            onSelect: () => {
-                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Review the relevant changes or files for bugs, regressions, and missing tests:');
-            },
-        },
-        {
-            name: 'fix',
-            label: '/fix',
-            description: 'Ask the assistant to diagnose and fix a bug in local code.',
-            kind: 'prompt',
-            keywords: ['debug', 'repair', 'broken'],
-            onSelect: () => {
-                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Diagnose the root cause in the local codebase and fix this bug:');
+                setSlashCommandDraft('grep');
             },
         },
         {
             name: 'plan',
             label: '/plan',
-            description: 'Ask the assistant to inspect the codebase and propose an implementation plan.',
-            kind: 'prompt',
+            description: 'Run the direct planning flow and prepare an executable plan draft.',
+            kind: 'tool',
             keywords: ['approach', 'design', 'scoping'],
             onSelect: () => {
                 if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Inspect the relevant local code and propose a concrete implementation plan for:');
-            },
-        },
-        {
-            name: 'explain',
-            label: '/explain',
-            description: 'Ask the assistant to explain how local code works.',
-            kind: 'prompt',
-            keywords: ['walkthrough', 'understand', 'code explanation'],
-            onSelect: () => {
-                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
-                setDraftFromSlash('Explain how the relevant local code works, including key files and flow, for:');
-            },
-        },
-        {
-            name: 'add',
-            label: '/add',
-            description: 'Recover the latest assistant reply into the workspace as staged files plus a README.',
-            kind: 'action',
-            keywords: ['recover chat output', 'promote response', 'workspace object'],
-            onSelect: async () => {
-                hideSlashMenu();
-                const latest = getLatestRecoverableAssistantMessage();
-                if (!latest) {
-                    alert('No assistant reply with recoverable content is visible in this chat yet.');
-                    return;
-                }
-                await recoverAssistantMessage(latest);
-                document.getElementById('input')?.focus();
-            },
-        },
-        {
-            name: 'attach',
-            label: '/attach',
-            description: 'Open the file picker so you can add attachments to this chat.',
-            kind: 'action',
-            keywords: ['upload', 'file', 'image'],
-            onSelect: () => {
-                hideSlashMenu();
-                openAttachmentPicker();
-                document.getElementById('input')?.focus();
+                setSlashCommandDraft('plan');
             },
         },
     ];
@@ -2429,7 +2405,7 @@ function renderWorkspaceTreeNode(entry, options = {}) {
             toggleWorkspaceDirectory(entry.path);
             return;
         }
-        openWorkspaceFile(entry.path, { modal: options.modal !== false });
+        openWorkspaceFile(entry.path);
     };
 
     const caret = document.createElement('span');
@@ -2485,8 +2461,7 @@ function renderWorkspaceTree(containerId, options = {}) {
 }
 
 function renderWorkspaceTrees() {
-    renderWorkspaceTree('workspaceFileList', { modal: true });
-    renderWorkspaceTree('fileModalTree', { modal: true });
+    renderWorkspaceTree('workspaceFileList');
 }
 
 function isSpreadsheetPath(path) {
@@ -2596,12 +2571,83 @@ function updateBuildSteps(steps, activeIndex = null, completedCount = 0) {
     syncInterveneButton();
 }
 
+function renderExecutionPlanApproval() {
+    const panel = document.getElementById('planApprovalPanel');
+    const summary = document.getElementById('planApprovalSummary');
+    const runButton = document.getElementById('planApprovalRunButton');
+    const editButton = document.getElementById('planApprovalEditButton');
+    if (!panel || !summary) return;
+
+    const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
+    panel.hidden = !hasPlan;
+    summary.textContent = hasPlan ? (pendingExecutionPlan.summary || 'Execution plan ready.') : '';
+    if (runButton) {
+        runButton.disabled = !hasPlan || isGenerating || !modelAvailable || !ws || ws.readyState !== WebSocket.OPEN;
+    }
+    if (editButton) {
+        editButton.disabled = !hasPlan;
+    }
+}
+
+function storeExecutionPlan(summary, executePrompt) {
+    const cleanedPrompt = String(executePrompt || '').trim();
+    if (!cleanedPrompt) return;
+    pendingExecutionPlan = {
+        summary: String(summary || '').trim(),
+        executePrompt: cleanedPrompt,
+    };
+    renderExecutionPlanApproval();
+}
+
+function dismissExecutionPlan() {
+    pendingExecutionPlan = null;
+    renderExecutionPlanApproval();
+}
+
 function loadExecutionPlanDraft(executePrompt) {
     const draft = String(executePrompt || '').trim();
     const input = document.getElementById('input');
     if (!draft || !input) return;
     setInputValue(draft, draft.length);
     focusInput();
+}
+
+function editExecutionPlanDraft() {
+    if (!pendingExecutionPlan?.executePrompt) return;
+    loadExecutionPlanDraft(pendingExecutionPlan.executePrompt);
+    recordWorkspaceActivity('Plan', 'Copied the execution draft into the composer.');
+}
+
+function approveExecutionPlan() {
+    if (!pendingExecutionPlan?.executePrompt || isGenerating || !ws || ws.readyState !== WebSocket.OPEN || !modelAvailable) {
+        return;
+    }
+
+    const turnFeatures = resolveTurnFeatures(APPROVED_PLAN_EXECUTION_MESSAGE, [], null);
+    if (!turnFeatures.workspace_write) return;
+
+    document.querySelector('.welcome')?.remove();
+    exitWelcomeMode();
+    addMessage(APPROVED_PLAN_EXECUTION_MESSAGE, 'user');
+    showLoading();
+    clearBuildSteps();
+    clearWorkspaceActivity();
+    recordWorkspaceActivity('Request', APPROVED_PLAN_EXECUTION_MESSAGE);
+
+    isGenerating = true;
+    activeStreamConversationId = currentConvId;
+    streamingAssistantMessage = null;
+    dismissExecutionPlan();
+    syncSendButton();
+    ws.send(JSON.stringify({
+        message: APPROVED_PLAN_EXECUTION_MESSAGE,
+        attachments: [],
+        conversation_id: currentConvId,
+        system_prompt: localStorage.getItem('customSystemPrompt') || null,
+        mode: deepMode ? 'deep' : 'normal',
+        features: turnFeatures,
+        slash_command: null,
+    }));
 }
 
 function renderWorkspaceActivity() {
@@ -2626,15 +2672,16 @@ function renderWorkspaceActivity() {
             ? `<span class="workspace-activity-repeat">${entry.collapsedSummary ? `${entry.repeats} events` : `x${entry.repeats}`}</span>`
             : '';
         const stepMeta = entry.stepLabel
-            ? `<div class="workspace-activity-step">${escapeHtml(entry.stepLabel)}</div>`
+            ? `<span class="workspace-activity-sep" aria-hidden="true">·</span><span class="workspace-activity-step">${escapeHtml(entry.stepLabel)}</span>`
             : '';
         row.innerHTML = `
-            <div class="workspace-activity-time">${escapeHtml(entry.time || '')}</div>
-            <div class="workspace-activity-kind">${escapeHtml(entry.kind || 'Activity')}${repeatBadge}</div>
-            <div class="workspace-activity-text-wrap">
-                ${stepMeta}
-                <div class="workspace-activity-text">${escapeHtml(entry.text || '')}</div>
-            </div>
+            <span class="workspace-activity-time">${escapeHtml(entry.time || '')}</span>
+            <span class="workspace-activity-sep" aria-hidden="true">·</span>
+            <span class="workspace-activity-kind">${escapeHtml(entry.kind || 'Activity')}</span>
+            ${repeatBadge ? `<span class="workspace-activity-sep" aria-hidden="true">·</span>${repeatBadge}` : ''}
+            ${stepMeta}
+            <span class="workspace-activity-sep" aria-hidden="true">·</span>
+            <span class="workspace-activity-text">${escapeHtml(entry.text || '')}</span>
         `;
         activityEl.appendChild(row);
     });
@@ -2733,22 +2780,42 @@ function collapseWorkspaceActivityEntries(entries, nextEntry) {
     return entries.concat(nextEntry);
 }
 
+function compactWorkspaceActivityText(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function truncateWorkspaceActivityText(text, maxLength = 180) {
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function formatWorkspaceActivityText(kind, text) {
+    const normalized = compactWorkspaceActivityText(text);
+    if (!normalized) return '';
+    if (kind === 'Request' || kind === 'Interrupt') {
+        return truncateWorkspaceActivityText(normalized, 160);
+    }
+    return normalized;
+}
+
 function recordWorkspaceActivity(kind, text, options = {}) {
-    if (!text) return;
+    const normalizedKind = String(kind || 'Activity').trim() || 'Activity';
+    const normalizedText = formatWorkspaceActivityText(normalizedKind, text);
+    if (!normalizedText) return;
     const timestamp = new Date();
     const classified = options.phase
-        ? { kind: String(kind || 'Activity').trim() || 'Activity', phase: options.phase }
-        : classifyWorkspaceActivity(kind, text);
+        ? { kind: normalizedKind, phase: options.phase }
+        : classifyWorkspaceActivity(normalizedKind, normalizedText);
     const entry = {
         kind: classified.kind,
         phase: classified.phase,
-        text,
+        text: normalizedText,
         error: Boolean(options.error),
-        stepLabel: options.stepLabel || (
+        stepLabel: compactWorkspaceActivityText(options.stepLabel || (
             ['execute', 'tool', 'verify', 'synthesize'].includes(classified.phase)
                 ? currentBuildStepLabel()
                 : ''
-        ),
+        )),
         repeats: 1,
         time: timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }),
     };
@@ -3357,33 +3424,19 @@ async function undoInlineViewerChange() {
 }
 
 function getViewerState(prefix) {
-    if (prefix === 'inlineViewer') {
-        return {
-            editable: inlineViewerEditable,
-            kind: inlineViewerKind,
-            path: inlineViewerPath,
-            view: inlineViewerView,
-        };
-    }
     return {
-        editable: fileModalEditable,
-        kind: fileModalKind,
-        path: fileModalPath,
-        view: 'edit',
+        editable: inlineViewerEditable,
+        kind: inlineViewerKind,
+        path: inlineViewerPath,
+        view: inlineViewerView,
     };
 }
 
 function setViewerState(prefix, updates = {}) {
-    if (prefix === 'inlineViewer') {
-        if (updates.editable !== undefined) inlineViewerEditable = updates.editable;
-        if (updates.kind !== undefined) inlineViewerKind = updates.kind;
-        if (updates.path !== undefined) inlineViewerPath = updates.path;
-        if (updates.view !== undefined) inlineViewerView = updates.view;
-        return;
-    }
-    if (updates.editable !== undefined) fileModalEditable = updates.editable;
-    if (updates.kind !== undefined) fileModalKind = updates.kind;
-    if (updates.path !== undefined) fileModalPath = updates.path;
+    if (updates.editable !== undefined) inlineViewerEditable = updates.editable;
+    if (updates.kind !== undefined) inlineViewerKind = updates.kind;
+    if (updates.path !== undefined) inlineViewerPath = updates.path;
+    if (updates.view !== undefined) inlineViewerView = updates.view;
 }
 
 function setViewerView(prefix, view) {
@@ -3406,14 +3459,30 @@ function setViewerView(prefix, view) {
             setTimeout(() => editor.refresh(), 0);
         }
     }
-}
-
-function setFileModalView(view) {
-    setViewerView('fileModal', view);
+    if (prefix === 'inlineViewer') syncInlineViewerMode();
 }
 
 function setInlineViewerView(view) {
     setViewerView('inlineViewer', view);
+}
+
+function inlineViewerModeLabel() {
+    if (!inlineViewerPath) return 'No file';
+    if (inlineViewerKind === 'spreadsheet') return 'Preview only';
+    if (!inlineViewerEditable) return 'Read only';
+    if (inlineViewerView === 'preview') return 'Preview';
+    return 'Editing';
+}
+
+function syncInlineViewerMode() {
+    const modeEl = document.getElementById('inlineViewerMode');
+    if (modeEl) modeEl.textContent = inlineViewerModeLabel();
+}
+
+function syncInlineViewerVisibility() {
+    const viewer = document.querySelector('.ide-viewer');
+    if (!viewer) return;
+    viewer.classList.toggle('is-hidden', !inlineViewerPath);
 }
 
 function toggleViewerEmptyState(prefix, hasFile) {
@@ -3571,30 +3640,10 @@ function renderViewerSheetTabs(prefix, sheetNames, activeSheet) {
         button.textContent = name;
         button.onclick = () => {
             selectedSpreadsheetSheet = name;
-            openWorkspaceFile(getViewerState(prefix).path, { preserveSheet: true, modal: prefix === 'fileModal' });
+            openWorkspaceFile(getViewerState(prefix).path, { preserveSheet: true });
         };
         tabs.appendChild(button);
     });
-}
-
-function renderFileModalCodePreview(content, path) {
-    renderCodePreview('fileModalPreview', content, path);
-}
-
-function renderFileModalHtmlPreview(content) {
-    renderHtmlPreview('fileModalPreview', content);
-}
-
-function renderFileModalDelimitedPreview(content, path) {
-    renderDelimitedPreview('fileModalPreview', content, path);
-}
-
-function renderFileModalSpreadsheetPreview(data) {
-    renderSpreadsheetPreview('fileModalPreview', data);
-}
-
-function renderFileModalSheetTabs(sheetNames, activeSheet) {
-    renderViewerSheetTabs('fileModal', sheetNames, activeSheet);
 }
 
 function updateViewerPreview(prefix) {
@@ -3608,39 +3657,20 @@ function updateViewerPreview(prefix) {
     else renderCodePreview(previewId, content, state.path);
 }
 
-function updateFileModalPreview() {
-    updateViewerPreview('fileModal');
-}
-
 function updateInlineViewerPreview() {
     updateViewerPreview('inlineViewer');
-}
-
-function openFileModal() {
-    renderWorkspaceTrees();
-    document.getElementById('fileModal')?.classList.add('show');
-}
-
-function closeFileModal() {
-    document.getElementById('fileModal')?.classList.remove('show');
-    fileModalPath = '';
-    fileModalKind = 'text';
-    fileModalEditable = false;
-    applyViewerMetadata('fileModal', '');
-    renderWorkspaceTrees();
 }
 
 async function saveViewer(prefix, options = {}) {
     const state = getViewerState(prefix);
     if (!state.editable || !state.path) return;
-    const editor = prefix === 'inlineViewer' ? ensureInlineEditor() : document.getElementById(`${prefix}Editor`);
+    const editor = ensureInlineEditor();
     const saveButton = document.getElementById(`${prefix}SaveButton`);
     if (!editor || !saveButton) return;
     const content = getViewerContent(prefix);
 
     saveButton.disabled = true;
-    if (prefix === 'inlineViewer') setInlineViewerSaveState('saving', options.autosave ? 'Autosaving...' : 'Saving...');
-    else saveButton.textContent = 'Saving...';
+    setInlineViewerSaveState('saving', options.autosave ? 'Autosaving...' : 'Saving...');
     try {
         const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file`, {
             method: 'POST',
@@ -3649,33 +3679,20 @@ async function saveViewer(prefix, options = {}) {
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-        if (prefix === 'fileModal') {
-            await refreshWorkspace(true);
-            closeFileModal();
-        } else {
-            if (!options.skipUndoSnapshot && !inlineViewerPerformingUndo && inlineViewerLastSavedContent !== content) {
-                pushInlineUndoSnapshot(state.path, inlineViewerLastSavedContent);
-            }
-            inlineViewerLastSavedContent = content;
-            setInlineViewerSaveState('saved');
-            syncInlineUndoButton();
-            await refreshWorkspace(false);
+        if (!options.skipUndoSnapshot && !inlineViewerPerformingUndo && inlineViewerLastSavedContent !== content) {
+            pushInlineUndoSnapshot(state.path, inlineViewerLastSavedContent);
         }
+        inlineViewerLastSavedContent = content;
+        setInlineViewerSaveState('saved');
+        syncInlineUndoButton();
+        await refreshWorkspace(false);
     } catch (e) {
-        if (prefix === 'inlineViewer') {
-            setInlineViewerSaveState('error', 'Save failed');
-        } else {
-            alert(`Save failed: ${e.message}`);
-        }
+        setInlineViewerSaveState('error', 'Save failed');
         throw e;
     } finally {
         saveButton.disabled = false;
         saveButton.textContent = 'Save';
     }
-}
-
-async function saveFileModal() {
-    await saveViewer('fileModal');
 }
 
 async function saveInlineViewer(options = {}) {
@@ -3692,16 +3709,16 @@ function applyViewerMetadata(prefix, path) {
         setViewerContent(prefix, '');
         if (preview) preview.innerHTML = '';
         renderViewerSheetTabs(prefix, [], '');
-        if (prefix === 'inlineViewer') {
-            currentFileSymbols = [];
-            renderCurrentFileSymbols();
-            inlineViewerLastSavedContent = '';
-            setInlineViewerSaveState('idle');
-            syncInlineUndoButton();
-            syncInlineSelectionAction();
-        }
+        currentFileSymbols = [];
+        renderCurrentFileSymbols();
+        inlineViewerLastSavedContent = '';
+        setInlineViewerSaveState('idle');
+        syncInlineUndoButton();
+        syncInlineSelectionAction();
     }
     toggleViewerEmptyState(prefix, Boolean(path));
+    syncInlineViewerMode();
+    syncInlineViewerVisibility();
 }
 
 function syncViewerControls(prefix, editable, defaultView = 'edit') {
@@ -3710,39 +3727,45 @@ function syncViewerControls(prefix, editable, defaultView = 'edit') {
     if (editTab) editTab.hidden = !editable;
     if (saveButton) saveButton.hidden = !editable;
     setViewerView(prefix, editable ? defaultView : 'preview');
-    if (prefix === 'inlineViewer') {
-        syncInlineUndoButton();
-        syncInlineSelectionAction();
-    }
+    if (!getViewerState(prefix).path) toggleViewerEmptyState(prefix, false);
+    syncInlineUndoButton();
+    syncInlineSelectionAction();
+    syncInlineViewerMode();
+    syncInlineViewerVisibility();
 }
 
-function openInlineViewerInModal() {
-    if (!inlineViewerPath) return;
-    openWorkspaceFile(inlineViewerPath, { preserveSheet: true, modal: true });
+function closeInlineViewer() {
+    if (inlineViewerAutosaveTimer) {
+        clearTimeout(inlineViewerAutosaveTimer);
+        inlineViewerAutosaveTimer = null;
+    }
+    selectedWorkspaceFile = '';
+    selectedSpreadsheetSheet = '';
+    inlineViewerPath = '';
+    inlineViewerKind = 'text';
+    inlineViewerEditable = false;
+    inlineViewerView = 'edit';
+    currentFileSymbols = [];
+    applyViewerMetadata('inlineViewer', '');
+    renderCurrentFileSymbols();
+    syncViewerControls('inlineViewer', false, 'preview');
+    renderFileList();
 }
 
 async function openWorkspaceFile(path, options = {}) {
     if (!featureSettings.agent_tools || !path) return;
     const preserveSheet = Boolean(options.preserveSheet);
-    const openModal = options.modal ?? true;
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
-    fileModalPath = path;
     renderFileList();
     applyViewerMetadata('inlineViewer', path);
-    applyViewerMetadata('fileModal', path);
-    const modalEditor = document.getElementById('fileModalEditor');
     setViewerContent('inlineViewer', '');
-    if (modalEditor) modalEditor.value = '';
     renderViewerSheetTabs('inlineViewer', [], '');
-    renderViewerSheetTabs('fileModal', [], '');
-    if (openModal) openFileModal();
 
     try {
         if (/\.(xlsx|xls|xlsm)$/i.test(path)) {
             setViewerState('inlineViewer', { kind: 'spreadsheet', editable: false, path });
-            setViewerState('fileModal', { kind: 'spreadsheet', editable: false, path });
             const params = new URLSearchParams({ path });
             if (selectedSpreadsheetSheet) params.set('sheet', selectedSpreadsheetSheet);
             const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?${params.toString()}`);
@@ -3750,11 +3773,8 @@ async function openWorkspaceFile(path, options = {}) {
             if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
             selectedSpreadsheetSheet = data.sheet || '';
             renderViewerSheetTabs('inlineViewer', data.sheet_names || [], selectedSpreadsheetSheet);
-            renderViewerSheetTabs('fileModal', data.sheet_names || [], selectedSpreadsheetSheet);
             renderSpreadsheetPreview('inlineViewerPreview', data);
-            renderSpreadsheetPreview('fileModalPreview', data);
             syncViewerControls('inlineViewer', false, 'preview');
-            syncViewerControls('fileModal', false, 'preview');
             return;
         }
 
@@ -3765,45 +3785,36 @@ async function openWorkspaceFile(path, options = {}) {
         const editable = isEditableTextPath(path);
         const kind = isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'));
         setViewerState('inlineViewer', { editable, kind, path });
-        setViewerState('fileModal', { editable, kind, path });
         setViewerContent('inlineViewer', data.content || '');
-        if (modalEditor) modalEditor.value = data.content || '';
         inlineViewerLastSavedContent = data.content || '';
         setInlineViewerSaveState('idle');
         syncInlineUndoButton();
 
         if (kind === 'html') {
             renderHtmlPreview('inlineViewerPreview', data.content || '');
-            renderFileModalHtmlPreview(data.content || '');
         }
         else if (kind === 'markdown') {
             renderMarkdownPreview('inlineViewerPreview', data.content || '');
-            renderMarkdownPreview('fileModalPreview', data.content || '');
         }
         else if (kind === 'csv') {
             const summaryResp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?path=${encodeURIComponent(path)}`);
             const summaryData = await summaryResp.json();
             if (summaryResp.ok) {
                 renderSpreadsheetPreview('inlineViewerPreview', summaryData);
-                renderFileModalSpreadsheetPreview(summaryData);
             } else {
                 renderDelimitedPreview('inlineViewerPreview', data.content || '', path);
-                renderFileModalDelimitedPreview(data.content || '', path);
             }
         } else {
             renderCodePreview('inlineViewerPreview', data.content || '', path);
-            renderFileModalCodePreview(data.content || '', path);
         }
 
         syncViewerControls('inlineViewer', editable, inlineViewerView || 'edit');
-        syncViewerControls('fileModal', editable, 'preview');
         configureInlineEditorLanguage(path);
         updateCurrentFileSymbols(path, data.content || '');
         updateInlineViewerPreview();
-        updateFileModalPreview();
     } catch (e) {
         alert(`Failed to open ${path}: ${e.message}`);
-        closeFileModal();
+        closeInlineViewer();
     }
 }
 
@@ -3891,7 +3902,9 @@ function sendMessage() {
     const input = document.getElementById('input');
     const displayText = input.value.trim();
     if (!modelAvailable || !displayText || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
+    dismissExecutionPlan();
     hideSlashMenu();
+    const slashCommand = parseDirectSlashCommandInput(displayText);
 
     // Resolve any collapsed paste placeholders to actual content
     let message = displayText;
@@ -3908,7 +3921,7 @@ function sendMessage() {
     input.value = '';
     pastedBlocks = [];
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
-    const turnFeatures = resolveTurnFeatures(message, attachmentPaths);
+    const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
     clearPendingAttachments();
     autoResizeTextarea(input);
     showLoading();
@@ -3927,14 +3940,21 @@ function sendMessage() {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: deepMode ? 'deep' : 'normal',
         features: turnFeatures,
+        slash_command: slashCommand ? {
+            name: slashCommand.name,
+            raw_name: slashCommand.rawName,
+            args: slashCommand.args,
+        } : null,
     }));
 }
 
 function sendInterruptMessage(messageText) {
     const text = String(messageText || '').trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    dismissExecutionPlan();
+    const slashCommand = parseDirectSlashCommandInput(text);
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
-    const turnFeatures = resolveTurnFeatures(text, attachmentPaths);
+    const turnFeatures = resolveTurnFeatures(text, attachmentPaths, slashCommand);
     const attachmentNote = pendingAttachments.length
         ? `\n\nAttached files:\n${pendingAttachments.map(file => `- ${file.path || file.name}`).join('\n')}`
         : '';
@@ -3951,6 +3971,11 @@ function sendInterruptMessage(messageText) {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: deepMode ? 'deep' : 'normal',
         features: turnFeatures,
+        slash_command: slashCommand ? {
+            name: slashCommand.name,
+            raw_name: slashCommand.rawName,
+            args: slashCommand.args,
+        } : null,
     }));
 }
 
@@ -4207,18 +4232,13 @@ function showLoading() {
         <div class="loading-spinner">
             <div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div>
         </div>
-        <div class="loading-copy">
-            <div class="loading-text">Thinking...</div>
-            <div class="loading-hint" id="loadingHintText" aria-live="polite"></div>
-        </div>
+        <div class="loading-text">Thinking...</div>
     `;
     document.getElementById('messages').appendChild(loading);
     scrollToBottom();
-    startLoadingHintRotation();
 }
 
 function removeLoading() {
-    stopLoadingHintRotation();
     document.getElementById('loadingIndicator')?.remove();
 }
 
@@ -4317,13 +4337,6 @@ function renderMarkdown() {
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
 
-                const speakBtn = document.createElement('button');
-                speakBtn.className = 'action-btn speak-btn';
-                speakBtn.innerHTML = `${SPEAK_BUTTON_ICON} Speak`;
-                speakBtn.disabled = !supportsSpeechSynthesis();
-                speakBtn.onclick = (e) => { e.stopPropagation(); speakAssistantMessage(msg); };
-                actions.appendChild(speakBtn);
-
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn';
                 copyBtn.innerHTML = '&#128203; Copy';
@@ -4361,10 +4374,8 @@ function renderMarkdown() {
                 btn.onclick = (e) => { e.stopPropagation(); copyToClipboard(codeText, btn); };
                 pre.appendChild(btn);
             });
-            syncSpeakButtons();
             if (voiceSettings.autoSpeakReplies && supportsSpeechSynthesis() && msg.dataset.autoSpoken !== 'true') {
-                msg.dataset.autoSpoken = 'true';
-                speakAssistantMessage(msg);
+                enqueueAssistantSpeech(msg);
             }
         } catch (e) {
             contentDiv.textContent = content;
@@ -4446,12 +4457,11 @@ async function refreshWorkspace(force = false) {
         buildSteps = [];
         selectedWorkspaceFile = '';
         selectedSpreadsheetSheet = '';
-        inlineViewerPath = '';
+        closeInlineViewer();
         pathEl.textContent = 'Agent tools disabled';
         listEl.innerHTML = '<div class="workspace-empty">Agent dev tools are turned off.</div>';
         renderBuildSteps();
         renderWorkspaceActivity();
-        applyViewerMetadata('inlineViewer', '');
         return;
     }
 
@@ -4463,13 +4473,13 @@ async function refreshWorkspace(force = false) {
         workspaceEntries = flattenWorkspaceFiles(tree, []);
         workspaceStats = collectWorkspaceStats(tree);
         currentRunId = tree.run_id || null;
-        if (!workspaceEntries.some(item => item.path === selectedWorkspaceFile)) {
-            selectedWorkspaceFile = workspaceEntries[0]?.path || '';
-        }
+        const hasSelectedFile = workspaceEntries.some(item => item.path === selectedWorkspaceFile);
+        if (!hasSelectedFile) selectedWorkspaceFile = '';
+        if (inlineViewerPath && !workspaceEntries.some(item => item.path === inlineViewerPath)) closeInlineViewer();
         if (workspaceEntries.length) {
             applyWorkspacePanelState();
         } else {
-            applyViewerMetadata('inlineViewer', '');
+            closeInlineViewer();
         }
         renderFileList();
     } catch (e) {
@@ -4585,9 +4595,10 @@ async function loadConversation(id, options = {}) {
     selectedWorkspaceFile = '';
     selectedSpreadsheetSheet = '';
     clearBuildSteps();
+    dismissExecutionPlan();
     if (!preserveActivity) clearWorkspaceActivity();
     if (!preserveActivity) clearTerminalOutput();
-    closeFileModal();
+    closeInlineViewer();
     clearPendingAttachments();
     const resp = await fetch(`/api/conversation/${id}`);
     const data = await resp.json();
@@ -4616,9 +4627,10 @@ function newChat() {
     selectedWorkspaceFile = '';
     selectedSpreadsheetSheet = '';
     clearBuildSteps();
+    dismissExecutionPlan();
     clearWorkspaceActivity();
     clearTerminalOutput();
-    closeFileModal();
+    closeInlineViewer();
     clearPendingAttachments();
     document.getElementById('messages').innerHTML = buildWelcomeMarkup();
     enterWelcomeMode();
@@ -4693,7 +4705,6 @@ document.addEventListener('keydown', (e) => {
         return;
     }
     if (e.key !== 'Escape') return;
-    if (document.getElementById('fileModal').classList.contains('show')) { closeFileModal(); return; }
     if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
     if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }

@@ -23,7 +23,7 @@ The Settings panel exposes the main runtime affordances:
 - **Workspace Panel** shows or hides the right-side workspace UI.
 - **Local RAG** allows conversation-history search for recall-heavy prompts.
 - **Web Search** allows freshness-sensitive web lookups.
-- **Auto-Speak Replies** plays assistant responses through the server TTS pipeline when available.
+- **Auto-Speak Replies** queues fresh assistant responses through the server TTS pipeline when available, using only the final reply content instead of the reasoning panel.
 - **Speech Speed** adjusts playback rate for generated audio.
 
 These toggles affect both UI behavior and the server-side feature flags sent with each request.
@@ -42,7 +42,7 @@ The activity timeline is populated from WebSocket `activity`, `tool_start`, `too
 
 ## File viewer and editor
 
-Selecting a workspace file opens a modal reader/editor.
+Selecting a workspace file opens the inline viewer/editor in the workspace area.
 
 Current capabilities include:
 
@@ -78,30 +78,31 @@ That means attachments are first-class workspace inputs rather than opaque blobs
 - uploaded files appear in the workspace tree
 - follow-up turns can keep working with those artifacts
 
-Assistant replies can also be recovered into the workspace after the fact:
-
-- the `Add to WS` action on an assistant message stages fenced code blocks into `recovered/.../files/`
-- the app generates a companion `README.md` with the non-code notes from that reply
-- this creates a reviewable staging area instead of forcing users to perfectly re-prompt the model
-
 ## Slash commands
 
 The composer has a slash menu for common workflows. Current commands include:
 
 - `/new`
 - `/clear`
-- `/web`
+- `/search`
+- `/grep`
+- `/code`
 - `/files`
 - `/read`
-- `/edit`
 - `/review`
 - `/fix`
 - `/plan`
 - `/explain`
 - `/attach`
-- `/add`
 
-Some commands also enable the related feature toggle automatically, such as turning on web search or agent tools before inserting the prompt template.
+The direct workflow commands now take a structured path instead of only inserting prompt text:
+
+- `/search` runs web search first, then fetches pages only when needed
+- `/grep` runs workspace grep first, then reads matching files if needed
+- `/plan` inspects the workspace and prepares an executable plan draft
+- `/code` runs the inspect/plan/edit/verify code workflow directly
+
+Some commands still enable related feature toggles automatically, such as turning on web search or agent tools before filling the composer.
 
 ## Deep-mode UX
 
@@ -110,7 +111,7 @@ Deep mode is no longer just "think harder." The UI now exposes several orchestra
 - a reasoning-effort control in the composer
 - streaming activity updates across inspect/plan/execute/verify phases
 - structured build-step progress
-- plan previews that can be loaded back into the composer for approval-first execution
+- plan previews that stay out of the composer by default and can be approved directly or copied into the composer on demand
 
 On mobile, the title area doubles as a quick reasoning toggle, while the workspace panel is intentionally suppressed to keep the layout manageable.
 
@@ -120,6 +121,8 @@ The browser can use the server-side voice pipeline for both directions:
 
 - record audio and send it to `/api/voice/transcribe`
 - request spoken playback from `/api/voice/speak`
+
+When auto-speak is enabled, fresh assistant replies are spoken in arrival order so a new response does not cut off one that is already playing.
 
 The UI detects runtime availability from `/api/voice/status` and updates controls accordingly. If STT or TTS is missing on the server, the relevant controls stay disabled and the user gets a clear note explaining why.
 
