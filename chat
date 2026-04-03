@@ -6,6 +6,17 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 cd "$PROJECT_DIR"
 
+# Filter known benign Docker/Colima transport noise while preserving real errors.
+docker_compose() {
+    docker compose "$@" 2> >(
+        awk '
+            /^channel [0-9]+: open failed: connect failed: Connection refused$/ { next }
+            /^\[\+\] Pulling [0-9]+\/[0-9]+ failed: connect failed: Connection refused$/ { next }
+            { print > "/dev/stderr" }
+        '
+    )
+}
+
 # Get the LAN IP address of the host
 lan_ip() {
     hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"
@@ -23,17 +34,53 @@ usage() {
     echo "  logs      Tail logs from all services"
 }
 
+ensure_data_dirs() {
+    # Pre-create data directories before Docker can claim them as root
+    mkdir -p "$PROJECT_DIR/data/voice/models"
+}
+
+install_voice_model() {
+    local model_dir="$PROJECT_DIR/data/voice/models"
+    local model_name="en_US-amy-medium"
+    local model_file="$model_dir/${model_name}.onnx"
+    local config_file="$model_dir/${model_name}.onnx.json"
+    local base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+
+    if [[ -f "$model_file" && -f "$config_file" ]]; then
+        echo "Piper voice model already installed."
+        return 0
+    fi
+
+    echo "Downloading Piper TTS voice model..."
+    if ! mkdir -p "$model_dir" 2>/dev/null; then
+        echo ""
+        echo "ERROR: Cannot write to $model_dir"
+        echo "Docker likely created it as root. Fix with:"
+        echo "  sudo chown -R $(id -un):$(id -gn) $PROJECT_DIR/data"
+        echo "Then re-run: ./chat install"
+        exit 1
+    fi
+    curl -fSL "$base_url/${model_name}.onnx" -o "$model_file"
+    curl -fSL "$base_url/${model_name}.onnx.json" -o "$config_file"
+    echo "Voice model downloaded."
+}
+
 do_install() {
+    ensure_data_dirs
     echo "Pulling vLLM image..."
-    docker compose pull vllm
+    docker_compose pull vllm
     echo ""
     echo "Building chat-app image..."
-    docker compose build chat-app
+    docker_compose build chat-app
+    echo ""
+    echo "Installing voice tools..."
+    install_voice_model
     echo ""
     echo "Install complete. Run './chat start' to launch."
 }
 
 do_start() {
+    ensure_data_dirs
     # Check if already fully running
     local vllm_running chat_running
     vllm_running=$(docker inspect -f '{{.State.Running}}' vllm 2>/dev/null || echo "false")
@@ -47,10 +94,10 @@ do_start() {
     fi
 
     # Clean up any stopped/broken containers before starting
-    docker compose down --remove-orphans 2>/dev/null || true
+    docker_compose down --remove-orphans 2>/dev/null || true
 
     echo "Starting services..."
-    docker compose up -d
+    docker_compose up -d
 
     echo ""
     echo "Started."
@@ -63,7 +110,7 @@ do_start() {
 
 do_stop() {
     echo "Stopping services..."
-    docker compose down --remove-orphans 2>/dev/null || true
+    docker_compose down --remove-orphans 2>/dev/null || true
     echo "Stopped."
 }
 
@@ -81,6 +128,6 @@ case "${1:-}" in
     stop)     do_stop ;;
     restart)  do_stop; echo ""; do_start ;;
     status)   do_status ;;
-    logs)     docker compose logs -f ;;
+    logs)     docker_compose logs -f ;;
     *)        usage; exit 1 ;;
 esac
