@@ -21,7 +21,7 @@ For each request the server:
 2. Parses per-turn feature flags from the UI.
 3. Classifies workspace intent.
 4. Chooses a small allowed tool set with `select_enabled_tools(...)`.
-5. Either streams a direct answer or enters `run_tool_loop(...)`.
+5. Either streams a direct answer, enters `run_tool_loop(...)`, or auto-upgrades broad approved write requests into the deeper inspect/plan/build/verify flow.
 
 `run_tool_loop(...)` is intentionally small:
 
@@ -29,6 +29,7 @@ For each request the server:
 - The model may emit a single `<tool_call>{...}</tool_call>` block.
 - The server validates the tool name and arguments.
 - The server executes the tool and appends a structured `<tool_result>` message.
+- After a successful patch, the server can infer one focused auto-verify command and run it immediately when command access is available.
 - The loop repeats until the model returns plain text or the step budget is exhausted.
 
 Important guardrails:
@@ -39,6 +40,10 @@ Important guardrails:
 - Token budgets are reduced for tool-oriented turns by `tool_loop_token_budget(...)`.
 - `workspace.run_command` takes an argv array, not a shell string.
 - `workspace.patch_file` uses exact-match edits so changes stay narrow and predictable.
+- `workspace.render` is only exposed when the prompt strongly implies “render/preview/display this HTML”.
+- Final answer text is post-processed to strip unsupported claims that a file was created or updated when no successful workspace write happened.
+- Direct answers get one recovery pass if the model incorrectly claims an available tool capability is missing.
+- Broad “build me an app/project/repo” requests with approved workspace edits can bypass the lightweight loop and run through the full workspace execution path automatically.
 
 ## Deep-mode harness
 
@@ -57,7 +62,7 @@ Typical flow:
 Two user-facing behaviors matter here:
 
 - Some deep requests return a **plan preview** first via `plan_ready`, so the UI can offer approval-first execution without overwriting the user's composer draft.
-- Explicit execution requests can proceed through the full inspect/build/verify path and stream step-by-step activity while work is happening.
+- Explicit or auto-executed workspace build requests can proceed through the full inspect/build/verify path and stream step-by-step activity while work is happening.
 
 ## Tool surface
 
@@ -69,6 +74,7 @@ Available tools today:
 - `workspace.grep`
 - `workspace.read_file`
 - `workspace.patch_file`
+- `workspace.render`
 - `workspace.run_command`
 - `spreadsheet.describe`
 - `conversation.search_history`
@@ -79,12 +85,15 @@ Current search-specific behavior:
 
 - `workspace.grep` is the preferred read-only repo search tool for code and text questions.
 - `conversation.search_history` is for recall within the active conversation.
-- `web.search` returns ordered results plus normalized domain metadata for result selection.
+- `web.search` returns ordered results plus normalized domain metadata, and by default checks general web results alongside Wikipedia and Reddit result sets.
+- For some topics, `web.search` also adds curated authoritative domains; philosophy queries now include Stanford Encyclopedia of Philosophy and Internet Encyclopedia of Philosophy result sets.
+- Curated authoritative domains are fail-open and can be temporarily disabled automatically if they start failing repeatedly.
 - `web.fetch_page` returns cleaned page text plus normalized source metadata so final answers can cite fetched pages.
 
 How tools are exposed:
 
 - **Workspace read tools** are available when the request clearly needs local files.
+- **Workspace render** is added for HTML preview/display requests so the model can materialize a preview file directly in the viewer.
 - **Write access** only appears when the user approves file changes for that turn.
 - **Command execution** only appears when the user approves command execution for that turn.
 - **Conversation search** depends on the `local_rag` feature toggle.
@@ -147,6 +156,14 @@ The UI also receives:
 - `build_steps`
 
 Those events drive the workspace activity timeline, build-step checklist, loading text, and terminal status.
+
+## Workflow persistence
+
+Each chat turn now creates a workflow execution record in SQLite before any answer path runs.
+
+- `workflow_executions` stores the chosen route (`direct_answer`, tool loop, slash flow, deep orchestrated flow, auto-executed workspace flow), final outcome, artifact paths, and tool count.
+- `workflow_steps` stores per-tool step history including arguments, summarized results, latency, and whether a step was auto-generated (for example, auto-verify after a patch).
+- Route metadata is updated if a deep attempt falls back to normal mode or if a direct answer is retried with tools.
 
 ## Related files
 

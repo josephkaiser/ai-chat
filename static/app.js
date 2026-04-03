@@ -19,6 +19,7 @@ let availableModelProfiles = [];
 let selectedModelProfileKey = '';
 let activeModelProfileKey = '';
 let modelSwitchInFlight = false;
+let dockerControlAvailable = false;
 let uiReadyReportInFlight = false;
 let lastReportedUiReadyKey = '';
 let dashboardRefreshTimer = null;
@@ -39,6 +40,7 @@ let selectedWorkspaceFile = '';
 let selectedSpreadsheetSheet = '';
 let workspaceRefreshTimer = null;
 let workspacePanelOpen = localStorage.getItem('workspacePanelOpen') !== 'false';
+let workspaceConsoleOpen = localStorage.getItem('workspaceConsoleOpen') === 'true';
 let collapsedWorkspaceDirs = new Set();
 let featureSettings = null;
 let voiceSettings = null;
@@ -77,11 +79,16 @@ let speechQueueVersion = 0;
 let mediaRecorder = null;
 let mediaStream = null;
 let recordedChunks = [];
+let audioAttachmentUploadInFlight = false;
+let dictationStartedAt = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
 const SEND_BUTTON_ICON = '&#10148;';
 const STOP_BUTTON_ICON = '&#9632;';
 const MIC_BUTTON_ICON = '&#127908;';
 const MIC_ACTIVE_BUTTON_ICON = '&#9209;';
+const MAX_PENDING_ATTACHMENTS = 8;
+const MIN_CHAT_SURFACE_WIDTH = 520;
+const CHAT_SURFACE_GAP_PX = 14;
 let voiceRuntime = {
     tts_available: false,
     stt_available: false,
@@ -182,7 +189,57 @@ const PLAN_EXECUTION_MARKERS = Object.freeze([
     'run this plan',
     'run the plan',
 ]);
-const APPROVED_PLAN_EXECUTION_MESSAGE = 'Execute approved plan.';
+const PLAN_APPROVAL_REPLY_MARKERS = Object.freeze([
+    'yes',
+    'yes please',
+    'yes do it',
+    'yes do that',
+    'yes go ahead',
+    'yes start',
+    'yep',
+    'sure',
+    'ok',
+    'okay',
+    'approve',
+    'approve this plan',
+    'approve the plan',
+    'approve and run',
+    'run',
+    'run it',
+    'run this plan',
+    'execute',
+    'execute it',
+    'execute this plan',
+    'go ahead',
+    'go ahead please',
+    'go ahead and run it',
+    'do it',
+    'please do',
+    'sounds good',
+    'looks good',
+    'that works',
+    'lets do it',
+    "let's do it",
+    'start',
+    'start it',
+    'start with step 1',
+    'start with the first step',
+]);
+const APPROVED_PLAN_EXECUTION_MESSAGE = 'yes';
+const MESSAGE_FEEDBACK_OPTIONS = Object.freeze([
+    Object.freeze({
+        value: 'positive',
+        label: 'Good',
+        icon: '&#128077;',
+        title: 'Mark this response as helpful.',
+    }),
+    Object.freeze({
+        value: 'negative',
+        label: 'Bad',
+        icon: '&#128078;',
+        title: 'Mark this response as unhelpful.',
+    }),
+]);
 
 featureSettings = loadFeatureSettings();
 voiceSettings = loadVoiceSettings();
@@ -209,7 +266,7 @@ function applyTheme(mode) {
 
     // Update theme icon
     const icon = document.getElementById('themeIcon');
-    if (icon) icon.innerHTML = mode === 'dark' ? '&#9728;' : '&#127769;';
+    if (icon) icon.textContent = mode === 'dark' ? 'Dark' : 'Light';
 
     applyPetTheme(petProfile, mode);
 }
@@ -311,6 +368,21 @@ function setModelNote(modelName) {
     if (modelName) window.MODEL_NAME = modelName;
 }
 
+function getProfileDisplayLabel(profile) {
+    if (!profile || typeof profile !== 'object') return '';
+    return profile.display_label || profile.label || profile.key || '';
+}
+
+function getModelSelectDisabledReason(profiles = availableModelProfiles) {
+    if (modelSwitchInFlight) return 'Model switch in progress.';
+    if (isGenerating) return 'Wait for the current reply to finish before switching models.';
+    if (!modelAvailable) return 'The current model is still loading.';
+    if (!dockerControlAvailable && Array.isArray(profiles) && profiles.length > 1) {
+        return 'Profile switching is disabled on this server because Docker control is off. Use Models to browse, download, or delete Hugging Face checkpoints.';
+    }
+    return '';
+}
+
 function syncReasoningSelector() {
     const select = document.getElementById('reasoningSelect');
     if (!select) return;
@@ -342,6 +414,7 @@ function syncModelSelector() {
 
     const profiles = Array.isArray(availableModelProfiles) ? availableModelProfiles : [];
     const nextValue = selectedModelProfileKey || activeModelProfileKey || select.value || '';
+    const disabledReason = getModelSelectDisabledReason(profiles);
 
     select.innerHTML = '';
     if (!profiles.length) {
@@ -350,6 +423,7 @@ function syncModelSelector() {
         option.textContent = modelSwitchInFlight ? 'Switching model...' : (window.MODEL_NAME || 'Loading model...');
         select.appendChild(option);
         select.disabled = true;
+        select.title = 'No model profiles available.';
         return;
     }
 
@@ -357,14 +431,16 @@ function syncModelSelector() {
         const option = document.createElement('option');
         option.value = profile.key;
         const status = profile.active ? 'Active' : (profile.selected ? 'Selected' : '');
-        option.textContent = status ? `${profile.label} (${status})` : profile.label;
+        const displayLabel = getProfileDisplayLabel(profile);
+        option.textContent = status ? `${displayLabel} (${status})` : displayLabel;
         select.appendChild(option);
     });
 
     select.value = profiles.some(profile => profile.key === nextValue)
         ? nextValue
         : (profiles.find(profile => profile.selected)?.key || profiles[0].key);
-    select.disabled = modelSwitchInFlight || isGenerating || !modelAvailable;
+    select.disabled = Boolean(disabledReason);
+    select.title = disabledReason || 'Choose the active model profile.';
 }
 
 function extractProfileKey(profileValue) {
@@ -378,6 +454,7 @@ function applyModelRuntime(data = {}) {
     availableModelProfiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
     selectedModelProfileKey = extractProfileKey(data.selected_profile) || extractProfileKey(data.selected_profile_key) || selectedModelProfileKey;
     activeModelProfileKey = extractProfileKey(data.active_profile) || extractProfileKey(data.active_profile_key) || activeModelProfileKey;
+    dockerControlAvailable = Boolean(data.docker_control_available);
     if (!selectedModelProfileKey && Array.isArray(availableModelProfiles)) {
         selectedModelProfileKey = availableModelProfiles.find(profile => profile.selected)?.key || '';
     }
@@ -408,8 +485,15 @@ async function handleModelSelectChange(profileKey) {
     }
 
     const profile = availableModelProfiles.find(item => item.key === profileKey);
+    const profileLabel = getProfileDisplayLabel(profile) || profileKey;
+    if (!dockerControlAvailable) {
+        syncModelSelector();
+        showDashboard();
+        alert('Model profile switching is disabled on this server because Docker control is off. You can still use the Models view to download or delete Hugging Face checkpoints.');
+        return;
+    }
     const confirmed = confirm(
-        `Switch to ${profile?.label || profileKey}?\n\nThis will restart the model and the chat may be unavailable for a few minutes while it loads.`
+        `Switch to ${profileLabel}?\n\nThis will restart the model and the chat may be unavailable for a few minutes while it loads.`
     );
     if (!confirmed) {
         syncModelSelector();
@@ -563,6 +647,66 @@ async function maybeReportUiModelReady() {
     }
 }
 
+function syncChatShellLayout() {
+    const shell = document.querySelector('.chat-shell');
+    if (!shell) return;
+
+    const mobileViewport = window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+    if (mobileViewport) {
+        shell.style.setProperty('--chat-main-inset-left', '0px');
+        shell.style.setProperty('--chat-main-inset-right', '0px');
+        shell.classList.remove('menu-open', 'chrome-shifted');
+        return;
+    }
+
+    const shellRect = shell.getBoundingClientRect();
+    if (!shellRect.width) return;
+
+    let desiredLeft = 0;
+    let desiredRight = 0;
+
+    const menuOverlay = document.getElementById('menuOverlay');
+    const menuPanel = menuOverlay?.querySelector('.menu-panel');
+    const menuOpen = Boolean(menuOverlay?.classList.contains('show') && menuPanel);
+    if (menuOpen && menuPanel) {
+        const menuRect = menuPanel.getBoundingClientRect();
+        desiredLeft = Math.max(0, menuRect.right - shellRect.left + CHAT_SURFACE_GAP_PX);
+    }
+
+    const ideWorkspace = document.getElementById('ideWorkspace');
+    const workspaceOpen = Boolean(shell.classList.contains('ide-mode') && ideWorkspace);
+    if (workspaceOpen && ideWorkspace) {
+        const visibleWorkspaceRects = [];
+        const workspacePanel = document.getElementById('workspacePanel');
+        const inlineViewer = ideWorkspace.querySelector('.ide-viewer:not(.is-hidden)');
+
+        if (workspacePanel && workspacePanel.offsetParent !== null) {
+            visibleWorkspaceRects.push(workspacePanel.getBoundingClientRect());
+        }
+        if (inlineViewer && inlineViewer instanceof HTMLElement && inlineViewer.offsetParent !== null) {
+            visibleWorkspaceRects.push(inlineViewer.getBoundingClientRect());
+        }
+
+        if (visibleWorkspaceRects.length) {
+            const chromeLeftEdge = Math.min(...visibleWorkspaceRects.map(rect => rect.left));
+            desiredRight = Math.max(0, shellRect.right - chromeLeftEdge + CHAT_SURFACE_GAP_PX);
+        }
+    }
+
+    const totalDesiredInset = desiredLeft + desiredRight;
+    const maxInset = Math.max(0, shellRect.width - MIN_CHAT_SURFACE_WIDTH);
+    if (totalDesiredInset > maxInset && totalDesiredInset > 0) {
+        const scale = maxInset / totalDesiredInset;
+        desiredLeft *= scale;
+        desiredRight *= scale;
+    }
+
+    shell.style.setProperty('--chat-main-inset-left', `${Math.round(desiredLeft)}px`);
+    shell.style.setProperty('--chat-main-inset-right', `${Math.round(desiredRight)}px`);
+    shell.classList.toggle('menu-open', menuOpen);
+    shell.classList.toggle('chrome-shifted', desiredLeft > 0 || desiredRight > 0);
+}
+
 function applyWorkspacePanelState() {
     const panel = document.getElementById('workspacePanel');
     const toggle = document.getElementById('workspaceToggle');
@@ -580,18 +724,50 @@ function applyWorkspacePanelState() {
     const open = workspaceAllowed && workspacePanelOpen;
     panel.classList.toggle('is-open', open);
     toggle.classList.toggle('active', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (shell) shell.classList.toggle('ide-mode', open);
     if (shell) shell.classList.toggle('workspace-open', open);
     if (root) {
         root.classList.toggle('mobile-chat-mode', mobileViewport);
     }
     localStorage.setItem('workspacePanelOpen', open ? 'true' : 'false');
+    applyWorkspaceConsoleState();
+    syncChatShellLayout();
+}
+
+function applyWorkspaceConsoleState() {
+    const drawer = document.getElementById('workspaceActivityDrawer');
+    const toggle = document.getElementById('workspaceConsoleToggle');
+    if (!drawer || !toggle) return;
+    const allowed = Boolean(featureSettings?.agent_tools);
+    const open = allowed && workspaceConsoleOpen;
+    drawer.hidden = !open;
+    toggle.hidden = !allowed;
+    toggle.classList.toggle('active', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.title = open ? 'Hide activity log' : 'Show activity log';
+    toggle.setAttribute('aria-label', open ? 'Hide activity log' : 'Show activity log');
+    localStorage.setItem('workspaceConsoleOpen', workspaceConsoleOpen ? 'true' : 'false');
+    if (open) renderWorkspaceActivity();
+}
+
+function toggleWorkspaceConsole() {
+    workspaceConsoleOpen = !workspaceConsoleOpen;
+    applyWorkspaceConsoleState();
+}
+
+function closeWorkspacePanel() {
+    if (!workspacePanelOpen) return;
+    workspacePanelOpen = false;
+    applyWorkspacePanelState();
 }
 
 function toggleWorkspacePanel() {
     if (!featureSettings.agent_tools || !featureSettings.workspace_panel || window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches) return;
+    if (!workspacePanelOpen) closeMenu();
     workspacePanelOpen = !workspacePanelOpen;
     applyWorkspacePanelState();
+    if (workspacePanelOpen) refreshWorkspace(true);
 }
 
 function syncFeatureControls() {
@@ -650,7 +826,13 @@ function updateFeatureSetting(name, enabled) {
 
 function downloadWorkspaceZip() {
     if (!currentConvId) return;
-    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/download`, '_blank');
+    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/download`, '_blank', 'noopener');
+}
+
+function downloadWorkspaceFile(path) {
+    if (!currentConvId || !path) return;
+    const params = new URLSearchParams({ path });
+    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/file/download?${params.toString()}`, '_blank', 'noopener');
 }
 
 function inferTurnPermissions(message, attachmentPaths = []) {
@@ -674,9 +856,61 @@ function inferTurnPermissions(message, attachmentPaths = []) {
     return { wantsWrite, wantsRun };
 }
 
-function messageRequestsPlanExecution(message) {
-    const text = String(message || '').trim().toLowerCase().replace(/\s+/g, ' ');
-    return PLAN_EXECUTION_MARKERS.some(marker => text.includes(marker));
+function normalizeTurnMessage(message) {
+    return String(message || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeApprovalReply(message) {
+    return normalizeTurnMessage(message).replace(/[.!?,;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function messageRequestsPlanExecution(message, slashCommand = null) {
+    const text = normalizeTurnMessage(message);
+    const approvalText = normalizeApprovalReply(message);
+    if (!text) return false;
+    if (PLAN_EXECUTION_MARKERS.some(marker => text.includes(marker))) return true;
+
+    const slashName = slashCommand?.name || '';
+    const slashArgs = normalizeApprovalReply(slashCommand?.args || '');
+    if (slashName === 'plan' && PLAN_APPROVAL_REPLY_MARKERS.includes(slashArgs)) {
+        return true;
+    }
+
+    return Boolean(pendingExecutionPlan?.executePrompt || buildSteps.length) && PLAN_APPROVAL_REPLY_MARKERS.includes(approvalText);
+}
+
+function messageRequestsWebSearch(message) {
+    const text = normalizeTurnMessage(message);
+    if (!text) return false;
+    return [
+        'search the web',
+        'search web',
+        'search online',
+        'use search',
+        'look up',
+        'browse',
+        'google',
+        'find sources',
+        'add citations',
+        'cite sources',
+        'with citations',
+        'with sources',
+    ].some(phrase => text.includes(phrase));
+}
+
+function messageRequestsHistoryLookup(message) {
+    const text = normalizeTurnMessage(message);
+    if (!text) return false;
+    return [
+        'search history',
+        'search the history',
+        'search our chat',
+        'search this chat',
+        'conversation history',
+        'earlier in this chat',
+        'what did we say',
+        'what did i say',
+    ].some(phrase => text.includes(phrase));
 }
 
 function getAllowedCommandsForConversation(conversationId) {
@@ -701,7 +935,7 @@ function clearAllowedCommandsForConversation(conversationId) {
 
 function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null) {
     const permissions = inferTurnPermissions(message, attachmentPaths);
-    const executionRequest = messageRequestsPlanExecution(message);
+    const executionRequest = messageRequestsPlanExecution(message, slashCommand);
     const allowedCommands = getAllowedCommandsForConversation(currentConvId);
     const slashName = slashCommand?.name || '';
     const slashWantsWrite = slashName === 'code';
@@ -718,7 +952,8 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
         ...featureSettings,
         agent_tools: true,
         workspace_panel: true,
-        web_search: featureSettings.web_search || slashName === 'search',
+        local_rag: featureSettings.local_rag || messageRequestsHistoryLookup(message),
+        web_search: featureSettings.web_search || slashName === 'search' || messageRequestsWebSearch(message),
         workspace_write: workspaceWrite,
         workspace_run_commands: workspaceRunCommands,
         allowed_commands: allowedCommands,
@@ -743,7 +978,7 @@ function updateSpeechSpeed(value) {
 }
 
 function supportsDictation() {
-    return Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder && voiceRuntime.stt_available);
+    return Boolean(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
 }
 
 function supportsSpeechSynthesis() {
@@ -777,11 +1012,13 @@ function updateVoiceNote(text = '') {
 function syncVoiceSupportUI() {
     const micButton = document.getElementById('micButton');
     if (micButton) {
-        micButton.disabled = !supportsDictation();
+        micButton.disabled = !supportsDictation() || audioAttachmentUploadInFlight;
         micButton.classList.toggle('is-active', dictationActive);
         micButton.innerHTML = dictationActive ? MIC_ACTIVE_BUTTON_ICON : MIC_BUTTON_ICON;
-        micButton.setAttribute('aria-label', dictationActive ? 'Stop dictation' : 'Start dictation');
-        micButton.title = dictationActive ? 'Stop dictation' : (supportsDictation() ? 'Record audio for server transcription' : 'Server dictation is unavailable');
+        micButton.setAttribute('aria-label', dictationActive ? 'Stop recording' : 'Record audio');
+        micButton.title = dictationActive
+            ? 'Stop recording'
+            : (supportsDictation() ? 'Record an audio attachment' : 'Audio recording is unavailable');
     }
 
     const autoSpeak = document.getElementById('settingAutoSpeak');
@@ -789,40 +1026,22 @@ function syncVoiceSupportUI() {
     const speechSpeed = document.getElementById('settingSpeechSpeed');
     if (speechSpeed) speechSpeed.disabled = !supportsSpeechSynthesis();
 
+    if (dictationActive || audioAttachmentUploadInFlight) return;
+
     if (!supportsDictation() && !supportsSpeechSynthesis()) {
-        updateVoiceNote('Server voice is unavailable. Install native STT/TTS tools on the server, then reload.');
+        updateVoiceNote('Audio recording and reply playback are unavailable right now.');
     } else if (!supportsDictation()) {
-        updateVoiceNote('Server transcription is unavailable. Reply playback is still available.');
+        updateVoiceNote('Audio recording is unavailable right now. Reply playback is still available.');
     } else if (!supportsSpeechSynthesis()) {
-        updateVoiceNote('Server speech playback is unavailable. Dictation is still available.');
+        updateVoiceNote('Reply playback is unavailable right now. Audio recording is still available.');
     } else {
         updateVoiceNote('');
     }
 }
 
-function appendDictationTranscript(transcript) {
-    const text = String(transcript || '').trim();
-    const input = document.getElementById('input');
-    if (!input) return;
-    const existing = input.value || '';
-    const separator = existing && text && !/\s$/.test(existing) ? ' ' : '';
-    input.value = text ? `${existing}${separator}${text}` : existing;
-    handleInputChange(input);
-}
-
 function mediaRecorderMimeType() {
     const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
     return candidates.find(type => window.MediaRecorder?.isTypeSupported?.(type)) || '';
-}
-
-async function transcribeRecordedAudio(blob) {
-    const formData = new FormData();
-    const extension = blob.type.includes('ogg') ? 'ogg' : (blob.type.includes('mp4') ? 'mp4' : 'webm');
-    formData.append('file', blob, `dictation.${extension}`);
-    const resp = await fetch('/api/voice/transcribe', { method: 'POST', body: formData });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
-    return data;
 }
 
 async function stopDictationAndUpload() {
@@ -840,10 +1059,6 @@ async function toggleDictation() {
         updateVoiceNote('Audio capture is not available in this browser.');
         return;
     }
-    if (!voiceRuntime.stt_available) {
-        updateVoiceNote('Server transcription is unavailable right now.');
-        return;
-    }
     updateVoiceNote('');
     try {
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -855,37 +1070,72 @@ async function toggleDictation() {
         };
         mediaRecorder.onerror = () => {
             dictationActive = false;
+            dictationStartedAt = 0;
             mediaRecorder = null;
+            recordedChunks = [];
+            audioAttachmentUploadInFlight = false;
             mediaStream?.getTracks?.().forEach(track => track.stop());
             mediaStream = null;
             syncVoiceSupportUI();
-            updateVoiceNote('Recording failed before transcription could start.');
+            syncSendButton();
+            updateVoiceNote('Recording failed before the audio could be attached.');
         };
         mediaRecorder.onstop = async () => {
             dictationActive = false;
+            audioAttachmentUploadInFlight = true;
             syncVoiceSupportUI();
+            syncSendButton();
             const chunks = recordedChunks.slice();
             recordedChunks = [];
+            const recorderMimeType = mediaRecorder?.mimeType || mimeType || 'audio/webm';
+            const durationSeconds = Math.max(1, Math.round((Date.now() - dictationStartedAt) / 1000));
+            dictationStartedAt = 0;
             mediaRecorder = null;
             mediaStream?.getTracks?.().forEach(track => track.stop());
             mediaStream = null;
-            if (!chunks.length) return;
-            updateVoiceNote('Uploading audio for server transcription...');
+            if (!chunks.length) {
+                audioAttachmentUploadInFlight = false;
+                syncVoiceSupportUI();
+                syncSendButton();
+                updateVoiceNote('');
+                return;
+            }
+            updateVoiceNote('Saving audio attachment...');
             try {
-                const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || mimeType || 'audio/webm' });
-                const result = await transcribeRecordedAudio(blob);
-                appendDictationTranscript(result.transcript || '');
+                const blob = new Blob(chunks, { type: recorderMimeType });
+                const extension = blob.type.includes('ogg') ? 'ogg' : (blob.type.includes('mp4') ? 'mp4' : 'webm');
+                const filename = `recording-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`;
+                await uploadPendingFiles([{
+                    blob,
+                    name: filename,
+                    size: blob.size,
+                    contentType: blob.type || recorderMimeType,
+                    duration: durationSeconds,
+                    kind: 'audio',
+                }], {
+                    failureMessage: 'Audio attachment failed',
+                });
                 updateVoiceNote('');
             } catch (error) {
-                updateVoiceNote(`Transcription failed: ${error.message}`);
+                updateVoiceNote(`Audio attachment failed: ${error.message}`);
+            } finally {
+                audioAttachmentUploadInFlight = false;
+                syncVoiceSupportUI();
+                syncSendButton();
             }
         };
         mediaRecorder.start();
         dictationActive = true;
+        dictationStartedAt = Date.now();
         syncVoiceSupportUI();
+        syncSendButton();
+        updateVoiceNote('Recording audio...');
     } catch (error) {
         dictationActive = false;
+        audioAttachmentUploadInFlight = false;
+        dictationStartedAt = 0;
         syncVoiceSupportUI();
+        syncSendButton();
         updateVoiceNote('Recording could not start. Allow microphone access and use HTTPS if the page is remote.');
     }
 }
@@ -936,10 +1186,12 @@ function stopSpeaking() {
 }
 
 async function requestServerSpeech(text) {
+    const payload = { text };
+    if (currentConvId) payload.conversation_id = currentConvId;
     const resp = await fetch('/api/voice/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify(payload),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
@@ -1128,12 +1380,14 @@ function connectWS() {
                 recordTerminalCommandStart(command, data.arguments?.cwd || '.');
             }
         } else if (data.type === 'tool_result') {
-            const prefix = data.ok === false ? 'Tool failed' : 'Tool finished';
-            setLoadingText(data.content ? `${prefix}: ${data.content}` : prefix);
+            setLoadingText(data.content || (data.ok === false ? 'Tool failed' : 'Tool finished'));
             if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
             if (data.name === 'workspace.run_command') {
                 const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
                 recordTerminalCommandResult(command, data.payload || {});
+            }
+            if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
+                openWorkspaceFile(data.payload.path);
             }
             scheduleWorkspaceRefresh();
         } else if (data.type === 'tool_error') {
@@ -1164,6 +1418,13 @@ function connectWS() {
         } else if (data.type === 'final_replace') {
             replaceAssistantAnswer(data.content);
             recordWorkspaceActivity('Draft', 'Draft updated.');
+        } else if (data.type === 'message_id') {
+            const msg = currentStreamingAssistantMessage();
+            if (msg && data.message_id !== undefined && data.message_id !== null) {
+                msg.dataset.messageId = String(data.message_id);
+                msg.dataset.feedback = normalizeMessageFeedback(msg.dataset.feedback);
+                syncAssistantMessageActions(msg);
+            }
         } else if (data.type === 'done') {
             const finishedConvId = activeStreamConversationId;
             isGenerating = false;
@@ -1236,10 +1497,31 @@ function connectLogWS() {
 // ==================== Menu ====================
 
 function toggleMenu() {
-    document.getElementById('menuOverlay').classList.toggle('show');
+    const overlay = document.getElementById('menuOverlay');
+    const button = document.getElementById('menuBtn');
+    const shell = document.querySelector('.chat-shell');
+    if (!overlay) return;
+    const open = !overlay.classList.contains('show');
+    if (open) closeWorkspacePanel();
+    overlay.classList.toggle('show', open);
+    if (shell) shell.classList.toggle('menu-open', open);
+    if (button) {
+        button.classList.toggle('active', open);
+        button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    syncChatShellLayout();
 }
 function closeMenu() {
-    document.getElementById('menuOverlay').classList.remove('show');
+    const overlay = document.getElementById('menuOverlay');
+    const button = document.getElementById('menuBtn');
+    const shell = document.querySelector('.chat-shell');
+    if (overlay) overlay.classList.remove('show');
+    if (shell) shell.classList.remove('menu-open');
+    if (button) {
+        button.classList.remove('active');
+        button.setAttribute('aria-expanded', 'false');
+    }
+    syncChatShellLayout();
 }
 
 // ==================== Dashboard ====================
@@ -1290,6 +1572,7 @@ function formatDurationSeconds(value) {
 
 async function loadDashboard() {
     const el = document.getElementById('dashboardContent');
+    if (!el) return;
     try {
         const [runtimeResp, libraryResp] = await Promise.all([
             fetch('/api/dashboard'),
@@ -1309,16 +1592,17 @@ async function loadDashboard() {
         const profiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
         const jobs = Array.isArray(library.jobs) ? library.jobs : [];
         const models = Array.isArray(library.models) ? library.models : [];
-        const dockerControlAvailable = Boolean(data.docker_control_available);
-        const switchButtons = dockerControlAvailable
+        const runtimeControlAvailable = Boolean(data.docker_control_available);
+        dockerControlAvailable = runtimeControlAvailable;
+        const switchButtons = runtimeControlAvailable
             ? profiles.filter(profile => profile.key !== 'custom').map(profile => `
-                <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(profile.label)}, ${JSON.stringify(profile.name)})'>
-                    Switch to ${profile.label}
-                    <div class="btn-desc">${profile.active ? 'Currently active' : profile.name}</div>
+                <button class="dash-btn${profile.active ? ' active' : ''}" onclick='dashSwitchModel(${JSON.stringify(profile.key)}, ${JSON.stringify(getProfileDisplayLabel(profile))}, ${JSON.stringify(profile.name)})'>
+                    Switch to ${escapeHtml(getProfileDisplayLabel(profile))}
+                    <div class="btn-desc">${profile.active ? `Currently active - ${escapeHtml(profile.name)}` : `${escapeHtml(profile.provider || 'Provider unknown')} - ${escapeHtml(profile.name)}`}</div>
                 </button>
             `).join('')
             : '';
-        const actionBody = dockerControlAvailable
+        const actionBody = runtimeControlAvailable
             ? `
                 <button class="dash-btn" onclick="dashRestart()">
                     Restart vLLM
@@ -1334,7 +1618,7 @@ async function loadDashboard() {
                 <div class="dash-card">
                     <div class="dash-row"><span class="label">Runtime control</span><span class="value">Disabled</span></div>
                     <div style="color:var(--text_secondary);font-size:13px;margin-top:10px;">
-                        Docker-backed restart, profile switch, and re-download actions are disabled unless the server enables Docker control explicitly.
+                        Docker-backed restart, profile switching, and activation are disabled unless the server enables Docker control explicitly. You can still use the model library below to download checkpoints and delete non-profile caches.
                     </div>
                 </div>
             `;
@@ -1356,7 +1640,7 @@ async function loadDashboard() {
                     </div>
                     <div class="model-library-actions">
                         <button class="dash-btn dash-btn-compact" onclick='window.open(${JSON.stringify(model.download_url)}, "_blank", "noopener")'>View</button>
-                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${dockerControlAvailable ? '' : 'disabled'}>${model.active_profile ? 'Active' : 'Use Model'}</button>
+                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${runtimeControlAvailable ? '' : 'disabled'}>${model.active_profile ? 'Active' : 'Use Model'}</button>
                         <button class="dash-btn dash-btn-compact danger" onclick='dashDeleteModel(${JSON.stringify(model.model_id)})' ${model.managed_by_profile ? 'disabled' : ''}>Delete</button>
                     </div>
                 </div>
@@ -1379,8 +1663,11 @@ async function loadDashboard() {
             <div class="dash-section">
                 <h4>Model</h4>
                 <div class="dash-card">
-                    <div class="dash-row"><span class="label">Name</span><span class="value">${data.model_name}</span></div>
-                    <div class="dash-row"><span class="label">Selected</span><span class="value">${data.selected_model_name || data.model_name}</span></div>
+                    <div class="dash-row"><span class="label">Active Profile</span><span class="value">${escapeHtml(data.active_profile?.display_label || data.active_profile?.label || '--')}</span></div>
+                    <div class="dash-row"><span class="label">Selected Profile</span><span class="value">${escapeHtml(data.selected_profile?.display_label || data.selected_profile?.label || '--')}</span></div>
+                    <div class="dash-row"><span class="label">Name</span><span class="value">${escapeHtml(data.model_name || '--')}</span></div>
+                    <div class="dash-row"><span class="label">Selected</span><span class="value">${escapeHtml(data.selected_model_name || data.model_name || '--')}</span></div>
+                    <div class="dash-row"><span class="label">Profile Switching</span><span class="value">${runtimeControlAvailable ? 'Enabled' : 'Disabled (Docker control off)'}</span></div>
                     <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
                     <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
                     <div class="dash-row"><span class="label">Load Phase</span><span class="value">${escapeHtml(loading.phase || (data.model_available ? 'ready' : 'loading'))}</span></div>
@@ -1413,9 +1700,9 @@ async function loadDashboard() {
             <div class="dash-section">
                 <h4>Model Library</h4>
                 <div class="dash-card model-library-shell">
-                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download it into the shared cache used by this app.</div>
+                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download it into the shared cache used by this app. Try entries like <code>google/gemma-4-E4B-it</code> or <code>Qwen/Qwen3-8B</code>.</div>
                     <div class="model-library-form">
-                        <input id="modelLibraryInput" class="dash-input" placeholder="e.g. Qwen/Qwen3-8B or https://huggingface.co/Qwen/Qwen3-8B">
+                        <input id="modelLibraryInput" class="dash-input" placeholder="e.g. google/gemma-4-E4B-it or https://huggingface.co/google/gemma-4-E4B-it">
                         <button class="dash-btn" onclick="dashDownloadModel()">Download Model</button>
                     </div>
                     <div class="model-library-subhead">
@@ -1487,6 +1774,10 @@ async function dashRestart() {
 }
 
 async function dashSwitchModel(profileKey, profileLabel, modelName) {
+    if (!dockerControlAvailable) {
+        alert('Model profile switching is disabled on this server because Docker control is off.');
+        return;
+    }
     const confirmed = confirm(`Switch to ${profileLabel}?\n\nThis will hard-restart vLLM and load ${modelName}. The chat will be unavailable for a few minutes while the model loads.`);
     if (!confirmed) return;
 
@@ -1582,6 +1873,10 @@ async function dashDeleteModel(modelId) {
 }
 
 async function dashActivateModel(modelId) {
+    if (!dockerControlAvailable) {
+        alert('Activating a cached model needs Docker control on this server.');
+        return;
+    }
     const confirmed = confirm(`Switch to ${modelId}?\n\nThis will restart vLLM and load that cached model.`);
     if (!confirmed) return;
 
@@ -1759,113 +2054,103 @@ function buildWelcomeMarkup() {
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
                 <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
                     <svg class="welcome-logo welcome-logo-dog welcome-logo-dog-pixel" viewBox="0 0 192 160" role="img" aria-hidden="true">
+                        <rect class="dog-shadow px-shadow" x="52" y="136" width="80" height="4"/>
+                        <rect class="dog-shadow px-shadow" x="48" y="140" width="88" height="4"/>
                         <g class="dog-drawing" shape-rendering="crispEdges">
                             <g class="dog-bark-lines" aria-hidden="true">
                                 <rect class="px-bark" x="156" y="32" width="4" height="12"/>
                                 <rect class="px-bark" x="164" y="40" width="4" height="12"/>
                                 <rect class="px-bark" x="156" y="52" width="4" height="8"/>
                             </g>
-                            <path class="dog-shadow px-shadow" d="M56 132h72v4H56zM48 136h88v4H48zM56 140h72v4H56z"/>
                             <g class="dog-tail">
-                                <rect class="px-outline" x="36" y="76" width="8" height="12"/>
-                                <rect class="px-outline" x="44" y="68" width="12" height="24"/>
-                                <rect class="px-outline" x="56" y="64" width="12" height="28"/>
-                                <rect class="px-outline" x="68" y="68" width="8" height="20"/>
-                                <rect class="px-outline" x="72" y="80" width="8" height="16"/>
-                                <rect class="px-outline" x="64" y="92" width="8" height="12"/>
-                                <rect class="px-outline" x="52" y="96" width="12" height="8"/>
-                                <rect class="px-fur-mid" x="40" y="80" width="8" height="8"/>
-                                <rect class="px-fur-light" x="48" y="72" width="8" height="16"/>
-                                <rect class="px-fur-light" x="56" y="68" width="8" height="20"/>
-                                <rect class="px-fur-mid" x="64" y="72" width="8" height="16"/>
-                                <rect class="px-cream" x="60" y="64" width="8" height="8"/>
-                                <rect class="px-cream" x="52" y="92" width="8" height="8"/>
+                                <rect class="px-outline" x="40" y="80" width="8" height="8"/>
+                                <rect class="px-outline" x="48" y="76" width="8" height="8"/>
+                                <rect class="px-outline" x="56" y="72" width="8" height="12"/>
+                                <rect class="px-outline" x="64" y="68" width="8" height="12"/>
+                                <rect class="px-outline" x="72" y="64" width="4" height="12"/>
+                                <rect class="px-outline" x="60" y="84" width="4" height="12"/>
+                                <rect class="px-fur-dark" x="44" y="80" width="4" height="4"/>
+                                <rect class="px-fur-mid" x="52" y="76" width="4" height="8"/>
+                                <rect class="px-fur-light" x="60" y="72" width="4" height="12"/>
+                                <rect class="px-fur-light" x="68" y="68" width="4" height="8"/>
                             </g>
                             <g class="dog-body-group">
-                                <rect class="px-outline" x="64" y="76" width="48" height="8"/>
-                                <rect class="px-outline" x="56" y="84" width="64" height="12"/>
-                                <rect class="px-outline" x="48" y="96" width="72" height="16"/>
-                                <rect class="px-outline" x="52" y="112" width="68" height="8"/>
-                                <rect class="px-outline" x="60" y="120" width="52" height="8"/>
-                                <rect class="px-outline" x="72" y="128" width="28" height="4"/>
-                                <rect class="px-outline" x="108" y="80" width="12" height="32"/>
-                                <rect class="px-fur-dark" x="64" y="80" width="48" height="8"/>
-                                <rect class="px-fur-mid" x="56" y="88" width="60" height="16"/>
-                                <rect class="px-fur-mid" x="60" y="104" width="56" height="8"/>
-                                <rect class="px-fur-dark" x="64" y="112" width="52" height="8"/>
-                                <rect class="px-fur-light" x="68" y="120" width="36" height="4"/>
-                                <rect class="px-cream" x="76" y="88" width="24" height="8"/>
-                                <rect class="px-cream" x="72" y="96" width="32" height="16"/>
-                                <rect class="px-cream" x="76" y="112" width="28" height="8"/>
-                                <rect class="px-cream" x="92" y="84" width="12" height="8"/>
+                                <rect class="px-outline" x="68" y="76" width="40" height="4"/>
+                                <rect class="px-outline" x="60" y="80" width="52" height="4"/>
+                                <rect class="px-outline" x="56" y="84" width="60" height="4"/>
+                                <rect class="px-outline" x="52" y="88" width="64" height="8"/>
+                                <rect class="px-outline" x="56" y="96" width="56" height="8"/>
+                                <rect class="px-outline" x="64" y="104" width="40" height="4"/>
+                                <rect class="px-fur-dark" x="68" y="80" width="36" height="4"/>
+                                <rect class="px-fur-mid" x="60" y="84" width="48" height="12"/>
+                                <rect class="px-fur-mid" x="64" y="96" width="40" height="4"/>
+                                <rect class="px-fur-light" x="84" y="80" width="12" height="8"/>
+                                <rect class="px-cream" x="72" y="84" width="16" height="20"/>
+                                <rect class="px-fur-light" x="68" y="104" width="20" height="4"/>
                             </g>
                             <g class="dog-leg-group dog-leg-back-group">
-                                <rect class="px-outline" x="60" y="108" width="12" height="24"/>
-                                <rect class="px-outline" x="76" y="112" width="12" height="20"/>
-                                <rect class="px-fur-mid" x="64" y="112" width="4" height="16"/>
-                                <rect class="px-fur-mid" x="80" y="116" width="4" height="12"/>
-                                <rect class="px-cream" x="56" y="128" width="20" height="8"/>
-                                <rect class="px-cream" x="72" y="128" width="20" height="8"/>
+                                <rect class="px-outline" x="60" y="92" width="8" height="36"/>
+                                <rect class="px-outline" x="76" y="96" width="8" height="32"/>
+                                <rect class="px-fur-mid" x="64" y="96" width="4" height="24"/>
+                                <rect class="px-fur-dark" x="80" y="100" width="4" height="20"/>
+                                <rect class="px-outline" x="56" y="128" width="12" height="4"/>
+                                <rect class="px-outline" x="72" y="128" width="12" height="4"/>
+                                <rect class="px-fur-light" x="60" y="128" width="8" height="4"/>
+                                <rect class="px-fur-light" x="76" y="128" width="8" height="4"/>
                             </g>
                             <g class="dog-head-group">
                                 <g class="dog-ear-left">
-                                    <rect class="px-outline" x="92" y="16" width="12" height="12"/>
-                                    <rect class="px-outline" x="96" y="12" width="8" height="8"/>
-                                    <rect class="px-ear" x="96" y="20" width="4" height="8"/>
-                                    <rect class="px-ear" x="100" y="24" width="4" height="4"/>
+                                    <rect class="px-outline" x="116" y="28" width="8" height="16"/>
+                                    <rect class="px-outline" x="120" y="24" width="8" height="8"/>
+                                    <rect class="px-ear" x="120" y="32" width="4" height="8"/>
                                 </g>
                                 <g class="dog-ear-right">
-                                    <rect class="px-outline" x="120" y="12" width="8" height="8"/>
-                                    <rect class="px-outline" x="124" y="16" width="12" height="16"/>
-                                    <rect class="px-ear" x="124" y="20" width="4" height="8"/>
-                                    <rect class="px-ear" x="120" y="24" width="4" height="4"/>
+                                    <rect class="px-outline" x="132" y="32" width="8" height="12"/>
+                                    <rect class="px-outline" x="136" y="28" width="4" height="8"/>
+                                    <rect class="px-ear" x="132" y="36" width="4" height="4"/>
                                 </g>
-                                <rect class="px-outline" x="92" y="28" width="32" height="8"/>
-                                <rect class="px-outline" x="84" y="36" width="52" height="12"/>
-                                <rect class="px-outline" x="80" y="48" width="60" height="16"/>
-                                <rect class="px-outline" x="84" y="64" width="56" height="12"/>
-                                <rect class="px-outline" x="92" y="76" width="40" height="8"/>
-                                <rect class="px-outline" x="100" y="84" width="20" height="4"/>
-                                <rect class="px-fur-dark" x="92" y="32" width="32" height="4"/>
-                                <rect class="px-fur-mid" x="88" y="40" width="44" height="20"/>
-                                <rect class="px-fur-light" x="100" y="32" width="20" height="8"/>
-                                <rect class="px-fur-light" x="96" y="40" width="28" height="8"/>
-                                <rect class="px-fur-mid" x="92" y="60" width="40" height="12"/>
-                                <rect class="px-cream" x="104" y="56" width="24" height="8"/>
-                                <rect class="px-cream" x="100" y="64" width="28" height="12"/>
-                                <rect class="px-cream" x="108" y="76" width="12" height="4"/>
-                                <rect class="px-blush" x="100" y="68" width="4" height="4"/>
-                                <rect class="px-blush" x="120" y="64" width="4" height="4"/>
+                                <rect class="px-outline" x="116" y="44" width="16" height="4"/>
+                                <rect class="px-outline" x="108" y="48" width="36" height="4"/>
+                                <rect class="px-outline" x="104" y="52" width="48" height="8"/>
+                                <rect class="px-outline" x="100" y="60" width="56" height="8"/>
+                                <rect class="px-outline" x="104" y="68" width="48" height="4"/>
+                                <rect class="px-outline" x="112" y="72" width="40" height="4"/>
+                                <rect class="px-fur-dark" x="116" y="48" width="16" height="4"/>
+                                <rect class="px-fur-mid" x="108" y="52" width="36" height="12"/>
+                                <rect class="px-fur-mid" x="104" y="64" width="40" height="4"/>
+                                <rect class="px-fur-light" x="124" y="52" width="8" height="8"/>
+                                <rect class="px-fur-light" x="116" y="56" width="12" height="4"/>
+                                <rect class="px-cream" x="136" y="60" width="16" height="8"/>
+                                <rect class="px-cream" x="132" y="68" width="16" height="8"/>
                                 <g class="dog-eyes-open">
-                                    <rect class="px-eye" x="104" y="48" width="8" height="8"/>
-                                    <rect class="px-eye" x="120" y="44" width="8" height="8"/>
-                                    <rect class="px-eye-shine" x="108" y="48" width="4" height="4"/>
-                                    <rect class="px-eye-shine" x="124" y="44" width="4" height="4"/>
+                                    <rect class="px-eye" x="124" y="60" width="8" height="8"/>
+                                    <rect class="px-eye-shine" x="128" y="60" width="4" height="4"/>
                                 </g>
                                 <g class="dog-eye-blink">
-                                    <rect class="px-eye" x="104" y="52" width="8" height="4"/>
-                                    <rect class="px-eye" x="120" y="48" width="8" height="4"/>
+                                    <rect class="px-eye" x="124" y="64" width="8" height="4"/>
                                 </g>
-                                <rect class="px-nose" x="128" y="60" width="8" height="4"/>
-                                <rect class="px-nose" x="124" y="64" width="8" height="4"/>
+                                <rect class="px-nose" x="148" y="64" width="4" height="4"/>
+                                <rect class="px-nose" x="144" y="68" width="4" height="4"/>
                                 <g class="dog-mouth-neutral">
-                                    <rect class="px-mouth" x="124" y="68" width="8" height="4"/>
-                                    <rect class="px-mouth" x="128" y="72" width="4" height="4"/>
+                                    <rect class="px-mouth" x="140" y="76" width="8" height="4"/>
+                                    <rect class="px-mouth" x="144" y="80" width="4" height="4"/>
                                 </g>
                                 <g class="dog-mouth-bark">
-                                    <rect class="px-nose" x="124" y="60" width="8" height="4"/>
-                                    <rect class="px-mouth" x="120" y="64" width="16" height="12"/>
-                                    <rect class="px-tongue" x="124" y="72" width="8" height="4"/>
-                                    <rect class="px-cream" x="116" y="76" width="16" height="4"/>
+                                    <rect class="px-nose" x="148" y="64" width="4" height="4"/>
+                                    <rect class="px-mouth" x="140" y="72" width="12" height="12"/>
+                                    <rect class="px-tongue" x="144" y="80" width="4" height="4"/>
+                                    <rect class="px-cream" x="136" y="84" width="12" height="4"/>
                                 </g>
                             </g>
                             <g class="dog-leg-group dog-leg-front-group">
-                                <rect class="px-outline" x="96" y="104" width="12" height="28"/>
-                                <rect class="px-outline" x="112" y="100" width="12" height="32"/>
-                                <rect class="px-fur-light" x="100" y="108" width="4" height="20"/>
-                                <rect class="px-fur-light" x="116" y="104" width="4" height="24"/>
-                                <rect class="px-cream" x="92" y="128" width="20" height="8"/>
-                                <rect class="px-cream" x="108" y="128" width="20" height="8"/>
+                                <rect class="px-outline" x="100" y="92" width="8" height="36"/>
+                                <rect class="px-outline" x="116" y="96" width="8" height="32"/>
+                                <rect class="px-fur-mid" x="104" y="96" width="4" height="24"/>
+                                <rect class="px-fur-dark" x="120" y="100" width="4" height="20"/>
+                                <rect class="px-outline" x="96" y="128" width="12" height="4"/>
+                                <rect class="px-outline" x="112" y="128" width="12" height="4"/>
+                                <rect class="px-fur-light" x="100" y="128" width="8" height="4"/>
+                                <rect class="px-fur-light" x="116" y="128" width="8" height="4"/>
                             </g>
                         </g>
                     </svg>
@@ -2076,11 +2361,11 @@ function syncSendButton() {
 
     if (isGenerating) {
         send.disabled = false;
-        const hasDraft = Boolean(input && input.value.trim());
+        const hasDraft = Boolean((input && input.value.trim()) || pendingAttachments.length);
         send.innerHTML = hasDraft ? SEND_BUTTON_ICON : STOP_BUTTON_ICON;
         send.classList.add('is-stop');
-        send.setAttribute('aria-label', hasDraft ? 'Interrupt with prompt' : 'Stop response');
-        send.title = hasDraft ? 'Interrupt with prompt' : 'Stop response';
+        send.setAttribute('aria-label', hasDraft ? 'Interrupt with message' : 'Stop response');
+        send.title = hasDraft ? 'Interrupt with message' : 'Stop response';
         syncModelSelector();
         syncInterveneButton();
         renderExecutionPlanApproval();
@@ -2091,7 +2376,9 @@ function syncSendButton() {
     send.classList.remove('is-stop');
     send.setAttribute('aria-label', 'Send message');
     send.title = 'Send message';
-    send.disabled = !modelAvailable || !input || !input.value.trim();
+    const hasDraft = Boolean(input && input.value.trim());
+    const hasPendingContent = hasDraft || pendingAttachments.length > 0;
+    send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !hasPendingContent;
     syncModelSelector();
     syncInterveneButton();
     renderExecutionPlanApproval();
@@ -2444,6 +2731,7 @@ function toggleWorkspaceDirectory(path) {
 function workspaceTreeNodeMeta(entry) {
     if (entry.type === 'directory') {
         const childCount = Array.isArray(entry.children) ? entry.children.length : 0;
+        if (!childCount) return '';
         return `${childCount} item${childCount === 1 ? '' : 's'}`;
     }
     const parts = [formatBytes(entry.size || 0)];
@@ -2460,11 +2748,13 @@ function renderWorkspaceTreeNode(entry, options = {}) {
     const isChanged = isWorkspaceEntryRecentlyChanged(entry);
     node.className = `workspace-tree-node ${isDirectory ? 'is-directory' : 'is-file'}${isActive ? ' active' : ''}${isChanged ? ' is-changed' : ''}`;
 
-    const row = document.createElement('button');
-    row.type = 'button';
+    const row = document.createElement('div');
     row.className = 'workspace-tree-row';
     row.style.setProperty('--workspace-depth', String(options.depth || 0));
-    row.onclick = () => {
+    const mainButton = document.createElement('button');
+    mainButton.type = 'button';
+    mainButton.className = 'workspace-tree-main';
+    mainButton.onclick = () => {
         if (isDirectory) {
             toggleWorkspaceDirectory(entry.path);
             return;
@@ -2475,26 +2765,45 @@ function renderWorkspaceTreeNode(entry, options = {}) {
     const caret = document.createElement('span');
     caret.className = `workspace-tree-caret${isDirectory ? '' : ' is-placeholder'}${collapsed ? ' is-collapsed' : ''}`;
     caret.innerHTML = isDirectory ? '&#9656;' : '&#8226;';
-    row.appendChild(caret);
+    mainButton.appendChild(caret);
 
     const icon = document.createElement('span');
     icon.className = 'workspace-tree-icon';
     icon.innerHTML = isDirectory ? (collapsed ? '&#128193;' : '&#128194;') : '&#128196;';
-    row.appendChild(icon);
+    mainButton.appendChild(icon);
 
     const copy = document.createElement('span');
     copy.className = 'workspace-tree-copy';
+    const metaText = workspaceTreeNodeMeta(entry);
     copy.innerHTML = `
         <span class="workspace-tree-name">${escapeHtml(entry.name || basename(entry.path) || 'workspace')}</span>
-        <span class="workspace-tree-meta">${escapeHtml(workspaceTreeNodeMeta(entry))}</span>
+        ${metaText ? `<span class="workspace-tree-meta">${escapeHtml(metaText)}</span>` : ''}
     `;
-    row.appendChild(copy);
+    mainButton.appendChild(copy);
 
     if (isChanged) {
         const badge = document.createElement('span');
         badge.className = 'workspace-tree-status';
         badge.textContent = 'Live';
-        row.appendChild(badge);
+        mainButton.appendChild(badge);
+    }
+
+    row.appendChild(mainButton);
+    if (!isDirectory) {
+        const actions = document.createElement('div');
+        actions.className = 'workspace-tree-actions';
+        const downloadButton = document.createElement('button');
+        downloadButton.type = 'button';
+        downloadButton.className = 'workspace-tree-action';
+        downloadButton.title = `Download ${entry.name || basename(entry.path) || 'file'}`;
+        downloadButton.setAttribute('aria-label', `Download ${entry.name || basename(entry.path) || 'file'}`);
+        downloadButton.innerHTML = '&#8681;';
+        downloadButton.onclick = (event) => {
+            event.stopPropagation();
+            downloadWorkspaceFile(entry.path);
+        };
+        actions.appendChild(downloadButton);
+        row.appendChild(actions);
     }
 
     node.appendChild(row);
@@ -2516,12 +2825,15 @@ function renderWorkspaceTree(containerId, options = {}) {
     if (!container) return;
 
     if (!workspaceTree) {
-        container.innerHTML = '<div class="workspace-empty">Choose a chat action that creates or uploads files, and the workspace tree will appear here.</div>';
+        container.innerHTML = '';
         return;
     }
 
     container.innerHTML = '';
-    container.appendChild(renderWorkspaceTreeNode(workspaceTree, { depth: 0, ...options }));
+    const rootChildren = Array.isArray(workspaceTree.children) ? workspaceTree.children : [];
+    rootChildren.forEach(child => {
+        container.appendChild(renderWorkspaceTreeNode(child, { depth: 0, ...options }));
+    });
 }
 
 function renderWorkspaceTrees() {
@@ -2609,11 +2921,7 @@ function getLanguageForPath(path) {
 }
 
 function renderBuildSteps() {
-    const panel = document.getElementById('buildStepsPanel');
-    const list = document.getElementById('buildStepsList');
-    if (!panel || !list) return;
-    panel.hidden = true;
-    list.innerHTML = '';
+    renderExecutionPlanApproval();
 }
 
 function clearBuildSteps() {
@@ -2637,14 +2945,59 @@ function updateBuildSteps(steps, activeIndex = null, completedCount = 0) {
 
 function renderExecutionPlanApproval() {
     const panel = document.getElementById('planApprovalPanel');
+    const title = document.getElementById('planApprovalTitle');
+    const subtitle = document.getElementById('planApprovalSubtitle');
+    const dismissButton = document.getElementById('planApprovalDismiss');
     const summary = document.getElementById('planApprovalSummary');
+    const checklist = document.getElementById('planApprovalChecklist');
+    const checklistList = document.getElementById('planApprovalSteps');
+    const actions = panel?.querySelector('.plan-approval-actions');
     const runButton = document.getElementById('planApprovalRunButton');
     const editButton = document.getElementById('planApprovalEditButton');
-    if (!panel || !summary) return;
+    if (!panel || !summary || !checklist || !checklistList) return;
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
-    panel.hidden = !hasPlan;
+    const hasChecklist = buildSteps.length > 0;
+    panel.hidden = !hasPlan && !hasChecklist;
+
+    if (title) {
+        title.textContent = hasChecklist ? 'Plan Progress' : 'Plan';
+    }
+    if (subtitle) {
+        subtitle.textContent = hasChecklist
+            ? 'Working one step at a time. The assistant will pause between steps for a yes or no.'
+            : 'Review the next steps here. Keep it moving with a simple yes or no.';
+    }
+
+    summary.hidden = !hasPlan;
     summary.textContent = hasPlan ? (pendingExecutionPlan.summary || 'Execution plan ready.') : '';
+
+    checklist.hidden = !hasChecklist;
+    checklistList.innerHTML = '';
+    if (hasChecklist) {
+        buildSteps.forEach(step => {
+            const item = document.createElement('li');
+            item.className = `is-${step.state}`;
+
+            const marker = document.createElement('span');
+            marker.className = 'plan-approval-step-marker';
+            marker.textContent = step.state === 'complete' ? '✓' : (step.state === 'active' ? '•' : '○');
+
+            const label = document.createElement('span');
+            label.textContent = step.text || '';
+
+            item.appendChild(marker);
+            item.appendChild(label);
+            checklistList.appendChild(item);
+        });
+    }
+
+    if (dismissButton) {
+        dismissButton.hidden = !hasPlan;
+    }
+    if (actions) {
+        actions.hidden = !hasPlan;
+    }
     if (runButton) {
         runButton.disabled = !hasPlan || isGenerating || !modelAvailable || !ws || ws.readyState !== WebSocket.OPEN;
     }
@@ -2697,7 +3050,7 @@ function approveExecutionPlan() {
     showLoading();
     clearBuildSteps();
     clearWorkspaceActivity();
-    recordWorkspaceActivity('Request', APPROVED_PLAN_EXECUTION_MESSAGE);
+    recordWorkspaceActivity('Request', 'Yes, run the approved plan in the workspace.');
 
     isGenerating = true;
     activeStreamConversationId = currentConvId;
@@ -2781,6 +3134,13 @@ function classifyWorkspaceActivity(kind, text) {
         if (lower.startsWith('synthesize:')) return { kind: 'Synthesize Tool', phase: 'synthesize' };
         return { kind: 'Tool', phase: 'tool' };
     }
+
+    if (normalizedKind === 'Command') return { kind: 'Command', phase: 'execute' };
+    if (normalizedKind === 'Explore') return { kind: 'Explore', phase: 'inspect' };
+    if (normalizedKind === 'Edit') return { kind: 'Edit', phase: 'execute' };
+    if (normalizedKind === 'Render') return { kind: 'Render', phase: 'execute' };
+    if (normalizedKind === 'History') return { kind: 'History', phase: 'inspect' };
+    if (normalizedKind === 'Web') return { kind: 'Web', phase: 'respond' };
 
     if (normalizedKind === 'Tool Result') {
         if (lower.startsWith('inspect:')) return { kind: 'Inspect Result', phase: 'inspect' };
@@ -3095,12 +3455,15 @@ function renderFileList() {
     if (!listEl || !pathEl) return;
 
     if (!workspaceTree) {
-        pathEl.textContent = 'No files yet';
-        listEl.innerHTML = '<div class="workspace-empty">Choose a chat action that creates or uploads files, and the workspace tree will appear here.</div>';
+        pathEl.textContent = 'Root';
+        listEl.innerHTML = '';
         return;
     }
 
-    pathEl.textContent = `${workspaceStats.files} file${workspaceStats.files === 1 ? '' : 's'} • ${workspaceStats.directories} folder${workspaceStats.directories === 1 ? '' : 's'}`;
+    const summary = [];
+    if (workspaceStats.files > 0) summary.push(`${workspaceStats.files} file${workspaceStats.files === 1 ? '' : 's'}`);
+    if (workspaceStats.directories > 0) summary.push(`${workspaceStats.directories} folder${workspaceStats.directories === 1 ? '' : 's'}`);
+    pathEl.textContent = summary.join(' • ') || 'Root';
     renderWorkspaceTrees();
 }
 
@@ -3402,6 +3765,27 @@ function syncInlineUndoButton() {
     button.disabled = !inlineViewerPath || !stack.length || !inlineViewerEditable;
 }
 
+function viewerSupportsCopy(state) {
+    if (!state?.path) return false;
+    return ['text', 'markdown', 'csv', 'html'].includes(state.kind);
+}
+
+function syncInlineViewerCopyButton() {
+    const button = document.getElementById('inlineViewerCopyButton');
+    if (!button) return;
+    const show = viewerSupportsCopy(getViewerState('inlineViewer'));
+    button.hidden = !show;
+    button.disabled = !show;
+    button.title = show ? 'Copy current file contents' : '';
+}
+
+function copyInlineViewerContent() {
+    const button = document.getElementById('inlineViewerCopyButton');
+    const state = getViewerState('inlineViewer');
+    if (!button || !viewerSupportsCopy(state)) return;
+    copyToClipboard(getViewerContent('inlineViewer'), button);
+}
+
 function getInlineSelection() {
     if (!inlineViewerEditable || !inlineViewerPath) return '';
     const editor = ensureInlineEditor();
@@ -3524,7 +3908,10 @@ function setViewerView(prefix, view) {
             setTimeout(() => editor.refresh(), 0);
         }
     }
-    if (prefix === 'inlineViewer') syncInlineViewerMode();
+    if (prefix === 'inlineViewer') {
+        syncInlineViewerMode();
+        syncInlineViewerCopyButton();
+    }
 }
 
 function setInlineViewerView(view) {
@@ -3548,6 +3935,7 @@ function syncInlineViewerVisibility() {
     const viewer = document.querySelector('.ide-viewer');
     if (!viewer) return;
     viewer.classList.toggle('is-hidden', !inlineViewerPath);
+    syncChatShellLayout();
 }
 
 function toggleViewerEmptyState(prefix, hasFile) {
@@ -3784,6 +4172,7 @@ function applyViewerMetadata(prefix, path) {
     toggleViewerEmptyState(prefix, Boolean(path));
     syncInlineViewerMode();
     syncInlineViewerVisibility();
+    syncInlineViewerCopyButton();
 }
 
 function syncViewerControls(prefix, editable, defaultView = 'edit') {
@@ -3797,6 +4186,7 @@ function syncViewerControls(prefix, editable, defaultView = 'edit') {
     syncInlineSelectionAction();
     syncInlineViewerMode();
     syncInlineViewerVisibility();
+    syncInlineViewerCopyButton();
 }
 
 function closeInlineViewer() {
@@ -3820,9 +4210,14 @@ function closeInlineViewer() {
 async function openWorkspaceFile(path, options = {}) {
     if (!featureSettings.agent_tools || !path) return;
     const preserveSheet = Boolean(options.preserveSheet);
+    const provisionalKind = /\.(xlsx|xls|xlsm)$/i.test(path)
+        ? 'spreadsheet'
+        : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text')));
+    const provisionalEditable = provisionalKind !== 'spreadsheet';
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
+    setViewerState('inlineViewer', { editable: provisionalEditable, kind: provisionalKind, path });
     renderFileList();
     applyViewerMetadata('inlineViewer', path);
     setViewerContent('inlineViewer', '');
@@ -3883,6 +4278,146 @@ async function openWorkspaceFile(path, options = {}) {
     }
 }
 
+function isAudioAttachment(file) {
+    const contentType = String(file?.content_type || file?.contentType || '').toLowerCase();
+    if (contentType.startsWith('audio/')) return true;
+    const path = String(file?.name || file?.path || '').toLowerCase();
+    return /\.(aac|aif|aiff|caf|flac|m4a|mp3|ogg|opus|wav|wave|webm)$/i.test(path);
+}
+
+function formatAudioDuration(totalSeconds) {
+    const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function buildAudioWaveMarkup(seed = '') {
+    const pattern = [8, 14, 10, 18, 12, 20, 9, 16, 11, 17, 13, 15];
+    const offset = Array.from(String(seed)).reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % pattern.length;
+    return `
+        <span class="attachment-chip-wave" aria-hidden="true">
+            ${pattern.map((_, index) => {
+                const height = pattern[(index + offset) % pattern.length];
+                return `<span class="attachment-chip-wave-bar" style="height:${height}px; animation-delay:${(index % 6) * 0.08}s"></span>`;
+            }).join('')}
+        </span>
+    `;
+}
+
+function buildAttachmentChipMarkup(file) {
+    const audio = isAudioAttachment(file);
+    const label = file.name || file.path || 'attachment';
+    const meta = [];
+    meta.push(audio ? 'audio' : String(file.kind || 'file'));
+    if (audio && Number.isFinite(Number(file.duration))) meta.push(formatAudioDuration(file.duration));
+    meta.push(formatBytes(file.size || 0));
+    return `
+        ${audio ? buildAudioWaveMarkup(label) : ''}
+        <div class="attachment-chip-copy${audio ? ' is-audio' : ''}">
+            <span class="attachment-chip-name">${escapeHtml(label)}</span>
+            <span class="attachment-chip-meta">${escapeHtml(meta.join(' • '))}</span>
+        </div>
+        <button type="button" class="attachment-chip-remove" title="Remove attachment" aria-label="Remove attachment">&times;</button>
+    `;
+}
+
+function buildAttachmentNoteText(attachments = pendingAttachments) {
+    const lines = attachments
+        .map(file => String(file.path || file.name || '').trim())
+        .filter(Boolean);
+    if (!lines.length) return '';
+    return `Attached files:\n${lines.map(line => `- ${line}`).join('\n')}`;
+}
+
+function buildDisplayedMessageText(text, attachments = pendingAttachments) {
+    const trimmed = String(text || '').trim();
+    const attachmentNote = buildAttachmentNoteText(attachments);
+    if (trimmed && attachmentNote) return `${trimmed}\n\n${attachmentNote}`;
+    return trimmed || attachmentNote;
+}
+
+function buildAttachmentOnlyMessage(attachments = pendingAttachments) {
+    const usableAttachments = attachments.filter(Boolean);
+    if (!usableAttachments.length) return '';
+    if (usableAttachments.every(file => isAudioAttachment(file))) {
+        return usableAttachments.length === 1
+            ? 'Please review the attached audio recording.'
+            : 'Please review the attached audio recordings.';
+    }
+    return usableAttachments.length === 1
+        ? 'Please review the attached file.'
+        : 'Please review the attached files.';
+}
+
+async function uploadPendingFiles(fileEntries, options = {}) {
+    const {
+        failureMessage = 'Attachment upload failed',
+    } = options;
+    const availableSlots = Math.max(0, MAX_PENDING_ATTACHMENTS - pendingAttachments.length);
+    if (!availableSlots) {
+        throw new Error(`You can attach up to ${MAX_PENDING_ATTACHMENTS} files per message.`);
+    }
+
+    const descriptors = fileEntries
+        .slice(0, availableSlots)
+        .map((entry, index) => {
+            const blob = entry?.blob || entry;
+            const name = entry?.name || blob?.name || `attachment-${index + 1}`;
+            if (!blob) return null;
+            return {
+                blob,
+                name,
+                size: entry?.size ?? blob.size ?? 0,
+                duration: entry?.duration,
+                kind: entry?.kind || '',
+                contentType: entry?.contentType || blob.type || 'application/octet-stream',
+            };
+        })
+        .filter(Boolean);
+
+    if (!descriptors.length) return [];
+
+    if (!featureSettings.agent_tools) {
+        featureSettings.agent_tools = true;
+        persistFeatureSettings();
+        applyFeatureSettingsToUI();
+    }
+
+    const formData = new FormData();
+    descriptors.forEach(file => formData.append('files', file.blob, file.name));
+    formData.append('target_path', '.');
+
+    const attachButton = document.getElementById('attachButton');
+    if (attachButton) attachButton.disabled = true;
+
+    try {
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/upload`, {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+        const savedFiles = (data.files || []).map((saved, index) => ({
+            ...saved,
+            kind: descriptors[index]?.kind || saved.kind,
+            content_type: descriptors[index]?.contentType || saved.content_type,
+            duration: descriptors[index]?.duration,
+        }));
+        pendingAttachments = pendingAttachments.concat(savedFiles).slice(0, MAX_PENDING_ATTACHMENTS);
+        renderPendingAttachments();
+        if (savedFiles.length) {
+            selectedWorkspaceFile = savedFiles[0].path || selectedWorkspaceFile;
+            refreshWorkspace(true);
+        }
+        return savedFiles;
+    } catch (error) {
+        throw new Error(error.message || failureMessage);
+    } finally {
+        if (attachButton) attachButton.disabled = false;
+    }
+}
+
 function renderPendingAttachments() {
     const bar = document.getElementById('attachmentBar');
     if (!bar) return;
@@ -3890,6 +4425,7 @@ function renderPendingAttachments() {
     if (!pendingAttachments.length) {
         bar.hidden = true;
         bar.innerHTML = '';
+        syncSendButton();
         return;
     }
 
@@ -3897,20 +4433,15 @@ function renderPendingAttachments() {
     bar.innerHTML = '';
     pendingAttachments.forEach((file, index) => {
         const chip = document.createElement('div');
-        chip.className = 'attachment-chip';
-        chip.innerHTML = `
-            <div class="attachment-chip-copy">
-                <span class="attachment-chip-name">${escapeHtml(file.name || file.path)}</span>
-                <span class="attachment-chip-meta">${escapeHtml(file.kind || 'file')} • ${escapeHtml(formatBytes(file.size || 0))}</span>
-            </div>
-            <button type="button" class="attachment-chip-remove" title="Remove attachment" aria-label="Remove attachment">&times;</button>
-        `;
+        chip.className = `attachment-chip${isAudioAttachment(file) ? ' is-audio' : ''}`;
+        chip.innerHTML = buildAttachmentChipMarkup(file);
         chip.querySelector('.attachment-chip-remove').onclick = () => {
             pendingAttachments.splice(index, 1);
             renderPendingAttachments();
         };
         bar.appendChild(chip);
     });
+    syncSendButton();
 }
 
 function clearPendingAttachments() {
@@ -3928,37 +4459,12 @@ async function handleAttachmentSelection(event) {
     const input = event.target;
     const files = Array.from(input.files || []);
     if (!files.length) return;
-    if (!featureSettings.agent_tools) {
-        featureSettings.agent_tools = true;
-        persistFeatureSettings();
-        applyFeatureSettingsToUI();
-    }
-
-    const formData = new FormData();
-    files.slice(0, 8).forEach(file => formData.append('files', file));
-    formData.append('target_path', '.');
-
-    const attachButton = document.getElementById('attachButton');
-    if (attachButton) attachButton.disabled = true;
 
     try {
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/upload`, {
-            method: 'POST',
-            body: formData,
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-
-        pendingAttachments = pendingAttachments.concat(data.files || []).slice(0, 8);
-        renderPendingAttachments();
-        if (data.files?.length) {
-            selectedWorkspaceFile = data.files[0].path || '';
-        }
-        refreshWorkspace(true);
+        await uploadPendingFiles(files, { failureMessage: 'Attachment upload failed' });
     } catch (e) {
         alert(`Attachment upload failed: ${e.message}`);
     } finally {
-        if (attachButton) attachButton.disabled = false;
         input.value = '';
     }
 }
@@ -3966,8 +4472,8 @@ async function handleAttachmentSelection(event) {
 function sendMessage() {
     const input = document.getElementById('input');
     const displayText = input.value.trim();
-    if (!modelAvailable || !displayText || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
-    dismissExecutionPlan();
+    const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
+    if (!modelAvailable || (!displayText && !attachmentPaths.length) || !ws || ws.readyState !== WebSocket.OPEN || isGenerating) return;
     hideSlashMenu();
     const slashCommand = parseDirectSlashCommandInput(displayText);
 
@@ -3976,23 +4482,21 @@ function sendMessage() {
     for (const block of pastedBlocks) {
         message = message.replace(block.placeholder, block.actual);
     }
+    if (!message) message = buildAttachmentOnlyMessage(pendingAttachments);
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    const attachmentNote = pendingAttachments.length
-        ? `\n\nAttached files:\n${pendingAttachments.map(file => `- ${file.path || file.name}`).join('\n')}`
-        : '';
-    addMessage(displayText + attachmentNote, 'user');
+    addMessage(buildDisplayedMessageText(displayText, pendingAttachments) || message, 'user');
     input.value = '';
     pastedBlocks = [];
-    const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
     const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
+    dismissExecutionPlan();
     clearPendingAttachments();
     autoResizeTextarea(input);
     showLoading();
     clearBuildSteps();
     clearWorkspaceActivity();
-    recordWorkspaceActivity('Request', displayText);
+    recordWorkspaceActivity('Request', displayText || message);
 
     isGenerating = true;
     activeStreamConversationId = currentConvId;
@@ -4015,22 +4519,20 @@ function sendMessage() {
 
 function sendInterruptMessage(messageText) {
     const text = String(messageText || '').trim();
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-    dismissExecutionPlan();
-    const slashCommand = parseDirectSlashCommandInput(text);
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
-    const turnFeatures = resolveTurnFeatures(text, attachmentPaths, slashCommand);
-    const attachmentNote = pendingAttachments.length
-        ? `\n\nAttached files:\n${pendingAttachments.map(file => `- ${file.path || file.name}`).join('\n')}`
-        : '';
-    addMessage(text + attachmentNote, 'user');
+    const outboundText = text || buildAttachmentOnlyMessage(pendingAttachments);
+    if (!outboundText || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const slashCommand = parseDirectSlashCommandInput(outboundText);
+    const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
+    dismissExecutionPlan();
+    addMessage(buildDisplayedMessageText(text, pendingAttachments) || outboundText, 'user');
     clearPendingAttachments();
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    recordWorkspaceActivity('Interrupt', text);
+    recordWorkspaceActivity('Interrupt', outboundText);
     ws.send(JSON.stringify({
         type: 'interrupt',
-        message: text,
+        message: outboundText,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
@@ -4057,12 +4559,13 @@ function sendIntervention() {
 function handlePrimaryAction() {
     const input = document.getElementById('input');
     const draft = input?.value.trim() || '';
+    const hasPendingAttachments = pendingAttachments.length > 0;
     if (isGenerating) {
-        if (draft) {
+        if (draft || hasPendingAttachments) {
             input.value = '';
             autoResizeTextarea(input);
             syncSendButton();
-            sendInterruptMessage(draft);
+            sendInterruptMessage(draft || buildAttachmentOnlyMessage(pendingAttachments));
         } else {
             stopMessage();
         }
@@ -4161,6 +4664,122 @@ function hydrateAssistantFromRaw(msg, raw) {
     if (contentDiv) contentDiv.textContent = trimmed;
 }
 
+function normalizeMessageFeedback(value) {
+    const feedback = String(value || '').trim().toLowerCase();
+    if (feedback === 'positive' || feedback === 'negative' || feedback === 'neutral') return feedback;
+    return 'neutral';
+}
+
+function getAssistantCopyText(msg) {
+    return String(msg?.dataset?.originalContent || msg?.querySelector('.message-content')?.textContent || '').trim();
+}
+
+function syncAssistantMessageActions(msg) {
+    if (!msg || !msg.classList.contains('assistant')) return;
+    const feedback = normalizeMessageFeedback(msg.dataset.feedback);
+    const hasMessageId = Boolean(String(msg.dataset.messageId || '').trim());
+    const pending = msg.dataset.feedbackPending === 'true';
+    msg.querySelectorAll('.feedback-btn').forEach(btn => {
+        const value = String(btn.dataset.feedbackValue || '');
+        const active = feedback === value;
+        btn.classList.toggle('is-active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        btn.disabled = pending || !hasMessageId;
+        if (!hasMessageId) {
+            btn.title = 'Feedback is available after the reply is saved.';
+        } else if (active) {
+            btn.title = 'Click again to clear this rating.';
+        } else if (value === 'positive') {
+            btn.title = 'Mark this response as helpful.';
+        } else {
+            btn.title = 'Mark this response as unhelpful.';
+        }
+    });
+}
+
+async function submitMessageFeedback(msg, feedback) {
+    if (!msg || !msg.classList.contains('assistant')) return;
+    const messageId = Number.parseInt(msg.dataset.messageId || '', 10);
+    if (!Number.isFinite(messageId)) return;
+
+    const previousFeedback = normalizeMessageFeedback(msg.dataset.feedback);
+    const nextFeedback = normalizeMessageFeedback(feedback);
+    msg.dataset.feedback = nextFeedback;
+    msg.dataset.feedbackPending = 'true';
+    syncAssistantMessageActions(msg);
+
+    try {
+        const resp = await fetch(`/api/message/${encodeURIComponent(messageId)}/feedback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ feedback: nextFeedback }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        msg.dataset.feedback = normalizeMessageFeedback(data.feedback || nextFeedback);
+    } catch (error) {
+        msg.dataset.feedback = previousFeedback;
+        console.error('Failed to save message feedback:', error);
+    } finally {
+        delete msg.dataset.feedbackPending;
+        syncAssistantMessageActions(msg);
+    }
+}
+
+function ensureAssistantMessageActions(msg) {
+    if (!msg || !msg.classList.contains('assistant')) return;
+
+    let actions = msg.querySelector('.message-actions');
+    const tsDiv = msg.querySelector('.message-timestamp');
+    if (!actions) {
+        actions = document.createElement('div');
+        actions.className = 'message-actions';
+        if (tsDiv) msg.insertBefore(actions, tsDiv);
+        else msg.appendChild(actions);
+    }
+
+    let copyBtn = actions.querySelector('[data-action="copy"]');
+    if (!copyBtn) {
+        copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'action-btn';
+        copyBtn.dataset.action = 'copy';
+        copyBtn.innerHTML = '&#128203; Copy';
+        copyBtn.onclick = (e) => {
+            e.stopPropagation();
+            copyToClipboard(getAssistantCopyText(msg), copyBtn);
+        };
+        actions.appendChild(copyBtn);
+    }
+
+    let feedbackGroup = actions.querySelector('.message-feedback-group');
+    if (!feedbackGroup) {
+        feedbackGroup = document.createElement('div');
+        feedbackGroup.className = 'message-feedback-group';
+        feedbackGroup.setAttribute('role', 'group');
+        feedbackGroup.setAttribute('aria-label', 'Assistant response feedback');
+
+        MESSAGE_FEEDBACK_OPTIONS.forEach(option => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'action-btn feedback-btn';
+            btn.dataset.feedbackValue = option.value;
+            btn.innerHTML = `${option.icon} ${option.label}`;
+            btn.title = option.title;
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                const currentFeedback = normalizeMessageFeedback(msg.dataset.feedback);
+                const nextFeedback = currentFeedback === option.value ? 'neutral' : option.value;
+                submitMessageFeedback(msg, nextFeedback);
+            };
+            feedbackGroup.appendChild(btn);
+        });
+        actions.appendChild(feedbackGroup);
+    }
+
+    syncAssistantMessageActions(msg);
+}
+
 function createMessageElement(content, role, timestamp = null, options = {}) {
     const msg = document.createElement('div');
     msg.className = `message ${role}`;
@@ -4178,6 +4797,7 @@ function createMessageElement(content, role, timestamp = null, options = {}) {
         msg.dataset.needsMarkdown = 'true';
         msg.dataset.originalContent = '';
         msg.dataset.autoSpoken = 'false';
+        msg.dataset.feedback = normalizeMessageFeedback(options.feedback);
         if (content && content.trim()) hydrateAssistantFromRaw(msg, content);
     } else {
         const contentDiv = document.createElement('div');
@@ -4353,6 +4973,22 @@ function handleKeyDown(event) {
         return;
     }
 
+    const target = event.target;
+    const isPlainBackspace = event.key === 'Backspace' && !event.metaKey && !event.ctrlKey && !event.altKey;
+    if (
+        isPlainBackspace &&
+        pendingAttachments.length &&
+        target &&
+        target.value === '' &&
+        (target.selectionStart ?? 0) === 0 &&
+        (target.selectionEnd ?? 0) === 0
+    ) {
+        event.preventDefault();
+        pendingAttachments.pop();
+        renderPendingAttachments();
+        return;
+    }
+
     if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         handlePrimaryAction();
@@ -4388,40 +5024,13 @@ function renderMarkdown() {
 
         const tsDiv = msg.querySelector('.message-timestamp');
         try {
-            const originalContent = msg.dataset.originalContent || content;
             const html = (content && content.trim()) ? marked.parse(content) : '';
             contentDiv.innerHTML = html;
             msg.dataset.needsMarkdown = 'false';
             msg.dataset.rendered = 'true';
 
             if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
-
-            // Action bar below assistant message (like Claude)
-            if (!msg.querySelector('.message-actions')) {
-                const copyText = (originalContent || '').trim();
-                const actions = document.createElement('div');
-                actions.className = 'message-actions';
-
-                const copyBtn = document.createElement('button');
-                copyBtn.className = 'action-btn';
-                copyBtn.innerHTML = '&#128203; Copy';
-                copyBtn.onclick = (e) => { e.stopPropagation(); copyToClipboard(copyText, copyBtn); };
-                actions.appendChild(copyBtn);
-
-                const addBtn = document.createElement('button');
-                addBtn.className = 'action-btn';
-                addBtn.innerHTML = '&#128190; Add to WS';
-                addBtn.title = 'Recover this assistant reply into staged workspace files and notes';
-                addBtn.onclick = async (e) => {
-                    e.stopPropagation();
-                    await recoverAssistantMessage(msg, addBtn);
-                };
-                actions.appendChild(addBtn);
-
-                const tsDiv = msg.querySelector('.message-timestamp');
-                if (tsDiv) msg.insertBefore(actions, tsDiv);
-                else msg.appendChild(actions);
-            }
+            ensureAssistantMessageActions(msg);
 
             // Syntax highlighting + code copy buttons
             if (typeof hljs !== 'undefined') {
@@ -4444,6 +5053,7 @@ function renderMarkdown() {
             }
         } catch (e) {
             contentDiv.textContent = content;
+            ensureAssistantMessageActions(msg);
         }
     });
 }
@@ -4672,9 +5282,14 @@ async function loadConversation(id, options = {}) {
     messages.innerHTML = '';
     exitWelcomeMode();
     data.messages.forEach(msg => {
-        const el = addMessage(msg.content, msg.role, msg.timestamp, { messageId: msg.id });
+        const el = addMessage(msg.content, msg.role, msg.timestamp, { messageId: msg.id, feedback: msg.feedback });
         if (msg.role === 'assistant') el.dataset.autoSpoken = 'true';
     });
+    if (data.pending_plan?.execute_prompt) {
+        storeExecutionPlan(data.pending_plan.summary || '', data.pending_plan.execute_prompt || '');
+    } else {
+        dismissExecutionPlan();
+    }
     appendStreamingAssistantMessageIfVisible();
     setTimeout(() => renderMarkdown(), 100);
     loadConversations();
@@ -4775,6 +5390,18 @@ document.addEventListener('keydown', (e) => {
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
     if (document.getElementById('dashboardOverlay').classList.contains('show')) { closeDashboard(); return; }
     if (document.getElementById('menuOverlay').classList.contains('show')) { closeMenu(); return; }
+    if (workspacePanelOpen) { closeWorkspacePanel(); }
+});
+
+document.addEventListener('click', (event) => {
+    if (!workspacePanelOpen || window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches) return;
+    const panel = document.getElementById('workspacePanel');
+    const viewer = document.querySelector('.ide-viewer');
+    const toggle = document.getElementById('workspaceToggle');
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (panel?.contains(target) || toggle?.contains(target) || viewer?.contains(target)) return;
+    closeWorkspacePanel();
 });
 
 // ==================== Init ====================
@@ -4808,6 +5435,7 @@ if (_input) {
     handleInputChange(_input);
     window.addEventListener('resize', () => autoResizeTextarea(_input));
     window.addEventListener('resize', positionSlashMenu);
+    window.addEventListener('resize', syncChatShellLayout);
     window.addEventListener('scroll', positionSlashMenu, true);
     _input.focus();
     _input.addEventListener('focus', () => updateSlashMenu(_input));
@@ -4843,6 +5471,7 @@ syncModelSelector();
 renderWorkspaceActivity();
 renderTerminalOutput();
 applyViewerMetadata('inlineViewer', '');
+syncChatShellLayout();
 window.addEventListener('resize', () => {
     fitTerminalEmulator();
     sendTerminalResize();

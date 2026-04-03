@@ -9,11 +9,22 @@ The main composer in `static/index.html` and `static/app.js` now supports:
 - model profile switching from the composer
 - reasoning effort switching (`Low` / `High`)
 - attachments uploaded into the conversation workspace
+- browser-recorded audio attachments from the mic button
 - slash commands for common coding tasks
-- voice dictation
+- server-backed reply playback
 - send-or-interrupt behavior from the primary action button
 
 The app also preserves several client-side preferences in `localStorage`, including feature toggles, speech playback settings, and workspace panel visibility.
+
+## Assistant message actions
+
+Assistant replies now ship with lightweight inline actions:
+
+- **Copy** copies only the visible final answer, not the hidden reasoning blocks.
+- **Good / Bad** feedback is saved per assistant message through `/api/message/{id}/feedback`.
+- Clicking the active feedback button again clears the rating back to `neutral`.
+
+That feedback is preserved in the conversation API and reused by the server's history-ranking logic.
 
 ## Settings and feature toggles
 
@@ -27,6 +38,8 @@ The Settings panel exposes the main runtime affordances:
 - **Speech Speed** adjusts playback rate for generated audio.
 
 These toggles affect both UI behavior and the server-side feature flags sent with each request.
+
+The same panel now also groups appearance switching, system-prompt editing, the About page, and the reset-all danger zone into one workflow instead of scattering them across separate modals.
 
 ## Workspace panel
 
@@ -53,6 +66,8 @@ Current capabilities include:
 - spreadsheet summaries with sheet switching
 - save-back into the current conversation workspace
 
+When the assistant uses `workspace.render`, the UI automatically opens the generated HTML file in this viewer so the preview appears immediately.
+
 This gives users a way to inspect or lightly edit generated artifacts without leaving the app.
 
 ## Terminal integration
@@ -78,6 +93,8 @@ That means attachments are first-class workspace inputs rather than opaque blobs
 - uploaded files appear in the workspace tree
 - follow-up turns can keep working with those artifacts
 
+Recorded audio now follows the same path: the mic button uses `MediaRecorder`, uploads the clip as a workspace attachment, and shows a waveform-style chip with duration metadata. If the user records audio without typing text, the client sends a small “please review the attached audio recording(s)” message alongside the attachment paths.
+
 ## Slash commands
 
 The composer has a slash menu for common workflows. Current commands include:
@@ -101,6 +118,7 @@ The direct workflow commands now take a structured path instead of only insertin
 - `/grep` runs workspace grep first, then reads matching files if needed
 - `/plan` inspects the workspace and prepares an executable plan draft
 - `/code` runs the inspect/plan/edit/verify code workflow directly
+- broad approved build/edit requests in normal chat can also auto-route into the same workspace execution workflow
 
 Some commands still enable related feature toggles automatically, such as turning on web search or agent tools before filling the composer.
 
@@ -112,19 +130,20 @@ Deep mode is no longer just "think harder." The UI now exposes several orchestra
 - streaming activity updates across inspect/plan/execute/verify phases
 - structured build-step progress
 - plan previews that stay out of the composer by default and can be approved directly or copied into the composer on demand
+- automatic end-to-end execution for approved broad workspace build requests, so the assistant can scaffold and iterate in the workspace without stopping after step 1
 
 On mobile, the title area doubles as a quick reasoning toggle, while the workspace panel is intentionally suppressed to keep the layout manageable.
 
 ## Voice features
 
-The browser can use the server-side voice pipeline for both directions:
+The current built-in voice UX is split across two paths:
 
-- record audio and send it to `/api/voice/transcribe`
-- request spoken playback from `/api/voice/speak`
+- browser microphone capture records locally and uploads an audio attachment into the conversation workspace
+- spoken reply playback calls `/api/voice/speak` and plays back the returned server audio file
 
 When auto-speak is enabled, fresh assistant replies are spoken in arrival order so a new response does not cut off one that is already playing.
 
-The UI detects runtime availability from `/api/voice/status` and updates controls accordingly. If STT or TTS is missing on the server, the relevant controls stay disabled and the user gets a clear note explaining why.
+The UI detects runtime availability from `/api/voice/status` and updates controls accordingly. TTS availability gates reply playback; microphone capture only depends on browser recording support. The server-side `/api/voice/transcribe` endpoint still exists for direct API use or custom clients, but the stock web UI does not call it for the mic button anymore.
 
 ## Dashboard and model controls
 
