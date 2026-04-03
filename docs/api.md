@@ -99,5 +99,9 @@ Legacy compatibility:
 
 - `GET /health` — Health check (model availability plus voice runtime summary)
 - `GET /api/dashboard` — Model status, container info, cache details
+- `GET /api/models/library` — List cached Hugging Face models plus active background download jobs
 - `POST /api/vllm/restart` — Restart vLLM container
+- `POST /api/models/library/download` — Start downloading a Hugging Face model into the shared cache
+- `POST /api/models/library/activate` — Restart vLLM using a cached Hugging Face model from the discovery library
+- `POST /api/models/library/delete` — Delete a cached Hugging Face model that is not configured as an active profile
 - `POST /api/model/redownload` — Clear cache and re-download model

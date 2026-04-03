@@ -68,6 +68,8 @@ environment:
   - VOICE_INPUT_SIZE_LIMIT=15728640
   - VOICE_COMMAND_TIMEOUT_SECONDS=180
   - VOICE_TTS_VOICE=Samantha
+  - VOICE_STT_LANGUAGE=en
+  - PIPER_MODEL=/app/data/voice/models/en_US-lessac-high.onnx
   - VOICE_TTS_COMMAND=
   - VOICE_STT_COMMAND=
 ```
@@ -75,7 +77,7 @@ environment:
 Behavior:
 
 - If `VOICE_TTS_COMMAND` is empty and the server can run `say`, the app uses native macOS `say` for TTS.
-- If `VOICE_STT_COMMAND` is empty and the server can run `whisper`, the app uses native `whisper` CLI for STT.
+- If `VOICE_STT_COMMAND` is empty and the server can run `whisper`, the app uses native `whisper` CLI for STT with `VOICE_STT_LANGUAGE` as the language hint.
 - If either tool is unavailable, the corresponding voice feature is disabled in the UI with a clear status note.
 
 Command templates support these placeholders:
@@ -95,9 +97,32 @@ Examples:
 
 Notes:
 
+- The UI speech-speed control now supports up to `2.0x` playback for generated replies.
+- For a more natural English voice on macOS, start with `VOICE_TTS_VOICE=Samantha` and try other English `say` voices such as `Karen`, `Moira`, or `Daniel` if you prefer a different accent or cadence.
+- For Piper fallback, the project now defaults to `en_US-lessac-high`, which is a better English-quality choice than the previous `en_US-amy-medium`, at the cost of a larger/slower model.
 - In Docker, native host tools like macOS `say` are usually not available inside the container unless you deliberately provide them.
 - For a host-native deployment on macOS, leaving `VOICE_TTS_COMMAND` empty is enough to pick up `say`.
 - The current built-in fallback writes AIFF output when using `say`, which the browser then plays back from the server.
+
+## Hardening flags
+
+The app now ships with the riskiest host-control features disabled by default. Configure these env vars on `chat-app` only if you explicitly want them:
+
+```yaml
+environment:
+  - DOCKER_CONTROL_ENABLED=false
+  - INTERACTIVE_TERMINAL_ENABLED=false
+  - EXECUTE_CODE_ENABLED=false
+  - STRICT_WORKSPACE_COMMAND_PATHS=true
+```
+
+- `DOCKER_CONTROL_ENABLED` gates Docker-socket-backed dashboard actions such as restart, model switching, and cache redownload.
+- `INTERACTIVE_TERMINAL_ENABLED` gates the PTY-backed interactive shell in the workspace panel.
+- `EXECUTE_CODE_ENABLED` gates the legacy `/api/execute-code` endpoint.
+- `STRICT_WORKSPACE_COMMAND_PATHS` rejects workspace command arguments that reference paths outside the current conversation workspace.
+- Command execution is additionally allowlisted per chat in the UI: when the assistant first tries an executable such as `pytest` or `npm`, the user is asked to allow that executable for the current chat only.
+
+If you enable Docker control, you must also mount `/var/run/docker.sock` into the `chat-app` container deliberately.
 
 ## GPU Configurations
 
@@ -123,6 +148,8 @@ The application runs two containers via `docker-compose.yml`:
 
 - **vllm** — vLLM OpenAI-compatible inference server (port 8001)
 - **chat-app** — FastAPI web application (port 8000)
+
+By default the sample compose file does not mount the Docker socket into `chat-app`. That keeps dashboard runtime controls read-only unless you opt in.
 
 Both are set to `restart: unless-stopped`, so they will survive reboots.
 

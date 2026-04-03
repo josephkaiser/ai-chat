@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     uvicorn[standard] \
     websockets \
     httpx \
+    huggingface_hub \
     beautifulsoup4 \
     jinja2 \
     aiofiles \
