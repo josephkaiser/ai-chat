@@ -1885,6 +1885,9 @@ async function loadDashboard() {
         ]);
         const data = await runtimeResp.json();
         const library = await libraryResp.json();
+        // Keep the composer/send state aligned with the same runtime snapshot the
+        // dashboard is showing, so opening Models can recover from a missed ready update.
+        applyModelRuntime(data);
 
         const loading = data.loading || {};
         const loadFailed = loading.status === 'failed';

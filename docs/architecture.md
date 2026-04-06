@@ -8,7 +8,9 @@ ai-chat/
 ├── themes.py            # Light/dark palettes → CSS custom properties for the UI
 ├── prompts.py           # Default system prompt text
 ├── thinking_stream.py   # Model stream → “thinking” vs visible answer (WebSocket framing)
+├── workflow_router.py   # Lightweight learned router training/inference helpers
 ├── chat                 # CLI to start/stop the stack
+├── training/            # Dataset export + lightweight training scripts
 ├── static/
 │   ├── index.html       # Web UI template (Jinja)
 │   ├── app.js           # Frontend: WebSocket client, markdown, theme application
@@ -26,6 +28,7 @@ ai-chat/
 - **`themes.py`** defines small named palettes (e.g. paper, ink, panel). Those expand to the `--bg_primary`, `--text_secondary`, … keys that **`static/style.css`** already expects. At runtime, `GET /` injects JSON into the page; **`static/app.js`** calls `applyTheme()` to set `document.documentElement` styles.
 - **`prompts.py`** holds **`DEFAULT_SYSTEM_PROMPT`** plus the tool-use and execution prompts that shape both normal tool turns and deep-mode planning/build flows.
 - **`thinking_stream.py`** implements **`ThinkingStreamSplitter`**: it parses model output for paired thinking tags (must match **`THINK_TAG_PAIRS` in `static/app.js`**) and emits the WebSocket payloads (`think_start`, `think_token`, `think_end`, and normal `token`).
+- **`workflow_router.py`** contains the zero-dependency learned workflow router used both by the training scripts and by the app's optional runtime routing hook.
 - **`static/app.js`** is now a substantial client runtime, not just a chat socket wrapper. It manages feature toggles, model/profile controls, reasoning mode, attachments, slash commands, workspace activity, the file modal, terminal streaming, dashboard actions, and voice playback/recording.
 
 ## Tech stack

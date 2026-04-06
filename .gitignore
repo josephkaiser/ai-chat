@@ -72,3 +72,7 @@ cuda-keyring*.deb
 
 # Backups
 *.backup
+
+# Training exports
+training/exports/*
+!training/exports/.gitkeep

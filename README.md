@@ -71,11 +71,34 @@ If you want a stricter deployment, remove the Docker socket mount and set `DOCKE
 ./chat restart   # Stop then start
 ./chat status    # Check what's running
 ./chat logs      # Tail logs from all services
+./chat learn             # Refresh the lightweight learned helpers from the latest chat.db
+./chat export-training   # Export JSONL datasets from chat.db for finetuning/evals
+./chat train-router      # Train a lightweight workflow router from exported examples
+./chat train-tool-policy # Train a lightweight tool-family helper from workflow traces
+./chat backfill-evaluations # Populate workflow_evaluations for existing runs
 ```
 
 Once started, open **http://localhost:8000**. The model loads in the background on first run.
 
 Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-chat/runs) on the host via the default `/app/runs` bind mount, so files the assistant creates remain visible outside the container.
+
+## Training
+
+The repo now includes a lightweight training scaffold under [`training/README.md`](/Users/joe/dev/ai-chat/training/README.md). It can export conversation SFT examples, workflow traces, router labels, and feedback votes directly from the local `chat.db` history:
+
+```bash
+./chat learn
+
+# or run the pieces manually:
+./chat export-training
+./chat backfill-evaluations
+./chat train-router
+./chat train-tool-policy
+```
+
+`./chat learn` is the simplest realistic one-command loop today: it backfills deterministic evaluations, re-exports datasets from the latest `chat.db`, retrains the lightweight router and tool-policy helpers, and writes fresh model artifacts into `data/`.
+
+That gives us a practical first loop for finetuning workflow-aware helpers before we add richer RLM-style runtime traces. The trained router is written to `data/router_model.json` by default and can be enabled at runtime with the learned-router config flags documented in [docs/configuration.md](/Users/joe/dev/ai-chat/docs/configuration.md).
 
 ## Documentation
 
@@ -84,3 +107,4 @@ Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-cha
 - [Architecture](docs/architecture.md) — Main modules and high-level data flow
 - [Harness And Tools](docs/harness.md) — Tool loop, deep-mode orchestration, permissions, and workspace model
 - [UI Features](docs/ui.md) — Workspace panel, terminal, attachments, voice, slash commands, and dashboard behaviors
+- [Training Scaffold](training/README.md) — Exporting JSONL datasets from `chat.db` for workflow learning
