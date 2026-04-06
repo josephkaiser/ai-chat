@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Voice: OpenAI Whisper (STT) and Piper (TTS)
 RUN pip install --no-cache-dir openai-whisper piper-tts
 
-# Copy application (app imports themes, prompts, thinking_stream)
-COPY app.py themes.py prompts.py thinking_stream.py .
+# Copy application (app imports themes, prompts, thinking_stream, workflow_router)
+COPY app.py themes.py prompts.py thinking_stream.py workflow_router.py .
 COPY static/ static/
 
 # Create data directory

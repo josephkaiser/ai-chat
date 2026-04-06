@@ -78,6 +78,7 @@ from prompts import (
 )
 from themes import COLORS_DARK, COLORS_LIGHT
 from thinking_stream import ThinkingStreamSplitter, strip_stream_special_tokens
+from workflow_router import load_router_model as load_workflow_router_model, predict_workflow_router
 
 # Setup logging with capture
 log_capture = io.StringIO()
@@ -111,7 +112,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Runtime configuration (override with env vars; see docs/configuration.md) ---
-DB_PATH = "/app/data/chat.db"
+DB_PATH = os.getenv("DB_PATH", "/app/data/chat.db")
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B-AWQ")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
@@ -120,6 +121,8 @@ PET_ROOT = os.getenv("PET_ROOT", str(pathlib.Path("/app/pet")))
 RUNS_ROOT = os.getenv("RUNS_ROOT", str(pathlib.Path("/app/runs")))
 VOICE_ROOT = os.getenv("VOICE_ROOT", str(pathlib.Path("/app/data/voice")))
 MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/app/data/model_state.json")
+WORKFLOW_ROUTER_MODEL_PATH = os.getenv("WORKFLOW_ROUTER_MODEL_PATH", "/app/data/router_model.json")
+TOOL_POLICY_MODEL_PATH = os.getenv("TOOL_POLICY_MODEL_PATH", "/app/data/tool_policy_model.json")
 MODEL_14B_NAME = os.getenv("MODEL_14B_NAME", MODEL_NAME)
 MODEL_14B_ARGS = os.getenv(
     "MODEL_14B_ARGS",
@@ -145,6 +148,8 @@ DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() 
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "6"))
 TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "2")))
+LEARNED_ROUTER_MIN_CONFIDENCE = max(0.0, min(1.0, float(os.getenv("LEARNED_ROUTER_MIN_CONFIDENCE", "0.80"))))
+LEARNED_TOOL_POLICY_MIN_CONFIDENCE = max(0.0, min(1.0, float(os.getenv("LEARNED_TOOL_POLICY_MIN_CONFIDENCE", "0.85"))))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
 AUTO_VERIFY_MAX_RUNS = max(0, int(os.getenv("AUTO_VERIFY_MAX_RUNS", "2")))
 WORKSPACE_FILE_SIZE_LIMIT = 1024 * 1024
@@ -212,6 +217,20 @@ DOCKER_CONTROL_ENABLED = env_flag("DOCKER_CONTROL_ENABLED", False)
 INTERACTIVE_TERMINAL_ENABLED = env_flag("INTERACTIVE_TERMINAL_ENABLED", False)
 EXECUTE_CODE_ENABLED = env_flag("EXECUTE_CODE_ENABLED", False)
 STRICT_WORKSPACE_COMMAND_PATHS = env_flag("STRICT_WORKSPACE_COMMAND_PATHS", True)
+LEARNED_ROUTER_ENABLED = env_flag("LEARNED_ROUTER_ENABLED", False)
+LEARNED_TOOL_POLICY_ENABLED = env_flag("LEARNED_TOOL_POLICY_ENABLED", False)
+LEARNED_ROUTER_CACHE: Dict[str, Any] = {
+    "path": "",
+    "mtime": None,
+    "model": None,
+    "load_failed": False,
+}
+LEARNED_TOOL_POLICY_CACHE: Dict[str, Any] = {
+    "path": "",
+    "mtime": None,
+    "model": None,
+    "load_failed": False,
+}
 
 
 def infer_model_provider(model_name: str) -> str:
@@ -692,7 +711,7 @@ def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Pat
 
 
 WORKFLOW_LIBRARY_VERSION = "workflow-lib-v1"
-WORKFLOW_ROUTER_VERSION = "workflow-router-v1"
+WORKFLOW_ROUTER_VERSION = "workflow-router-v2"
 
 
 @dataclass
@@ -893,6 +912,252 @@ def finalize_workflow_execution(
     )
     conn.commit()
     conn.close()
+    try:
+        refresh_workflow_evaluations(
+            execution,
+            assistant_message_id=assistant_message_id,
+            final_outcome=final_outcome,
+            status=status,
+            error_text=error_text,
+        )
+    except Exception as exc:
+        logger.warning("Workflow evaluation refresh failed for %s: %s", execution.execution_id, exc)
+
+
+def workflow_tool_step_rows(execution_id: str) -> List[Dict[str, Any]]:
+    """Load persisted workflow steps for evaluator scoring."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        '''
+        SELECT step_index, step_name, tool_name, result_ok, result_summary, result_json, auto_generated
+        FROM workflow_steps
+        WHERE execution_id = ?
+        ORDER BY step_index ASC, id ASC
+        ''',
+        (execution_id,),
+    ).fetchall()
+    conn.close()
+    return [
+        {
+            "step_index": int(row["step_index"] or 0),
+            "step_name": str(row["step_name"] or ""),
+            "tool_name": str(row["tool_name"] or ""),
+            "result_ok": bool(int(row["result_ok"] or 0)),
+            "result_summary": str(row["result_summary"] or ""),
+            "result": parse_json_field(row["result_json"], {}),
+            "auto_generated": bool(int(row["auto_generated"] or 0)),
+        }
+        for row in rows
+    ]
+
+
+def expected_final_outcome_for_workflow(workflow_name: str) -> str:
+    """Return the most natural final outcome label for a workflow route."""
+    normalized = str(workflow_name or "").strip()
+    if normalized == "deep_orchestrated":
+        return "completed_deep"
+    if normalized.startswith("slash_"):
+        return "completed_slash"
+    if normalized == "direct_answer":
+        return "completed_direct"
+    if normalized.startswith("normal_") and "tool_loop" in normalized:
+        return "completed_with_tools"
+    return "completed_direct"
+
+
+def build_workflow_evaluation_rows(
+    execution: WorkflowExecutionContext,
+    *,
+    assistant_message_id: Optional[int],
+    final_outcome: str,
+    status: str,
+    error_text: str,
+) -> List[Dict[str, Any]]:
+    """Score a completed workflow using deterministic post-hoc metrics."""
+    normalized_status = str(status or "completed").strip()
+    normalized_outcome = str(final_outcome or normalized_status or "").strip()
+    steps = workflow_tool_step_rows(execution.execution_id)
+    successful_steps = [step for step in steps if step.get("result_ok")]
+    failed_steps = [step for step in steps if not step.get("result_ok")]
+    successful_write_steps = [
+        step for step in successful_steps
+        if step.get("tool_name") in {"workspace.patch_file", "workspace.render"}
+    ]
+    nontrivial_artifacts = [
+        path for path in execution.artifact_paths
+        if str(path).strip() and str(path).strip() not in {".", "./"}
+    ]
+    last_successful_write_index = max(
+        (step.get("step_index", 0) for step in successful_write_steps),
+        default=0,
+    )
+    verification_after_write = any(
+        step.get("step_index", 0) > last_successful_write_index
+        and step.get("tool_name") in {
+            "workspace.list_files", "workspace.grep", "workspace.read_file",
+            "workspace.run_command", "spreadsheet.describe",
+            "conversation.search_history", "web.search", "web.fetch_page",
+        }
+        for step in steps
+    )
+
+    tool_success_rate = (
+        (len(successful_steps) / max(len(steps), 1))
+        if steps else 1.0
+    )
+    completion_passed = normalized_status == "completed" and not str(error_text or "").strip()
+    expected_outcome = expected_final_outcome_for_workflow(execution.workflow_name)
+    route_alignment_passed = (
+        normalized_status != "completed"
+        or normalized_outcome == expected_outcome
+    )
+    write_grounding_passed = (
+        True if not successful_write_steps else bool(nontrivial_artifacts)
+    )
+    verification_passed = (
+        True if not successful_write_steps else verification_after_write
+    )
+
+    rows = [
+        {
+            "metric": "completion_status",
+            "score": 1.0 if completion_passed else 0.0,
+            "passed": completion_passed,
+            "notes": {
+                "status": normalized_status,
+                "final_outcome": normalized_outcome,
+                "assistant_message_id": assistant_message_id,
+                "error_text": truncate_output(str(error_text or ""), limit=500),
+            },
+        },
+        {
+            "metric": "route_alignment",
+            "score": 1.0 if route_alignment_passed else 0.0,
+            "passed": route_alignment_passed,
+            "notes": {
+                "workflow_name": execution.workflow_name,
+                "expected_final_outcome": expected_outcome,
+                "observed_final_outcome": normalized_outcome,
+            },
+        },
+        {
+            "metric": "tool_success_rate",
+            "score": round(tool_success_rate, 4),
+            "passed": tool_success_rate >= 0.4,
+            "notes": {
+                "tool_count": len(steps),
+                "successful_steps": len(successful_steps),
+                "failed_steps": len(failed_steps),
+                "failed_tool_names": [step.get("tool_name", "") for step in failed_steps[:8]],
+            },
+        },
+        {
+            "metric": "write_grounding",
+            "score": 1.0 if write_grounding_passed else 0.0,
+            "passed": write_grounding_passed,
+            "notes": {
+                "successful_write_steps": len(successful_write_steps),
+                "artifact_paths": list(execution.artifact_paths),
+                "nontrivial_artifacts": nontrivial_artifacts,
+            },
+        },
+        {
+            "metric": "post_write_verification",
+            "score": 1.0 if verification_passed else 0.0,
+            "passed": verification_passed,
+            "notes": {
+                "successful_write_steps": len(successful_write_steps),
+                "last_successful_write_index": last_successful_write_index,
+                "verification_after_write": verification_after_write,
+            },
+        },
+    ]
+    return rows
+
+
+def persist_workflow_evaluations(
+    execution_id: str,
+    evaluator: str,
+    evaluations: List[Dict[str, Any]],
+) -> None:
+    """Replace one evaluator's rows for an execution with the latest scores."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'DELETE FROM workflow_evaluations WHERE execution_id = ? AND evaluator = ?',
+        (execution_id, evaluator),
+    )
+    for evaluation in evaluations:
+        conn.execute(
+            '''
+            INSERT INTO workflow_evaluations
+            (execution_id, evaluator, metric, score, passed, notes_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                execution_id,
+                evaluator,
+                str(evaluation.get("metric", "")).strip(),
+                evaluation.get("score"),
+                1 if evaluation.get("passed") else 0,
+                safe_json_dumps(evaluation.get("notes", {}), default="{}"),
+                utcnow_iso(),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def refresh_workflow_evaluations(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    assistant_message_id: Optional[int] = None,
+    final_outcome: str = "",
+    status: str = "completed",
+    error_text: str = "",
+) -> None:
+    """Recompute deterministic evaluations for one workflow execution."""
+    if not execution:
+        return
+    evaluations = build_workflow_evaluation_rows(
+        execution,
+        assistant_message_id=assistant_message_id,
+        final_outcome=final_outcome,
+        status=status,
+        error_text=error_text,
+    )
+    persist_workflow_evaluations(
+        execution.execution_id,
+        evaluator="workflow_autoeval_v1",
+        evaluations=evaluations,
+    )
+
+
+def sync_workflow_feedback_evaluation(assistant_message_id: int, feedback: str) -> None:
+    """Persist user feedback as a separate evaluator signal for the matching workflow."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        'SELECT id FROM workflow_executions WHERE assistant_message_id = ?',
+        (int(assistant_message_id),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return
+
+    normalized_feedback = normalize_feedback_label(feedback)
+    score_map = {"positive": 1.0, "neutral": 0.5, "negative": 0.0}
+    passed = normalized_feedback != "negative"
+    persist_workflow_evaluations(
+        str(row["id"]),
+        evaluator="workflow_feedback_v1",
+        evaluations=[{
+            "metric": "user_feedback",
+            "score": score_map.get(normalized_feedback, 0.5),
+            "passed": passed,
+            "notes": {"feedback": normalized_feedback},
+        }],
+    )
 
 
 def sync_workflow_feedback_for_message(assistant_message_id: int, feedback: str) -> None:
@@ -906,6 +1171,7 @@ def sync_workflow_feedback_for_message(assistant_message_id: int, feedback: str)
     )
     conn.commit()
     conn.close()
+    sync_workflow_feedback_evaluation(assistant_message_id, feedback)
 
 
 def get_voice_dir(kind: str, create: bool = True) -> pathlib.Path:
@@ -9890,14 +10156,18 @@ def choose_turn_workflow_name(
 def build_turn_route_metadata(
     *,
     mode: str,
+    requested_mode: str,
     workspace_intent: str,
     enabled_tools: List[str],
     auto_execute_workspace: bool,
     slash_command: Optional[Dict[str, str]] = None,
+    learned_router: Optional[Dict[str, Any]] = None,
+    learned_tool_policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Capture deterministic routing facts for offline workflow analysis."""
     metadata: Dict[str, Any] = {
         "mode": str(mode or "normal"),
+        "requested_mode": str(requested_mode or "normal"),
         "workspace_intent": str(workspace_intent or "none"),
         "enabled_tools": list(enabled_tools or []),
         "auto_execute_workspace": bool(auto_execute_workspace),
@@ -9907,7 +10177,252 @@ def build_turn_route_metadata(
             "name": normalize_direct_slash_command(slash_command.get("name", "")) or "",
             "raw_name": str(slash_command.get("raw_name", "")).strip().lower(),
         }
+    if learned_router:
+        metadata["learned_router"] = learned_router
+    if learned_tool_policy:
+        metadata["learned_tool_policy"] = learned_tool_policy
     return metadata
+
+
+def get_learned_router_model() -> Optional[Dict[str, Any]]:
+    """Load the optional learned router model with a small mtime cache."""
+    if not LEARNED_ROUTER_ENABLED:
+        return None
+
+    model_path = pathlib.Path(WORKFLOW_ROUTER_MODEL_PATH)
+    if not model_path.exists():
+        return None
+
+    try:
+        model_mtime = model_path.stat().st_mtime
+    except OSError:
+        return None
+
+    cached_path = str(LEARNED_ROUTER_CACHE.get("path", ""))
+    cached_mtime = LEARNED_ROUTER_CACHE.get("mtime")
+    if (
+        cached_path == str(model_path)
+        and cached_mtime == model_mtime
+        and LEARNED_ROUTER_CACHE.get("model") is not None
+    ):
+        return LEARNED_ROUTER_CACHE.get("model")
+
+    try:
+        model = load_workflow_router_model(model_path)
+    except Exception as exc:
+        if not LEARNED_ROUTER_CACHE.get("load_failed"):
+            logger.warning("Failed to load learned router model from %s: %s", model_path, exc)
+        LEARNED_ROUTER_CACHE.update({
+            "path": str(model_path),
+            "mtime": model_mtime,
+            "model": None,
+            "load_failed": True,
+        })
+        return None
+
+    LEARNED_ROUTER_CACHE.update({
+        "path": str(model_path),
+        "mtime": model_mtime,
+        "model": model,
+        "load_failed": False,
+    })
+    return model
+
+
+def get_learned_tool_policy_model() -> Optional[Dict[str, Any]]:
+    """Load the optional learned tool-policy model with a small mtime cache."""
+    if not LEARNED_TOOL_POLICY_ENABLED:
+        return None
+
+    model_path = pathlib.Path(TOOL_POLICY_MODEL_PATH)
+    if not model_path.exists():
+        return None
+
+    try:
+        model_mtime = model_path.stat().st_mtime
+    except OSError:
+        return None
+
+    cached_path = str(LEARNED_TOOL_POLICY_CACHE.get("path", ""))
+    cached_mtime = LEARNED_TOOL_POLICY_CACHE.get("mtime")
+    if (
+        cached_path == str(model_path)
+        and cached_mtime == model_mtime
+        and LEARNED_TOOL_POLICY_CACHE.get("model") is not None
+    ):
+        return LEARNED_TOOL_POLICY_CACHE.get("model")
+
+    try:
+        model = load_workflow_router_model(model_path)
+    except Exception as exc:
+        if not LEARNED_TOOL_POLICY_CACHE.get("load_failed"):
+            logger.warning("Failed to load learned tool policy model from %s: %s", model_path, exc)
+        LEARNED_TOOL_POLICY_CACHE.update({
+            "path": str(model_path),
+            "mtime": model_mtime,
+            "model": None,
+            "load_failed": True,
+        })
+        return None
+
+    LEARNED_TOOL_POLICY_CACHE.update({
+        "path": str(model_path),
+        "mtime": model_mtime,
+        "model": model,
+        "load_failed": False,
+    })
+    return model
+
+
+def resolve_learned_router_mode(
+    message: str,
+    history: List[Dict[str, str]],
+    requested_mode: str,
+    slash_command: Optional[Dict[str, str]],
+) -> tuple[str, Dict[str, Any]]:
+    """Optionally let a trained router upgrade a normal turn into deep mode."""
+    normalized_requested_mode = str(requested_mode or "normal").strip().lower() or "normal"
+    decision: Dict[str, Any] = {
+        "enabled": bool(LEARNED_ROUTER_ENABLED),
+        "requested_mode": normalized_requested_mode,
+        "resolved_mode": normalized_requested_mode,
+        "applied": False,
+        "reason": "",
+    }
+
+    if slash_command:
+        decision["reason"] = "slash_command"
+        return normalized_requested_mode, decision
+    if normalized_requested_mode == "deep":
+        decision["reason"] = "explicit_deep"
+        return normalized_requested_mode, decision
+    if not LEARNED_ROUTER_ENABLED:
+        decision["reason"] = "disabled"
+        return normalized_requested_mode, decision
+    if request_is_about_limitations(message):
+        decision["reason"] = "limitations_request"
+        return normalized_requested_mode, decision
+
+    model = get_learned_router_model()
+    if not model:
+        decision["reason"] = "model_unavailable"
+        decision["model_path"] = WORKFLOW_ROUTER_MODEL_PATH
+        return normalized_requested_mode, decision
+
+    prediction = predict_workflow_router(model, history, message, top_k=3)
+    decision.update({
+        "model_path": WORKFLOW_ROUTER_MODEL_PATH,
+        "model_schema_version": str(model.get("schema_version", "")),
+        "predicted_workflow": str(prediction.get("label", "")),
+        "confidence": round(float(prediction.get("confidence", 0.0)), 4),
+        "top_labels": prediction.get("top_labels", []),
+        "tokens_used": int(prediction.get("tokens_used", 0)),
+    })
+
+    if decision["predicted_workflow"] != "deep_orchestrated":
+        decision["reason"] = "predicted_non_deep"
+        return normalized_requested_mode, decision
+    if float(prediction.get("confidence", 0.0)) < LEARNED_ROUTER_MIN_CONFIDENCE:
+        decision["reason"] = "low_confidence"
+        return normalized_requested_mode, decision
+
+    decision["applied"] = True
+    decision["reason"] = "predicted_deep"
+    decision["resolved_mode"] = "deep"
+    logger.info(
+        "Learned router upgraded turn to deep mode (confidence=%.3f, message=%r)",
+        float(prediction.get("confidence", 0.0)),
+        str(message or "")[:160],
+    )
+    return "deep", decision
+
+
+def learned_tool_policy_tools_for_label(label: str, features: FeatureFlags) -> List[str]:
+    """Map a tool-policy label to a safe tool subset allowed for this turn."""
+    normalized = str(label or "").strip()
+    if normalized == "workspace_read":
+        return allowed_workspace_tools(features, include_write=False, include_render=False) if features.agent_tools else []
+    if normalized == "history_search":
+        return ["conversation.search_history"] if features.local_rag else []
+    if normalized == "web_search":
+        return ["web.search", "web.fetch_page"] if features.web_search else []
+    return []
+
+
+def resolve_learned_tool_policy(
+    message: str,
+    history: List[Dict[str, str]],
+    features: FeatureFlags,
+    enabled_tools: List[str],
+    slash_command: Optional[Dict[str, str]],
+) -> tuple[List[str], Dict[str, Any]]:
+    """Optionally add safe read-only tools when heuristics chose none."""
+    decision: Dict[str, Any] = {
+        "enabled": bool(LEARNED_TOOL_POLICY_ENABLED),
+        "applied": False,
+        "reason": "",
+        "resolved_tools": list(enabled_tools),
+    }
+
+    if slash_command:
+        decision["reason"] = "slash_command"
+        return enabled_tools, decision
+    if enabled_tools:
+        decision["reason"] = "heuristics_selected_tools"
+        return enabled_tools, decision
+    if not LEARNED_TOOL_POLICY_ENABLED:
+        decision["reason"] = "disabled"
+        return enabled_tools, decision
+    if request_is_about_limitations(message):
+        decision["reason"] = "limitations_request"
+        return enabled_tools, decision
+
+    model = get_learned_tool_policy_model()
+    if not model:
+        decision["reason"] = "model_unavailable"
+        decision["model_path"] = TOOL_POLICY_MODEL_PATH
+        return enabled_tools, decision
+
+    prediction = predict_workflow_router(model, history, message, top_k=3)
+    label = str(prediction.get("label", "")).strip()
+    decision.update({
+        "model_path": TOOL_POLICY_MODEL_PATH,
+        "model_schema_version": str(model.get("schema_version", "")),
+        "predicted_label": label,
+        "confidence": round(float(prediction.get("confidence", 0.0)), 4),
+        "top_labels": prediction.get("top_labels", []),
+        "tokens_used": int(prediction.get("tokens_used", 0)),
+    })
+
+    if label in {"", "no_tool", "workspace_write", "workspace_command", "workspace_render"}:
+        decision["reason"] = "no_safe_runtime_mapping"
+        return enabled_tools, decision
+    if float(prediction.get("confidence", 0.0)) < LEARNED_TOOL_POLICY_MIN_CONFIDENCE:
+        decision["reason"] = "low_confidence"
+        return enabled_tools, decision
+
+    suggested_tools = learned_tool_policy_tools_for_label(label, features)
+    if not suggested_tools:
+        decision["reason"] = "tools_not_allowed"
+        return enabled_tools, decision
+
+    merged_tools: List[str] = []
+    for tool_name in list(enabled_tools) + list(suggested_tools):
+        if tool_name not in merged_tools:
+            merged_tools.append(tool_name)
+
+    decision["applied"] = True
+    decision["reason"] = "predicted_safe_tools"
+    decision["suggested_tools"] = list(suggested_tools)
+    decision["resolved_tools"] = list(merged_tools)
+    logger.info(
+        "Learned tool policy added tools %s (label=%s, confidence=%.3f, message=%r)",
+        suggested_tools,
+        label,
+        float(prediction.get("confidence", 0.0)),
+        str(message or "")[:160],
+    )
+    return merged_tools, decision
 
 
 def direct_response_tool_recovery_candidates(
@@ -11131,7 +11646,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         return
 
     custom_system_prompt = data.get('system_prompt')
-    mode = data.get('mode', 'normal')
+    requested_mode = data.get('mode', 'normal')
+    mode = requested_mode
     features = parse_feature_flags(data.get('features'))
     workflow_execution: Optional[WorkflowExecutionContext] = None
     slash_command = (
@@ -11160,6 +11676,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
             effective_message,
         )
+        mode, learned_router_decision = resolve_learned_router_mode(
+            effective_message,
+            history,
+            requested_mode,
+            slash_command,
+        )
         agent_params = get_agent_llm_params()
         max_tokens = agent_params["max_tokens"]
         deep_succeeded = False
@@ -11168,6 +11690,21 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             select_enabled_tools(conv_id, effective_message, features, history=history)
             if TOOL_LOOP_ENABLED else []
         )
+        if TOOL_LOOP_ENABLED:
+            enabled_tools, learned_tool_policy_decision = resolve_learned_tool_policy(
+                effective_message,
+                history,
+                features,
+                enabled_tools,
+                slash_command,
+            )
+        else:
+            learned_tool_policy_decision = {
+                "enabled": False,
+                "applied": False,
+                "reason": "tool_loop_disabled",
+                "resolved_tools": list(enabled_tools),
+            }
         resume_saved_workspace = (
             not slash_command
             and should_resume_saved_workspace_task(conv_id, effective_message, features)
@@ -11191,10 +11728,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             ),
             build_turn_route_metadata(
                 mode=mode,
+                requested_mode=requested_mode,
                 workspace_intent=workspace_intent,
                 enabled_tools=enabled_tools,
                 auto_execute_workspace=auto_execute_workspace,
                 slash_command=slash_command,
+                learned_router=learned_router_decision,
+                learned_tool_policy=learned_tool_policy_decision,
             ),
         )
 
@@ -11209,6 +11749,19 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     f"Mode {mode}. Intent {workspace_intent}. "
                     f"Tools: {', '.join(enabled_tools) if enabled_tools else 'none'}. "
                     f"Auto-execute workspace build: {'yes' if auto_execute_workspace else 'no'}."
+                    + (
+                        f" Learned router elevated this turn to deep mode "
+                        f"(p={float(learned_router_decision.get('confidence', 0.0)):.2f})."
+                        if learned_router_decision.get("applied")
+                        else ""
+                    )
+                    + (
+                        f" Learned tool policy added "
+                        f"{', '.join(learned_tool_policy_decision.get('suggested_tools', []))} "
+                        f"(p={float(learned_tool_policy_decision.get('confidence', 0.0)):.2f})."
+                        if learned_tool_policy_decision.get("applied")
+                        else ""
+                    )
                 )
             ),
         )

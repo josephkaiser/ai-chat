@@ -72,10 +72,49 @@ Other tunables in **`app.py`** (module-level constants / env):
 
 - `MAX_COMPLETION_TOKENS` — From env `MAX_COMPLETION_TOKENS` (default `4096`).
 - `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — See comments near the top of `app.py`.
+- `LEARNED_ROUTER_ENABLED`, `WORKFLOW_ROUTER_MODEL_PATH`, `LEARNED_ROUTER_MIN_CONFIDENCE` — Control the optional learned workflow router trained from exported `chat.db` telemetry.
+- `LEARNED_TOOL_POLICY_ENABLED`, `TOOL_POLICY_MODEL_PATH`, `LEARNED_TOOL_POLICY_MIN_CONFIDENCE` — Control the optional learned read-only tool advisor trained from `workflow_traces.jsonl`.
 - `CURATED_SOURCE_FAILURE_THRESHOLD` / `CURATED_SOURCE_DISABLE_MINUTES` — Control how quickly auto-added curated web domains are temporarily disabled after repeated failures.
 - `VOICE_STORAGE_LIMIT_BYTES` — Caps retained server-owned voice artifacts before oldest-first pruning kicks in.
 
-The Docker image copies **`app.py`**, **`themes.py`**, **`prompts.py`**, and **`thinking_stream.py`** together (see `Dockerfile`).
+The Docker image copies **`app.py`**, **`themes.py`**, **`prompts.py`**, **`thinking_stream.py`**, and **`workflow_router.py`** together (see `Dockerfile`).
+
+## Learned Workflow Router
+
+The repo can now learn a lightweight workflow router from its own exported routing history:
+
+```bash
+./chat learn
+
+# or run the pieces manually:
+./chat export-training
+./chat backfill-evaluations
+./chat train-router
+./chat train-tool-policy
+```
+
+That produces a default router model at `data/router_model.json` and a tool-policy model at `data/tool_policy_model.json`.
+
+To let the server consult that model during turn routing, set these env vars on `chat-app`:
+
+```yaml
+environment:
+  - LEARNED_ROUTER_ENABLED=true
+  - WORKFLOW_ROUTER_MODEL_PATH=/app/data/router_model.json
+  - LEARNED_ROUTER_MIN_CONFIDENCE=0.80
+  - LEARNED_TOOL_POLICY_ENABLED=true
+  - TOOL_POLICY_MODEL_PATH=/app/data/tool_policy_model.json
+  - LEARNED_TOOL_POLICY_MIN_CONFIDENCE=0.85
+```
+
+Current behavior:
+
+- The learned router is advisory and optional.
+- It only upgrades normal turns into deep mode when it predicts `deep_orchestrated` with high confidence.
+- The learned tool policy is also advisory and optional.
+- It only adds safe read-only tool families when heuristics selected none and the model is confident.
+- Existing heuristics remain the fallback and still determine tool exposure, approvals, and auto-execute behavior.
+- Route metadata records the learned-router prediction so later exports can measure whether it helped.
 
 ## Server Voice Pipeline
 

@@ -33,7 +33,7 @@ lan_ip() {
 }
 
 usage() {
-    echo "Usage: ./chat {install|start|stop|restart|status|logs}"
+    echo "Usage: ./chat {install|start|stop|restart|status|logs|learn|export-training|train-router|train-tool-policy|backfill-evaluations}"
     echo ""
     echo "Commands:"
     echo "  install   Build images and pull dependencies"
@@ -42,6 +42,11 @@ usage() {
     echo "  restart   Stop then start"
     echo "  status    Show running containers"
     echo "  logs      Tail logs from all services"
+    echo "  learn     Run the full lightweight learning loop against the latest chat.db"
+    echo "  export-training [out_dir]  Export JSONL training datasets from data/chat.db"
+    echo "  train-router [input_jsonl] [output_json]  Train a lightweight workflow router"
+    echo "  train-tool-policy [input_jsonl] [output_json]  Train a lightweight tool-family helper"
+    echo "  backfill-evaluations       Recompute workflow_evaluations for existing executions"
 }
 
 ensure_data_dirs() {
@@ -132,6 +137,65 @@ do_status() {
     echo "  chat-app:   $chat_state"
 }
 
+do_export_training() {
+    local out_dir="${1:-$PROJECT_DIR/training/exports/latest}"
+    mkdir -p "$PROJECT_DIR/training/exports"
+    python3 "$PROJECT_DIR/training/export_workflow_dataset.py" \
+        --db-path "$PROJECT_DIR/data/chat.db" \
+        --out-dir "$out_dir"
+}
+
+do_train_router() {
+    local input_path="${1:-$PROJECT_DIR/training/exports/latest/router_examples.jsonl}"
+    local output_path="${2:-$PROJECT_DIR/data/router_model.json}"
+    python3 "$PROJECT_DIR/training/train_router.py" \
+        --input "$input_path" \
+        --output "$output_path"
+}
+
+do_train_tool_policy() {
+    local input_path="${1:-$PROJECT_DIR/training/exports/latest/workflow_traces.jsonl}"
+    local output_path="${2:-$PROJECT_DIR/data/tool_policy_model.json}"
+    python3 "$PROJECT_DIR/training/train_tool_policy.py" \
+        --input "$input_path" \
+        --output "$output_path"
+}
+
+do_backfill_evaluations() {
+    python3 "$PROJECT_DIR/training/backfill_workflow_evaluations.py" \
+        --db-path "$PROJECT_DIR/data/chat.db"
+}
+
+do_learn() {
+    local export_dir="${1:-$PROJECT_DIR/training/exports/latest}"
+    local router_model="${2:-$PROJECT_DIR/data/router_model.json}"
+    local tool_policy_model="${3:-$PROJECT_DIR/data/tool_policy_model.json}"
+
+    echo "==> Backfilling workflow evaluations"
+    do_backfill_evaluations
+    echo ""
+
+    echo "==> Exporting training datasets"
+    do_export_training "$export_dir"
+    echo ""
+
+    echo "==> Training workflow router"
+    do_train_router "$export_dir/router_examples.jsonl" "$router_model"
+    echo ""
+
+    echo "==> Training tool policy helper"
+    do_train_tool_policy "$export_dir/workflow_traces.jsonl" "$tool_policy_model"
+    echo ""
+
+    echo "Learning loop complete."
+    echo "  Export dir:        $export_dir"
+    echo "  Router model:      $router_model"
+    echo "  Tool policy model: $tool_policy_model"
+    echo ""
+    echo "This refreshes the lightweight learned helpers from the latest chat history."
+    echo "It does not finetune the main chat model yet."
+}
+
 case "${1:-}" in
     install)  do_install ;;
     start)    do_start ;;
@@ -139,5 +203,10 @@ case "${1:-}" in
     restart)  do_stop; echo ""; do_start ;;
     status)   do_status ;;
     logs)     docker_compose logs -f ;;
+    learn)    shift; do_learn "${1:-}" "${2:-}" "${3:-}" ;;
+    export-training) shift; do_export_training "${1:-}" ;;
+    train-router) shift; do_train_router "${1:-}" "${2:-}" ;;
+    train-tool-policy) shift; do_train_tool_policy "${1:-}" "${2:-}" ;;
+    backfill-evaluations) do_backfill_evaluations ;;
     *)        usage; exit 1 ;;
 esac
