@@ -59,6 +59,7 @@ let latestAssistantTurnArtifactPaths = new Set();
 let slashMenuItems = [];
 let slashMenuSelectedIndex = 0;
 let welcomeHintTimer = null;
+let transientHintTimer = null;
 let currentRunId = null;
 let pendingExecutionPlan = null;
 let pendingPermissionRequest = null;
@@ -379,6 +380,7 @@ function toggleDeepModeMobile() {
 function syncMobileReasoningBadge() {
     const badge = document.getElementById('mobileReasoningBadge');
     if (!badge) return;
+    badge.hidden = true;
     badge.textContent = 'Base';
     badge.classList.add('is-high');
 }
@@ -386,6 +388,7 @@ function syncMobileReasoningBadge() {
 function syncReasoningToggleButton() {
     const button = document.getElementById('reasoningToggleButton');
     if (!button) return;
+    button.hidden = true;
     button.classList.add('is-active');
     button.dataset.mode = 'base';
     button.title = 'Base reasoning mode uses the high-thinking path by default.';
@@ -1027,6 +1030,15 @@ function renderPermissionPanel() {
     }
     if (allowButton) allowButton.textContent = pendingPermissionRequest.allowLabel || 'Allow';
     if (denyButton) denyButton.textContent = pendingPermissionRequest.denyLabel || 'Deny';
+    const input = document.getElementById('input');
+    const inputHasDraft = Boolean((input && input.value.trim()) || pendingAttachments.length);
+    if (allowButton && !inputHasDraft) {
+        window.requestAnimationFrame(() => {
+            if (!pendingPermissionRequest || panel.hidden) return;
+            if (document.activeElement === input) return;
+            allowButton.focus({ preventScroll: true });
+        });
+    }
 }
 
 function clearPendingPermissionRequest() {
@@ -1050,24 +1062,43 @@ function respondToPendingPermission(approved) {
     const permissionKey = String(pendingPermissionRequest.permissionKey || '').trim().toLowerCase();
     const approvalTarget = String(pendingPermissionRequest.approvalTarget || 'tool').trim().toLowerCase();
     const title = pendingPermissionRequest.title || 'Permission';
+    const conversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
     if (approved) {
         rememberApprovalForPendingRequest();
         recordWorkspaceActivity('Approve', `${title} approved for this chat.`);
         setLoadingText(`${title} approved. Resuming...`);
+        showTransientComposerHint('Approved. The assistant is resuming. Type to interrupt, or press Stop.', 7000);
     } else {
         recordWorkspaceActivity('Blocked', `${title} denied for this chat.`);
         setLoadingText(`${title} denied. Continuing without it...`);
+        showTransientComposerHint('Denied. You can add guidance, interrupt with a message, or let the turn continue.', 7000);
     }
     if (canUseWebsocketTransport()) {
         ws.send(JSON.stringify({
             type: 'permission_response',
-            conversation_id: currentConvId,
+            conversation_id: conversationId,
             permission_key: permissionKey,
             approval_target: approvalTarget,
             approved: Boolean(approved),
         }));
     }
     clearPendingPermissionRequest();
+    syncSendButton();
+    focusInputAtStart();
+}
+
+function hasActiveTurnForConversation(conversationId = '') {
+    const target = String(conversationId || '').trim();
+    if (!target) {
+        return Boolean(isGenerating || currentTurnTransport || activeStreamConversationId);
+    }
+    return Boolean(
+        isGenerating
+        && (
+            activeStreamConversationId === target
+            || currentConvId === target
+        )
+    );
 }
 
 function updateVoiceSetting(name, enabled) {
@@ -1530,7 +1561,21 @@ function handleChatEvent(data) {
             stepLabel: data.step_label || currentBuildStepLabel(),
         });
     } else if (data.type === 'permission_required') {
+        const permissionConversationId = String(data.conversation_id || '').trim();
+        if (!hasActiveTurnForConversation(permissionConversationId)) {
+            if (canUseWebsocketTransport()) {
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    conversation_id: permissionConversationId || currentConvId,
+                    permission_key: String(data.permission_key || '').trim().toLowerCase(),
+                    approval_target: String(data.approval_target || 'tool').trim().toLowerCase(),
+                    approved: false,
+                }));
+            }
+            return;
+        }
         pendingPermissionRequest = {
+            conversationId: permissionConversationId || currentConvId,
             permissionKey: String(data.permission_key || '').trim().toLowerCase(),
             approvalTarget: String(data.approval_target || 'tool').trim().toLowerCase(),
             title: data.title || 'Permission needed',
@@ -1854,6 +1899,32 @@ function startWelcomeHintRotation() {
     welcomeHintTimer = window.setInterval(renderHint, WELCOME_HINT_ROTATE_MS);
 }
 
+function clearTransientComposerHint() {
+    if (transientHintTimer) {
+        window.clearTimeout(transientHintTimer);
+        transientHintTimer = null;
+    }
+}
+
+function showTransientComposerHint(text, durationMs = 6000) {
+    const hint = document.getElementById('appHint');
+    if (!hint) return;
+    clearTransientComposerHint();
+    hint.textContent = String(text || '').trim();
+    if (!durationMs) return;
+    transientHintTimer = window.setTimeout(() => {
+        transientHintTimer = null;
+        const area = document.getElementById('inputArea');
+        if (area?.classList.contains('welcome-mode')) {
+            startWelcomeHintRotation();
+            return;
+        }
+        if (hint.textContent === text) {
+            hint.textContent = '';
+        }
+    }, durationMs);
+}
+
 // ==================== Chat ====================
 
 function isComposerCompact(textarea = document.getElementById('input')) {
@@ -2041,6 +2112,14 @@ function syncSendButton() {
 }
 
 function handleInputChange(textarea) {
+    const area = document.getElementById('inputArea');
+    if (!area?.classList.contains('welcome-mode')) {
+        clearTransientComposerHint();
+        const hint = document.getElementById('appHint');
+        if (hint && hint.textContent && !pendingPermissionRequest) {
+            hint.textContent = '';
+        }
+    }
     autoResizeTextarea(textarea);
     syncSendButton();
     updateSlashMenu(textarea);
@@ -4890,6 +4969,20 @@ function preserveMessagesViewport(mutate, options = {}) {
 }
 
 function handleKeyDown(event) {
+    const target = event.target;
+    if (
+        pendingPermissionRequest &&
+        event.key === 'Enter' &&
+        !event.shiftKey &&
+        target?.id === 'input' &&
+        !String(target.value || '').trim() &&
+        !pendingAttachments.length
+    ) {
+        event.preventDefault();
+        respondToPendingPermission(true);
+        return;
+    }
+
     const slashMenuOpen = !document.getElementById('slashMenu')?.hidden;
     if (slashMenuOpen) {
         if (event.key === 'ArrowDown') {
@@ -4930,7 +5023,6 @@ function handleKeyDown(event) {
         return;
     }
 
-    const target = event.target;
     const isPlainBackspace = event.key === 'Backspace' && !event.metaKey && !event.ctrlKey && !event.altKey;
     if (
         isPlainBackspace &&
