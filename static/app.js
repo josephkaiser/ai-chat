@@ -13,8 +13,10 @@ let runtimeAvailabilityStatus = 'loading';
 let markedReady = false;
 let healthPollInterval = null;
 let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
-let deepMode = localStorage.getItem('deepMode') === 'true';
+const BASE_REASONING_MODE = 'deep';
+let deepMode = true;
 let chatCommandAllowlists = loadStoredObject('chatCommandAllowlists', {});
+let chatToolPermissionAllowlists = loadStoredObject('chatToolPermissionAllowlists', {});
 let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
 let websocketConnected = false;
 let currentTurnTransport = null;
@@ -39,7 +41,7 @@ let pendingAttachments = [];
 let inlineViewerPath = '';
 let inlineViewerKind = 'text';
 let inlineViewerEditable = false;
-let inlineViewerView = 'edit';
+let inlineViewerView = 'preview';
 let inlineEditor = null;
 let inlineEditorReady = false;
 let inlineViewerAutosaveTimer = null;
@@ -48,6 +50,7 @@ let inlineViewerSaveState = 'idle';
 let inlineViewerUndoStacks = {};
 let inlineViewerApplyingRemoteContent = false;
 let inlineViewerPerformingUndo = false;
+let inlineViewerRequestToken = 0;
 let currentFileSymbols = [];
 let symbolGroupState = {};
 let currentAssistantTurnStartedAt = null;
@@ -58,6 +61,7 @@ let slashMenuSelectedIndex = 0;
 let welcomeHintTimer = null;
 let currentRunId = null;
 let pendingExecutionPlan = null;
+let pendingPermissionRequest = null;
 let dictationActive = false;
 let currentAudio = null;
 let speechQueue = [];
@@ -97,6 +101,8 @@ const SPEECH_SPEED_OPTIONS = Object.freeze([
 ]);
 const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
+const PLAN_STEP_LIMIT = 4;
+const INLINE_ACTIVITY_LIMIT = 4;
 const DISCOVERY_HINTS = Object.freeze([
     'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
     'I can help with logic, math, and careful reasoning from the information you give me.',
@@ -153,6 +159,9 @@ const DIRECT_SLASH_COMMANDS = Object.freeze({
 const WORKSPACE_ACTIVITY_LIMIT = 80;
 const INLINE_VIEWER_AUTOSAVE_DELAY_MS = 700;
 const INLINE_VIEWER_UNDO_LIMIT = 40;
+const LIVE_AREA_READ_ONLY = true;
+const DEFAULT_INLINE_VIEWER_EMPTY_TEXT = 'Browse the workspace tree and open a file to read it here.';
+const MESSAGE_SCROLL_BOTTOM_THRESHOLD = 96;
 const PLAN_EXECUTION_MARKERS = Object.freeze([
     'execute approved plan',
     'execute this approved plan',
@@ -227,6 +236,9 @@ const MESSAGE_FEEDBACK_OPTIONS = Object.freeze([
         title: 'Mark this response as unhelpful.',
     }),
 ]);
+const MESSAGE_FEEDBACK_OPTION_MAP = Object.freeze(
+    Object.fromEntries(MESSAGE_FEEDBACK_OPTIONS.map(option => [option.value, option]))
+);
 
 featureSettings = loadFeatureSettings();
 voiceSettings = loadVoiceSettings();
@@ -345,39 +357,39 @@ function generateId() {
 
 function syncReasoningSelector() {
     const select = document.getElementById('reasoningSelect');
-    if (!select) return;
-    select.value = deepMode ? 'high' : 'low';
-    select.title = deepMode ? 'High reasoning effort enabled' : 'Low reasoning effort enabled';
+    if (select) {
+        select.value = 'base';
+        select.title = 'Base reasoning mode uses the high-thinking path by default.';
+    }
     syncReasoningToggleButton();
 }
 
 function handleReasoningSelectChange(value) {
-    deepMode = value === 'high';
-    localStorage.setItem('deepMode', deepMode ? 'true' : 'false');
+    deepMode = true;
     syncReasoningSelector();
     syncMobileReasoningBadge();
 }
 
 function toggleDeepModeMobile() {
-    handleReasoningSelectChange(deepMode ? 'low' : 'high');
+    deepMode = true;
+    syncReasoningSelector();
+    syncMobileReasoningBadge();
 }
 
 function syncMobileReasoningBadge() {
     const badge = document.getElementById('mobileReasoningBadge');
     if (!badge) return;
-    badge.textContent = deepMode ? 'High' : 'Low';
-    badge.classList.toggle('is-high', deepMode);
+    badge.textContent = 'Base';
+    badge.classList.add('is-high');
 }
 
 function syncReasoningToggleButton() {
     const button = document.getElementById('reasoningToggleButton');
     if (!button) return;
-    button.classList.toggle('is-active', deepMode);
-    button.dataset.mode = deepMode ? 'high' : 'low';
-    button.title = deepMode
-        ? 'High reasoning effort enabled. Tap to switch to low.'
-        : 'Low reasoning effort enabled. Tap to switch to high.';
-    button.setAttribute('aria-label', deepMode ? 'Reasoning effort: high' : 'Reasoning effort: low');
+    button.classList.add('is-active');
+    button.dataset.mode = 'base';
+    button.title = 'Base reasoning mode uses the high-thinking path by default.';
+    button.setAttribute('aria-label', 'Reasoning mode: base');
 }
 
 function dismissMobileKeyboard(force = false) {
@@ -436,9 +448,9 @@ function observeMobileComposerSize() {
 function loadFeatureSettings() {
     return {
         agent_tools: true,
-        workspace_panel: true,
-        local_rag: localStorage.getItem('feature.local_rag') !== 'false',
-        web_search: localStorage.getItem('feature.web_search') === 'true',
+        workspace_panel: localStorage.getItem('feature.workspace_panel') !== 'false',
+        local_rag: true,
+        web_search: true,
     };
 }
 
@@ -613,7 +625,7 @@ function applyWorkspacePanelState() {
     if (!panel || !toggle) return;
     const agentToolsEnabled = featureSettings.agent_tools;
     const workspacePanelEnabled = featureSettings.workspace_panel;
-    const mobileViewport = window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+    const mobileViewport = workspaceUsesMobileLayout();
     const workspaceAllowed = agentToolsEnabled && workspacePanelEnabled;
     if (!workspaceAllowed) {
         workspacePanelOpen = false;
@@ -634,7 +646,12 @@ function applyWorkspacePanelState() {
     syncChatShellLayout();
 }
 
+function workspaceUsesMobileLayout() {
+    return window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+}
+
 function effectiveWorkspaceViewMode() {
+    if (!workspaceUsesMobileLayout()) return 'split';
     if (workspaceViewMode === 'reader' && !inlineViewerPath) return 'tree';
     return workspaceViewMode === 'reader' ? 'reader' : 'tree';
 }
@@ -644,27 +661,38 @@ function syncWorkspaceViewMode() {
     const viewer = document.querySelector('.ide-viewer');
     const treeButton = document.getElementById('workspaceTreeViewButton');
     const readerButton = document.getElementById('workspaceReaderViewButton');
+    const switcher = document.querySelector('.workspace-view-switch');
+    const mobileLayout = workspaceUsesMobileLayout();
     const mode = effectiveWorkspaceViewMode();
+    const showTree = !mobileLayout || mode === 'tree';
+    const showReader = !mobileLayout || mode === 'reader';
 
-    workspaceViewMode = mode;
-    if (panel) panel.classList.toggle('is-hidden', mode !== 'tree');
-    if (viewer) viewer.classList.toggle('is-hidden', mode !== 'reader');
+    workspaceViewMode = mobileLayout ? mode : 'split';
+    if (panel) panel.classList.toggle('is-hidden', !showTree);
+    if (viewer) viewer.classList.toggle('is-hidden', !showReader);
+    if (switcher) switcher.hidden = !mobileLayout;
 
     if (treeButton) {
-        treeButton.classList.toggle('active', mode === 'tree');
-        treeButton.setAttribute('aria-pressed', mode === 'tree' ? 'true' : 'false');
+        treeButton.classList.toggle('active', mobileLayout ? mode === 'tree' : showTree);
+        treeButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'tree' ? 'true' : 'false') : (showTree ? 'true' : 'false'));
     }
     if (readerButton) {
         const hasReader = Boolean(inlineViewerPath);
-        readerButton.disabled = !hasReader;
-        readerButton.classList.toggle('active', mode === 'reader');
-        readerButton.setAttribute('aria-pressed', mode === 'reader' ? 'true' : 'false');
+        readerButton.disabled = mobileLayout ? !hasReader : false;
+        readerButton.classList.toggle('active', mobileLayout ? mode === 'reader' : (showReader && hasReader));
+        readerButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'reader' ? 'true' : 'false') : (showReader && hasReader ? 'true' : 'false'));
     }
 
-    localStorage.setItem('workspaceViewMode', mode);
+    localStorage.setItem('workspaceViewMode', mobileLayout ? mode : (inlineViewerPath ? 'reader' : 'tree'));
 }
 
 function setWorkspaceViewMode(mode) {
+    if (!workspaceUsesMobileLayout()) {
+        workspaceViewMode = inlineViewerPath ? 'reader' : 'tree';
+        syncWorkspaceViewMode();
+        syncChatShellLayout();
+        return;
+    }
     const nextMode = mode === 'reader' ? 'reader' : 'tree';
     if (nextMode === 'reader' && !inlineViewerPath) return;
     workspaceViewMode = nextMode;
@@ -771,6 +799,12 @@ function downloadWorkspaceFile(path) {
     if (!currentConvId || !path) return;
     const params = new URLSearchParams({ path });
     window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/file/download?${params.toString()}`, '_blank', 'noopener');
+}
+
+function workspaceFileInlineViewUrl(path) {
+    if (!currentConvId || !path) return '';
+    const params = new URLSearchParams({ path });
+    return `/api/workspace/${encodeURIComponent(currentConvId)}/file/view?${params.toString()}`;
 }
 
 function inferTurnPermissions(message, attachmentPaths = []) {
@@ -880,6 +914,28 @@ function clearAllowedCommandsForConversation(conversationId) {
     persistStoredObject('chatCommandAllowlists', chatCommandAllowlists);
 }
 
+function getAllowedToolPermissionsForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    const values = Array.isArray(chatToolPermissionAllowlists[key]) ? chatToolPermissionAllowlists[key] : [];
+    return [...new Set(values.map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function rememberAllowedToolPermission(conversationId, permissionKey) {
+    const key = String(conversationId || '').trim();
+    const normalized = String(permissionKey || '').trim().toLowerCase();
+    if (!key || !normalized) return;
+    chatToolPermissionAllowlists[key] = getAllowedToolPermissionsForConversation(key).concat(normalized)
+        .filter((value, index, items) => value && items.indexOf(value) === index);
+    persistStoredObject('chatToolPermissionAllowlists', chatToolPermissionAllowlists);
+}
+
+function clearAllowedToolPermissionsForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    if (!key) return;
+    delete chatToolPermissionAllowlists[key];
+    persistStoredObject('chatToolPermissionAllowlists', chatToolPermissionAllowlists);
+}
+
 function getRememberedTurnFeatures(conversationId) {
     const key = String(conversationId || '').trim();
     const stored = key ? conversationTurnFeatureMemory[key] : null;
@@ -919,13 +975,13 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
     const continuationRequest = messageRequestsContinuation(message, slashCommand);
     const rememberedFeatures = getRememberedTurnFeatures(currentConvId);
     const allowedCommands = getAllowedCommandsForConversation(currentConvId);
+    const allowedToolPermissions = getAllowedToolPermissionsForConversation(currentConvId);
     const slashName = slashCommand?.name || '';
     const slashWantsWrite = slashName === 'code';
     const slashWantsRun = slashName === 'code';
     const carryForwardWrite = continuationRequest && rememberedFeatures.workspace_write && !permissions.wantsWrite && !slashWantsWrite;
-    let workspaceWrite = carryForwardWrite;
-    const needsWriteApproval = !carryForwardWrite && (permissions.wantsWrite || slashWantsWrite || executionRequest);
-    let workspaceRunCommands = (
+    const workspaceWrite = carryForwardWrite || permissions.wantsWrite || slashWantsWrite || executionRequest;
+    const workspaceRunCommands = (
         permissions.wantsRun
         || permissions.wantsWrite
         || slashWantsRun
@@ -934,20 +990,84 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
         || (continuationRequest && rememberedFeatures.workspace_run_commands)
     );
 
-    if (needsWriteApproval) {
-        workspaceWrite = window.confirm('Allow the assistant to create or edit files in the workspace for this request?');
-    }
-
     return {
         ...featureSettings,
         agent_tools: true,
         workspace_panel: true,
-        local_rag: featureSettings.local_rag || messageRequestsHistoryLookup(message),
-        web_search: featureSettings.web_search || slashName === 'search' || messageRequestsWebSearch(message),
+        local_rag: true,
+        web_search: true,
         workspace_write: workspaceWrite,
         workspace_run_commands: workspaceRunCommands,
         allowed_commands: allowedCommands,
+        allowed_tool_permissions: allowedToolPermissions,
     };
+}
+
+function renderPermissionPanel() {
+    const panel = document.getElementById('permissionPanel');
+    const title = document.getElementById('permissionPanelTitle');
+    const text = document.getElementById('permissionPanelText');
+    const preview = document.getElementById('permissionPanelPreview');
+    const allowButton = document.getElementById('permissionAllowButton');
+    const denyButton = document.getElementById('permissionDenyButton');
+    if (!panel) return;
+
+    if (!pendingPermissionRequest) {
+        panel.hidden = true;
+        return;
+    }
+
+    panel.hidden = false;
+    if (title) title.textContent = pendingPermissionRequest.title || 'Permission needed';
+    if (text) text.textContent = pendingPermissionRequest.content || 'The assistant needs your approval to continue.';
+    if (preview) {
+        const previewText = String(pendingPermissionRequest.preview || '').trim();
+        preview.hidden = !previewText;
+        preview.textContent = previewText;
+    }
+    if (allowButton) allowButton.textContent = pendingPermissionRequest.allowLabel || 'Allow';
+    if (denyButton) denyButton.textContent = pendingPermissionRequest.denyLabel || 'Deny';
+}
+
+function clearPendingPermissionRequest() {
+    pendingPermissionRequest = null;
+    renderPermissionPanel();
+}
+
+function rememberApprovalForPendingRequest() {
+    if (!pendingPermissionRequest) return;
+    const permissionKey = String(pendingPermissionRequest.permissionKey || '').trim().toLowerCase();
+    if (!permissionKey) return;
+    if (pendingPermissionRequest.approvalTarget === 'command') {
+        rememberAllowedCommand(currentConvId, permissionKey);
+        return;
+    }
+    rememberAllowedToolPermission(currentConvId, permissionKey);
+}
+
+function respondToPendingPermission(approved) {
+    if (!pendingPermissionRequest) return;
+    const permissionKey = String(pendingPermissionRequest.permissionKey || '').trim().toLowerCase();
+    const approvalTarget = String(pendingPermissionRequest.approvalTarget || 'tool').trim().toLowerCase();
+    const title = pendingPermissionRequest.title || 'Permission';
+    if (approved) {
+        rememberApprovalForPendingRequest();
+        recordWorkspaceActivity('Approve', `${title} approved for this chat.`);
+        setLoadingText(`${title} approved. Resuming...`);
+    } else {
+        recordWorkspaceActivity('Blocked', `${title} denied for this chat.`);
+        setLoadingText(`${title} denied. Continuing without it...`);
+    }
+    if (canUseWebsocketTransport()) {
+        ws.send(JSON.stringify({
+            type: 'permission_response',
+            conversation_id: currentConvId,
+            permission_key: permissionKey,
+            approval_target: approvalTarget,
+            approved: Boolean(approved),
+        }));
+    }
+    clearPendingPermissionRequest();
 }
 
 function updateVoiceSetting(name, enabled) {
@@ -1309,6 +1429,7 @@ function startHealthPolling() {
 function handleChatEvent(data) {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'start') {
+        clearPendingPermissionRequest();
         removeLoading();
         ensureStreamingAssistantMessage();
         currentAssistantTurnStartedAt = Date.now();
@@ -1366,39 +1487,64 @@ function handleChatEvent(data) {
             stepLabel: data.step_label || currentBuildStepLabel(),
         });
     } else if (data.type === 'tool_start') {
-        setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
+        const toolText = data.content || `Using ${data.name || 'tool'}...`;
+        setLoadingText(toolText);
+        recordWorkspaceActivity('Tool', toolText, {
+            phase: 'tool',
+            stepLabel: data.step_label || '',
+        });
+        updatePlanFocus({
+            text: toolText,
+            phase: 'tool',
+            stepLabel: data.step_label || currentBuildStepLabel(),
+        });
     } else if (data.type === 'tool_result') {
-        setLoadingText(data.content || (data.ok === false ? 'Tool failed' : 'Tool finished'));
+        const toolResultText = data.content || (data.ok === false ? 'Tool failed' : 'Tool finished');
+        setLoadingText(toolResultText);
+        recordWorkspaceActivity(data.ok === false ? 'Tool Error' : 'Tool Result', toolResultText, {
+            phase: data.ok === false ? 'error' : 'tool',
+            stepLabel: data.step_label || '',
+            error: data.ok === false,
+        });
+        updatePlanFocus({
+            text: toolResultText,
+            phase: data.ok === false ? 'error' : 'tool',
+            stepLabel: data.step_label || currentBuildStepLabel(),
+        });
         if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
         if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
             openWorkspaceFile(data.payload.path);
         }
         scheduleWorkspaceRefresh();
     } else if (data.type === 'tool_error') {
-        setLoadingText(data.content || 'Tool error');
-    } else if (data.type === 'command_approval_required') {
-        const command = Array.isArray(data.command) ? data.command : [];
-        const commandKey = String(data.command_key || command[0] || 'command').trim().toLowerCase();
-        const commandPreview = command.length ? command.join(' ') : commandKey;
-        const approved = window.confirm(
-            `Allow '${commandKey}' in this chat?\n\nRequested command:\n${commandPreview}\n\nThis approval will be remembered for this chat only.`
-        );
-        if (approved) {
-            rememberAllowedCommand(currentConvId, commandKey);
-            recordWorkspaceActivity('Approve', `Allowed '${commandKey}' for this chat.`);
-            setLoadingText(`Approved '${commandKey}'. Resuming the command...`);
-        } else {
-            recordWorkspaceActivity('Blocked', `Denied '${commandKey}' for this chat.`);
-            setLoadingText(`Command blocked: '${commandKey}' was not approved.`);
-        }
-        if (canUseWebsocketTransport()) {
-            ws.send(JSON.stringify({
-                type: 'command_approval',
-                conversation_id: currentConvId,
-                command_key: commandKey,
-                approved,
-            }));
-        }
+        const toolErrorText = data.content || 'Tool error';
+        setLoadingText(toolErrorText);
+        recordWorkspaceActivity('Tool Error', toolErrorText, {
+            phase: 'error',
+            stepLabel: data.step_label || '',
+            error: true,
+        });
+        updatePlanFocus({
+            text: toolErrorText,
+            phase: 'error',
+            stepLabel: data.step_label || currentBuildStepLabel(),
+        });
+    } else if (data.type === 'permission_required') {
+        pendingPermissionRequest = {
+            permissionKey: String(data.permission_key || '').trim().toLowerCase(),
+            approvalTarget: String(data.approval_target || 'tool').trim().toLowerCase(),
+            title: data.title || 'Permission needed',
+            content: data.content || 'The assistant needs your approval to continue.',
+            preview: data.preview || '',
+            allowLabel: data.allow_label || 'Allow',
+            denyLabel: data.deny_label || 'Deny',
+        };
+        renderPermissionPanel();
+        recordWorkspaceActivity('Permission', pendingPermissionRequest.content, {
+            phase: 'blocked',
+            stepLabel: data.step_label || '',
+        });
+        setLoadingText(pendingPermissionRequest.content);
     } else if (data.type === 'final_replace') {
         replaceAssistantAnswer(data.content);
         recordWorkspaceActivity('Draft', 'Draft updated.');
@@ -1410,7 +1556,7 @@ function handleChatEvent(data) {
             syncAssistantMessageActions(msg);
         }
     } else if (data.type === 'done') {
-        const finishedConvId = activeStreamConversationId;
+        clearPendingPermissionRequest();
         isGenerating = false;
         currentTurnTransport = null;
         httpTurnAbortController = null;
@@ -1423,10 +1569,8 @@ function handleChatEvent(data) {
         recordWorkspaceActivity('Done', 'Turn complete.');
         activeStreamConversationId = null;
         streamingAssistantMessage = null;
-        if (finishedConvId && currentConvId === finishedConvId) {
-            loadConversation(finishedConvId, { preserveActivity: true });
-        }
     } else if (data.type === 'canceled') {
+        clearPendingPermissionRequest();
         removeLoading();
         isGenerating = false;
         currentTurnTransport = null;
@@ -1434,6 +1578,7 @@ function handleChatEvent(data) {
         syncSendButton();
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
     } else if (data.type === 'error') {
+        clearPendingPermissionRequest();
         removeLoading();
         isGenerating = false;
         currentTurnTransport = null;
@@ -1711,11 +1856,32 @@ function startWelcomeHintRotation() {
 
 // ==================== Chat ====================
 
+function isComposerCompact(textarea = document.getElementById('input')) {
+    const area = document.getElementById('inputArea');
+    if (!textarea || !area || area.classList.contains('welcome-mode')) return false;
+    return !textarea.value.trim();
+}
+
+function syncComposerDensity(textarea = document.getElementById('input')) {
+    const area = document.getElementById('inputArea');
+    if (!textarea || !area) return false;
+    const compact = isComposerCompact(textarea);
+    area.classList.toggle('composer-compact', compact);
+    textarea.rows = compact ? 1 : 3;
+    return compact;
+}
+
 function autoResizeTextarea(textarea) {
+    if (!textarea) return;
+    const compact = syncComposerDensity(textarea);
     const mobile = isMobileViewport();
-    const minHeight = mobile ? (mobileKeyboardInset > 120 ? 38 : 46) : 72;
+    const minHeight = compact
+        ? (mobile ? (mobileKeyboardInset > 120 ? 32 : 36) : 28)
+        : (mobile ? (mobileKeyboardInset > 120 ? 38 : 46) : 72);
     const viewportHeight = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
     const maxHeight = mobile ? Math.max(96, Math.min(160, Math.round(viewportHeight * 0.26))) : 220;
+    textarea.style.minHeight = `${minHeight}px`;
+    textarea.style.maxHeight = `${maxHeight}px`;
     textarea.style.height = 'auto';
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
     textarea.style.height = `${nextHeight}px`;
@@ -1741,13 +1907,15 @@ function enterWelcomeMode() {
     const chat = document.querySelector('.chat');
     if (chat) chat.classList.add('welcome-layout');
     const input = document.getElementById('input');
-    if (input) input.style.height = '';
+    if (input) {
+        input.style.height = '';
+        autoResizeTextarea(input);
+    }
     startWelcomeHintRotation();
 }
 
 function toggleDeepMode() {
-    deepMode = !deepMode;
-    localStorage.setItem('deepMode', deepMode);
+    deepMode = true;
     syncReasoningSelector();
 }
 
@@ -1771,7 +1939,7 @@ function normalizeExecutionPlanSteps(steps) {
     return steps
         .map(step => String(step || '').trim())
         .filter(Boolean)
-        .slice(0, 5);
+        .slice(0, PLAN_STEP_LIMIT);
 }
 
 function extractExecutionPlanStepsFromPrompt(executePrompt) {
@@ -1785,7 +1953,7 @@ function extractExecutionPlanStepsFromPrompt(executePrompt) {
         .filter(Boolean)
         .map(line => line.replace(/^\d+[.)]?\s+/, '').trim())
         .filter(Boolean)
-        .slice(0, 5);
+        .slice(0, PLAN_STEP_LIMIT);
 }
 
 function formatExecutionPlanDraft(steps) {
@@ -1801,7 +1969,7 @@ function parseExecutionPlanDraft(value) {
         .filter(Boolean)
         .map(line => line.replace(/^[-*]\s+/, '').replace(/^\d+[.)]?\s+/, '').trim())
         .filter(Boolean)
-        .slice(0, 5);
+        .slice(0, PLAN_STEP_LIMIT);
 }
 
 function getExecutionPlanSourceSteps() {
@@ -2369,7 +2537,20 @@ function insertArtifactReference(path) {
 }
 
 function isEditableTextPath(path) {
-    return !/\.(xlsx|xls|xlsm)$/i.test(path || '');
+    return !/\.(pdf|xlsx|xls|xlsm)$/i.test(path || '');
+}
+
+function normalizeViewerMetadata(path, data = {}) {
+    const backendKind = typeof data.content_kind === 'string' ? data.content_kind.toLowerCase() : '';
+    const kind = (
+        ['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet'].includes(backendKind)
+            ? backendKind
+            : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path || '') ? 'csv' : 'text')))
+    );
+    const backendEditable = typeof data.editable === 'boolean' ? data.editable : isEditableTextPath(path);
+    const editable = LIVE_AREA_READ_ONLY ? false : backendEditable;
+    const defaultView = data.default_view === 'edit' && editable ? 'edit' : 'preview';
+    return { kind, editable, defaultView };
 }
 
 function getLanguageForPath(path) {
@@ -2411,6 +2592,7 @@ function getLanguageForPath(path) {
 
 function renderBuildSteps() {
     renderExecutionPlanApproval();
+    syncStreamingAssistantStatusPanels();
 }
 
 function clearBuildSteps() {
@@ -2477,6 +2659,154 @@ function formatSubstepReportMeta(report = {}) {
     return parts.join(' • ');
 }
 
+function ensureStreamingAssistantStatusStack(msg) {
+    const stack = msg?.querySelector('.think-stack');
+    if (!stack) return null;
+    let statusStack = stack.querySelector('.turn-status-stack');
+    if (!statusStack) {
+        statusStack = document.createElement('div');
+        statusStack.className = 'turn-status-stack';
+        stack.prepend(statusStack);
+    }
+    return statusStack;
+}
+
+function cleanupStreamingAssistantStatusStack(msg) {
+    const statusStack = msg?.querySelector('.turn-status-stack');
+    if (statusStack && !statusStack.children.length) {
+        statusStack.remove();
+    }
+}
+
+function buildInlineStatusHeading(titleText, metaText = '') {
+    const heading = document.createElement('div');
+    heading.className = 'turn-status-heading';
+
+    const title = document.createElement('span');
+    title.className = 'turn-status-title';
+    title.textContent = titleText;
+    heading.appendChild(title);
+
+    if (metaText) {
+        const meta = document.createElement('span');
+        meta.className = 'turn-status-meta';
+        meta.textContent = metaText;
+        heading.appendChild(meta);
+    }
+
+    return heading;
+}
+
+function ensureInlineStatusBox(statusStack, className, { prepend = false } = {}) {
+    if (!statusStack) return null;
+    let box = statusStack.querySelector(`.${className}`);
+    if (!box) {
+        box = document.createElement('section');
+        box.className = `turn-status-box ${className}`;
+        if (prepend && statusStack.firstChild) statusStack.insertBefore(box, statusStack.firstChild);
+        else statusStack.appendChild(box);
+    }
+    return box;
+}
+
+function renderInlinePlanSummary(msg = currentStreamingAssistantMessage()) {
+    if (!msg) return;
+    const statusStack = ensureStreamingAssistantStatusStack(msg);
+    if (!statusStack) return;
+
+    let box = statusStack.querySelector('.turn-plan-box');
+    if (!buildSteps.length) {
+        box?.remove();
+        cleanupStreamingAssistantStatusStack(msg);
+        return;
+    }
+
+    box = ensureInlineStatusBox(statusStack, 'turn-plan-box', { prepend: true });
+    box.innerHTML = '';
+
+    const completedCount = buildSteps.filter(step => step.state === 'complete').length;
+    const totalCount = buildSteps.length;
+    box.appendChild(buildInlineStatusHeading(
+        completedCount >= totalCount ? 'Plan Complete' : 'Plan',
+        `${completedCount}/${totalCount} complete`,
+    ));
+
+    const list = document.createElement('ol');
+    list.className = 'turn-plan-list';
+    buildSteps.forEach(step => {
+        const item = document.createElement('li');
+        item.className = `turn-plan-item is-${step.state || 'pending'}`;
+
+        const marker = document.createElement('span');
+        marker.className = 'turn-plan-marker';
+        marker.textContent = stepStateMarker(step.state || 'pending');
+        item.appendChild(marker);
+
+        const text = document.createElement('span');
+        text.className = 'turn-plan-text';
+        text.textContent = step.text || '';
+        item.appendChild(text);
+
+        list.appendChild(item);
+    });
+    box.appendChild(list);
+}
+
+function shouldShowInlineWorkspaceActivityEntry(entry) {
+    if (!entry) return false;
+    if (['Request', 'Turn', 'Interrupt'].includes(entry.kind)) return false;
+    return true;
+}
+
+function renderInlineActivitySummary(msg = currentStreamingAssistantMessage()) {
+    if (!msg) return;
+    const statusStack = ensureStreamingAssistantStatusStack(msg);
+    if (!statusStack) return;
+
+    const entries = workspaceActivity
+        .filter(shouldShowInlineWorkspaceActivityEntry)
+        .slice(-INLINE_ACTIVITY_LIMIT);
+
+    let box = statusStack.querySelector('.turn-activity-box');
+    if (!isGenerating || !entries.length) {
+        box?.remove();
+        cleanupStreamingAssistantStatusStack(msg);
+        return;
+    }
+
+    box = ensureInlineStatusBox(statusStack, 'turn-activity-box');
+    box.innerHTML = '';
+    box.appendChild(buildInlineStatusHeading('Activity', isGenerating ? 'Live' : 'Recent'));
+
+    const list = document.createElement('div');
+    list.className = 'turn-activity-list';
+    entries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = `turn-activity-item is-${entry.phase || 'status'}${entry.error ? ' is-error' : ''}`;
+
+        const meta = document.createElement('div');
+        meta.className = 'turn-activity-meta';
+        meta.textContent = entry.stepLabel
+            ? `${entry.kind} · ${entry.stepLabel}`
+            : `${entry.kind}`;
+        row.appendChild(meta);
+
+        const text = document.createElement('div');
+        text.className = 'turn-activity-text';
+        text.textContent = truncateWorkspaceActivityText(String(entry.text || '').trim(), 140);
+        row.appendChild(text);
+
+        list.appendChild(row);
+    });
+    box.appendChild(list);
+}
+
+function syncStreamingAssistantStatusPanels(msg = currentStreamingAssistantMessage()) {
+    if (!msg) return;
+    renderInlinePlanSummary(msg);
+    renderInlineActivitySummary(msg);
+}
+
 function renderExecutionPlanApproval() {
     const panel = document.getElementById('planApprovalPanel');
     const title = document.getElementById('planApprovalTitle');
@@ -2494,204 +2824,41 @@ function renderExecutionPlanApproval() {
     if (!panel || !summary || !checklist || !checklistList) return;
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
-    const hasChecklist = buildSteps.length > 0;
-    const activeStep = currentBuildStepIndex !== null ? buildSteps[currentBuildStepIndex] : null;
-    const activeSubstep = Array.isArray(activeStep?.substeps)
-        ? activeStep.substeps.find(item => item?.state === 'active')
-        : null;
-    panel.hidden = !hasPlan && !hasChecklist;
+    panel.hidden = !hasPlan;
 
-    if (title) {
-        title.textContent = hasChecklist ? 'Plan Progress' : 'Plan Preview';
-    }
-    if (subtitle) {
-        subtitle.textContent = hasChecklist
-            ? (
-                activeSubstep?.text
-                    ? `Working on ${activeSubstep.text}. Use Stop to pause at any time.`
-                    : 'The assistant is running these steps now. Use Stop to pause at any time.'
-            )
-            : 'Press Enter or Send to start, or use Up Arrow there to revise these steps first.';
+    if (!hasPlan) {
+        if (editor) editor.hidden = true;
+        if (reasoning) reasoning.hidden = true;
+        if (currentBox) currentBox.hidden = true;
+        checklist.hidden = true;
+        checklistList.innerHTML = '';
+        if (dismissButton) dismissButton.hidden = true;
+        return;
     }
 
-    if (editor) {
-        editor.hidden = !hasPlan || hasChecklist;
-    }
+    if (title) title.textContent = 'Plan';
+    if (subtitle) subtitle.textContent = 'Edit the main steps if needed, then press Enter or Send to run it.';
+
+    if (editor) editor.hidden = false;
     if (draft) {
         const nextDraftText = hasPlan ? String(pendingExecutionPlan?.draftText || '') : '';
         if (draft.value !== nextDraftText) {
             draft.value = nextDraftText;
         }
-        if (!editor?.hidden) {
-            autoResizeTextarea(draft);
-        }
+        autoResizeTextarea(draft);
     }
 
-    const hasSummary = Boolean(hasPlan && pendingExecutionPlan?.summary);
-    if (reasoning) {
-        reasoning.hidden = !hasSummary || hasChecklist;
-    }
+    const hasSummary = Boolean(pendingExecutionPlan?.summary);
+    if (reasoning) reasoning.hidden = !hasSummary;
     summary.textContent = hasSummary ? pendingExecutionPlan.summary : '';
 
-    const activeFocusStep = compactWorkspaceActivityText(currentPlanFocus?.stepLabel || currentBuildStepLabel());
-    const activeFocusText = compactWorkspaceActivityText(
-        currentPlanFocus?.text
-        || (activeSubstep?.text
-            ? `Working inside ${activeSubstep.text}.`
-            : (activeStep?.text ? `Working inside ${activeStep.text}.` : '')),
-    );
-    if (currentBox) {
-        currentBox.hidden = !hasChecklist || (!activeFocusStep && !activeFocusText);
-    }
-    if (currentStep) {
-        currentStep.textContent = activeFocusStep;
-    }
-    if (currentText) {
-        currentText.textContent = activeFocusText;
-    }
-
-    checklist.hidden = !hasChecklist;
+    if (currentBox) currentBox.hidden = true;
+    if (currentStep) currentStep.textContent = '';
+    if (currentText) currentText.textContent = '';
+    checklist.hidden = true;
     checklistList.innerHTML = '';
-    if (hasChecklist) {
-        buildSteps.forEach((step, stepIndex) => {
-            const item = document.createElement('li');
-            item.className = `is-${step.state}`;
-            item.dataset.stepIndex = String(stepIndex);
 
-            const marker = document.createElement('span');
-            marker.className = 'plan-approval-step-marker';
-            marker.textContent = stepStateMarker(step.state);
-
-            const label = document.createElement('span');
-            label.className = 'plan-approval-step-label';
-            label.textContent = step.text || '';
-
-            item.appendChild(marker);
-            item.appendChild(label);
-
-            const recentActivity = step.state === 'active' ? collectRecentStepActivity(stepIndex) : [];
-            const completionSummary = summarizeCompletedStep(step);
-            const hasNestedContent = step.state === 'active' && Boolean(
-                step.goal
-                || step.successSignal
-                || step.progressNote
-                || (Array.isArray(step.substeps) && step.substeps.length)
-                || recentActivity.length
-            );
-            if (hasNestedContent) {
-                const nested = document.createElement('div');
-                nested.className = 'plan-approval-step-nested';
-
-                if (step.goal) {
-                    const goal = document.createElement('div');
-                    goal.className = 'plan-approval-step-goal';
-                    goal.textContent = step.goal;
-                    nested.appendChild(goal);
-                }
-
-                if (recentActivity.length) {
-                    const activityBlock = document.createElement('div');
-                    activityBlock.className = 'plan-approval-step-activity';
-
-                    const activityLabel = document.createElement('div');
-                    activityLabel.className = 'plan-approval-step-activity-label';
-                    activityLabel.textContent = 'Recent activity';
-                    activityBlock.appendChild(activityLabel);
-
-                    const activityList = document.createElement('div');
-                    activityList.className = 'plan-approval-step-activity-list';
-                    recentActivity.forEach(entry => {
-                        const activityRow = document.createElement('div');
-                        activityRow.className = 'plan-approval-step-activity-item';
-
-                        const activityMeta = formatPlanActivityMeta(entry);
-                        if (activityMeta) {
-                            const meta = document.createElement('span');
-                            meta.className = 'plan-approval-step-activity-meta';
-                            meta.textContent = activityMeta;
-                            activityRow.appendChild(meta);
-                        }
-
-                        const activityTextEl = document.createElement('span');
-                        activityTextEl.className = 'plan-approval-step-activity-text';
-                        activityTextEl.textContent = truncateWorkspaceActivityText(String(entry?.text || '').trim(), 160);
-                        activityRow.appendChild(activityTextEl);
-                        activityList.appendChild(activityRow);
-                    });
-                    activityBlock.appendChild(activityList);
-                    nested.appendChild(activityBlock);
-                }
-
-                if (Array.isArray(step.substeps) && step.substeps.length) {
-                    const nestedList = document.createElement('ol');
-                    nestedList.className = 'plan-approval-substeps';
-                    step.substeps.forEach((substep, index) => {
-                        const subItem = document.createElement('li');
-                        subItem.className = `is-${substep.state || 'pending'}`;
-
-                        const subMarker = document.createElement('span');
-                        subMarker.className = 'plan-approval-substep-marker';
-                        subMarker.textContent = stepStateMarker(substep.state || 'pending');
-
-                        const subCopy = document.createElement('div');
-                        subCopy.className = 'plan-approval-substep-copy';
-
-                        const subLabel = document.createElement('span');
-                        subLabel.className = 'plan-approval-substep-label';
-                        subLabel.textContent = substep.text || `Substep ${index + 1}`;
-                        subCopy.appendChild(subLabel);
-
-                        const subReportMeta = formatSubstepReportMeta(substep.report || {});
-                        if (subReportMeta) {
-                            const subMeta = document.createElement('span');
-                            subMeta.className = 'plan-approval-substep-meta';
-                            subMeta.textContent = subReportMeta;
-                            subCopy.appendChild(subMeta);
-                        }
-
-                        const subSummary = String(substep?.report?.summary || '').trim();
-                        if (subSummary && substep.state === 'complete') {
-                            const summaryEl = document.createElement('span');
-                            summaryEl.className = 'plan-approval-substep-summary';
-                            summaryEl.textContent = truncateWorkspaceActivityText(subSummary, 160);
-                            subCopy.appendChild(summaryEl);
-                        }
-
-                        subItem.appendChild(subMarker);
-                        subItem.appendChild(subCopy);
-                        nestedList.appendChild(subItem);
-                    });
-                    nested.appendChild(nestedList);
-                }
-
-                if (step.progressNote) {
-                    const progress = document.createElement('div');
-                    progress.className = 'plan-approval-step-progress';
-                    progress.textContent = step.progressNote;
-                    nested.appendChild(progress);
-                }
-
-                if (step.successSignal) {
-                    const success = document.createElement('div');
-                    success.className = 'plan-approval-step-success';
-                    success.textContent = `Success target: ${step.successSignal}`;
-                    nested.appendChild(success);
-                }
-
-                item.appendChild(nested);
-            } else if (step.state === 'complete' && completionSummary) {
-                const summaryEl = document.createElement('div');
-                summaryEl.className = 'plan-approval-step-summaryline';
-                summaryEl.textContent = truncateWorkspaceActivityText(completionSummary, 170);
-                item.appendChild(summaryEl);
-            }
-            checklistList.appendChild(item);
-        });
-    }
-
-    if (dismissButton) {
-        dismissButton.hidden = !hasPlan;
-    }
+    if (dismissButton) dismissButton.hidden = false;
 }
 
 function handleExecutionPlanDraftChange(textarea) {
@@ -2766,7 +2933,7 @@ function approveExecutionPlan() {
     hideSlashMenu();
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    addMessage(APPROVED_PLAN_EXECUTION_MESSAGE, 'user');
+    addMessage(APPROVED_PLAN_EXECUTION_MESSAGE, 'user', null, { forceScroll: true });
     showLoading();
     clearBuildSteps();
     clearWorkspaceActivity();
@@ -2782,7 +2949,7 @@ function approveExecutionPlan() {
         attachments: [],
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
-        mode: deepMode ? 'deep' : 'normal',
+        mode: BASE_REASONING_MODE,
         features: turnFeatures,
         plan_override_steps: builderSteps,
         slash_command: null,
@@ -2833,6 +3000,7 @@ function renderWorkspaceActivity() {
 function clearWorkspaceActivity() {
     workspaceActivity = [];
     renderWorkspaceActivity();
+    syncStreamingAssistantStatusPanels();
 }
 
 function classifyWorkspaceActivity(kind, text) {
@@ -3027,6 +3195,7 @@ function recordWorkspaceActivity(kind, text, options = {}) {
     };
     workspaceActivity = collapseWorkspaceActivityEntries(workspaceActivity, entry).slice(-WORKSPACE_ACTIVITY_LIMIT);
     renderWorkspaceActivity();
+    syncStreamingAssistantStatusPanels();
 }
 
 function renderFileList() {
@@ -3516,16 +3685,35 @@ function syncInlineViewerVisibility() {
     syncChatShellLayout();
 }
 
-function toggleViewerEmptyState(prefix, hasFile) {
+function setViewerPlaceholder(prefix, message = DEFAULT_INLINE_VIEWER_EMPTY_TEXT, kind = 'empty', visible = true) {
     const emptyEl = document.getElementById(`${prefix}Empty`);
     const editPane = document.getElementById(`${prefix}EditPane`);
     const previewPane = document.getElementById(`${prefix}PreviewPane`);
     if (!emptyEl) return;
-    emptyEl.hidden = hasFile;
-    if (!hasFile) {
+    emptyEl.textContent = message || DEFAULT_INLINE_VIEWER_EMPTY_TEXT;
+    emptyEl.dataset.kind = kind || 'empty';
+    emptyEl.hidden = !visible;
+    if (visible) {
         if (editPane) editPane.classList.add('file-modal-pane-hidden');
         if (previewPane) previewPane.classList.add('file-modal-pane-hidden');
     }
+}
+
+function toggleViewerEmptyState(prefix, hasFile) {
+    setViewerPlaceholder(prefix, DEFAULT_INLINE_VIEWER_EMPTY_TEXT, 'empty', !hasFile);
+}
+
+function showViewerLoading(prefix, path) {
+    setViewerPlaceholder(prefix, `Opening ${basename(path) || 'file'}...`, 'loading', true);
+}
+
+function showViewerError(prefix, path, message) {
+    const details = String(message || '').trim() || 'The file could not be opened.';
+    setViewerPlaceholder(prefix, `Couldn't open ${basename(path) || 'this file'}: ${details}`, 'error', true);
+}
+
+function clearViewerPlaceholder(prefix) {
+    setViewerPlaceholder(prefix, DEFAULT_INLINE_VIEWER_EMPTY_TEXT, 'empty', false);
 }
 
 function renderCodePreview(targetId, content, path) {
@@ -3555,6 +3743,18 @@ function renderHtmlPreview(targetId, content) {
     iframe.className = 'file-modal-html';
     iframe.setAttribute('sandbox', 'allow-same-origin');
     iframe.srcdoc = content || '';
+    previewEl.appendChild(iframe);
+}
+
+function renderPdfPreview(targetId, path) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.className = 'file-modal-pdf';
+    iframe.title = basename(path) || 'PDF preview';
+    iframe.src = workspaceFileInlineViewUrl(path);
     previewEl.appendChild(iframe);
 }
 
@@ -3682,7 +3882,8 @@ function updateViewerPreview(prefix) {
     if (!state.editable) return;
     const content = getViewerContent(prefix);
     const previewId = `${prefix}Preview`;
-    if (state.kind === 'html') renderHtmlPreview(previewId, content);
+    if (state.kind === 'pdf') renderPdfPreview(previewId, state.path);
+    else if (state.kind === 'html') renderHtmlPreview(previewId, content);
     else if (state.kind === 'markdown') renderMarkdownPreview(previewId, content);
     else if (state.kind === 'csv') renderDelimitedPreview(previewId, content, state.path);
     else renderCodePreview(previewId, content, state.path);
@@ -3735,7 +3936,7 @@ function applyViewerMetadata(prefix, path) {
     const subtitleEl = document.getElementById(`${prefix}Subtitle`);
     const preview = document.getElementById(`${prefix}Preview`);
     if (titleEl) titleEl.textContent = path ? basename(path) : 'File Viewer';
-    if (subtitleEl) subtitleEl.textContent = path || 'Select a workspace file to inspect or edit it here.';
+    if (subtitleEl) subtitleEl.textContent = path || 'Select a workspace file to read it here.';
     if (!path) {
         setViewerContent(prefix, '');
         if (preview) preview.innerHTML = '';
@@ -3747,16 +3948,21 @@ function applyViewerMetadata(prefix, path) {
         syncInlineUndoButton();
         syncInlineSelectionAction();
     }
-    toggleViewerEmptyState(prefix, Boolean(path));
+    if (path) clearViewerPlaceholder(prefix);
+    else toggleViewerEmptyState(prefix, false);
     syncInlineViewerMode();
     syncInlineViewerVisibility();
     syncInlineViewerCopyButton();
 }
 
-function syncViewerControls(prefix, editable, defaultView = 'edit') {
+function syncViewerControls(prefix, editable, defaultView = 'preview') {
     const editTab = document.getElementById(`${prefix}EditTab`);
+    const previewTab = document.getElementById(`${prefix}PreviewTab`);
+    const undoButton = document.getElementById(`${prefix}UndoButton`);
     const saveButton = document.getElementById(`${prefix}SaveButton`);
     if (editTab) editTab.hidden = !editable;
+    if (previewTab) previewTab.hidden = !editable;
+    if (undoButton) undoButton.hidden = !editable;
     if (saveButton) saveButton.hidden = !editable;
     setViewerView(prefix, editable ? defaultView : 'preview');
     if (!getViewerState(prefix).path) toggleViewerEmptyState(prefix, false);
@@ -3772,12 +3978,13 @@ function closeInlineViewer() {
         clearTimeout(inlineViewerAutosaveTimer);
         inlineViewerAutosaveTimer = null;
     }
+    inlineViewerRequestToken += 1;
     selectedWorkspaceFile = '';
     selectedSpreadsheetSheet = '';
     inlineViewerPath = '';
     inlineViewerKind = 'text';
     inlineViewerEditable = false;
-    inlineViewerView = 'edit';
+    inlineViewerView = 'preview';
     currentFileSymbols = [];
     applyViewerMetadata('inlineViewer', '');
     renderCurrentFileSymbols();
@@ -3789,20 +3996,23 @@ function closeInlineViewer() {
 async function openWorkspaceFile(path, options = {}) {
     if (!featureSettings.agent_tools || !path) return;
     const preserveSheet = Boolean(options.preserveSheet);
+    const requestToken = ++inlineViewerRequestToken;
     const provisionalKind = /\.(xlsx|xls|xlsm)$/i.test(path)
         ? 'spreadsheet'
-        : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text')));
-    const provisionalEditable = provisionalKind !== 'spreadsheet';
-    const provisionalView = provisionalEditable ? 'edit' : 'preview';
+        : (/\.pdf$/i.test(path) ? 'pdf' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'))));
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
-    setViewerState('inlineViewer', { editable: provisionalEditable, kind: provisionalKind, path, view: provisionalView });
+    setViewerState('inlineViewer', { editable: false, kind: provisionalKind, path, view: 'preview' });
     renderFileList();
     applyViewerMetadata('inlineViewer', path);
-    setWorkspaceViewMode('reader');
     setViewerContent('inlineViewer', '');
     renderViewerSheetTabs('inlineViewer', [], '');
+    currentFileSymbols = [];
+    renderCurrentFileSymbols();
+    syncViewerControls('inlineViewer', false, 'preview');
+    showViewerLoading('inlineViewer', path);
+    setWorkspaceViewMode('reader');
 
     try {
         if (/\.(xlsx|xls|xlsm)$/i.test(path)) {
@@ -3812,9 +4022,14 @@ async function openWorkspaceFile(path, options = {}) {
             const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?${params.toString()}`);
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+            if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
             selectedSpreadsheetSheet = data.sheet || '';
             renderViewerSheetTabs('inlineViewer', data.sheet_names || [], selectedSpreadsheetSheet);
             renderSpreadsheetPreview('inlineViewerPreview', data);
+            clearViewerPlaceholder('inlineViewer');
+            currentFileSymbols = [];
+            renderCurrentFileSymbols();
+            setInlineViewerSaveState('idle');
             syncViewerControls('inlineViewer', false, 'preview');
             return;
         }
@@ -3822,10 +4037,12 @@ async function openWorkspaceFile(path, options = {}) {
         const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file?path=${encodeURIComponent(path)}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
 
-        const editable = isEditableTextPath(path);
-        const kind = isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'));
-        const defaultView = editable ? 'edit' : 'preview';
+        const metadata = normalizeViewerMetadata(path, data);
+        const editable = metadata.editable;
+        const kind = metadata.kind;
+        const defaultView = metadata.defaultView;
         const content = typeof data.content === 'string' ? data.content : '';
         setViewerState('inlineViewer', { editable, kind, path, view: defaultView });
         setViewerContent('inlineViewer', content);
@@ -3833,7 +4050,10 @@ async function openWorkspaceFile(path, options = {}) {
         setInlineViewerSaveState('idle');
         syncInlineUndoButton();
 
-        if (kind === 'html') {
+        if (kind === 'pdf') {
+            renderPdfPreview('inlineViewerPreview', path);
+        }
+        else if (kind === 'html') {
             renderHtmlPreview('inlineViewerPreview', content);
         }
         else if (kind === 'markdown') {
@@ -3842,6 +4062,7 @@ async function openWorkspaceFile(path, options = {}) {
         else if (kind === 'csv') {
             const summaryResp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?path=${encodeURIComponent(path)}`);
             const summaryData = await summaryResp.json();
+            if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
             if (summaryResp.ok) {
                 renderSpreadsheetPreview('inlineViewerPreview', summaryData);
             } else {
@@ -3851,13 +4072,19 @@ async function openWorkspaceFile(path, options = {}) {
             renderCodePreview('inlineViewerPreview', content, path);
         }
 
+        clearViewerPlaceholder('inlineViewer');
         syncViewerControls('inlineViewer', editable, defaultView);
         configureInlineEditorLanguage(path);
         updateCurrentFileSymbols(path, content);
         updateInlineViewerPreview();
     } catch (e) {
-        alert(`Failed to open ${path}: ${e.message}`);
-        closeInlineViewer();
+        if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
+        setViewerState('inlineViewer', { editable: false, kind: provisionalKind, path, view: 'preview' });
+        setInlineViewerSaveState('error', 'Open failed');
+        currentFileSymbols = [];
+        renderCurrentFileSymbols();
+        showViewerError('inlineViewer', path, e.message);
+        syncViewerControls('inlineViewer', false, 'preview');
     }
 }
 
@@ -4070,7 +4297,7 @@ function sendMessage() {
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    addMessage(buildDisplayedMessageText(displayText, pendingAttachments) || message, 'user');
+    addMessage(buildDisplayedMessageText(displayText, pendingAttachments) || message, 'user', null, { forceScroll: true });
     input.value = '';
     pastedBlocks = [];
     const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
@@ -4092,7 +4319,7 @@ function sendMessage() {
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
-        mode: deepMode ? 'deep' : 'normal',
+        mode: BASE_REASONING_MODE,
         features: turnFeatures,
         slash_command: slashCommand ? {
             name: slashCommand.name,
@@ -4111,7 +4338,7 @@ function sendInterruptMessage(messageText) {
     const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
-    addMessage(buildDisplayedMessageText(text, pendingAttachments) || outboundText, 'user');
+    addMessage(buildDisplayedMessageText(text, pendingAttachments) || outboundText, 'user', null, { forceScroll: true });
     clearPendingAttachments();
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
@@ -4122,7 +4349,7 @@ function sendInterruptMessage(messageText) {
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
-        mode: deepMode ? 'deep' : 'normal',
+        mode: BASE_REASONING_MODE,
         features: turnFeatures,
         slash_command: slashCommand ? {
             name: slashCommand.name,
@@ -4266,6 +4493,15 @@ function normalizeMessageFeedback(value) {
     return 'neutral';
 }
 
+function isRecordedMessageFeedback(value) {
+    const feedback = normalizeMessageFeedback(value);
+    return feedback === 'positive' || feedback === 'negative';
+}
+
+function getMessageFeedbackOption(value) {
+    return MESSAGE_FEEDBACK_OPTION_MAP[normalizeMessageFeedback(value)] || null;
+}
+
 function getAssistantCopyText(msg) {
     return String(msg?.dataset?.originalContent || msg?.querySelector('.message-content')?.textContent || '').trim();
 }
@@ -4275,6 +4511,47 @@ function syncAssistantMessageActions(msg) {
     const feedback = normalizeMessageFeedback(msg.dataset.feedback);
     const hasMessageId = Boolean(String(msg.dataset.messageId || '').trim());
     const pending = msg.dataset.feedbackPending === 'true';
+    const isEditing = msg.dataset.feedbackEditing === 'true';
+    const hasRecordedFeedback = isRecordedMessageFeedback(feedback);
+    const showSavedState = hasRecordedFeedback && !isEditing;
+    const feedbackGroup = msg.querySelector('.message-feedback-group');
+    const feedbackStatus = msg.querySelector('.message-feedback-status');
+
+    if (feedbackGroup) {
+        feedbackGroup.hidden = showSavedState;
+    }
+    if (feedbackStatus) {
+        const option = getMessageFeedbackOption(feedback);
+        const showStatus = hasRecordedFeedback;
+        feedbackStatus.hidden = !showStatus;
+        feedbackStatus.disabled = pending;
+        feedbackStatus.classList.toggle('is-positive', feedback === 'positive' && !pending && !isEditing);
+        feedbackStatus.classList.toggle('is-negative', feedback === 'negative' && !pending && !isEditing);
+        feedbackStatus.classList.toggle('is-pending', pending || isEditing);
+        if (showStatus && option) {
+            const label = pending
+                ? `Saving as ${option.label}...`
+                : isEditing
+                    ? 'Cancel'
+                    : `Saved as ${option.label}`;
+            feedbackStatus.textContent = label;
+            if (pending) {
+                feedbackStatus.title = 'Saving feedback...';
+                feedbackStatus.setAttribute('aria-label', `Saving feedback as ${option.label}.`);
+            } else if (isEditing) {
+                feedbackStatus.title = 'Keep the saved feedback and close these controls.';
+                feedbackStatus.setAttribute('aria-label', 'Keep the saved feedback and close these controls.');
+            } else {
+                feedbackStatus.title = `Feedback saved as ${option.label}. Click to change it.`;
+                feedbackStatus.setAttribute('aria-label', `Feedback saved as ${option.label}. Click to change it.`);
+            }
+        } else {
+            feedbackStatus.textContent = '';
+            feedbackStatus.title = '';
+            feedbackStatus.removeAttribute('aria-label');
+        }
+    }
+
     msg.querySelectorAll('.feedback-btn').forEach(btn => {
         const value = String(btn.dataset.feedbackValue || '');
         const active = feedback === value;
@@ -4299,9 +4576,11 @@ async function submitMessageFeedback(msg, feedback) {
     if (!Number.isFinite(messageId)) return;
 
     const previousFeedback = normalizeMessageFeedback(msg.dataset.feedback);
+    const previousEditing = msg.dataset.feedbackEditing === 'true';
     const nextFeedback = normalizeMessageFeedback(feedback);
     msg.dataset.feedback = nextFeedback;
     msg.dataset.feedbackPending = 'true';
+    delete msg.dataset.feedbackEditing;
     syncAssistantMessageActions(msg);
 
     try {
@@ -4315,6 +4594,8 @@ async function submitMessageFeedback(msg, feedback) {
         msg.dataset.feedback = normalizeMessageFeedback(data.feedback || nextFeedback);
     } catch (error) {
         msg.dataset.feedback = previousFeedback;
+        if (previousEditing) msg.dataset.feedbackEditing = 'true';
+        else delete msg.dataset.feedbackEditing;
         console.error('Failed to save message feedback:', error);
     } finally {
         delete msg.dataset.feedbackPending;
@@ -4373,6 +4654,23 @@ function ensureAssistantMessageActions(msg) {
         actions.appendChild(feedbackGroup);
     }
 
+    let feedbackStatus = actions.querySelector('.message-feedback-status');
+    if (!feedbackStatus) {
+        feedbackStatus = document.createElement('button');
+        feedbackStatus.type = 'button';
+        feedbackStatus.className = 'message-feedback-status';
+        feedbackStatus.hidden = true;
+        feedbackStatus.setAttribute('aria-live', 'polite');
+        feedbackStatus.onclick = (e) => {
+            e.stopPropagation();
+            if (msg.dataset.feedbackPending === 'true') return;
+            if (msg.dataset.feedbackEditing === 'true') delete msg.dataset.feedbackEditing;
+            else msg.dataset.feedbackEditing = 'true';
+            syncAssistantMessageActions(msg);
+        };
+        actions.appendChild(feedbackStatus);
+    }
+
     syncAssistantMessageActions(msg);
 }
 
@@ -4414,8 +4712,9 @@ function appendStreamingAssistantMessageIfVisible() {
     if (!streamingAssistantMessage || activeStreamConversationId !== currentConvId) return;
     const messages = document.getElementById('messages');
     if (!messages || streamingAssistantMessage.parentElement === messages) return;
-    messages.appendChild(streamingAssistantMessage);
-    scrollToBottom();
+    preserveMessagesViewport(() => {
+        messages.appendChild(streamingAssistantMessage);
+    });
 }
 
 function ensureStreamingAssistantMessage() {
@@ -4423,6 +4722,7 @@ function ensureStreamingAssistantMessage() {
         streamingAssistantMessage = createMessageElement('', 'assistant');
     }
     appendStreamingAssistantMessageIfVisible();
+    syncStreamingAssistantStatusPanels(streamingAssistantMessage);
     return streamingAssistantMessage;
 }
 
@@ -4446,8 +4746,9 @@ function onAssistantThinkStart() {
     box.appendChild(toolbar);
     box.appendChild(body);
     attachThinkToolbarHandlers(box, toolbar);
-    stack.appendChild(box);
-    if (msg.isConnected) scrollToBottom();
+    preserveMessagesViewport(() => {
+        stack.appendChild(box);
+    });
 }
 
 function onAssistantThinkToken(text) {
@@ -4455,8 +4756,9 @@ function onAssistantThinkToken(text) {
     const box = msg?.querySelector('.think-box--streaming');
     const body = box?.querySelector('.think-body');
     if (!body) return;
-    body.appendChild(document.createTextNode(text));
-    if (msg.isConnected) scrollToBottom();
+    preserveMessagesViewport(() => {
+        body.appendChild(document.createTextNode(text));
+    });
 }
 
 function onAssistantThinkEnd() {
@@ -4472,7 +4774,7 @@ function onAssistantThinkEnd() {
     if (body) {
         body.classList.add('think-body--collapsed');
     }
-    if (msg.isConnected) scrollToBottom();
+    preserveMessagesViewport(() => {});
 }
 
 function appendAssistantAnswerToken(text) {
@@ -4480,9 +4782,10 @@ function appendAssistantAnswerToken(text) {
     if (!msg) return;
     const contentDiv = msg.querySelector('.message-content');
     if (!contentDiv) return;
-    msg.dataset.originalContent = (msg.dataset.originalContent || '') + text;
-    contentDiv.textContent = msg.dataset.originalContent;
-    if (msg.isConnected) scrollToBottom();
+    preserveMessagesViewport(() => {
+        msg.dataset.originalContent = (msg.dataset.originalContent || '') + text;
+        contentDiv.textContent = msg.dataset.originalContent;
+    });
 }
 
 function replaceAssistantAnswer(content) {
@@ -4491,17 +4794,19 @@ function replaceAssistantAnswer(content) {
     const stack = msg.querySelector('.think-stack');
     const contentDiv = msg.querySelector('.message-content');
     if (!stack || !contentDiv) return;
-    stack.innerHTML = '';
-    msg.dataset.originalContent = '';
-    msg.dataset.autoSpoken = 'false';
-    hydrateAssistantFromRaw(msg, content || '');
-    if (msg.isConnected) scrollToBottom();
+    preserveMessagesViewport(() => {
+        stack.innerHTML = '';
+        msg.dataset.originalContent = '';
+        msg.dataset.autoSpoken = 'false';
+        hydrateAssistantFromRaw(msg, content || '');
+    });
 }
 
 function addMessage(content, role, timestamp = null, options = {}) {
     const msg = createMessageElement(content, role, timestamp, options);
-    document.getElementById('messages').appendChild(msg);
-    scrollToBottom();
+    preserveMessagesViewport(() => {
+        document.getElementById('messages').appendChild(msg);
+    }, { forceBottom: Boolean(options.forceScroll) });
     return msg;
 }
 function showLoading() {
@@ -4515,8 +4820,9 @@ function showLoading() {
         </div>
         <div class="loading-text">Thinking...</div>
     `;
-    document.getElementById('messages').appendChild(loading);
-    scrollToBottom();
+    preserveMessagesViewport(() => {
+        document.getElementById('messages').appendChild(loading);
+    }, { forceBottom: true });
 }
 
 function removeLoading() {
@@ -4525,7 +4831,62 @@ function removeLoading() {
 
 function scrollToBottom() {
     const messages = document.getElementById('messages');
+    if (!messages) return;
     messages.scrollTop = messages.scrollHeight;
+}
+
+function messagesNearBottom(threshold = MESSAGE_SCROLL_BOTTOM_THRESHOLD) {
+    const messages = document.getElementById('messages');
+    if (!messages) return true;
+    return (messages.scrollHeight - messages.clientHeight - messages.scrollTop) <= threshold;
+}
+
+function captureMessagesViewportAnchor(messages) {
+    if (!messages) return null;
+    const containerTop = messages.getBoundingClientRect().top;
+    const anchor = Array.from(messages.children).find(child => {
+        const rect = child.getBoundingClientRect();
+        return rect.bottom > containerTop + 1;
+    });
+    if (!anchor) {
+        return { element: null, offsetTop: 0, scrollTop: messages.scrollTop };
+    }
+    return {
+        element: anchor,
+        offsetTop: anchor.getBoundingClientRect().top - containerTop,
+        scrollTop: messages.scrollTop,
+    };
+}
+
+function restoreMessagesViewportAnchor(messages, anchor) {
+    if (!messages || !anchor) return;
+    if (!anchor.element || !anchor.element.isConnected) {
+        messages.scrollTop = anchor.scrollTop;
+        return;
+    }
+    const containerTop = messages.getBoundingClientRect().top;
+    const currentOffsetTop = anchor.element.getBoundingClientRect().top - containerTop;
+    messages.scrollTop += currentOffsetTop - anchor.offsetTop;
+}
+
+function preserveMessagesViewport(mutate, options = {}) {
+    if (typeof mutate !== 'function') return;
+    const messages = document.getElementById('messages');
+    if (!messages) {
+        mutate();
+        return;
+    }
+    const shouldStickToBottom = Boolean(options.forceBottom) || messagesNearBottom();
+    const viewportAnchor = shouldStickToBottom ? null : captureMessagesViewportAnchor(messages);
+    mutate();
+    requestAnimationFrame(() => {
+        if (!messages.isConnected) return;
+        if (shouldStickToBottom) {
+            scrollToBottom();
+            return;
+        }
+        restoreMessagesViewportAnchor(messages, viewportAnchor);
+    });
 }
 
 function handleKeyDown(event) {
@@ -4625,47 +4986,49 @@ function renderMarkdown() {
         setTimeout(renderMarkdown, 100);
         return;
     }
-    document.querySelectorAll('.message.assistant[data-needs-markdown="true"]').forEach(msg => {
-        const contentDiv = msg.querySelector('.message-content');
-        if (!contentDiv) return;
-        // Read raw content from data attribute (answer only); thinking lives in .think-stack
-        const content = msg.dataset.originalContent || contentDiv.textContent || contentDiv.innerText;
-        const hasThink = msg.querySelector('.think-stack .think-box');
-        if ((!content || !content.trim()) && !hasThink) return;
+    preserveMessagesViewport(() => {
+        document.querySelectorAll('.message.assistant[data-needs-markdown="true"]').forEach(msg => {
+            const contentDiv = msg.querySelector('.message-content');
+            if (!contentDiv) return;
+            // Read raw content from data attribute (answer only); thinking lives in .think-stack
+            const content = msg.dataset.originalContent || contentDiv.textContent || contentDiv.innerText;
+            const hasThink = msg.querySelector('.think-stack .think-box');
+            if ((!content || !content.trim()) && !hasThink) return;
 
-        const tsDiv = msg.querySelector('.message-timestamp');
-        try {
-            const html = (content && content.trim()) ? marked.parse(content) : '';
-            contentDiv.innerHTML = html;
-            msg.dataset.needsMarkdown = 'false';
-            msg.dataset.rendered = 'true';
+            const tsDiv = msg.querySelector('.message-timestamp');
+            try {
+                const html = (content && content.trim()) ? marked.parse(content) : '';
+                contentDiv.innerHTML = html;
+                msg.dataset.needsMarkdown = 'false';
+                msg.dataset.rendered = 'true';
 
-            if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
-            ensureAssistantMessageActions(msg);
+                if (tsDiv && !msg.querySelector('.message-timestamp')) msg.appendChild(tsDiv);
+                ensureAssistantMessageActions(msg);
 
-            // Syntax highlighting + code copy buttons
-            if (typeof hljs !== 'undefined') {
-                msg.querySelectorAll('pre code').forEach(block => {
-                    try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
+                // Syntax highlighting + code copy buttons
+                if (typeof hljs !== 'undefined') {
+                    msg.querySelectorAll('pre code').forEach(block => {
+                        try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
+                    });
+                }
+                msg.querySelectorAll('pre').forEach(pre => {
+                    if (pre.querySelector('.copy-btn')) return;
+                    const codeText = pre.querySelector('code')?.textContent || pre.textContent;
+                    if (!codeText) return;
+                    const btn = document.createElement('button');
+                    btn.className = 'copy-btn';
+                    btn.innerHTML = '&#128203; Copy';
+                    btn.onclick = (e) => { e.stopPropagation(); copyToClipboard(codeText, btn); };
+                    pre.appendChild(btn);
                 });
+                if (voiceSettings.autoSpeakReplies && supportsSpeechSynthesis() && msg.dataset.autoSpoken !== 'true') {
+                    enqueueAssistantSpeech(msg);
+                }
+            } catch (e) {
+                contentDiv.textContent = content;
+                ensureAssistantMessageActions(msg);
             }
-            msg.querySelectorAll('pre').forEach(pre => {
-                if (pre.querySelector('.copy-btn')) return;
-                const codeText = pre.querySelector('code')?.textContent || pre.textContent;
-                if (!codeText) return;
-                const btn = document.createElement('button');
-                btn.className = 'copy-btn';
-                btn.innerHTML = '&#128203; Copy';
-                btn.onclick = (e) => { e.stopPropagation(); copyToClipboard(codeText, btn); };
-                pre.appendChild(btn);
-            });
-            if (voiceSettings.autoSpeakReplies && supportsSpeechSynthesis() && msg.dataset.autoSpoken !== 'true') {
-                enqueueAssistantSpeech(msg);
-            }
-        } catch (e) {
-            contentDiv.textContent = content;
-            ensureAssistantMessageActions(msg);
-        }
+        });
     });
 }
 
@@ -4873,6 +5236,7 @@ async function loadConversations() {
 
 async function loadConversation(id, options = {}) {
     const preserveActivity = Boolean(options.preserveActivity);
+    const preserveScroll = Boolean(options.preserveScroll);
     currentConvId = id;
     currentRunId = null;
     currentAssistantTurnStartedAt = null;
@@ -4882,6 +5246,7 @@ async function loadConversation(id, options = {}) {
     selectedSpreadsheetSheet = '';
     clearBuildSteps();
     dismissExecutionPlan();
+    clearPendingPermissionRequest();
     if (!preserveActivity) clearWorkspaceActivity();
     closeInlineViewer();
     clearPendingAttachments();
@@ -4895,6 +5260,7 @@ async function loadConversation(id, options = {}) {
         const el = addMessage(msg.content, msg.role, msg.timestamp, { messageId: msg.id, feedback: msg.feedback });
         if (msg.role === 'assistant') el.dataset.autoSpoken = 'true';
     });
+    if (!preserveScroll) scrollToBottom();
     if (data.pending_plan?.execute_prompt) {
         storeExecutionPlan(
             data.pending_plan.summary || '',
@@ -4915,6 +5281,7 @@ function newChat() {
     dismissMobileKeyboard(true);
     stopSpeaking();
     clearAllowedCommandsForConversation(currentConvId);
+    clearAllowedToolPermissionsForConversation(currentConvId);
     currentConvId = generateId();
     currentRunId = null;
     currentAssistantTurnStartedAt = null;
@@ -4924,6 +5291,7 @@ function newChat() {
     selectedSpreadsheetSheet = '';
     clearBuildSteps();
     dismissExecutionPlan();
+    clearPendingPermissionRequest();
     clearWorkspaceActivity();
     closeInlineViewer();
     clearPendingAttachments();
@@ -4961,6 +5329,7 @@ async function deleteConv(id) {
     if (!confirm('Delete this conversation?')) return;
     await fetch(`/api/conversation/${id}`, { method: 'DELETE' });
     clearAllowedCommandsForConversation(id);
+    clearAllowedToolPermissionsForConversation(id);
     clearRememberedTurnFeatures(id);
     if (id === currentConvId) newChat(); else loadConversations();
 }
@@ -5118,6 +5487,7 @@ if (window.visualViewport) {
 
 syncReasoningSelector();
 renderWorkspaceActivity();
+renderPermissionPanel();
 applyViewerMetadata('inlineViewer', '');
 syncWorkspaceViewMode();
 syncMobileViewportState();

@@ -3,6 +3,7 @@ set -euo pipefail
 
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TAILSCALE_LAST_STATUS=""
 
 cd "$PROJECT_DIR"
 
@@ -32,8 +33,143 @@ lan_ip() {
     hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"
 }
 
+app_port() {
+    printf '%s\n' "${APP_PORT:-${PORT:-8000}}"
+}
+
+app_scheme() {
+    if [[ -n "${SSL_CERTFILE:-}" && -n "${SSL_KEYFILE:-}" ]]; then
+        printf '%s\n' "https"
+    else
+        printf '%s\n' "http"
+    fi
+}
+
+tailscale_available() {
+    command -v tailscale >/dev/null 2>&1
+}
+
+tailscale_manage_mode() {
+    printf '%s\n' "${TAILSCALE_SERVE:-auto}"
+}
+
+tailscale_should_manage() {
+    case "$(tailscale_manage_mode)" in
+        auto|on|true|1|enabled)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+tailscale_https_port() {
+    printf '%s\n' "${TAILSCALE_SERVE_HTTPS_PORT:-$(app_port)}"
+}
+
+tailscale_target_url() {
+    local scheme port
+    scheme="$(app_scheme)"
+    port="$(app_port)"
+    if [[ "$scheme" == "https" ]]; then
+        printf '%s\n' "https+insecure://127.0.0.1:${port}"
+    else
+        printf '%s\n' "http://127.0.0.1:${port}"
+    fi
+}
+
+extract_tailscale_https_url() {
+    local https_port="$1"
+    if [[ "$https_port" == "443" ]]; then
+        sed -nE 's#.*(https://[^[:space:]]+).*#\1#p' | awk 'NF { print; exit }'
+    else
+        sed -nE "s#.*(https://[^[:space:]]+:${https_port}).*#\\1#p" | awk 'NF { print; exit }'
+    fi
+}
+
+tailscale_serve_https_url() {
+    local https_port status
+    if ! tailscale_available; then
+        return 0
+    fi
+    https_port="$(tailscale_https_port)"
+    status="$(tailscale serve status 2>/dev/null || true)"
+    if [[ -z "$status" ]]; then
+        return 0
+    fi
+    printf '%s\n' "$status" | extract_tailscale_https_url "$https_port"
+}
+
+ensure_tailscale_https() {
+    local https_port target output
+    TAILSCALE_LAST_STATUS=""
+
+    if ! tailscale_should_manage || ! tailscale_available; then
+        return 1
+    fi
+
+    https_port="$(tailscale_https_port)"
+    target="$(tailscale_target_url)"
+
+    if output="$(tailscale serve --bg --yes --https="${https_port}" "$target" 2>&1)"; then
+        TAILSCALE_LAST_STATUS="tailnet HTTPS enabled"
+        return 0
+    fi
+
+    TAILSCALE_LAST_STATUS="$(printf '%s\n' "$output" | awk 'NF { print; exit }')"
+    return 1
+}
+
+disable_tailscale_https() {
+    local https_port
+    if ! tailscale_should_manage || ! tailscale_available; then
+        return 0
+    fi
+    https_port="$(tailscale_https_port)"
+    tailscale serve --https="${https_port}" off >/dev/null 2>&1 || true
+}
+
+preferred_browser_url() {
+    local tailscale_https
+    tailscale_https="$(tailscale_serve_https_url)"
+    if [[ -n "$tailscale_https" ]]; then
+        printf '%s\n' "$tailscale_https"
+        return 0
+    fi
+
+    printf '%s\n' "$(app_scheme)://localhost:$(app_port)"
+}
+
+print_access_urls() {
+    local preferred local_url
+    preferred="$(preferred_browser_url)"
+    local_url="$(app_scheme)://localhost:$(app_port)"
+
+    echo "  Open:     ${preferred}"
+    if [[ "$preferred" != "$local_url" ]]; then
+        echo "  Local:    ${local_url}"
+    fi
+    if [[ -n "$TAILSCALE_LAST_STATUS" && "$preferred" == "$local_url" ]]; then
+        echo "  Tailnet:  ${TAILSCALE_LAST_STATUS}"
+    fi
+}
+
+open_url_in_browser() {
+    local url="$1"
+    if command -v open >/dev/null 2>&1; then
+        open "$url"
+    elif command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url"
+    else
+        echo "No supported browser opener found. Open this URL manually:"
+        echo "$url"
+        return 1
+    fi
+}
+
 usage() {
-    echo "Usage: ./chat {install|start|stop|restart|status|logs}"
+    echo "Usage: ./chat {install|start|stop|restart|status|logs|open}"
     echo ""
     echo "Commands:"
     echo "  install   Build images and pull dependencies"
@@ -42,6 +178,7 @@ usage() {
     echo "  restart   Stop then start"
     echo "  status    Show running containers"
     echo "  logs      Tail logs from all services"
+    echo "  open      Open the preferred browser URL"
 }
 
 ensure_data_dirs() {
@@ -97,9 +234,9 @@ do_start() {
     chat_running=$(docker inspect -f '{{.State.Running}}' ai-chat-vllm 2>/dev/null || echo "false")
 
     if [[ "$vllm_running" == "true" && "$chat_running" == "true" ]]; then
+        ensure_tailscale_https || true
         echo "Already running."
-        echo "  Local:    http://localhost:8000"
-        echo "  LAN:      http://$(lan_ip):8000"
+        print_access_urls
         return 0
     fi
 
@@ -109,10 +246,11 @@ do_start() {
     echo "Starting services..."
     docker_compose up -d
 
+    ensure_tailscale_https || true
+
     echo ""
     echo "Started."
-    echo "  Local:    http://localhost:8000"
-    echo "  LAN:      http://$(lan_ip):8000"
+    print_access_urls
     echo ""
     echo "Note: vLLM may take a few minutes to load the model on first run."
     echo "Run './chat logs' to watch progress."
@@ -121,6 +259,7 @@ do_start() {
 do_stop() {
     echo "Stopping services..."
     docker_compose down --remove-orphans 2>/dev/null || true
+    disable_tailscale_https
     echo "Stopped."
 }
 
@@ -130,6 +269,18 @@ do_status() {
     chat_state=$(docker inspect -f '{{.State.Status}}' ai-chat-vllm 2>/dev/null || echo "not found")
     echo "  vLLM:       $vllm_state"
     echo "  chat-app:   $chat_state"
+    if [[ "$chat_state" == "running" ]]; then
+        TAILSCALE_LAST_STATUS=""
+        echo ""
+        print_access_urls
+    fi
+}
+
+do_open() {
+    local url
+    url="$(preferred_browser_url)"
+    echo "Opening $url"
+    open_url_in_browser "$url"
 }
 
 case "${1:-}" in
@@ -139,5 +290,6 @@ case "${1:-}" in
     restart)  do_stop; echo ""; do_start ;;
     status)   do_status ;;
     logs)     docker_compose logs -f ;;
+    open)     do_open ;;
     *)        usage; exit 1 ;;
 esac

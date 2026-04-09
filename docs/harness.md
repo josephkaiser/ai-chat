@@ -94,29 +94,26 @@ How tools are exposed:
 
 - **Workspace read tools** are available when the request clearly needs local files.
 - **Workspace render** is added for HTML preview/display requests so the model can materialize a preview file directly in the viewer.
-- **Write access** only appears when the user approves file changes for that turn.
-- **Command execution** only appears when the user approves command execution for that turn.
-- **Conversation search** depends on the `local_rag` feature toggle.
-- **Web search** depends on the `web_search` feature toggle.
+- **Write access** is exposed for write-oriented requests, then paused behind an inline approval card the first time the model tries to edit files.
+- **Command execution** is exposed for run/verify-oriented requests, then paused behind an inline approval card for each executable such as `git` or `python3`.
+- **Conversation search** stays available for recall-style prompts.
+- **Web search** stays available for freshness-sensitive prompts, then pauses behind an inline approval card the first time live web access is used.
 
 `allowed_workspace_tools(...)` is the core permission gate for file and command tools.
 
-## Per-turn approvals
+## Runtime approvals
 
-The UI does not blindly grant write or command access. `resolveTurnFeatures(...)` in `static/app.js` infers likely intent from the prompt and attachments, then asks for confirmation when a request looks like it wants to:
+Tool enablement is no longer buried in settings. `resolveTurnFeatures(...)` in `static/app.js` now sends the server the relevant tool surface plus any remembered per-chat approvals, and the harness pauses only when a gated capability is actually used.
 
-- create or edit workspace files
-- run workspace commands
+Current inline approval buckets are:
 
-Those approvals become `FeatureFlags` on the server:
+- workspace inspection
+- workspace grep
+- workspace edits / render writes
+- web search / fetch
+- per-executable commands such as `git`, `bash`, `python3`, or `pip`
 
-- `agent_tools`
-- `workspace_write`
-- `workspace_run_commands`
-- `local_rag`
-- `web_search`
-
-This keeps casual chat cheap and safe while still allowing fully agentic coding turns when the user explicitly wants them.
+If the user denies one of those requests, the tool loop gets a normal failed tool result and the model is expected to pivot gracefully instead of failing the whole turn.
 
 ## Workspace model
 

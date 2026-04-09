@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" id="themeColorMeta" content="#f5f0e8">
     <title>{{ app_title }}</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
@@ -34,10 +34,10 @@
         </svg>
         <span class="status-dot loading" id="statusDot"></span>
     </button>
-    <!-- Mobile top bar: title doubles as reasoning toggle -->
-    <button class="mobile-title-btn" id="mobileTitleBtn" onclick="toggleDeepModeMobile()">
+    <!-- Mobile top bar -->
+    <button class="mobile-title-btn" id="mobileTitleBtn" onclick="focusInput()">
         <span class="mobile-title-label">{{ app_title }}</span>
-        <span class="mobile-title-reasoning" id="mobileReasoningBadge">Low</span>
+        <span class="mobile-title-reasoning" id="mobileReasoningBadge">Base</span>
     </button>
 
     <!-- Menu overlay -->
@@ -92,35 +92,20 @@
                             </button>
                         </div>
                         <div class="settings-group">
-                            <div class="settings-group-title">Features</div>
-                            <label class="settings-row settings-row-check">
-                                <span class="settings-row-copy">
-                                    <span class="settings-row-label">Agent Dev Tools</span>
-                                    <span class="settings-row-note">Let the agent inspect files, create artifacts, edit workspace code, and run commands to self-check its work.</span>
-                                </span>
-                                <input class="settings-check" type="checkbox" id="settingAgentTools" onchange="updateFeatureSetting('agent_tools', this.checked)">
-                            </label>
+                            <div class="settings-group-title">Workspace</div>
                             <label class="settings-row settings-row-check">
                                 <span class="settings-row-copy">
                                     <span class="settings-row-label">Workspace Panel</span>
-                                    <span class="settings-row-note">Show the optional workspace browser so you can inspect files and artifacts the agent creates.</span>
+                                    <span class="settings-row-note">Show the optional workspace browser so you can inspect files and artifacts the assistant creates.</span>
                                 </span>
                                 <input class="settings-check" type="checkbox" id="settingWorkspacePanel" onchange="updateFeatureSetting('workspace_panel', this.checked)">
                             </label>
-                            <label class="settings-row settings-row-check">
-                                <span class="settings-row-copy">
-                                    <span class="settings-row-label">Local RAG</span>
-                                    <span class="settings-row-note">Search the current conversation when a prompt needs recall or local context.</span>
-                                </span>
-                                <input class="settings-check" type="checkbox" id="settingLocalRag" onchange="updateFeatureSetting('local_rag', this.checked)">
-                            </label>
-                            <label class="settings-row settings-row-check">
-                                <span class="settings-row-copy">
-                                    <span class="settings-row-label">Web Search</span>
-                                    <span class="settings-row-note">Allow optional current-web lookups for freshness-sensitive questions.</span>
-                                </span>
-                                <input class="settings-check" type="checkbox" id="settingWebSearch" onchange="updateFeatureSetting('web_search', this.checked)">
-                            </label>
+                            <div class="settings-row">
+                                <div class="settings-row-copy">
+                                    <span class="settings-row-label">Runtime Tool Approvals</span>
+                                    <span class="settings-row-note">Web access, workspace usage, edits, and commands are now approved inline during a reply instead of here.</span>
+                                </div>
+                            </div>
                         </div>
                         <div class="settings-group">
                             <div class="settings-group-title">Voice</div>
@@ -236,15 +221,15 @@
                         <div class="plan-approval-panel" id="planApprovalPanel" hidden>
                             <div class="plan-approval-header">
                                 <div>
-                                    <div class="plan-approval-title" id="planApprovalTitle">Plan Preview</div>
-                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Press Enter or Send to start, or use Up Arrow there to revise these steps first.</div>
+                                    <div class="plan-approval-title" id="planApprovalTitle">Plan</div>
+                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Edit the main steps if needed, then press Enter or Send to run it.</div>
                                 </div>
                                 <button type="button" class="plan-approval-dismiss" id="planApprovalDismiss" onclick="dismissExecutionPlan()" aria-label="Dismiss execution plan">&times;</button>
                             </div>
                             <div class="plan-approval-editor" id="planApprovalEditor" hidden>
-                                <label class="plan-approval-editor-label" for="planApprovalDraft">Editable build steps</label>
+                                <label class="plan-approval-editor-label" for="planApprovalDraft">Main steps</label>
                                 <textarea class="plan-approval-draft" id="planApprovalDraft" spellcheck="false" oninput="handleExecutionPlanDraftChange(this)" onkeydown="handleExecutionPlanDraftKeyDown(event)"></textarea>
-                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter here to start with the edited steps, or use Send.</div>
+                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter to run the edited plan, or use Send.</div>
                             </div>
                             <details class="plan-approval-reasoning" id="planApprovalReasoning" hidden>
                                 <summary>Reasoning for this turn</summary>
@@ -257,6 +242,17 @@
                             </div>
                             <div class="plan-approval-checklist" id="planApprovalChecklist" hidden>
                                 <ol class="plan-approval-steps" id="planApprovalSteps"></ol>
+                            </div>
+                        </div>
+                        <div class="permission-panel" id="permissionPanel" hidden>
+                            <div class="permission-panel-copy">
+                                <div class="permission-panel-title" id="permissionPanelTitle">Permission needed</div>
+                                <div class="permission-panel-text" id="permissionPanelText">The assistant needs your approval to continue.</div>
+                                <div class="permission-panel-preview" id="permissionPanelPreview" hidden></div>
+                            </div>
+                            <div class="permission-panel-actions">
+                                <button type="button" class="permission-panel-button permission-panel-button-allow" id="permissionAllowButton" onclick="respondToPendingPermission(true)">Allow</button>
+                                <button type="button" class="permission-panel-button permission-panel-button-deny" id="permissionDenyButton" onclick="respondToPendingPermission(false)">Deny</button>
                             </div>
                         </div>
                         <div class="input-container" onclick="focusInput()">
@@ -274,20 +270,9 @@
                                             <span class="composer-hover-text">Attach files, screenshots, audio, or workspace snippets to the next message.</span>
                                         </div>
                                     </div>
-                                    <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button" onclick="toggleDeepModeMobile()" title="Toggle reasoning effort" aria-label="Toggle reasoning effort">
-                                        <span class="reasoning-toggle-glyph" aria-hidden="true">!</span>
+                                    <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button is-active" type="button" title="Base reasoning mode uses the high-thinking path by default." aria-label="Reasoning mode: base">
+                                        <span class="reasoning-toggle-glyph" aria-hidden="true">Base</span>
                                     </button>
-                                    <div class="model-select-wrap reasoning-select-wrap">
-                                        <select id="reasoningSelect" class="composer-select reasoning-select" onchange="handleReasoningSelectChange(this.value)" aria-label="Select reasoning effort">
-                                            <option value="high">High</option>
-                                            <option value="low">Low</option>
-                                        </select>
-                                        <span class="model-select-caret" aria-hidden="true">
-                                            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M2.5 4.25 6 7.75l3.5-3.5"></path>
-                                            </svg>
-                                        </span>
-                                    </div>
                                 </div>
                                 <div class="composer-actions composer-actions-right">
                                     <button id="micButton" class="composer-control voice-toggle" onclick="toggleDictation()" title="Record audio" aria-label="Record audio">
@@ -355,7 +340,7 @@
                         <div class="ide-viewer-header">
                             <div class="ide-viewer-heading">
                                 <div class="ide-viewer-title" id="inlineViewerTitle">File Viewer</div>
-                                <div class="ide-viewer-subtitle" id="inlineViewerSubtitle">Select a workspace file to inspect or edit it here.</div>
+                                <div class="ide-viewer-subtitle" id="inlineViewerSubtitle">Select a workspace file to read it here.</div>
                             </div>
                             <div class="ide-viewer-actions">
                                 <div class="ide-editor-statusbar">
@@ -373,7 +358,7 @@
                         <div class="file-modal-sheet-tabs ide-sheet-tabs" id="inlineViewerSheetTabs" hidden></div>
                         <div class="ide-viewer-body">
                             <div class="ide-view-tabs" id="inlineViewerViewTabs" hidden></div>
-                            <div class="ide-viewer-empty" id="inlineViewerEmpty">Open a file from the workspace tree to read, edit, save, or close it here.</div>
+                            <div class="ide-viewer-empty" id="inlineViewerEmpty">Browse the workspace tree and open a file to read it here.</div>
                             <div class="ide-viewer-pane" id="inlineViewerEditPane">
                                 <textarea id="inlineViewerEditor" spellcheck="false" oninput="updateInlineViewerPreview(); scheduleInlineViewerAutosave(); updateCurrentFileSymbols(inlineViewerPath, this.value)"></textarea>
                             </div>
@@ -417,6 +402,6 @@
         window.MODEL_NAME = "{{ model_name }}";
         window.APP_TITLE = {{ app_title|tojson }};
     </script>
-    <script defer src="/static/app.js"></script>
+    <script defer src="/static/app.js?v={{ static_asset_version }}"></script>
 </body>
 </html>

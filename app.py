@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import logging
+import mimetypes
 import os
 import pathlib
 import re
@@ -78,6 +79,16 @@ from turn_strategy import (
     build_turn_assessment,
     format_turn_assessment_summary,
     infer_explicit_planning_request,
+)
+from workspace_reader import (
+    build_text_file_result as build_text_file_result_helper,
+    build_tool_loop_hard_limit_message as build_tool_loop_hard_limit_message_helper,
+    build_workspace_file_result as build_workspace_file_result_helper,
+    normalize_pause_reason as normalize_pause_reason_helper,
+    workspace_file_content_kind as workspace_file_content_kind_helper,
+    workspace_file_default_view as workspace_file_default_view_helper,
+    workspace_file_is_editable as workspace_file_is_editable_helper,
+    workspace_file_live_reader_mode as workspace_file_live_reader_mode_helper,
 )
 
 # Setup logging with capture
@@ -174,6 +185,10 @@ TEXT_DOCUMENT_EXTENSIONS = {
     ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".py", ".rb", ".rs", ".rst", ".sh",
     ".sql", ".svg", ".tex", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
 }
+MARKDOWN_EXTENSIONS = {".md", ".markdown", ".rst"}
+HTML_EXTENSIONS = {".htm", ".html"}
+DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
+BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 DOCUMENT_INDEX_SIZE_LIMIT = int(os.getenv("DOCUMENT_INDEX_SIZE_LIMIT", str(25 * 1024 * 1024)))
 DOCUMENT_TEXT_READ_LIMIT = int(os.getenv("DOCUMENT_TEXT_READ_LIMIT", str(8 * 1024 * 1024)))
 DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "900"))
@@ -331,7 +346,7 @@ def _read_selected_model_state() -> tuple[str, Optional[str], Dict[str, Any], Di
 
 ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME, MODEL_LOAD_HISTORY, MODEL_LOADING_STATUS = _read_selected_model_state()
 ACTIVE_MODEL_LOCK: asyncio.Lock | None = None
-COMMAND_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
+PERMISSION_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
 CURATED_SOURCE_HEALTH: Dict[str, Dict[str, Any]] = {}
 
 
@@ -1016,6 +1031,11 @@ def normalize_allowed_command_key(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def normalize_allowed_tool_permission_key(value: str) -> str:
+    """Normalize a persisted tool-approval token."""
+    return str(value or "").strip().lower()
+
+
 def command_permission_key(
     conversation_id: str,
     command: List[str],
@@ -1064,6 +1084,49 @@ def is_command_allowlisted(
         if isinstance(item, str) and normalize_allowed_command_key(item)
     }
     return key in allowed
+
+
+def is_tool_permission_allowlisted(features: FeatureFlags, permission_key: str) -> bool:
+    """Return whether a non-command tool permission was already approved for this chat."""
+    normalized = normalize_allowed_tool_permission_key(permission_key)
+    if not normalized:
+        return False
+    allowed = {
+        normalize_allowed_tool_permission_key(item)
+        for item in (features.allowed_tool_permissions or [])
+        if isinstance(item, str) and normalize_allowed_tool_permission_key(item)
+    }
+    return normalized in allowed
+
+
+def remember_approved_tool_permission(features: FeatureFlags, permission_key: str) -> None:
+    """Persist an approved tool permission onto the in-flight feature flags."""
+    normalized = normalize_allowed_tool_permission_key(permission_key)
+    if not normalized:
+        return
+    current = [
+        normalize_allowed_tool_permission_key(item)
+        for item in (features.allowed_tool_permissions or [])
+        if isinstance(item, str) and normalize_allowed_tool_permission_key(item)
+    ]
+    if normalized not in current:
+        current.append(normalized)
+    features.allowed_tool_permissions = sorted(set(current))
+
+
+def remember_approved_command(features: FeatureFlags, command_key: str) -> None:
+    """Persist an approved command executable onto the in-flight feature flags."""
+    normalized = normalize_allowed_command_key(command_key)
+    if not normalized:
+        return
+    current = [
+        normalize_allowed_command_key(item)
+        for item in (features.allowed_commands or [])
+        if isinstance(item, str) and normalize_allowed_command_key(item)
+    ]
+    if normalized not in current:
+        current.append(normalized)
+    features.allowed_commands = sorted(set(current))
 
 
 def validate_workspace_command(
@@ -1158,11 +1221,11 @@ def recreate_database_file_for_reset(reason: BaseException) -> None:
 
 async def reset_application_state() -> None:
     """Wipe persisted chat data, workspaces, and transient runtime state."""
-    for waiter in COMMAND_APPROVAL_WAITERS.values():
+    for waiter in PERMISSION_APPROVAL_WAITERS.values():
         future = waiter.get("future")
         if future and not future.done():
             future.cancel()
-    COMMAND_APPROVAL_WAITERS.clear()
+    PERMISSION_APPROVAL_WAITERS.clear()
 
     conn: Optional[sqlite3.Connection] = None
     try:
@@ -1228,6 +1291,67 @@ def classify_workspace_file_kind(path: str) -> str:
     if is_text_document_path(path):
         return "document"
     return "file"
+
+
+def indexable_for_retrieval(path: str | pathlib.Path) -> bool:
+    """Return whether the file should still be indexed for retrieval."""
+    return is_supported_document_path(path)
+
+
+def workspace_file_content_kind(path: str | pathlib.Path) -> str:
+    """Return the frontend content kind used by the live workspace reader."""
+    return workspace_file_content_kind_helper(path)
+
+
+def workspace_file_live_reader_mode(path: str | pathlib.Path) -> str:
+    """Return how the live reader should open this file."""
+    return workspace_file_live_reader_mode_helper(path)
+
+
+def workspace_file_is_editable(path: str | pathlib.Path) -> bool:
+    """Return whether the live workspace reader should allow editing."""
+    return workspace_file_is_editable_helper(path)
+
+
+def workspace_file_default_view(path: str | pathlib.Path) -> str:
+    """Default the reader to preview mode so files open read-first."""
+    return workspace_file_default_view_helper(path)
+
+
+def build_text_file_result(
+    target: pathlib.Path,
+    rel_path: str,
+    *,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Read a workspace text file directly for the live reader or tool layer."""
+    return build_text_file_result_helper(
+        target,
+        rel_path,
+        max_bytes=WORKSPACE_FILE_SIZE_LIMIT,
+        limit=limit,
+        truncate_output_func=truncate_output,
+    )
+
+
+def build_workspace_file_result(
+    target: pathlib.Path,
+    *,
+    conversation_id: Optional[str] = None,
+    rel_path: Optional[str] = None,
+    text_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return one consistent payload shape for workspace file reads."""
+    preview_limit = TOOL_RESULT_TEXT_LIMIT if text_limit is None else text_limit
+    return build_workspace_file_result_helper(
+        target,
+        rel_path=rel_path,
+        max_bytes=WORKSPACE_FILE_SIZE_LIMIT,
+        document_preview_builder=build_document_preview_result,
+        text_limit=preview_limit if workspace_file_live_reader_mode(target) == "document_preview" else text_limit,
+        truncate_output_func=truncate_output,
+        conversation_id=conversation_id,
+    )
 
 
 def serialize_spreadsheet_value(value: Any) -> Any:
@@ -2778,6 +2902,16 @@ def truncate_output(text: str, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
     return f"{text[:limit]}\n...[truncated {omitted} chars]"
 
 
+def normalize_pause_reason(value: Any) -> str:
+    """Normalize persisted pause reasons into a small stable set."""
+    return normalize_pause_reason_helper(value)
+
+
+def build_tool_loop_hard_limit_message(progress_summary: str) -> str:
+    """Render the user-facing resume note after exhausting the automatic tool budget."""
+    return build_tool_loop_hard_limit_message_helper(progress_summary)
+
+
 def build_tool_system_prompt(base_system_prompt: str) -> str:
     """Combine the base assistant prompt with the tool protocol and supported tools."""
     tool_schema = """Available tools:
@@ -2804,6 +2938,7 @@ Constraints:
 - conversation.search_history searches the current conversation only.
 - web.search is for fresh or explicitly web-based questions, supports optional domain filters, and by default checks the general web plus Wikipedia and Reddit result sets.
 - web.fetch_page reads a web page after search and returns normalized domain/content metadata for citation-ready summaries.
+- Some tools may pause for inline user approval. If approval is denied, continue gracefully with the remaining tools or answer without that capability.
 - Write reusable artifacts to the workspace and mention the path briefly.
 - Ask for another tool only when needed; otherwise answer."""
     return f"{base_system_prompt.strip()}\n\n{TOOL_USE_SYSTEM_PROMPT.strip()}\n\n{tool_schema}"
@@ -2861,6 +2996,7 @@ class DeepSession:
     auto_execute: bool = False
     plan_override_builder_steps: List[str] = field(default_factory=list)
     resumed: bool = False
+    pause_reason: str = ""
     workflow_execution: Optional[WorkflowExecutionContext] = None
 
     def history_messages(self) -> List[Dict[str, str]]:
@@ -2881,6 +3017,7 @@ class DeepBuildResult:
     summary: str
     needs_user_confirmation: bool = False
     build_complete: bool = False
+    pause_reason: str = ""
 
 
 def fetched_web_sources(tool_results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -3012,6 +3149,7 @@ class FeatureFlags:
     local_rag: bool = True
     web_search: bool = False
     allowed_commands: List[str] = field(default_factory=list)
+    allowed_tool_permissions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3089,50 +3227,177 @@ async def wait_for_command_approval(
     cwd: str = ".",
     step_label: Optional[str] = None,
 ) -> bool:
-    """Pause the active tool loop until the user approves or denies the command."""
+    """Compatibility wrapper for command-specific approvals."""
+    request = PermissionApprovalRequest(
+        key=command_key or "command",
+        approval_target="command",
+        title=f"Allow {pathlib.Path(str(command[0] or 'command')).name}?",
+        content=f"The assistant wants to run {command_preview_text(command)} in {tool_path_preview(cwd or '.', '.')}.",
+        preview=command_preview_text(command),
+    )
+    return await wait_for_permission_approval(
+        websocket,
+        conversation_id,
+        request,
+        step_label=step_label,
+    )
+
+
+@dataclass
+class PermissionApprovalRequest:
+    """One resumable inline approval request for a tool capability."""
+    key: str
+    approval_target: str
+    title: str
+    content: str
+    preview: str = ""
+    allow_label: str = "Allow"
+    deny_label: str = "Deny"
+
+
+def build_tool_permission_request(
+    conversation_id: str,
+    call: Dict[str, Any],
+) -> Optional[PermissionApprovalRequest]:
+    """Return the approval request needed before executing a gated tool."""
+    name = str(call.get("name", "")).strip()
+    arguments = call.get("arguments", {}) if isinstance(call.get("arguments"), dict) else {}
+
+    if name == "workspace.run_command":
+        command = arguments.get("command")
+        command_list = command if isinstance(command, list) else []
+        if not command_list:
+            return None
+        cwd_value = str(arguments.get("cwd", ".") or ".")
+        try:
+            cwd_path = resolve_workspace_relative_path(conversation_id, cwd_value)
+            key = command_permission_key(conversation_id, command_list, cwd_path)
+        except Exception:
+            return None
+        executable = pathlib.Path(str(command_list[0] or "command")).name or "command"
+        preview = command_preview_text(command_list)
+        return PermissionApprovalRequest(
+            key=key,
+            approval_target="command",
+            title=f"Allow {executable}?",
+            content=f"The assistant wants to run {preview} in {tool_path_preview(cwd_value, '.')} for this chat.",
+            preview=preview,
+        )
+
+    if name in {"workspace.list_files", "workspace.read_file", "spreadsheet.describe"}:
+        path_preview = tool_path_preview(arguments.get("path", "."), ".")
+        return PermissionApprovalRequest(
+            key="tool:workspace",
+            approval_target="tool",
+            title="Use workspace files?",
+            content=f"The assistant wants to inspect {path_preview} in this chat's workspace to ground the answer.",
+            preview=path_preview,
+        )
+
+    if name == "workspace.grep":
+        query = compact_tool_text(arguments.get("query", ""), limit=72) or "text"
+        target = tool_path_preview(arguments.get("path", "."), ".")
+        return PermissionApprovalRequest(
+            key="tool:workspace.grep",
+            approval_target="tool",
+            title="Search the workspace?",
+            content=f"The assistant wants to search {target} for {query}.",
+            preview=query,
+        )
+
+    if name in {"workspace.patch_file", "workspace.render"}:
+        path_preview = tool_path_preview(arguments.get("path", arguments.get("title", "workspace file")), "workspace file")
+        return PermissionApprovalRequest(
+            key="tool:workspace.write",
+            approval_target="tool",
+            title="Edit workspace files?",
+            content=(
+                f"The assistant wants to update {path_preview} in this chat's workspace."
+                if name == "workspace.patch_file"
+                else f"The assistant wants to write an HTML preview for {path_preview} in this chat's workspace."
+            ),
+            preview=path_preview,
+        )
+
+    if name in {"web.search", "web.fetch_page"}:
+        preview = (
+            compact_tool_text(arguments.get("query", ""), limit=96)
+            if name == "web.search"
+            else compact_tool_text(arguments.get("url", ""), limit=96)
+        ) or ("the requested query" if name == "web.search" else "the requested page")
+        return PermissionApprovalRequest(
+            key="tool:web.search",
+            approval_target="tool",
+            title="Use web search?",
+            content=(
+                f'The assistant wants to search the web for "{preview}".'
+                if name == "web.search"
+                else f"The assistant wants to open {preview} to verify the answer against a live source."
+            ),
+            preview=preview,
+        )
+
+    return None
+
+
+async def wait_for_permission_approval(
+    websocket: WebSocket,
+    conversation_id: str,
+    request: PermissionApprovalRequest,
+    *,
+    step_label: Optional[str] = None,
+) -> bool:
+    """Pause the active tool loop until the user approves or denies a gated tool."""
     if getattr(websocket, "supports_command_approval", True) is False:
         await websocket.send_json({
-            "type": "command_approval_required",
-            "command": command,
-            "command_key": command_key,
-            "cwd": cwd or ".",
-            "content": f"Approve '{command_key or 'command'}' for this chat to continue.",
+            "type": "permission_required",
+            "permission_key": request.key,
+            "approval_target": request.approval_target,
+            "title": request.title,
+            "content": request.content,
+            "preview": request.preview,
+            "allow_label": request.allow_label,
+            "deny_label": request.deny_label,
         })
         await send_activity_event(
             websocket,
             "blocked",
             "Blocked",
-            f"Cannot request approval for '{command_key or 'command'}' over HTTP fallback; denying it.",
+            f"Cannot request approval for '{request.key or 'tool'}' over HTTP fallback; denying it.",
             step_label=step_label,
         )
         return False
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future[bool] = loop.create_future()
-    COMMAND_APPROVAL_WAITERS[conversation_id] = {
+    PERMISSION_APPROVAL_WAITERS[conversation_id] = {
         "future": future,
-        "command_key": command_key,
+        "permission_key": request.key,
+        "approval_target": request.approval_target,
     }
     try:
         await websocket.send_json({
-            "type": "command_approval_required",
-            "command": command,
-            "command_key": command_key,
-            "cwd": cwd or ".",
-            "content": f"Approve '{command_key or 'command'}' for this chat to continue.",
+            "type": "permission_required",
+            "permission_key": request.key,
+            "approval_target": request.approval_target,
+            "title": request.title,
+            "content": request.content,
+            "preview": request.preview,
+            "allow_label": request.allow_label,
+            "deny_label": request.deny_label,
         })
         await send_activity_event(
             websocket,
             "blocked",
             "Blocked",
-            f"Waiting for approval to run '{command_key or 'command'}' in this chat.",
+            f"Waiting for approval: {request.content}",
             step_label=step_label,
         )
         return await future
     finally:
-        current = COMMAND_APPROVAL_WAITERS.get(conversation_id)
+        current = PERMISSION_APPROVAL_WAITERS.get(conversation_id)
         if current and current.get("future") is future:
-            COMMAND_APPROVAL_WAITERS.pop(conversation_id, None)
+            PERMISSION_APPROVAL_WAITERS.pop(conversation_id, None)
 
 
 class PatchApplicationError(ValueError):
@@ -3277,7 +3542,7 @@ def normalize_deep_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         builder_steps = []
     normalized["builder_steps"] = [
         str(step).strip() for step in builder_steps if str(step).strip()
-    ][:5]
+    ][:4]
     if not normalized["builder_steps"]:
         normalized["builder_steps"] = [
             "Inspect the most relevant local files or artifacts.",
@@ -3328,7 +3593,7 @@ def normalize_plan_override_steps(payload: Any) -> List[str]:
         for step in payload
         if str(step).strip()
     ]
-    return steps[:5]
+    return steps[:4]
 
 
 def apply_plan_builder_step_override(plan: Dict[str, Any], builder_steps: List[str]) -> Dict[str, Any]:
@@ -4295,6 +4560,7 @@ def format_task_state_payload(session: DeepSession) -> Dict[str, Any]:
     """Return a machine-readable snapshot of the current deep-mode task state."""
     return {
         "request": session.task_request or session.message,
+        "pause_reason": normalize_pause_reason(session.pause_reason),
         "workspace_facts": session.workspace_facts,
         "workspace_snapshot": session.workspace_snapshot,
         "plan": session.plan,
@@ -4369,7 +4635,10 @@ def task_state_has_remaining_build_steps(payload: Dict[str, Any]) -> bool:
 
 
 def task_state_has_pending_follow_up(payload: Dict[str, Any]) -> bool:
-    """Return whether a saved task state is waiting for the next explicit user confirmation."""
+    """Return whether a saved task state still represents resumable work."""
+    pause_reason = normalize_pause_reason(payload.get("pause_reason"))
+    if pause_reason:
+        return True
     if task_state_has_remaining_build_steps(payload):
         return True
     plan = payload.get("plan")
@@ -4390,7 +4659,7 @@ def task_state_has_pending_follow_up(payload: Dict[str, Any]) -> bool:
 
 
 def render_step_checkpoint_message(session: DeepSession, step_index: int, step_summary: str) -> str:
-    """Create the user-facing pause message after a build step finishes."""
+    """Create a neutral pause message after a build step finishes."""
     steps = [
         str(step).strip()
         for step in session.plan.get("builder_steps", [])
@@ -4410,7 +4679,7 @@ def render_step_checkpoint_message(session: DeepSession, step_index: int, step_s
         lines.extend([
             f"Next step: {steps[step_index + 1]}",
             "",
-            "Would you like me to continue to the next step? Say yes to continue, or say no and tell me what you'd like to change.",
+            "Saved progress is ready to resume from the next step.",
         ])
     else:
         lines.extend([
@@ -4418,7 +4687,7 @@ def render_step_checkpoint_message(session: DeepSession, step_index: int, step_s
             "",
             "Next step: run verification and prepare the final answer.",
             "",
-            "Would you like me to continue to verification and the final answer? Say yes to continue, or say no and tell me what you'd like to change.",
+            "Saved progress is ready to resume from verification.",
         ])
     return "\n".join(lines)
 
@@ -4501,6 +4770,16 @@ RESUME_HINTS = {
     "finish it", "proceed", "keep working", "next", "next step", "do the next step",
     "keep going with the plan", "move to the next step",
 }
+PAUSE_REASON_COMMAND_APPROVAL = "command_approval"
+PAUSE_REASON_WRITE_BLOCKED = "write_blocked"
+PAUSE_REASON_USER_DECISION = "user_decision"
+PAUSE_REASON_HARD_LIMIT = "hard_limit"
+KNOWN_PAUSE_REASONS = {
+    PAUSE_REASON_COMMAND_APPROVAL,
+    PAUSE_REASON_WRITE_BLOCKED,
+    PAUSE_REASON_USER_DECISION,
+    PAUSE_REASON_HARD_LIMIT,
+}
 
 
 def should_resume_task_state(message: str) -> bool:
@@ -4542,6 +4821,7 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
     if isinstance(plan, dict):
         session.plan = apply_deep_plan_guardrails(session, plan)
     session.plan_preview_pending = bool(payload.get("plan_preview_pending"))
+    session.pause_reason = normalize_pause_reason(payload.get("pause_reason"))
     session.task_board_path = str(payload.get("task_board_path") or session.task_board_path)
     session.build_step_summaries = [
         str(item).strip() for item in payload.get("build_step_summaries", []) if str(item).strip()
@@ -5119,7 +5399,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     attachments: List[str] = Field(default_factory=list)
     system_prompt: Optional[str] = None
-    mode: str = "normal"
+    mode: str = "deep"
     features: Dict[str, Any] = Field(default_factory=dict)
     slash_command: Optional[Dict[str, Any]] = None
     plan_override_steps: List[str] = Field(default_factory=list)
@@ -5562,6 +5842,16 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
         for item in (raw_allowed if isinstance(raw_allowed, list) else [])
         if isinstance(item, str) and normalize_allowed_command_key(item)
     ]
+    raw_allowed_tool_permissions = payload.get("allowed_tool_permissions", [])
+    allowed_tool_permissions = [
+        normalize_allowed_tool_permission_key(item)
+        for item in (
+            raw_allowed_tool_permissions
+            if isinstance(raw_allowed_tool_permissions, list)
+            else []
+        )
+        if isinstance(item, str) and normalize_allowed_tool_permission_key(item)
+    ]
 
     return FeatureFlags(
         agent_tools=(
@@ -5572,8 +5862,9 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
         workspace_write=flag("workspace_write", False),
         workspace_run_commands=flag("workspace_run_commands", False),
         local_rag=flag("local_rag", True),
-        web_search=flag("web_search", False),
+        web_search=flag("web_search", True),
         allowed_commands=sorted(set(allowed_commands)),
+        allowed_tool_permissions=sorted(set(allowed_tool_permissions)),
     )
 
 
@@ -5634,6 +5925,24 @@ app.add_middleware(
 )
 
 _base_dir = pathlib.Path(__file__).resolve().parent
+
+
+def compute_static_asset_version(base_dir: pathlib.Path) -> str:
+    """Build a cheap cache-busting token from local static asset mtimes."""
+    hasher = hashlib.sha1()
+    for rel_path in ("static/index.html", "static/app.js", "static/style.css"):
+        target = base_dir / rel_path
+        try:
+            stat = target.stat()
+        except OSError:
+            continue
+        hasher.update(rel_path.encode("utf-8"))
+        hasher.update(str(int(stat.st_mtime_ns)).encode("utf-8"))
+    digest = hasher.hexdigest()[:12]
+    return digest or str(int(time.time()))
+
+
+STATIC_ASSET_VERSION = compute_static_asset_version(_base_dir)
 app.mount("/static", StaticFiles(directory=str(_base_dir / "static")), name="static")
 templates = Jinja2Templates(directory=str(_base_dir / "static"))
 
@@ -5657,6 +5966,7 @@ async def home(request: Request):
                 "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
                 "model_name": get_active_model_name(),
                 "app_title": APP_TITLE,
+                "static_asset_version": STATIC_ASSET_VERSION,
             },
         )
     except Exception as e:
@@ -5994,15 +6304,7 @@ async def read_file_content(path: str):
         if not os.path.isfile(abs_path):
             raise HTTPException(status_code=404, detail="File not found")
         target = pathlib.Path(abs_path)
-        if is_supported_document_path(target):
-            return build_document_preview_result(target, limit=TOOL_RESULT_TEXT_LIMIT)
-        if os.path.getsize(abs_path) > 1024 * 1024:
-            raise HTTPException(status_code=400, detail="File too large (max 1MB)")
-
-        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-
-        return {'path': path, 'content': content, 'size': len(content), 'lines': content.count('\n') + 1}
+        return build_workspace_file_result(target, rel_path=path, text_limit=None)
     except (HTTPException):
         raise
     except ValueError as exc:
@@ -6137,25 +6439,12 @@ async def read_workspace_file(conversation_id: str, path: str):
         raise HTTPException(status_code=404, detail="File not found")
     rel_path = format_workspace_path(target, workspace)
     try:
-        if is_supported_document_path(target):
-            preview = build_document_preview_result(
-                target,
-                conversation_id=conversation_id,
-                rel_path=rel_path,
-                limit=TOOL_RESULT_TEXT_LIMIT,
-            )
-        else:
-            if target.stat().st_size > 1024 * 1024:
-                raise HTTPException(status_code=400, detail="File too large (max 1MB)")
-            with target.open('r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-            preview = {
-                "path": rel_path,
-                "content": content,
-                "size": len(content),
-                "lines": content.count('\n') + 1,
-                "file_type": "text",
-            }
+        preview = build_workspace_file_result(
+            target,
+            conversation_id=conversation_id,
+            rel_path=rel_path,
+            text_limit=None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -6164,6 +6453,15 @@ async def read_workspace_file(conversation_id: str, path: str):
         "workspace_path": str(workspace),
         **preview,
     }
+
+
+@app.get("/api/workspace/{conversation_id}/file/view")
+async def view_workspace_file(conversation_id: str, path: str):
+    target = resolve_workspace_relative_path(conversation_id, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type)
 
 
 @app.get("/api/workspace/{conversation_id}/file/download")
@@ -6368,8 +6666,13 @@ def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlag
         if not features.workspace_write:
             return (
                 f"I tried to use an internal file-editing tool to write {quoted_path}, "
-                "but workspace editing was not enabled for this turn. Retry and allow file edits "
+                "but workspace editing was not available for this turn. Retry with a coding/edit request "
                 "if you want me to create it directly, or ask me to paste the code inline instead."
+            )
+        if not is_tool_permission_allowlisted(features, "tool:workspace.write"):
+            return (
+                f"I tried to edit {quoted_path}, but file-edit permission was not approved for this chat. "
+                "Retry and approve workspace edits if you want me to change files directly."
             )
         return (
             f"I tried to create or edit {quoted_path}, but an internal tool payload leaked into the reply "
@@ -6379,8 +6682,8 @@ def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlag
     if name == "workspace.run_command":
         if not features.workspace_run_commands:
             return (
-                "I tried to use an internal command runner, but command execution was not enabled for this turn. "
-                "Retry and allow command execution if you want me to verify things automatically."
+                "I tried to use an internal command runner, but command execution was not available for this turn. "
+                "Retry with a verification-oriented request if you want me to run checks automatically."
             )
         return (
             "I tried to run an internal verification command, but the tool payload leaked into the visible reply. "
@@ -6396,8 +6699,13 @@ def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlag
     if name.startswith("web."):
         if not features.web_search:
             return (
-                "I tried to use an internal web tool, but web search was not enabled for this turn. "
-                "Retry with web search enabled if you want me to fetch current information."
+                "I tried to use an internal web tool, but web search was not available for this turn. "
+                "Retry with a current-events or citation-oriented request if you want live sources."
+            )
+        if not is_tool_permission_allowlisted(features, "tool:web.search"):
+            return (
+                "I tried to use an internal web tool, but web access was not approved for this chat. "
+                "Retry and approve web search if you want current sources."
             )
         return (
             "I accidentally exposed an internal web tool call instead of a normal reply. "
@@ -6618,25 +6926,12 @@ def workspace_read_file_result(conversation_id: str, rel_path: str) -> Dict[str,
     if not target.is_file():
         raise ValueError("File not found")
     rel_file_path = format_workspace_path(target, workspace)
-    if is_supported_document_path(target):
-        return build_document_preview_result(
-            target,
-            conversation_id=conversation_id,
-            rel_path=rel_file_path,
-            limit=TOOL_RESULT_TEXT_LIMIT,
-        )
-    if target.stat().st_size > WORKSPACE_FILE_SIZE_LIMIT:
-        raise ValueError("File too large (max 1MB)")
-
-    with target.open("r", encoding="utf-8", errors="replace") as f:
-        content = truncate_output(f.read(), limit=TOOL_RESULT_TEXT_LIMIT)
-
-    return {
-        "path": rel_file_path,
-        "content": content,
-        "size": len(content),
-        "lines": content.count("\n") + 1,
-    }
+    return build_workspace_file_result(
+        target,
+        conversation_id=conversation_id,
+        rel_path=rel_file_path,
+        text_limit=TOOL_RESULT_TEXT_LIMIT,
+    )
 
 
 def spreadsheet_describe_result(conversation_id: str, rel_path: str, sheet: Optional[str] = None) -> Dict[str, Any]:
@@ -7961,11 +8256,7 @@ async def run_resumable_tool_loop(
         if batch_index >= max(0, int(continuation_limit or 0)) or not tool_loop_progressed(outcome.tool_results):
             outcome.tool_results = combined_results
             if combined_results:
-                outcome.final_text = (
-                    "I made partial progress but need another turn to keep going safely.\n\n"
-                    f"{progress_summary}\n\n"
-                    "Say continue and I'll resume from the saved progress."
-                )
+                outcome.final_text = build_tool_loop_hard_limit_message(progress_summary)
             return outcome
 
         await send_assistant_note(
@@ -8067,6 +8358,63 @@ async def execute_tool_call(
     return {"id": call_id, "ok": True, "result": result}
 
 
+def build_permission_denied_result(
+    call: Dict[str, Any],
+    request: PermissionApprovalRequest,
+) -> Dict[str, Any]:
+    """Format a denied approval as a normal tool-result payload so the model can pivot."""
+    label = "command" if request.approval_target == "command" else "tool"
+    return {
+        "id": call.get("id", ""),
+        "ok": False,
+        "error": f"{label.capitalize()} permission '{request.key}' was denied for this chat",
+    }
+
+
+async def ensure_tool_permission(
+    websocket: WebSocket,
+    conversation_id: str,
+    call: Dict[str, Any],
+    features: Optional[FeatureFlags],
+    *,
+    step_label: Optional[str] = None,
+) -> tuple[bool, Optional[PermissionApprovalRequest]]:
+    """Request runtime approval for a gated tool when the chat hasn't approved it yet."""
+    if features is None:
+        return True, None
+
+    request = build_tool_permission_request(conversation_id, call)
+    if request is None:
+        return True, None
+
+    if request.approval_target == "command":
+        arguments = call.get("arguments", {}) if isinstance(call.get("arguments"), dict) else {}
+        command = arguments.get("command")
+        command_list = command if isinstance(command, list) else []
+        cwd_value = str(arguments.get("cwd", ".") or ".")
+        try:
+            cwd_path = resolve_workspace_relative_path(conversation_id, cwd_value)
+        except Exception:
+            return True, None
+        if is_command_allowlisted(conversation_id, command_list, cwd_path, features):
+            return True, request
+    elif is_tool_permission_allowlisted(features, request.key):
+        return True, request
+
+    approved = await wait_for_permission_approval(
+        websocket,
+        conversation_id,
+        request,
+        step_label=step_label,
+    )
+    if approved:
+        if request.approval_target == "command":
+            remember_approved_command(features, request.key)
+        else:
+            remember_approved_tool_permission(features, request.key)
+    return approved, request
+
+
 async def emit_direct_tool_call(
     websocket: WebSocket,
     conversation_id: str,
@@ -8081,6 +8429,40 @@ async def emit_direct_tool_call(
     """Execute one deterministic tool call while mirroring the normal tool-loop UI events."""
     tool_name = call["name"]
     tool_arguments = call.get("arguments", {})
+    approved, permission_request = await ensure_tool_permission(
+        websocket,
+        conversation_id,
+        call,
+        features,
+        step_label=activity_step_label,
+    )
+    if not approved and permission_request is not None:
+        result = build_permission_denied_result(call, permission_request)
+        result_summary = tool_result_preview(result, tool_name, tool_arguments)
+        await websocket.send_json({
+            "type": "tool_result",
+            "name": tool_name,
+            "ok": False,
+            "content": f"{status_prefix}{result_summary}",
+            "arguments": tool_arguments,
+            "payload": {"error": result.get("error", "Tool failed")},
+        })
+        await send_activity_event(
+            websocket,
+            "error",
+            tool_activity_label(tool_name),
+            f"{status_prefix}{result_summary}",
+            step_label=activity_step_label,
+        )
+        record_workflow_step(
+            workflow_execution,
+            step_name=activity_step_label or activity_phase or call.get("name", ""),
+            call=call,
+            result=result,
+            latency_ms=0,
+        )
+        return result
+
     activity_label = tool_activity_label(tool_name)
     start_summary = tool_status_summary(tool_name, tool_arguments)
     await websocket.send_json({
@@ -8180,61 +8562,48 @@ async def run_tool_loop(
                 tool_results=tool_results,
             )
 
-        if call["name"] == "workspace.run_command":
-            arguments = call.get("arguments", {})
-            command = arguments.get("command")
-            command_list = command if isinstance(command, list) else []
-            cwd_value = str(arguments.get("cwd", "."))
-            cwd_path = resolve_workspace_relative_path(conversation_id, cwd_value or ".")
-            command_key = command_permission_key(conversation_id, command_list, cwd_path) if command_list else ""
-            if features is not None and command_list and not is_command_allowlisted(conversation_id, command_list, cwd_path, features):
-                approved = await wait_for_command_approval(
-                    websocket,
-                    conversation_id,
-                    command_list,
-                    command_key or "command",
-                    cwd=cwd_value,
-                    step_label=activity_step_label,
-                )
-                if not approved:
-                    denied_result = {
-                        "id": call.get("id", ""),
-                        "ok": False,
-                        "error": f"Command '{command_key or command_list[0]}' was not approved for this chat",
-                    }
-                    denied_summary = tool_result_preview(denied_result, call["name"], call.get("arguments", {}))
-                    await websocket.send_json({
-                        "type": "tool_result",
-                        "name": call["name"],
-                        "ok": False,
-                        "content": f"{status_prefix}{denied_summary}",
-                        "arguments": call.get("arguments", {}),
-                        "payload": {"error": denied_result["error"]},
-                    })
-                    await send_activity_event(
-                        websocket,
-                        "error",
-                        tool_activity_label(call["name"]),
-                        f"{status_prefix}{denied_summary}",
-                        step_label=activity_step_label,
-                    )
-                    tool_results.append({
-                        "call": call,
-                        "result": denied_result,
-                    })
-                    record_workflow_step(
-                        workflow_execution,
-                        step_name=activity_step_label or activity_phase or call.get("name", ""),
-                        call=call,
-                        result=denied_result,
-                        latency_ms=0,
-                    )
-                    messages.append({"role": "assistant", "content": cleaned})
-                    messages.append({
-                        "role": "user",
-                        "content": "<tool_result>\n" + json.dumps(denied_result, ensure_ascii=False) + "\n</tool_result>",
-                    })
-                    continue
+        approved, permission_request = await ensure_tool_permission(
+            websocket,
+            conversation_id,
+            call,
+            features,
+            step_label=activity_step_label,
+        )
+        if not approved and permission_request is not None:
+            denied_result = build_permission_denied_result(call, permission_request)
+            denied_summary = tool_result_preview(denied_result, call["name"], call.get("arguments", {}))
+            await websocket.send_json({
+                "type": "tool_result",
+                "name": call["name"],
+                "ok": False,
+                "content": f"{status_prefix}{denied_summary}",
+                "arguments": call.get("arguments", {}),
+                "payload": {"error": denied_result["error"]},
+            })
+            await send_activity_event(
+                websocket,
+                "error",
+                tool_activity_label(call["name"]),
+                f"{status_prefix}{denied_summary}",
+                step_label=activity_step_label,
+            )
+            tool_results.append({
+                "call": call,
+                "result": denied_result,
+            })
+            record_workflow_step(
+                workflow_execution,
+                step_name=activity_step_label or activity_phase or call.get("name", ""),
+                call=call,
+                result=denied_result,
+                latency_ms=0,
+            )
+            messages.append({"role": "assistant", "content": cleaned})
+            messages.append({
+                "role": "user",
+                "content": "<tool_result>\n" + json.dumps(denied_result, ensure_ascii=False) + "\n</tool_result>",
+            })
+            continue
 
         start_summary = tool_status_summary(call["name"], call.get("arguments", {}))
         await websocket.send_json({
@@ -8882,11 +9251,13 @@ async def deep_plan_step_subtasks(
 async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
     """Execute the remaining planned build steps and persist progress after each one."""
     if not session.workspace_enabled:
+        session.pause_reason = ""
         session.build_summary = ""
         session.build_step_summaries = []
         session.changed_files = []
         return DeepBuildResult(summary=session.build_summary, build_complete=True)
     if not session.features.workspace_write:
+        session.pause_reason = PAUSE_REASON_WRITE_BLOCKED
         session.build_summary = "Build skipped because workspace write permission was not granted for this turn."
         session.build_step_summaries = [session.build_summary]
         session.changed_files = []
@@ -8897,13 +9268,18 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
             "Write permission required before I can create or edit workspace files.",
         )
         await persist_task_state(session)
-        return DeepBuildResult(summary=session.build_summary, build_complete=False)
+        return DeepBuildResult(
+            summary=session.build_summary,
+            build_complete=False,
+            pause_reason=session.pause_reason,
+        )
     await send_activity_event(
         session.websocket,
         "execute",
         "Execute",
         "Executing the approved plan from the task board.",
     )
+    session.pause_reason = ""
     agent_a = session.plan["agent_a"]
     changed_files: List[str] = []
     if session.changed_files:
@@ -9117,6 +9493,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
                 session.changed_files = changed_files
                 session.build_summary = "\n".join(session.build_step_summaries) or "(build in progress)"
+                session.pause_reason = PAUSE_REASON_HARD_LIMIT
                 await send_build_steps(
                     session.websocket,
                     steps,
@@ -9143,6 +9520,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                     ),
                     needs_user_confirmation=True,
                     build_complete=False,
+                    pause_reason=session.pause_reason,
                 )
 
             completed_substeps.append(substep_summary)
@@ -9222,6 +9600,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
         "Execute",
         "Completed all planned build steps.",
     )
+    session.pause_reason = ""
     return DeepBuildResult(summary=session.build_summary, build_complete=True)
 
 
@@ -9230,6 +9609,7 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     if session.plan:
         await send_assistant_note(session.websocket, "Reusing the saved execution plan from the existing task board.")
         session.plan_preview_pending = bool(preview_only)
+        session.pause_reason = PAUSE_REASON_USER_DECISION if preview_only else ""
         if not preview_only:
             await send_build_steps(
                 session.websocket,
@@ -9290,6 +9670,7 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
             session.plan = build_heuristic_deep_plan(session)
     session.plan = apply_deep_plan_guardrails(session, session.plan)
     session.plan_preview_pending = bool(preview_only)
+    session.pause_reason = PAUSE_REASON_USER_DECISION if preview_only else ""
     await send_assistant_note(session.websocket, format_deep_plan_note(session.plan))
     if not preview_only:
         await send_build_steps(
@@ -9381,6 +9762,7 @@ async def deep_parallel_solve(session: DeepSession) -> Dict[str, str]:
 async def deep_verify(session: DeepSession) -> str:
     """Run a read-only verification pass after the parallel solve."""
     if not session.workspace_enabled:
+        session.pause_reason = ""
         session.verification_summary = ""
         return session.verification_summary
     await send_activity_event(
@@ -9428,6 +9810,7 @@ async def deep_verify(session: DeepSession) -> str:
             activity_phase="verify",
         ),
     )
+    session.pause_reason = PAUSE_REASON_HARD_LIMIT if outcome.hit_limit else ""
     session.verification_summary = outcome.final_text
     session.scope_audit = build_scope_audit(session)
     session.scope_audit_summary = str(session.scope_audit.get("summary", "")).strip()
@@ -9482,6 +9865,7 @@ async def deep_review(session: DeepSession) -> str:
             activity_phase="synthesize",
         ),
     )
+    session.pause_reason = PAUSE_REASON_HARD_LIMIT if outcome.hit_limit else ""
     session.draft_response = outcome.final_text
     await persist_task_state(session)
     return session.draft_response
@@ -9604,16 +9988,24 @@ async def run_deep_execution_flow(
         )
     )
     if decision.action == "blocked_write":
+        session.pause_reason = PAUSE_REASON_WRITE_BLOCKED
+        await persist_task_state(session)
         await send_plan_ready(session.websocket, session.plan, format_deep_execution_prompt(session.plan))
         renderer = blocked_write_renderer or (lambda current_session: render_saved_plan_write_access_message(current_session.plan))
         return renderer(session)
 
     build_result = await deep_build_workspace(session)
     if build_result.needs_user_confirmation:
+        session.pause_reason = normalize_pause_reason(build_result.pause_reason)
         return build_result.summary
     await deep_parallel_solve(session)
     await deep_verify(session)
-    return await deep_review(session)
+    if session.pause_reason == PAUSE_REASON_HARD_LIMIT:
+        return session.verification_summary
+    final_review = await deep_review(session)
+    if session.pause_reason == PAUSE_REASON_HARD_LIMIT:
+        return session.draft_response
+    return final_review
 
 
 async def maybe_refine_deep_response(
@@ -10064,7 +10456,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         if isinstance(item, str) and str(item).strip()
     ]
     custom_system_prompt = data.get('system_prompt')
-    requested_mode = data.get('mode', 'normal')
+    requested_mode = data.get('mode', 'deep')
     features = parse_feature_flags(data.get('features'))
     slash_command = (
         parse_direct_slash_command_payload(data.get("slash_command"))
@@ -10091,7 +10483,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
         effective_message,
     )
-    mode = str(requested_mode or "normal").strip().lower() or "normal"
+    mode = str(requested_mode or "deep").strip().lower() or "deep"
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
     workspace_intent = classify_workspace_intent(effective_message)
@@ -10456,18 +10848,36 @@ async def chat_websocket(websocket: WebSocket):
                 active_task = None
                 continue
 
-            if data.get('type') == 'command_approval':
+            if data.get('type') in {'command_approval', 'permission_response'}:
                 conversation_id = str(data.get("conversation_id", "")).strip()
-                command_key = normalize_allowed_command_key(str(data.get("command_key", "")))
+                approval_target = str(data.get("approval_target", "") or "").strip().lower()
+                raw_permission_key = (
+                    data.get("permission_key")
+                    if data.get('type') == 'permission_response'
+                    else data.get("command_key", "")
+                )
+                permission_key = (
+                    normalize_allowed_command_key(str(raw_permission_key))
+                    if approval_target == "command" or data.get('type') == 'command_approval'
+                    else normalize_allowed_tool_permission_key(str(raw_permission_key))
+                )
                 approved = bool(data.get("approved"))
-                waiter = COMMAND_APPROVAL_WAITERS.get(conversation_id)
+                waiter = PERMISSION_APPROVAL_WAITERS.get(conversation_id)
                 if not waiter:
-                    await websocket.send_json({'type': 'error', 'content': 'No command approval is pending for this chat.'})
+                    await websocket.send_json({'type': 'error', 'content': 'No permission approval is pending for this chat.'})
                     continue
-                expected_key = normalize_allowed_command_key(str(waiter.get("command_key", "")))
+                expected_target = str(waiter.get("approval_target", "") or "").strip().lower()
+                expected_key = (
+                    normalize_allowed_command_key(str(waiter.get("permission_key", "")))
+                    if expected_target == "command"
+                    else normalize_allowed_tool_permission_key(str(waiter.get("permission_key", "")))
+                )
                 future = waiter.get("future")
-                if command_key != expected_key:
-                    await websocket.send_json({'type': 'error', 'content': 'Command approval response did not match the pending command.'})
+                if approval_target and expected_target and approval_target != expected_target:
+                    await websocket.send_json({'type': 'error', 'content': 'Permission approval target did not match the pending request.'})
+                    continue
+                if permission_key != expected_key:
+                    await websocket.send_json({'type': 'error', 'content': 'Permission approval response did not match the pending request.'})
                     continue
                 if isinstance(future, asyncio.Future) and not future.done():
                     future.set_result(approved)
@@ -10493,7 +10903,7 @@ async def chat_websocket(websocket: WebSocket):
             active_task = asyncio.create_task(process_chat_turn(websocket, data))
 
     except WebSocketDisconnect:
-        for conversation_id, waiter in list(COMMAND_APPROVAL_WAITERS.items()):
+        for conversation_id, waiter in list(PERMISSION_APPROVAL_WAITERS.items()):
             future = waiter.get("future")
             if isinstance(future, asyncio.Future) and not future.done():
                 future.set_result(False)
@@ -10715,7 +11125,44 @@ async def startup_event():
 
     asyncio.create_task(wait_for_model())
 
+
+def build_uvicorn_run_kwargs() -> Dict[str, Any]:
+    """Build bind/TLS settings for local or container startup."""
+    host = str(os.getenv("APP_HOST", "0.0.0.0")).strip() or "0.0.0.0"
+    raw_port = str(os.getenv("APP_PORT") or os.getenv("PORT") or "8000").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise RuntimeError(f"APP_PORT/PORT must be an integer, got {raw_port!r}") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"APP_PORT/PORT must be between 1 and 65535, got {port}")
+
+    certfile = str(os.getenv("SSL_CERTFILE", "")).strip()
+    keyfile = str(os.getenv("SSL_KEYFILE", "")).strip()
+    if bool(certfile) != bool(keyfile):
+        raise RuntimeError("SSL_CERTFILE and SSL_KEYFILE must be set together")
+
+    kwargs: Dict[str, Any] = {"host": host, "port": port}
+    if certfile and keyfile:
+        cert_path = pathlib.Path(certfile)
+        key_path = pathlib.Path(keyfile)
+        if not cert_path.is_file():
+            raise RuntimeError(f"SSL_CERTFILE does not exist: {cert_path}")
+        if not key_path.is_file():
+            raise RuntimeError(f"SSL_KEYFILE does not exist: {key_path}")
+        kwargs["ssl_certfile"] = str(cert_path)
+        kwargs["ssl_keyfile"] = str(key_path)
+    return kwargs
+
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting AI Chat with vLLM ({get_active_model_name()})...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    run_kwargs = build_uvicorn_run_kwargs()
+    scheme = "https" if run_kwargs.get("ssl_certfile") and run_kwargs.get("ssl_keyfile") else "http"
+    logger.info(
+        "Starting AI Chat with vLLM (%s) on %s://%s:%s...",
+        get_active_model_name(),
+        scheme,
+        run_kwargs["host"],
+        run_kwargs["port"],
+    )
+    uvicorn.run(app, **run_kwargs)
