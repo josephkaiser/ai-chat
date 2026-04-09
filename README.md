@@ -66,9 +66,17 @@ The app keeps the runtime surface fairly small:
 ./chat restart   # Stop then start
 ./chat status    # Check what's running
 ./chat logs      # Tail logs from all services
+./chat url       # Print the preferred browser URL
+./chat open      # Open the preferred browser URL
 ```
 
-Once started, open **http://localhost:8000**. The model loads in the background on first run.
+Once started, the launcher prints the best URL to open first:
+
+- Tailscale HTTPS when `tailscale serve` is active
+- Tailscale IP when Tailscale is available
+- `http://localhost:8000` as the local fallback
+
+If you prefer a trusted HTTPS URL inside your tailnet, run `tailscale serve --bg 8000` and then use `./chat open`.
 
 Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-chat/runs) on the host via the default `/app/runs` bind mount, so files the assistant creates remain visible outside the container.
 

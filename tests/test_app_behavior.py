@@ -1,0 +1,120 @@
+import pathlib
+import tempfile
+import unittest
+
+from prompts import DEFAULT_SYSTEM_PROMPT
+import workspace_reader
+
+
+class AppBehaviorTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.workspace = pathlib.Path(self.tempdir.name)
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def _write_text(self, rel_path: str, content: str) -> pathlib.Path:
+        target = self.workspace / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def _write_bytes(self, rel_path: str, content: bytes) -> pathlib.Path:
+        target = self.workspace / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return target
+
+    def test_text_like_files_return_raw_text_for_http_and_tool_reads(self):
+        fixtures = {
+            "DESIGN.md": ("# Design\nhello\n", "markdown"),
+            "config.json": ('{"ok": true}\n', "text"),
+            "main.py": ("print('hi')\n", "text"),
+            "notes.txt": ("plain text\n", "text"),
+        }
+        for rel_path, (content, content_kind) in fixtures.items():
+            target = self._write_text(rel_path, content)
+            payload = workspace_reader.build_workspace_file_result(
+                target,
+                rel_path=rel_path,
+                max_bytes=1024 * 1024,
+                document_preview_builder=lambda *_args, **_kwargs: {},
+                text_limit=None,
+                truncate_output_func=lambda text, _limit: text,
+            )
+            self.assertEqual(payload["content"], content)
+            self.assertEqual(payload["content_kind"], content_kind)
+            self.assertTrue(payload["editable"])
+            self.assertEqual(payload["default_view"], "preview")
+            self.assertFalse(payload["truncated"])
+
+    def test_pdf_reader_keeps_document_preview_behavior(self):
+        target = self._write_bytes("report.pdf", b"%PDF-1.4\n")
+        preview_payload = {
+            "path": "report.pdf",
+            "content": "Preview excerpt",
+            "size": 15,
+            "lines": 1,
+            "file_type": "pdf",
+            "extractor": "stub",
+            "page_count": 1,
+            "title": "report.pdf",
+            "metadata": {},
+        }
+        payload = workspace_reader.build_workspace_file_result(
+            target,
+            rel_path="report.pdf",
+            max_bytes=1024 * 1024,
+            document_preview_builder=lambda *_args, **_kwargs: dict(preview_payload),
+            text_limit=40000,
+            truncate_output_func=lambda text, _limit: text,
+        )
+        self.assertEqual(payload["content"], "Preview excerpt")
+        self.assertEqual(payload["content_kind"], "pdf")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["default_view"], "preview")
+
+    def test_pdf_reader_falls_back_to_inline_preview_when_extraction_is_unavailable(self):
+        target = self._write_bytes("report.pdf", b"%PDF-1.4\n")
+        payload = workspace_reader.build_workspace_file_result(
+            target,
+            rel_path="report.pdf",
+            max_bytes=1024 * 1024,
+            document_preview_builder=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("pdftotext unavailable")),
+            text_limit=40000,
+            truncate_output_func=lambda text, _limit: text,
+        )
+        self.assertEqual(payload["path"], "report.pdf")
+        self.assertEqual(payload["content"], "")
+        self.assertEqual(payload["content_kind"], "pdf")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["default_view"], "preview")
+        self.assertEqual(payload["metadata"].get("preview_error"), "pdftotext unavailable")
+
+    def test_oversized_text_file_returns_clear_reader_error(self):
+        target = self._write_text("big.txt", "a" * ((1024 * 1024) + 1))
+        with self.assertRaises(ValueError) as exc_info:
+            workspace_reader.build_workspace_file_result(
+                target,
+                rel_path="big.txt",
+                max_bytes=1024 * 1024,
+                document_preview_builder=lambda *_args, **_kwargs: {},
+                text_limit=None,
+                truncate_output_func=lambda text, _limit: text,
+            )
+        self.assertIn("File too large", str(exc_info.exception))
+
+    def test_hard_limit_message_drops_step_confirmation_language(self):
+        message = workspace_reader.build_tool_loop_hard_limit_message("Updated `plan.json` and inspected `DESIGN.md`.")
+        self.assertIn("Paused after reaching the current tool budget.", message)
+        self.assertIn("Say continue", message)
+        self.assertNotIn("Would you like me to continue", message)
+
+    def test_default_prompt_no_longer_instructs_step_by_step_confirmation(self):
+        self.assertNotIn("ask a short yes-or-no question", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("complete answer in one pass", DEFAULT_SYSTEM_PROMPT)
+
+
+if __name__ == "__main__":
+    unittest.main()

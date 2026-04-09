@@ -30,7 +30,7 @@ Common event types:
 - `think_start`, `think_token`, `think_end` — Collapsible reasoning stream
 - `token` — Visible answer stream
 - `tool_start`, `tool_result`, `tool_error` — Tool lifecycle events
-- `command_approval_required` — Pause for per-chat command approval
+- `permission_required` — Pause for inline tool or command approval
 - `final_replace` — Replace the in-progress draft with finalized text
 - `message_id` — Saved assistant message id
 - `canceled`, `done`, `error` — Terminal turn status

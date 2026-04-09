@@ -1,0 +1,76 @@
+import tempfile
+import unittest
+
+try:
+    import app
+except Exception as exc:
+    app = None
+    APP_IMPORT_ERROR = exc
+else:
+    APP_IMPORT_ERROR = None
+
+
+class RuntimePermissionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if app is None:
+            raise unittest.SkipTest(f"app.py dependencies are unavailable: {APP_IMPORT_ERROR}")
+
+    def test_parse_feature_flags_keeps_allowed_tool_permissions(self):
+        features = app.parse_feature_flags({
+            "allowed_tool_permissions": ["tool:web.search", " TOOL:workspace.write "],
+        })
+
+        self.assertTrue(features.web_search)
+        self.assertEqual(
+            features.allowed_tool_permissions,
+            ["tool:web.search", "tool:workspace.write"],
+        )
+
+    def test_workspace_grep_permission_request_is_granular(self):
+        request = app.build_tool_permission_request(
+            "conv-grep",
+            {
+                "id": "call1",
+                "name": "workspace.grep",
+                "arguments": {"query": "FeatureFlags", "path": "."},
+            },
+        )
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "tool:workspace.grep")
+        self.assertEqual(request.approval_target, "tool")
+        self.assertIn("search", request.content.lower())
+
+    def test_command_permission_request_uses_executable_key(self):
+        previous_root = app.WORKSPACE_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                app.WORKSPACE_ROOT = tempdir
+                app.get_workspace_path("conv-command")
+                request = app.build_tool_permission_request(
+                    "conv-command",
+                    {
+                        "id": "call2",
+                        "name": "workspace.run_command",
+                        "arguments": {"command": ["git", "status"], "cwd": "."},
+                    },
+                )
+        finally:
+            app.WORKSPACE_ROOT = previous_root
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "exec:git")
+        self.assertEqual(request.approval_target, "command")
+        self.assertIn("git", request.title.lower())
+
+    def test_tool_permission_allowlist_round_trip(self):
+        features = app.FeatureFlags()
+
+        self.assertFalse(app.is_tool_permission_allowlisted(features, "tool:web.search"))
+        app.remember_approved_tool_permission(features, "tool:web.search")
+        self.assertTrue(app.is_tool_permission_allowlisted(features, "tool:web.search"))
+
+
+if __name__ == "__main__":
+    unittest.main()
