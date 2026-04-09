@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -23,11 +24,13 @@ wheels/
 .installed.cfg
 *.egg
 
+# Node
+node_modules/
+
 # Data
 data/
 runs/
 workspaces/
-pet/
 *.db
 *.sqlite
 *.sqlite3
@@ -48,6 +51,7 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Environment
 .env
