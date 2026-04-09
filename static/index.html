@@ -37,7 +37,7 @@
     <!-- Mobile top bar -->
     <button class="mobile-title-btn" id="mobileTitleBtn" onclick="focusInput()">
         <span class="mobile-title-label">{{ app_title }}</span>
-        <span class="mobile-title-reasoning" id="mobileReasoningBadge">Base</span>
+        <span class="mobile-title-reasoning" id="mobileReasoningBadge" hidden>Base</span>
     </button>
 
     <!-- Menu overlay -->
@@ -270,7 +270,7 @@
                                             <span class="composer-hover-text">Attach files, screenshots, audio, or workspace snippets to the next message.</span>
                                         </div>
                                     </div>
-                                    <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button is-active" type="button" title="Base reasoning mode uses the high-thinking path by default." aria-label="Reasoning mode: base">
+                                    <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button is-active" type="button" title="Base reasoning mode uses the high-thinking path by default." aria-label="Reasoning mode: base" hidden>
                                         <span class="reasoning-toggle-glyph" aria-hidden="true">Base</span>
                                     </button>
                                 </div>

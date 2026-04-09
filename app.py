@@ -3351,6 +3351,7 @@ async def wait_for_permission_approval(
     if getattr(websocket, "supports_command_approval", True) is False:
         await websocket.send_json({
             "type": "permission_required",
+            "conversation_id": conversation_id,
             "permission_key": request.key,
             "approval_target": request.approval_target,
             "title": request.title,
@@ -3378,6 +3379,7 @@ async def wait_for_permission_approval(
     try:
         await websocket.send_json({
             "type": "permission_required",
+            "conversation_id": conversation_id,
             "permission_key": request.key,
             "approval_target": request.approval_target,
             "title": request.title,
@@ -5942,7 +5944,6 @@ def compute_static_asset_version(base_dir: pathlib.Path) -> str:
     return digest or str(int(time.time()))
 
 
-STATIC_ASSET_VERSION = compute_static_asset_version(_base_dir)
 app.mount("/static", StaticFiles(directory=str(_base_dir / "static")), name="static")
 templates = Jinja2Templates(directory=str(_base_dir / "static"))
 
@@ -5959,16 +5960,18 @@ async def global_exception_handler(request, exc):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     try:
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
                 "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
                 "model_name": get_active_model_name(),
                 "app_title": APP_TITLE,
-                "static_asset_version": STATIC_ASSET_VERSION,
+                "static_asset_version": compute_static_asset_version(_base_dir),
             },
         )
+        response.headers["Cache-Control"] = "no-store"
+        return response
     except Exception as e:
         logger.error(f"Error generating home page: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error loading page: {str(e)}")
