@@ -19,16 +19,13 @@ import json
 import logging
 import os
 import pathlib
-import pty
 import re
 import shlex
 import shutil
 import socket
 import sqlite3
 import subprocess
-import struct
 import sys
-import signal
 import tempfile
 import time
 import traceback
@@ -38,7 +35,7 @@ from html import unescape
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 
 import httpx
@@ -48,15 +45,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-import fcntl
-import termios
 
-try:
-    from huggingface_hub import hf_hub_download, snapshot_download
-except Exception:
-    hf_hub_download = None
-    snapshot_download = None
-
+from deep_flow import DeepRouteRequest, decide_deep_route
 try:
     import pandas as pd
 except Exception:
@@ -78,7 +68,12 @@ from prompts import (
 )
 from themes import COLORS_DARK, COLORS_LIGHT
 from thinking_stream import ThinkingStreamSplitter, strip_stream_special_tokens
-from workflow_router import load_router_model as load_workflow_router_model, predict_workflow_router
+from turn_strategy import (
+    TurnAssessment,
+    build_turn_assessment,
+    format_turn_assessment_summary,
+    infer_explicit_planning_request,
+)
 
 # Setup logging with capture
 log_capture = io.StringIO()
@@ -117,12 +112,9 @@ VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B-AWQ")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT", str(pathlib.Path("/app/workspaces")))
-PET_ROOT = os.getenv("PET_ROOT", str(pathlib.Path("/app/pet")))
 RUNS_ROOT = os.getenv("RUNS_ROOT", str(pathlib.Path("/app/runs")))
 VOICE_ROOT = os.getenv("VOICE_ROOT", str(pathlib.Path("/app/data/voice")))
 MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/app/data/model_state.json")
-WORKFLOW_ROUTER_MODEL_PATH = os.getenv("WORKFLOW_ROUTER_MODEL_PATH", "/app/data/router_model.json")
-TOOL_POLICY_MODEL_PATH = os.getenv("TOOL_POLICY_MODEL_PATH", "/app/data/tool_policy_model.json")
 MODEL_14B_NAME = os.getenv("MODEL_14B_NAME", MODEL_NAME)
 MODEL_14B_ARGS = os.getenv(
     "MODEL_14B_ARGS",
@@ -148,8 +140,6 @@ DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() 
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "6"))
 TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "2")))
-LEARNED_ROUTER_MIN_CONFIDENCE = max(0.0, min(1.0, float(os.getenv("LEARNED_ROUTER_MIN_CONFIDENCE", "0.80"))))
-LEARNED_TOOL_POLICY_MIN_CONFIDENCE = max(0.0, min(1.0, float(os.getenv("LEARNED_TOOL_POLICY_MIN_CONFIDENCE", "0.85"))))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
 AUTO_VERIFY_MAX_RUNS = max(0, int(os.getenv("AUTO_VERIFY_MAX_RUNS", "2")))
 WORKSPACE_FILE_SIZE_LIMIT = 1024 * 1024
@@ -212,27 +202,7 @@ def env_flag(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
-
-DOCKER_CONTROL_ENABLED = env_flag("DOCKER_CONTROL_ENABLED", False)
-INTERACTIVE_TERMINAL_ENABLED = env_flag("INTERACTIVE_TERMINAL_ENABLED", False)
-EXECUTE_CODE_ENABLED = env_flag("EXECUTE_CODE_ENABLED", False)
 STRICT_WORKSPACE_COMMAND_PATHS = env_flag("STRICT_WORKSPACE_COMMAND_PATHS", True)
-LEARNED_ROUTER_ENABLED = env_flag("LEARNED_ROUTER_ENABLED", False)
-LEARNED_TOOL_POLICY_ENABLED = env_flag("LEARNED_TOOL_POLICY_ENABLED", False)
-LEARNED_ROUTER_CACHE: Dict[str, Any] = {
-    "path": "",
-    "mtime": None,
-    "model": None,
-    "load_failed": False,
-}
-LEARNED_TOOL_POLICY_CACHE: Dict[str, Any] = {
-    "path": "",
-    "mtime": None,
-    "model": None,
-    "load_failed": False,
-}
-
-
 def infer_model_provider(model_name: str) -> str:
     """Infer a friendly provider/vendor label from a model identifier."""
     model_name = (model_name or "").strip()
@@ -352,10 +322,6 @@ def _read_selected_model_state() -> tuple[str, Optional[str], Dict[str, Any], Di
 
 ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME, MODEL_LOAD_HISTORY, MODEL_LOADING_STATUS = _read_selected_model_state()
 ACTIVE_MODEL_LOCK: asyncio.Lock | None = None
-TERMINAL_SESSIONS: Dict[str, TerminalSession] = {}
-TERMINAL_LOCKS: Dict[str, asyncio.Lock] = {}
-MODEL_DOWNLOAD_JOBS: Dict[str, Dict[str, Any]] = {}
-MODEL_DOWNLOAD_LOCK: asyncio.Lock | None = None
 COMMAND_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
 CURATED_SOURCE_HEALTH: Dict[str, Dict[str, Any]] = {}
 
@@ -491,21 +457,7 @@ def build_dynamic_app_title(hostname: str) -> str:
 
 
 RAW_HOSTNAME = socket.gethostname() or "localhost"
-APP_TITLE = "Wolfy"
-
-LEGACY_COMPY_PROFILE_DEFAULTS = {
-    "name": "Compy",
-    "theme_primary": "#2563eb",
-    "theme_secondary": "#0f172a",
-    "theme_accent": "#dbeafe",
-}
-
-WOLFY_PROFILE_DEFAULTS = {
-    "name": "Wolfy",
-    "theme_primary": "#d97706",
-    "theme_secondary": "#6b4f2a",
-    "theme_accent": "#f5e6c8",
-}
+APP_TITLE = "AI Chat"
 
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
@@ -513,8 +465,6 @@ MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
 
 WORKSPACE_ROOT_PATH = pathlib.Path(WORKSPACE_ROOT).resolve()
 WORKSPACE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
-PET_ROOT_PATH = pathlib.Path(PET_ROOT).resolve()
-PET_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 RUNS_ROOT_PATH = pathlib.Path(RUNS_ROOT).resolve()
 RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 VOICE_ROOT_PATH = pathlib.Path(VOICE_ROOT).resolve()
@@ -580,29 +530,6 @@ def sanitize_relative_workspace_path(path_value: str, fallback: str = "snippet.t
 def utcnow_iso() -> str:
     """Return a stable timestamp string for persisted records."""
     return datetime.now().isoformat()
-
-
-def get_pet_root() -> pathlib.Path:
-    """Return the persistent pet home directory."""
-    return PET_ROOT_PATH
-
-
-def ensure_pet_dirs() -> pathlib.Path:
-    """Create the persistent pet home layout if missing."""
-    pet_root = get_pet_root()
-    for rel_path in (
-        "state",
-        "memory",
-        "capabilities",
-        "capabilities/scripts",
-        "capabilities/prompts",
-        "capabilities/templates",
-        "capabilities/workflows",
-        "assets",
-        "journals",
-    ):
-        (pet_root / rel_path).mkdir(parents=True, exist_ok=True)
-    return pet_root
 
 
 def get_run_root(run_id: str, create: bool = True) -> pathlib.Path:
@@ -708,470 +635,6 @@ def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Pat
             return workspace
         run = ensure_run_for_conversation(conversation_id)
     return get_run_workspace_root(run["id"], create=create)
-
-
-WORKFLOW_LIBRARY_VERSION = "workflow-lib-v1"
-WORKFLOW_ROUTER_VERSION = "workflow-router-v2"
-
-
-@dataclass
-class WorkflowExecutionContext:
-    """Per-turn workflow execution state persisted for later review."""
-    execution_id: str
-    conversation_id: str
-    run_id: str
-    user_message_id: int
-    workflow_name: str
-    workflow_version: str
-    router_version: str
-    route_metadata: Dict[str, Any] = field(default_factory=dict)
-    step_index: int = 0
-    tool_count: int = 0
-    artifact_paths: List[str] = field(default_factory=list)
-
-    def next_step_index(self) -> int:
-        """Allocate the next 1-based step index for this execution."""
-        self.step_index += 1
-        return self.step_index
-
-
-def safe_json_dumps(value: Any, default: str = "{}") -> str:
-    """Serialize workflow metadata without letting odd values break persistence."""
-    try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    except Exception:
-        return default
-
-
-def build_workflow_execution_id(conversation_id: str) -> str:
-    """Return a unique workflow execution id scoped to the conversation."""
-    return f"wf-{sanitize_conversation_id(conversation_id)}-{uuid.uuid4().hex[:12]}"
-
-
-def create_workflow_execution(
-    conversation_id: str,
-    user_message_id: int,
-    workflow_name: str,
-    route_metadata: Optional[Dict[str, Any]] = None,
-) -> WorkflowExecutionContext:
-    """Create a turn-level workflow execution row."""
-    run = ensure_run_for_conversation(conversation_id)
-    execution = WorkflowExecutionContext(
-        execution_id=build_workflow_execution_id(conversation_id),
-        conversation_id=conversation_id,
-        run_id=str(run.get("id") or build_run_id(conversation_id)),
-        user_message_id=int(user_message_id),
-        workflow_name=str(workflow_name or "direct_answer"),
-        workflow_version=WORKFLOW_LIBRARY_VERSION,
-        router_version=WORKFLOW_ROUTER_VERSION,
-        route_metadata=dict(route_metadata or {}),
-    )
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''INSERT INTO workflow_executions
-           (id, conversation_id, run_id, user_message_id, assistant_message_id,
-            workflow_name, workflow_version, router_version, status, started_at, ended_at,
-            final_outcome, error_text, user_feedback, tool_count, artifact_paths_json, route_metadata_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            execution.execution_id,
-            execution.conversation_id,
-            execution.run_id,
-            execution.user_message_id,
-            None,
-            execution.workflow_name,
-            execution.workflow_version,
-            execution.router_version,
-            "running",
-            utcnow_iso(),
-            None,
-            "",
-            "",
-            "neutral",
-            0,
-            "[]",
-            safe_json_dumps(execution.route_metadata, default="{}"),
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return execution
-
-
-def persist_workflow_execution_route(execution: WorkflowExecutionContext) -> None:
-    """Persist route-name or metadata changes for an in-flight execution."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''UPDATE workflow_executions
-           SET workflow_name = ?, route_metadata_json = ?
-           WHERE id = ?''',
-        (
-            str(execution.workflow_name or "direct_answer"),
-            safe_json_dumps(execution.route_metadata, default="{}"),
-            execution.execution_id,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-
-def record_workflow_step(
-    execution: Optional[WorkflowExecutionContext],
-    *,
-    step_name: str,
-    call: Dict[str, Any],
-    result: Dict[str, Any],
-    latency_ms: int = 0,
-    auto_generated: bool = False,
-) -> None:
-    """Append one tool step to a workflow execution."""
-    if not execution:
-        return
-
-    tool_name = str(call.get("name", "")).strip()
-    if not tool_name:
-        return
-
-    result_payload = result.get("result", {})
-    if result.get("ok"):
-        payload = result_payload if isinstance(result_payload, dict) else {}
-        path = str(payload.get("path", "")).strip() if isinstance(payload, dict) else ""
-        if path and path not in execution.artifact_paths:
-            execution.artifact_paths.append(path)
-    execution.tool_count += 1
-    step_index = execution.next_step_index()
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''INSERT INTO workflow_steps
-           (execution_id, step_index, step_name, tool_name, arguments_json, result_ok,
-            result_summary, result_json, latency_ms, auto_generated, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            execution.execution_id,
-            step_index,
-            str(step_name or tool_name),
-            tool_name,
-            safe_json_dumps(call.get("arguments", {}), default="{}"),
-            1 if result.get("ok") else 0,
-            truncate_output(tool_result_preview(result, tool_name, call.get("arguments", {})), limit=500),
-            safe_json_dumps(result, default="{}"),
-            max(0, int(latency_ms or 0)),
-            1 if auto_generated else 0,
-            utcnow_iso(),
-        ),
-    )
-    conn.execute(
-        '''UPDATE workflow_executions
-           SET tool_count = ?, artifact_paths_json = ?
-           WHERE id = ?''',
-        (
-            execution.tool_count,
-            safe_json_dumps(execution.artifact_paths, default="[]"),
-            execution.execution_id,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-
-def finalize_workflow_execution(
-    execution: Optional[WorkflowExecutionContext],
-    *,
-    assistant_message_id: Optional[int] = None,
-    final_outcome: str = "",
-    status: str = "completed",
-    error_text: str = "",
-) -> None:
-    """Close a workflow execution row after the assistant turn finishes."""
-    if not execution:
-        return
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''UPDATE workflow_executions
-           SET assistant_message_id = COALESCE(?, assistant_message_id),
-               status = ?,
-               ended_at = ?,
-               final_outcome = ?,
-               error_text = ?,
-               tool_count = ?,
-               artifact_paths_json = ?,
-               route_metadata_json = ?
-           WHERE id = ?''',
-        (
-            assistant_message_id,
-            str(status or "completed"),
-            utcnow_iso(),
-            str(final_outcome or status or "completed"),
-            truncate_output(str(error_text or ""), limit=1000),
-            execution.tool_count,
-            safe_json_dumps(execution.artifact_paths, default="[]"),
-            safe_json_dumps(execution.route_metadata, default="{}"),
-            execution.execution_id,
-        ),
-    )
-    conn.commit()
-    conn.close()
-    try:
-        refresh_workflow_evaluations(
-            execution,
-            assistant_message_id=assistant_message_id,
-            final_outcome=final_outcome,
-            status=status,
-            error_text=error_text,
-        )
-    except Exception as exc:
-        logger.warning("Workflow evaluation refresh failed for %s: %s", execution.execution_id, exc)
-
-
-def workflow_tool_step_rows(execution_id: str) -> List[Dict[str, Any]]:
-    """Load persisted workflow steps for evaluator scoring."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        '''
-        SELECT step_index, step_name, tool_name, result_ok, result_summary, result_json, auto_generated
-        FROM workflow_steps
-        WHERE execution_id = ?
-        ORDER BY step_index ASC, id ASC
-        ''',
-        (execution_id,),
-    ).fetchall()
-    conn.close()
-    return [
-        {
-            "step_index": int(row["step_index"] or 0),
-            "step_name": str(row["step_name"] or ""),
-            "tool_name": str(row["tool_name"] or ""),
-            "result_ok": bool(int(row["result_ok"] or 0)),
-            "result_summary": str(row["result_summary"] or ""),
-            "result": parse_json_field(row["result_json"], {}),
-            "auto_generated": bool(int(row["auto_generated"] or 0)),
-        }
-        for row in rows
-    ]
-
-
-def expected_final_outcome_for_workflow(workflow_name: str) -> str:
-    """Return the most natural final outcome label for a workflow route."""
-    normalized = str(workflow_name or "").strip()
-    if normalized == "deep_orchestrated":
-        return "completed_deep"
-    if normalized.startswith("slash_"):
-        return "completed_slash"
-    if normalized == "direct_answer":
-        return "completed_direct"
-    if normalized.startswith("normal_") and "tool_loop" in normalized:
-        return "completed_with_tools"
-    return "completed_direct"
-
-
-def build_workflow_evaluation_rows(
-    execution: WorkflowExecutionContext,
-    *,
-    assistant_message_id: Optional[int],
-    final_outcome: str,
-    status: str,
-    error_text: str,
-) -> List[Dict[str, Any]]:
-    """Score a completed workflow using deterministic post-hoc metrics."""
-    normalized_status = str(status or "completed").strip()
-    normalized_outcome = str(final_outcome or normalized_status or "").strip()
-    steps = workflow_tool_step_rows(execution.execution_id)
-    successful_steps = [step for step in steps if step.get("result_ok")]
-    failed_steps = [step for step in steps if not step.get("result_ok")]
-    successful_write_steps = [
-        step for step in successful_steps
-        if step.get("tool_name") in {"workspace.patch_file", "workspace.render"}
-    ]
-    nontrivial_artifacts = [
-        path for path in execution.artifact_paths
-        if str(path).strip() and str(path).strip() not in {".", "./"}
-    ]
-    last_successful_write_index = max(
-        (step.get("step_index", 0) for step in successful_write_steps),
-        default=0,
-    )
-    verification_after_write = any(
-        step.get("step_index", 0) > last_successful_write_index
-        and step.get("tool_name") in {
-            "workspace.list_files", "workspace.grep", "workspace.read_file",
-            "workspace.run_command", "spreadsheet.describe",
-            "conversation.search_history", "web.search", "web.fetch_page",
-        }
-        for step in steps
-    )
-
-    tool_success_rate = (
-        (len(successful_steps) / max(len(steps), 1))
-        if steps else 1.0
-    )
-    completion_passed = normalized_status == "completed" and not str(error_text or "").strip()
-    expected_outcome = expected_final_outcome_for_workflow(execution.workflow_name)
-    route_alignment_passed = (
-        normalized_status != "completed"
-        or normalized_outcome == expected_outcome
-    )
-    write_grounding_passed = (
-        True if not successful_write_steps else bool(nontrivial_artifacts)
-    )
-    verification_passed = (
-        True if not successful_write_steps else verification_after_write
-    )
-
-    rows = [
-        {
-            "metric": "completion_status",
-            "score": 1.0 if completion_passed else 0.0,
-            "passed": completion_passed,
-            "notes": {
-                "status": normalized_status,
-                "final_outcome": normalized_outcome,
-                "assistant_message_id": assistant_message_id,
-                "error_text": truncate_output(str(error_text or ""), limit=500),
-            },
-        },
-        {
-            "metric": "route_alignment",
-            "score": 1.0 if route_alignment_passed else 0.0,
-            "passed": route_alignment_passed,
-            "notes": {
-                "workflow_name": execution.workflow_name,
-                "expected_final_outcome": expected_outcome,
-                "observed_final_outcome": normalized_outcome,
-            },
-        },
-        {
-            "metric": "tool_success_rate",
-            "score": round(tool_success_rate, 4),
-            "passed": tool_success_rate >= 0.4,
-            "notes": {
-                "tool_count": len(steps),
-                "successful_steps": len(successful_steps),
-                "failed_steps": len(failed_steps),
-                "failed_tool_names": [step.get("tool_name", "") for step in failed_steps[:8]],
-            },
-        },
-        {
-            "metric": "write_grounding",
-            "score": 1.0 if write_grounding_passed else 0.0,
-            "passed": write_grounding_passed,
-            "notes": {
-                "successful_write_steps": len(successful_write_steps),
-                "artifact_paths": list(execution.artifact_paths),
-                "nontrivial_artifacts": nontrivial_artifacts,
-            },
-        },
-        {
-            "metric": "post_write_verification",
-            "score": 1.0 if verification_passed else 0.0,
-            "passed": verification_passed,
-            "notes": {
-                "successful_write_steps": len(successful_write_steps),
-                "last_successful_write_index": last_successful_write_index,
-                "verification_after_write": verification_after_write,
-            },
-        },
-    ]
-    return rows
-
-
-def persist_workflow_evaluations(
-    execution_id: str,
-    evaluator: str,
-    evaluations: List[Dict[str, Any]],
-) -> None:
-    """Replace one evaluator's rows for an execution with the latest scores."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        'DELETE FROM workflow_evaluations WHERE execution_id = ? AND evaluator = ?',
-        (execution_id, evaluator),
-    )
-    for evaluation in evaluations:
-        conn.execute(
-            '''
-            INSERT INTO workflow_evaluations
-            (execution_id, evaluator, metric, score, passed, notes_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (
-                execution_id,
-                evaluator,
-                str(evaluation.get("metric", "")).strip(),
-                evaluation.get("score"),
-                1 if evaluation.get("passed") else 0,
-                safe_json_dumps(evaluation.get("notes", {}), default="{}"),
-                utcnow_iso(),
-            ),
-        )
-    conn.commit()
-    conn.close()
-
-
-def refresh_workflow_evaluations(
-    execution: Optional[WorkflowExecutionContext],
-    *,
-    assistant_message_id: Optional[int] = None,
-    final_outcome: str = "",
-    status: str = "completed",
-    error_text: str = "",
-) -> None:
-    """Recompute deterministic evaluations for one workflow execution."""
-    if not execution:
-        return
-    evaluations = build_workflow_evaluation_rows(
-        execution,
-        assistant_message_id=assistant_message_id,
-        final_outcome=final_outcome,
-        status=status,
-        error_text=error_text,
-    )
-    persist_workflow_evaluations(
-        execution.execution_id,
-        evaluator="workflow_autoeval_v1",
-        evaluations=evaluations,
-    )
-
-
-def sync_workflow_feedback_evaluation(assistant_message_id: int, feedback: str) -> None:
-    """Persist user feedback as a separate evaluator signal for the matching workflow."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        'SELECT id FROM workflow_executions WHERE assistant_message_id = ?',
-        (int(assistant_message_id),),
-    ).fetchone()
-    conn.close()
-    if not row:
-        return
-
-    normalized_feedback = normalize_feedback_label(feedback)
-    score_map = {"positive": 1.0, "neutral": 0.5, "negative": 0.0}
-    passed = normalized_feedback != "negative"
-    persist_workflow_evaluations(
-        str(row["id"]),
-        evaluator="workflow_feedback_v1",
-        evaluations=[{
-            "metric": "user_feedback",
-            "score": score_map.get(normalized_feedback, 0.5),
-            "passed": passed,
-            "notes": {"feedback": normalized_feedback},
-        }],
-    )
-
-
-def sync_workflow_feedback_for_message(assistant_message_id: int, feedback: str) -> None:
-    """Mirror thumbs feedback onto the matching workflow execution row."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''UPDATE workflow_executions
-           SET user_feedback = ?
-           WHERE assistant_message_id = ?''',
-        (normalize_feedback_label(feedback), int(assistant_message_id)),
-    )
-    conn.commit()
-    conn.close()
-    sync_workflow_feedback_evaluation(assistant_message_id, feedback)
 
 
 def get_voice_dir(kind: str, create: bool = True) -> pathlib.Path:
@@ -1441,704 +904,64 @@ def get_voice_runtime_summary() -> Dict[str, Any]:
     }
 
 
-def load_pet_profile() -> Optional[Dict[str, Any]]:
-    """Return the singleton agent profile."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        '''SELECT id, name, species, status, theme_primary, theme_secondary, theme_accent,
-                  avatar_style, curious, cautious, playful, talkative, independent,
-                  custom_backstory, system_prompt_suffix, created_at, updated_at, last_active_at,
-                  hunger, energy, last_fed_at,
-                  llm_temperature, llm_top_p, llm_frequency_penalty, llm_presence_penalty, llm_max_tokens
-           FROM pet_profile
-           WHERE id = 1'''
-    )
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return {
-        "id": row[0],
-        "name": row[1],
-        "species": row[2],
-        "status": row[3],
-        "theme_primary": row[4],
-        "theme_secondary": row[5],
-        "theme_accent": row[6],
-        "avatar_style": row[7],
-        "curious": int(row[8]),
-        "cautious": int(row[9]),
-        "playful": int(row[10]),
-        "talkative": int(row[11]),
-        "independent": int(row[12]),
-        "custom_backstory": row[13] or "",
-        "system_prompt_suffix": row[14] or "",
-        "created_at": row[15],
-        "updated_at": row[16],
-        "last_active_at": row[17],
-        "hunger": int(row[18] or 35) if len(row) > 18 else 35,
-        "energy": int(row[19] or 65) if len(row) > 19 else 65,
-        "last_fed_at": row[20] if len(row) > 20 else None,
-        "llm_temperature": float(row[21]) if len(row) > 21 and row[21] is not None else 0.25,
-        "llm_top_p": float(row[22]) if len(row) > 22 and row[22] is not None else 0.95,
-        "llm_frequency_penalty": float(row[23]) if len(row) > 23 and row[23] is not None else 0.2,
-        "llm_presence_penalty": float(row[24]) if len(row) > 24 and row[24] is not None else 0.15,
-        "llm_max_tokens": int(row[25]) if len(row) > 25 and row[25] is not None else 4096,
-    }
+@dataclass
+class WorkflowExecutionContext:
+    """Transient per-turn execution bookkeeping kept only in memory."""
+    workflow_name: str
+    route_metadata: Dict[str, Any] = field(default_factory=dict)
+    tool_count: int = 0
+    artifact_paths: List[str] = field(default_factory=list)
 
 
-def get_pet_stats() -> Dict[str, Any]:
-    """Return aggregate stats for the singleton pet."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    total_runs = c.execute('SELECT COUNT(*) FROM runs').fetchone()[0]
-    successful_runs = c.execute("SELECT COUNT(*) FROM runs WHERE status IN ('completed', 'success', 'active')").fetchone()[0]
-    capabilities_count = c.execute('SELECT COUNT(*) FROM pet_capabilities WHERE status != ?', ('archived',)).fetchone()[0]
-    memories_count = c.execute('SELECT COUNT(*) FROM pet_memories').fetchone()[0]
-    last_active_row = c.execute('SELECT MAX(updated_at) FROM conversations').fetchone()
-    conn.close()
-    return {
-        "total_runs": int(total_runs or 0),
-        "successful_runs": int(successful_runs or 0),
-        "capabilities_count": int(capabilities_count or 0),
-        "memories_count": int(memories_count or 0),
-        "last_active_at": last_active_row[0] if last_active_row else None,
-        "hunger": int(profile.get("hunger", 35)) if (profile := load_pet_profile()) else 35,
-        "energy": int(profile.get("energy", 65)) if profile else 65,
-        "last_fed_at": profile.get("last_fed_at") if profile else None,
-    }
-
-
-def write_pet_profile_snapshot(profile: Dict[str, Any]):
-    """Persist a JSON snapshot of the pet profile into the pet home."""
-    ensure_pet_dirs()
-    snapshot = {
-        key: value
-        for key, value in profile.items()
-        if key not in {"id"}
-    }
-    with (get_pet_root() / "profile.json").open("w", encoding="utf-8") as f:
-        json.dump(snapshot, f, indent=2)
-
-
-def _normalize_theme_color(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def is_legacy_compy_profile(profile: Optional[Dict[str, Any]]) -> bool:
-    """Return whether the stored profile still uses the old built-in Compy defaults."""
-    if not profile:
-        return False
-    return (
-        str(profile.get("name", "")).strip() == LEGACY_COMPY_PROFILE_DEFAULTS["name"]
-        and _normalize_theme_color(profile.get("theme_primary")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_primary"]
-        and _normalize_theme_color(profile.get("theme_secondary")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_secondary"]
-        and _normalize_theme_color(profile.get("theme_accent")) == LEGACY_COMPY_PROFILE_DEFAULTS["theme_accent"]
+def create_workflow_execution(
+    conversation_id: str,
+    user_message_id: int,
+    workflow_name: str,
+    route_metadata: Optional[Dict[str, Any]] = None,
+) -> WorkflowExecutionContext:
+    """Create an in-memory workflow context for a single turn."""
+    del conversation_id, user_message_id
+    return WorkflowExecutionContext(
+        workflow_name=str(workflow_name or "direct_answer"),
+        route_metadata=dict(route_metadata or {}),
     )
 
 
-def upgrade_legacy_compy_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """Rename the legacy default mascot and move it onto the built-in Wolfy palette."""
-    if not is_legacy_compy_profile(profile):
-        return profile
-    updated = dict(profile)
-    updated.update(WOLFY_PROFILE_DEFAULTS)
-    return upsert_pet_profile(updated, create=False)
+def persist_workflow_execution_route(execution: WorkflowExecutionContext) -> None:
+    """Compatibility shim for the simplified runtime."""
+    del execution
 
 
-def upsert_pet_profile(payload: Dict[str, Any], create: bool = False) -> Dict[str, Any]:
-    """Create or update the singleton pet profile."""
-    existing = load_pet_profile()
-    if create and existing:
-        raise HTTPException(status_code=400, detail="Agent profile already exists")
-    if not create and not existing:
-        raise HTTPException(status_code=404, detail="Agent profile not initialized")
-
-    base = existing or {}
-
-    def int_field(name: str, default: int) -> int:
-        raw = payload.get(name, base.get(name, default))
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            value = default
-        return max(0, min(100, value))
-
-    def float_field(name: str, default: float, lo: float, hi: float) -> float:
-        raw = payload.get(name, base.get(name, default))
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = default
-        return max(lo, min(hi, value))
-
-    now = utcnow_iso()
-    profile = {
-        "id": 1,
-        "name": str(payload.get("name", base.get("name", WOLFY_PROFILE_DEFAULTS["name"]))).strip() or WOLFY_PROFILE_DEFAULTS["name"],
-        "species": str(payload.get("species", base.get("species", "agent"))).strip() or "agent",
-        "status": str(payload.get("status", base.get("status", "active"))).strip() or "active",
-        "theme_primary": str(payload.get("theme_primary", base.get("theme_primary", WOLFY_PROFILE_DEFAULTS["theme_primary"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_primary"],
-        "theme_secondary": str(payload.get("theme_secondary", base.get("theme_secondary", WOLFY_PROFILE_DEFAULTS["theme_secondary"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_secondary"],
-        "theme_accent": str(payload.get("theme_accent", base.get("theme_accent", WOLFY_PROFILE_DEFAULTS["theme_accent"]))).strip() or WOLFY_PROFILE_DEFAULTS["theme_accent"],
-        "avatar_style": str(payload.get("avatar_style", base.get("avatar_style", "agent"))).strip() or "agent",
-        "curious": int_field("curious", 60),
-        "cautious": int_field("cautious", 60),
-        "playful": int_field("playful", 40),
-        "talkative": int_field("talkative", 45),
-        "independent": int_field("independent", 55),
-        "custom_backstory": str(payload.get("custom_backstory", base.get("custom_backstory", ""))).strip(),
-        "system_prompt_suffix": str(payload.get("system_prompt_suffix", base.get("system_prompt_suffix", ""))).strip(),
-        "created_at": base.get("created_at", now),
-        "updated_at": now,
-        "last_active_at": base.get("last_active_at"),
-        "hunger": max(0, min(100, int(payload.get("hunger", base.get("hunger", 35))))),
-        "energy": max(0, min(100, int(payload.get("energy", base.get("energy", 65))))),
-        "last_fed_at": payload.get("last_fed_at", base.get("last_fed_at")),
-        "llm_temperature": float_field("llm_temperature", 0.25, 0.0, 2.0),
-        "llm_top_p": float_field("llm_top_p", 0.95, 0.0, 1.0),
-        "llm_frequency_penalty": float_field("llm_frequency_penalty", 0.2, -2.0, 2.0),
-        "llm_presence_penalty": float_field("llm_presence_penalty", 0.15, -2.0, 2.0),
-        "llm_max_tokens": max(64, min(32768, int(float_field("llm_max_tokens", 4096, 64, 32768)))),
-    }
-
-    ensure_pet_dirs()
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''INSERT OR REPLACE INTO pet_profile
-           (id, name, species, status, theme_primary, theme_secondary, theme_accent,
-            avatar_style, curious, cautious, playful, talkative, independent,
-            custom_backstory, system_prompt_suffix, created_at, updated_at, last_active_at,
-            hunger, energy, last_fed_at,
-            llm_temperature, llm_top_p, llm_frequency_penalty, llm_presence_penalty, llm_max_tokens)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            profile["id"], profile["name"], profile["species"], profile["status"],
-            profile["theme_primary"], profile["theme_secondary"], profile["theme_accent"],
-            profile["avatar_style"], profile["curious"], profile["cautious"], profile["playful"],
-            profile["talkative"], profile["independent"], profile["custom_backstory"],
-            profile["system_prompt_suffix"], profile["created_at"], profile["updated_at"],
-            profile["last_active_at"], profile["hunger"], profile["energy"], profile["last_fed_at"],
-            profile["llm_temperature"], profile["llm_top_p"], profile["llm_frequency_penalty"],
-            profile["llm_presence_penalty"], profile["llm_max_tokens"],
-        ),
-    )
-    conn.commit()
-    conn.close()
-    write_pet_profile_snapshot(profile)
-    return profile
-
-
-def ensure_default_agent_profile() -> Dict[str, Any]:
-    """Ensure the install has a default productivity-agent profile."""
-    existing = load_pet_profile()
-    if existing:
-        return upgrade_legacy_compy_profile(existing)
-    return upsert_pet_profile(
-        {
-            "name": WOLFY_PROFILE_DEFAULTS["name"],
-            "species": "agent",
-            "status": "active",
-            "theme_primary": WOLFY_PROFILE_DEFAULTS["theme_primary"],
-            "theme_secondary": WOLFY_PROFILE_DEFAULTS["theme_secondary"],
-            "theme_accent": WOLFY_PROFILE_DEFAULTS["theme_accent"],
-            "avatar_style": "agent",
-            "curious": 62,
-            "cautious": 72,
-            "playful": 0,
-            "talkative": 32,
-            "independent": 70,
-            "custom_backstory": "A steady workspace-first coding agent focused on additive progress and safe execution.",
-            "system_prompt_suffix": "Prefer durable progress in workspace files. Keep changes additive, inspectable, and low-risk.",
-            "hunger": 0,
-            "energy": 100,
-            "llm_temperature": 0.25,
-            "llm_top_p": 0.95,
-            "llm_frequency_penalty": 0.2,
-            "llm_presence_penalty": 0.15,
-            "llm_max_tokens": 4096,
-        },
-        create=True,
-    )
-
-
-def touch_pet_activity():
-    """Update the pet's last-active timestamp when it handles a turn."""
-    profile = load_pet_profile()
-    if not profile:
+def record_workflow_step(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    step_name: str,
+    call: Dict[str, Any],
+    result: Dict[str, Any],
+    latency_ms: int = 0,
+    auto_generated: bool = False,
+) -> None:
+    """Track successful tool outputs for the current turn only."""
+    del step_name, latency_ms, auto_generated
+    if not execution:
         return
-    now = utcnow_iso()
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE pet_profile SET last_active_at = ?, updated_at = ? WHERE id = 1', (now, now))
-    conn.commit()
-    conn.close()
+    execution.tool_count += 1
+    payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    path = str(payload.get("path", "")).strip()
+    if result.get("ok") and path and path not in execution.artifact_paths:
+        execution.artifact_paths.append(path)
 
 
-def feed_pet(kind: str = "snack", note: str = "", source_run_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Refresh the agent's internal operating state."""
-    profile = load_pet_profile()
-    if not profile:
-        return None
-
-    normalized = (kind or "snack").strip().lower()
-    delta_map = {
-        "snack": {"hunger": -12, "energy": 6},
-        "meal": {"hunger": -24, "energy": 10},
-        "knowledge": {"hunger": -10, "energy": 8},
-        "capability": {"hunger": -14, "energy": 12},
-        "task": {"hunger": -8, "energy": 5},
-    }
-    delta = delta_map.get(normalized, delta_map["snack"])
-    now = utcnow_iso()
-    hunger = max(0, min(100, int(profile.get("hunger", 35)) + delta["hunger"]))
-    energy = max(0, min(100, int(profile.get("energy", 65)) + delta["energy"]))
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''UPDATE pet_profile
-           SET hunger = ?, energy = ?, last_fed_at = ?, updated_at = ?
-           WHERE id = 1''',
-        (hunger, energy, now, now),
-    )
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        (
-            "fed",
-            json.dumps({"kind": normalized, "note": note, "source_run_id": source_run_id, "hunger": hunger, "energy": energy}),
-            now,
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return load_pet_profile()
-
-
-BOND_MAX_PETS_PER_DAY = 12
-BOND_AFFECTION_PER_PET = 3
-BOND_DAILY_DECAY = 8
-BOND_MAX_AFFECTION = 100
-
-
-def _today_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def _bond_mood(affection: int, streak: int) -> str:
-    if affection >= 70 and streak >= 3:
-        return "happy"
-    if affection >= 40:
-        return "content"
-    if affection >= 15:
-        return "lonely"
-    return "neglected"
-
-
-def get_pet_bond() -> Dict[str, Any]:
-    """Load bond state, apply daily decay, and persist."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        'SELECT affection, pets_today, last_pet_date, streak, last_visit_date FROM pet_profile WHERE id = 1'
-    )
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return {"affection": 50, "pets_today": 0, "streak": 0, "mood": "content",
-                "max_pets_per_day": BOND_MAX_PETS_PER_DAY, "capped": False}
-
-    affection, pets_today, last_pet_date, streak, last_visit_date = (
-        int(row[0] or 50), int(row[1] or 0), row[2], int(row[3] or 0), row[4],
-    )
-    today = _today_str()
-    changed = False
-
-    # Reset daily pet count if new day
-    if last_pet_date != today:
-        pets_today = 0
-        changed = True
-
-    # Apply decay for missed days
-    if last_visit_date and last_visit_date != today:
-        try:
-            last_dt = datetime.strptime(last_visit_date, "%Y-%m-%d")
-            days_away = (datetime.strptime(today, "%Y-%m-%d") - last_dt).days
-        except ValueError:
-            days_away = 1
-        if days_away > 0:
-            affection = max(0, affection - BOND_DAILY_DECAY * days_away)
-            changed = True
-        if days_away > 1:
-            streak = 0
-            changed = True
-
-    if last_visit_date != today:
-        last_visit_date = today
-        changed = True
-
-    if changed:
-        conn.execute(
-            '''UPDATE pet_profile
-               SET affection = ?, pets_today = ?, streak = ?, last_visit_date = ?, updated_at = ?
-               WHERE id = 1''',
-            (affection, pets_today, streak, today, utcnow_iso()),
-        )
-        conn.commit()
-    conn.close()
-
-    return {
-        "affection": affection,
-        "pets_today": pets_today,
-        "streak": streak,
-        "mood": _bond_mood(affection, streak),
-        "max_pets_per_day": BOND_MAX_PETS_PER_DAY,
-        "capped": pets_today >= BOND_MAX_PETS_PER_DAY,
-    }
-
-
-def register_pet_action() -> Dict[str, Any]:
-    """Record a single petting interaction."""
-    bond = get_pet_bond()
-    if bond["capped"]:
-        return bond
-
-    today = _today_str()
-    affection = min(BOND_MAX_AFFECTION, bond["affection"] + BOND_AFFECTION_PER_PET)
-    pets_today = bond["pets_today"] + 1
-    streak = bond["streak"]
-
-    conn = sqlite3.connect(DB_PATH)
-    # Advance streak if first pet of the day
-    c = conn.cursor()
-    c.execute('SELECT last_pet_date FROM pet_profile WHERE id = 1')
-    row = c.fetchone()
-    last_pet_date = row[0] if row else None
-    if last_pet_date != today:
-        streak += 1
-
-    conn.execute(
-        '''UPDATE pet_profile
-           SET affection = ?, pets_today = ?, last_pet_date = ?, streak = ?,
-               last_visit_date = ?, updated_at = ?
-           WHERE id = 1''',
-        (affection, pets_today, today, streak, today, utcnow_iso()),
-    )
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("petted", json.dumps({"affection": affection, "streak": streak, "pets_today": pets_today}), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-
-    return {
-        "affection": affection,
-        "pets_today": pets_today,
-        "streak": streak,
-        "mood": _bond_mood(affection, streak),
-        "max_pets_per_day": BOND_MAX_PETS_PER_DAY,
-        "capped": pets_today >= BOND_MAX_PETS_PER_DAY,
-    }
-
-
-def list_pet_memories(limit: int = 200) -> List[Dict[str, Any]]:
-    """Return stored long-term memories for the pet."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        '''SELECT id, kind, title, content, importance, source_run_id, created_at, updated_at
-           FROM pet_memories
-           ORDER BY importance DESC, updated_at DESC
-           LIMIT ?''',
-        (max(1, min(limit, 500)),),
-    )
-    rows = c.fetchall()
-    conn.close()
-    return [
-        {
-            "id": row[0],
-            "kind": row[1],
-            "title": row[2],
-            "content": row[3],
-            "importance": int(row[4] or 0),
-            "source_run_id": row[5],
-            "created_at": row[6],
-            "updated_at": row[7],
-        }
-        for row in rows
-    ]
-
-
-def create_pet_memory(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a durable pet memory."""
-    now = utcnow_iso()
-    importance = max(0, min(100, int(payload.get("importance", 50))))
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        '''INSERT INTO pet_memories
-           (kind, title, content, importance, source_run_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)''',
-        (
-            str(payload.get("kind", "note")).strip() or "note",
-            str(payload.get("title", "")).strip() or "Untitled memory",
-            str(payload.get("content", "")).strip(),
-            importance,
-            str(payload.get("source_run_id", "")).strip() or None,
-            now,
-            now,
-        ),
-    )
-    memory_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return next((item for item in list_pet_memories(limit=500) if item["id"] == memory_id), {})
-
-
-def update_pet_memory_record(memory_id: int, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Update a durable pet memory."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, kind, title, content, importance FROM pet_memories WHERE id = ?', (memory_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return None
-    updated = {
-        "kind": str(payload.get("kind", row[1])).strip() or row[1],
-        "title": str(payload.get("title", row[2])).strip() or row[2],
-        "content": str(payload.get("content", row[3])).strip() if payload.get("content") is not None else row[3],
-        "importance": max(0, min(100, int(payload.get("importance", row[4])))),
-    }
-    c.execute(
-        '''UPDATE pet_memories
-           SET kind = ?, title = ?, content = ?, importance = ?, updated_at = ?
-           WHERE id = ?''',
-        (updated["kind"], updated["title"], updated["content"], updated["importance"], utcnow_iso(), memory_id),
-    )
-    conn.commit()
-    conn.close()
-    return next((item for item in list_pet_memories(limit=500) if item["id"] == memory_id), None)
-
-
-def delete_pet_memory_record(memory_id: int) -> bool:
-    """Delete a durable pet memory."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('DELETE FROM pet_memories WHERE id = ?', (memory_id,))
-    deleted = c.rowcount > 0
-    conn.commit()
-    conn.close()
-    return deleted
-
-
-def list_pet_capabilities(limit: int = 200) -> List[Dict[str, Any]]:
-    """Return learned capabilities for the pet."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        '''SELECT id, name, kind, path, description, source_run_id, status, created_at, updated_at
-           FROM pet_capabilities
-           ORDER BY updated_at DESC
-           LIMIT ?''',
-        (max(1, min(limit, 500)),),
-    )
-    rows = c.fetchall()
-    conn.close()
-    return [
-        {
-            "id": row[0],
-            "name": row[1],
-            "kind": row[2],
-            "path": row[3],
-            "description": row[4] or "",
-            "source_run_id": row[5],
-            "status": row[6],
-            "created_at": row[7],
-            "updated_at": row[8],
-        }
-        for row in rows
-    ]
-
-
-def ensure_unique_pet_capability_path(kind: str, name: str, source_filename: str) -> pathlib.Path:
-    """Choose a durable path for a promoted capability."""
-    ensure_pet_dirs()
-    bucket = {
-        "script": "capabilities/scripts",
-        "prompt": "capabilities/prompts",
-        "template": "capabilities/templates",
-        "workflow": "capabilities/workflows",
-    }.get(kind, "capabilities")
-    target_dir = get_pet_root() / bucket
-    target_dir.mkdir(parents=True, exist_ok=True)
-    source_name = sanitize_uploaded_filename(source_filename or name or "capability")
-    stem = pathlib.Path(source_name).stem or sanitize_uploaded_filename(name or "capability")
-    suffix = pathlib.Path(source_name).suffix
-    candidate = target_dir / f"{stem}{suffix}"
-    if not candidate.exists():
-        return candidate
-    for index in range(2, 1000):
-        candidate = target_dir / f"{stem}-{index}{suffix}"
-        if not candidate.exists():
-            return candidate
-    raise HTTPException(status_code=500, detail="Unable to allocate capability path")
-
-
-def promote_run_artifact(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy a run artifact into the pet home and register it as a capability."""
-    run_id = str(payload.get("run_id", "")).strip()
-    source_path = str(payload.get("source_path", "")).strip()
-    if not run_id or not source_path:
-        raise HTTPException(status_code=400, detail="run_id and source_path are required")
-
-    run_workspace = get_run_workspace_root(run_id, create=False)
-    source = (run_workspace / source_path).resolve()
-    if run_workspace not in source.parents:
-        raise HTTPException(status_code=403, detail="Source path escaped run workspace")
-    if not source.is_file():
-        raise HTTPException(status_code=404, detail="Source artifact not found")
-
-    target = ensure_unique_pet_capability_path(
-        str(payload.get("kind", "artifact")).strip() or "artifact",
-        str(payload.get("name", source.stem)).strip() or source.stem,
-        source.name,
-    )
-    shutil.copy2(source, target)
-    rel_target = target.relative_to(get_pet_root()).as_posix()
-    now = utcnow_iso()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        '''INSERT INTO pet_capabilities
-           (name, kind, path, description, source_run_id, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            str(payload.get("name", source.stem)).strip() or source.stem,
-            str(payload.get("kind", "artifact")).strip() or "artifact",
-            rel_target,
-            str(payload.get("description", "")).strip(),
-            run_id,
-            "active",
-            now,
-            now,
-        ),
-    )
-    capability_id = c.lastrowid
-    c.execute(
-        'UPDATE runs SET promoted_count = COALESCE(promoted_count, 0) + 1 WHERE id = ?',
-        (run_id,),
-    )
-    conn.commit()
-    conn.close()
-    capability = next((item for item in list_pet_capabilities(limit=500) if item["id"] == capability_id), None)
-    if not capability:
-        raise HTTPException(status_code=500, detail="Capability promotion failed")
-    return capability
-
-
-def update_pet_capability_record(capability_id: int, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Update capability metadata."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, description, status FROM pet_capabilities WHERE id = ?', (capability_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return None
-    name = str(payload.get("name", row[1])).strip() or row[1]
-    description = str(payload.get("description", row[2] or "")).strip() if payload.get("description") is not None else (row[2] or "")
-    status = str(payload.get("status", row[3])).strip() or row[3]
-    c.execute(
-        '''UPDATE pet_capabilities
-           SET name = ?, description = ?, status = ?, updated_at = ?
-           WHERE id = ?''',
-        (name, description, status, utcnow_iso(), capability_id),
-    )
-    conn.commit()
-    conn.close()
-    return next((item for item in list_pet_capabilities(limit=500) if item["id"] == capability_id), None)
-
-
-def delete_pet_capability_record(capability_id: int) -> bool:
-    """Delete a capability record and best-effort remove the backing file."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT path FROM pet_capabilities WHERE id = ?', (capability_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        return False
-    rel_path = row[0]
-    c.execute('DELETE FROM pet_capabilities WHERE id = ?', (capability_id,))
-    deleted = c.rowcount > 0
-    conn.commit()
-    conn.close()
-    target = (get_pet_root() / rel_path).resolve()
-    if target.exists() and get_pet_root() in target.parents:
-        try:
-            target.unlink()
-        except OSError:
-            pass
-    return deleted
-
-
-def summarize_pet_memories(message: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Select a few relevant memories to inject into the prompt."""
-    if limit is None:
-        limit = 2 if is_fast_profile_active() else 4
-    memories = list_pet_memories(limit=200)
-    if not memories:
-        return []
-    query_words = set(re.findall(r"[a-z0-9_+-]+", (message or "").lower()))
-    ranked = []
-    for memory in memories:
-        haystack = f"{memory['title']} {memory['content']} {memory['kind']}".lower()
-        overlap = len(query_words.intersection(set(re.findall(r"[a-z0-9_+-]+", haystack))))
-        score = (memory["importance"] / 100.0) + (0.35 if overlap else 0) + min(overlap, 4) * 0.08
-        ranked.append((score, memory))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return [memory for _, memory in ranked[:limit]]
-
-
-def summarize_pet_capabilities(limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return active capabilities for prompt injection."""
-    if limit is None:
-        limit = 4 if is_fast_profile_active() else 8
-    capabilities = [item for item in list_pet_capabilities(limit=200) if item.get("status") != "archived"]
-    return capabilities[:limit]
-
-
-def build_pet_prompt_block(message: str) -> str:
-    """Render persistent agent identity, memory, and capability context into the system prompt."""
-    profile = ensure_default_agent_profile()
-    if not profile:
-        return ""
-    memory_lines = summarize_pet_memories(message)
-    capability_lines = summarize_pet_capabilities()
-    fast_profile = is_fast_profile_active()
-    memory_limit = 120 if fast_profile else 220
-    capability_limit = 100 if fast_profile else 180
-    parts = [
-        f"You are {profile['name']}, a persistent local {profile['species']} agent on this server.",
-        "Profile:",
-        f"- Status: {profile['status']}",
-        "- Use durable artifacts when they help.",
-        "- Avoid destructive actions unless the user explicitly asks for them.",
-    ]
-    if profile.get("custom_backstory"):
-        parts.append(f"- Mission: {profile['custom_backstory']}")
-    if profile.get("system_prompt_suffix"):
-        parts.append(f"- Extra guidance: {profile['system_prompt_suffix']}")
-    if memory_lines:
-        parts.append("Relevant memory:")
-        parts.extend(f"- {item['title']}: {truncate_output(item['content'], memory_limit)}" for item in memory_lines)
-    if capability_lines:
-        parts.append("Capabilities:")
-        parts.extend(
-            f"- {item['name']}: {truncate_output(item['description'] or item['path'], capability_limit)}"
-            for item in capability_lines
-        )
-    return "\n".join(parts)
+def finalize_workflow_execution(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    assistant_message_id: Optional[int] = None,
+    final_outcome: str = "",
+    status: str = "completed",
+    error_text: str = "",
+) -> None:
+    """Compatibility shim for removed workflow persistence."""
+    del execution, assistant_message_id, final_outcome, status, error_text
 
 
 def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") -> pathlib.Path:
@@ -2267,14 +1090,6 @@ def validate_workspace_command(
             raise ValueError(f"command argument {index} references a path outside the workspace")
 
 
-def ensure_docker_control_enabled() -> None:
-    """Fail closed unless the operator explicitly enabled Docker control."""
-    if not DOCKER_CONTROL_ENABLED:
-        raise HTTPException(status_code=403, detail="Docker control is disabled on this server")
-    if not os.path.exists("/var/run/docker.sock"):
-        raise HTTPException(status_code=503, detail="Docker socket is not mounted")
-
-
 def delete_run_workspace(conversation_id: str):
     """Delete the run sandbox for a conversation if it exists."""
     run = get_run_record(conversation_id)
@@ -2333,13 +1148,7 @@ def recreate_database_file_for_reset(reason: BaseException) -> None:
 
 
 async def reset_application_state() -> None:
-    """Wipe persisted chat data, workspaces, pet artifacts, and transient runtime state."""
-    sessions = list(TERMINAL_SESSIONS.values())
-    TERMINAL_SESSIONS.clear()
-    TERMINAL_LOCKS.clear()
-    for session in sessions:
-        await _close_terminal_session(session)
-
+    """Wipe persisted chat data, workspaces, and transient runtime state."""
     for waiter in COMMAND_APPROVAL_WAITERS.values():
         future = waiter.get("future")
         if future and not future.done():
@@ -2356,13 +1165,9 @@ async def reset_application_state() -> None:
         c.execute('DELETE FROM document_sources')
         c.execute('DELETE FROM conversations')
         c.execute('DELETE FROM runs')
-        c.execute('DELETE FROM pet_memories')
-        c.execute('DELETE FROM pet_capabilities')
-        c.execute('DELETE FROM pet_events')
-        c.execute('DELETE FROM pet_profile')
         try:
             c.execute(
-                "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'document_chunks', 'document_sources', 'pet_memories', 'pet_capabilities', 'pet_events')"
+                "DELETE FROM sqlite_sequence WHERE name IN ('messages', 'document_chunks', 'document_sources')"
             )
         except sqlite3.OperationalError:
             pass
@@ -2389,12 +1194,8 @@ async def reset_application_state() -> None:
 
     reset_directory_contents(RUNS_ROOT_PATH)
     reset_directory_contents(WORKSPACE_ROOT_PATH)
-    reset_directory_contents(PET_ROOT_PATH)
     for kind in VOICE_EPHEMERAL_KINDS:
         reset_directory_contents(get_voice_dir(kind, create=True))
-
-    ensure_pet_dirs()
-    ensure_default_agent_profile()
 
 
 def format_workspace_path(path: pathlib.Path, workspace: pathlib.Path) -> str:
@@ -3610,12 +2411,9 @@ def build_filtered_tool_system_prompt(base_system_prompt: str, allowed_tools: Li
 
 
 def build_effective_system_prompt(base_system_prompt: str, user_message: str) -> str:
-    """Attach pet identity and long-term context to the active system prompt."""
-    pet_block = build_pet_prompt_block(user_message)
-    parts = [base_system_prompt.strip(), WORKSPACE_RESPONSE_TRUTHFULNESS_RULES]
-    if pet_block:
-        parts.append(pet_block)
-    return "\n\n".join(part for part in parts if part)
+    """Build the active system prompt for a turn."""
+    del user_message
+    return "\n\n".join(part for part in (base_system_prompt.strip(), WORKSPACE_RESPONSE_TRUTHFULNESS_RULES) if part)
 
 
 @dataclass
@@ -3796,17 +2594,6 @@ async def finalize_tool_loop_answer(
     cleaned = strip_unverified_workspace_write_claims(cleaned, tool_results)
     return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
 
-
-@dataclass
-class TerminalSession:
-    """Persistent PTY-backed shell session for a conversation workspace."""
-    conversation_id: str
-    workspace_path: pathlib.Path
-    process: asyncio.subprocess.Process
-    master_fd: int
-    reader_task: asyncio.Task
-
-
 @dataclass
 class FeatureFlags:
     """Per-request feature switches from the UI."""
@@ -3816,6 +2603,29 @@ class FeatureFlags:
     local_rag: bool = True
     web_search: bool = False
     allowed_commands: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PreparedTurnRequest:
+    """Normalized routing state for one user turn before execution starts."""
+    conversation_id: str
+    user_message_id: int
+    saved_user_message: str
+    effective_message: str
+    history: List[Dict[str, str]]
+    system_prompt: str
+    requested_mode: str
+    resolved_mode: str
+    features: FeatureFlags
+    slash_command: Optional[Dict[str, str]]
+    max_tokens: int
+    workspace_intent: str
+    enabled_tools: List[str]
+    auto_execute_workspace: bool
+    resume_saved_workspace: bool
+    plan_override_builder_steps: List[str]
+    promoted_to_planning: bool
+    assessment: TurnAssessment
 
 
 DIRECT_SLASH_COMMAND_ALIASES = {
@@ -4656,6 +3466,8 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
         return False
     if session.execution_requested or session.auto_execute:
         return False
+    if infer_explicit_planning_request(session.message):
+        return True
     return classify_workspace_intent(session.message) in {"focused_write", "broad_write"}
 
 
@@ -5241,22 +4053,13 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
 # ==================== vLLM Client (httpx) ====================
 
 def get_agent_llm_params() -> Dict[str, Any]:
-    """Return LLM inference parameters from the agent profile."""
-    profile = load_pet_profile()
-    if not profile:
-        return {
-            "temperature": 0.25,
-            "top_p": 0.95,
-            "frequency_penalty": 0.2,
-            "presence_penalty": 0.15,
-            "max_tokens": 4096,
-        }
+    """Return fixed default inference parameters for the local runtime."""
     return {
-        "temperature": profile.get("llm_temperature", 0.25),
-        "top_p": profile.get("llm_top_p", 0.95),
-        "frequency_penalty": profile.get("llm_frequency_penalty", 0.2),
-        "presence_penalty": profile.get("llm_presence_penalty", 0.15),
-        "max_tokens": profile.get("llm_max_tokens", 4096),
+        "temperature": 0.25,
+        "top_p": 0.95,
+        "frequency_penalty": 0.2,
+        "presence_penalty": 0.15,
+        "max_tokens": 4096,
     }
 
 async def vllm_chat_stream(messages: list, max_tokens: int = None, temperature: float = None):
@@ -5490,277 +4293,6 @@ def sync_active_profile_from_model_name(model_name: Optional[str]) -> str:
             logger.warning("Failed to persist custom model profile %s", model_name, exc_info=True)
     return "custom"
 
-
-async def docker_api_request(method: str, path: str, **kwargs) -> httpx.Response:
-    """Send a request to the local Docker API over the mounted socket."""
-    ensure_docker_control_enabled()
-    transport = httpx.AsyncHTTPTransport(uds="/var/run/docker.sock")
-    async with httpx.AsyncClient(transport=transport, timeout=30.0) as client:
-        return await client.request(method, f"http://localhost{path}", **kwargs)
-
-
-async def inspect_vllm_container() -> Dict[str, Any]:
-    """Inspect the current vLLM container definition."""
-    resp = await docker_api_request("GET", "/containers/vllm/json")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"Unable to inspect vLLM container (HTTP {resp.status_code})")
-    return resp.json()
-
-
-def summarize_vllm_container_state(container_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the dashboard-safe subset of Docker container state fields."""
-    state = container_info.get("State") or {}
-    return {
-        "status": state.get("Status"),
-        "running": bool(state.get("Running")),
-        "restarting": bool(state.get("Restarting")),
-        "exit_code": state.get("ExitCode"),
-        "error": state.get("Error"),
-        "oom_killed": bool(state.get("OOMKilled")),
-        "started_at": state.get("StartedAt"),
-        "finished_at": state.get("FinishedAt"),
-        "restart_count": container_info.get("RestartCount"),
-    }
-
-
-def decode_docker_log_stream(payload: bytes) -> str:
-    """Decode Docker's multiplexed stdout/stderr log stream into plain text."""
-    if not payload:
-        return ""
-    if len(payload) < 8 or payload[1:4] != b"\x00\x00\x00" or payload[0] not in {0, 1, 2, 3}:
-        return payload.decode("utf-8", errors="replace")
-
-    chunks: List[str] = []
-    cursor = 0
-    total = len(payload)
-    while cursor + 8 <= total:
-        header = payload[cursor:cursor + 8]
-        if header[1:4] != b"\x00\x00\x00":
-            return payload.decode("utf-8", errors="replace")
-        frame_size = struct.unpack(">I", header[4:8])[0]
-        cursor += 8
-        frame = payload[cursor:cursor + frame_size]
-        chunks.append(frame.decode("utf-8", errors="replace"))
-        cursor += frame_size
-    if cursor < total:
-        chunks.append(payload[cursor:].decode("utf-8", errors="replace"))
-    return "".join(chunks)
-
-
-def clean_vllm_log_line(line: str) -> str:
-    """Strip Docker/vLLM prefixes so error details are readable in the UI."""
-    cleaned = line.strip()
-    if not cleaned:
-        return ""
-    cleaned = re.sub(r"^\(APIServer pid=\d+\)\s*", "", cleaned)
-    cleaned = re.sub(r"^(?:INFO|WARNING|ERROR)\s+\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[[^\]]+\]\s*", "", cleaned)
-    return cleaned.strip()
-
-
-def extract_vllm_start_failure_detail(log_text: str) -> str:
-    """Pull the most useful startup failure line out of vLLM logs."""
-    lines = [clean_vllm_log_line(line) for line in (log_text or "").splitlines()]
-    lines = [line for line in lines if line]
-    if not lines:
-        return ""
-
-    preferred_needles = (
-        "does not recognize this architecture",
-        "Value error,",
-        "ValidationError:",
-        "RuntimeError:",
-        "ImportError:",
-        "ModuleNotFoundError:",
-        "No module named",
-        "No supported config format found",
-        "CUDA out of memory",
-        "OOM",
-        "Exception:",
-        "Error:",
-    )
-    for line in reversed(lines):
-        if any(needle in line for needle in preferred_needles):
-            if "Value error," in line:
-                return line.split("Value error,", 1)[1].strip()
-            return line
-
-    return " ".join(lines[-3:])[:600]
-
-
-async def fetch_vllm_container_logs(tail: int = 160) -> str:
-    """Fetch recent logs from the current vLLM container."""
-    try:
-        resp = await docker_api_request(
-            "GET",
-            "/containers/vllm/logs",
-            params={
-                "stdout": "1",
-                "stderr": "1",
-                "tail": str(max(1, tail)),
-            },
-        )
-    except Exception:
-        return ""
-    if resp.status_code != 200:
-        return ""
-    return decode_docker_log_stream(resp.content)
-
-
-async def get_vllm_start_failure() -> Optional[Dict[str, Any]]:
-    """Inspect the vLLM container for a clear startup failure."""
-    if not (DOCKER_CONTROL_ENABLED and os.path.exists("/var/run/docker.sock")):
-        return None
-    try:
-        container_info = await inspect_vllm_container()
-    except Exception:
-        return None
-
-    container_state = summarize_vllm_container_state(container_info)
-    status = str(container_state.get("status") or "").strip().lower()
-    restart_count_raw = container_state.get("restart_count")
-    restart_count = int(restart_count_raw) if isinstance(restart_count_raw, int) else 0
-    exit_code = container_state.get("exit_code")
-    detail = str(container_state.get("error") or "").strip()
-
-    if container_state.get("oom_killed"):
-        detail = detail or "The vLLM container was killed while starting, likely due to running out of memory."
-
-    should_fetch_logs = False
-    if status in {"dead", "exited"}:
-        should_fetch_logs = True
-    elif status == "restarting" and restart_count > 0:
-        should_fetch_logs = True
-    elif not container_state.get("running") and exit_code not in {None, 0}:
-        should_fetch_logs = True
-
-    logs = ""
-    if should_fetch_logs:
-        logs = await fetch_vllm_container_logs()
-        detail = extract_vllm_start_failure_detail(logs) or detail
-
-    if not should_fetch_logs and not detail:
-        return None
-
-    if not detail:
-        exit_suffix = f" (exit code {exit_code})" if exit_code not in {None, ""} else ""
-        detail = f"vLLM container is {status or 'unavailable'}{exit_suffix}."
-
-    return {
-        "detail": detail,
-        "container": container_state,
-        "logs": logs,
-    }
-
-
-async def wait_for_vllm_startup(
-    target_model_name: str,
-    *,
-    timeout_seconds: float = 25.0,
-    poll_interval: float = 1.0,
-) -> None:
-    """Wait for vLLM to either become healthy or fail clearly during startup."""
-    deadline = time.monotonic() + max(timeout_seconds, poll_interval)
-    while time.monotonic() < deadline:
-        if await vllm_health_check():
-            loaded_model_name = await fetch_loaded_model_name()
-            if not target_model_name or not loaded_model_name or loaded_model_name == target_model_name:
-                return
-
-        failure = await get_vllm_start_failure()
-        if failure:
-            raise HTTPException(status_code=500, detail=failure["detail"])
-
-        await asyncio.sleep(poll_interval)
-
-    failure = await get_vllm_start_failure()
-    if failure:
-        raise HTTPException(status_code=500, detail=failure["detail"])
-
-
-async def rollback_vllm_target(previous_profile: Dict[str, Any]) -> str:
-    """Restore the previously selected vLLM target after a failed switch."""
-    restore_key = str(previous_profile.get("key") or DEFAULT_MODEL_PROFILE)
-    restore_model_name = str(previous_profile.get("name") or get_active_model_name()).strip()
-    if not restore_model_name:
-        restore_key = DEFAULT_MODEL_PROFILE
-        restore_model_name = MODEL_PROFILES[restore_key]["name"]
-
-    logger.info("Rolling back vLLM to %s (%s)", restore_key, restore_model_name)
-    mark_model_load_started(restore_model_name, reason="rollback", profile_key=restore_key)
-    if restore_key == "custom":
-        await recreate_vllm_container("custom", model_name=restore_model_name)
-        persist_active_model_selection("custom", restore_model_name)
-    else:
-        await recreate_vllm_container(restore_key)
-        persist_active_model_selection(restore_key, None)
-    await wait_for_vllm_startup(restore_model_name, timeout_seconds=12.0)
-    return restore_model_name
-
-
-def build_vllm_create_payload(
-    container_info: Dict[str, Any],
-    profile_key: Optional[str] = None,
-    *,
-    model_name: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Clone the current vLLM container config and swap in the selected model command."""
-    config = container_info.get("Config", {})
-    host_config = container_info.get("HostConfig", {})
-    endpoint_config: Dict[str, Any] = {}
-    for network_name, network_data in (container_info.get("NetworkSettings", {}).get("Networks") or {}).items():
-        endpoint_entry: Dict[str, Any] = {}
-        aliases = network_data.get("Aliases")
-        if aliases:
-            endpoint_entry["Aliases"] = aliases
-        endpoint_config[network_name] = endpoint_entry
-
-    return {
-        "Image": container_info.get("Image") or config.get("Image"),
-        "Cmd": build_vllm_command(profile_key, model_name=model_name),
-        "Env": config.get("Env") or [],
-        "ExposedPorts": config.get("ExposedPorts") or {},
-        "Labels": config.get("Labels") or {},
-        "HostConfig": {
-            "Binds": host_config.get("Binds") or [],
-            "PortBindings": host_config.get("PortBindings") or {},
-            "RestartPolicy": host_config.get("RestartPolicy") or {},
-            "DeviceRequests": host_config.get("DeviceRequests") or [],
-            "AutoRemove": bool(host_config.get("AutoRemove")),
-            "ShmSize": host_config.get("ShmSize") or 0,
-        },
-        "NetworkingConfig": {
-            "EndpointsConfig": endpoint_config,
-        },
-    }
-
-
-async def recreate_vllm_container(profile_key: Optional[str] = None, *, model_name: Optional[str] = None):
-    """Hard-switch the vLLM container to the selected model profile or custom model."""
-    container_info = await inspect_vllm_container()
-
-    stop_resp = await docker_api_request("POST", "/containers/vllm/stop", params={"t": 10})
-    if stop_resp.status_code not in {204, 304}:
-        raise HTTPException(status_code=500, detail=f"Failed to stop vLLM (HTTP {stop_resp.status_code})")
-
-    delete_resp = await docker_api_request("DELETE", "/containers/vllm", params={"force": "true"})
-    if delete_resp.status_code not in {204, 404}:
-        raise HTTPException(status_code=500, detail=f"Failed to remove vLLM (HTTP {delete_resp.status_code})")
-
-    create_payload = build_vllm_create_payload(container_info, profile_key, model_name=model_name)
-    create_resp = await docker_api_request("POST", "/containers/create", params={"name": "vllm"}, json=create_payload)
-    if create_resp.status_code != 201:
-        detail = create_resp.text.strip() or f"HTTP {create_resp.status_code}"
-        raise HTTPException(status_code=500, detail=f"Failed to create switched vLLM container: {detail}")
-
-    container_id = create_resp.json().get("Id")
-    if not container_id:
-        raise HTTPException(status_code=500, detail="Docker did not return a container id for the switched vLLM")
-
-    start_resp = await docker_api_request("POST", f"/containers/{container_id}/start")
-    if start_resp.status_code != 204:
-        detail = start_resp.text.strip() or f"HTTP {start_resp.status_code}"
-        raise HTTPException(status_code=500, detail=f"Failed to start switched vLLM container: {detail}")
-
 # ==================== Database (SQLite file at DB_PATH) ====================
 
 FTS_TABLE = "messages_fts"
@@ -5902,34 +4434,6 @@ def init_db():
                       updated_at TEXT,
                       FOREIGN KEY(conversation_id) REFERENCES conversations(id))''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS pet_profile
-                     (id INTEGER PRIMARY KEY CHECK (id = 1),
-                      name TEXT NOT NULL,
-                      species TEXT NOT NULL DEFAULT 'agent',
-                      status TEXT NOT NULL DEFAULT 'active',
-                      theme_primary TEXT NOT NULL,
-                      theme_secondary TEXT NOT NULL,
-                      theme_accent TEXT NOT NULL,
-                      avatar_style TEXT NOT NULL DEFAULT 'agent',
-                      curious INTEGER NOT NULL DEFAULT 60,
-                      cautious INTEGER NOT NULL DEFAULT 60,
-                      playful INTEGER NOT NULL DEFAULT 40,
-                      talkative INTEGER NOT NULL DEFAULT 45,
-                      independent INTEGER NOT NULL DEFAULT 55,
-                      custom_backstory TEXT NOT NULL DEFAULT '',
-                      system_prompt_suffix TEXT NOT NULL DEFAULT '',
-                      created_at TEXT NOT NULL,
-                      updated_at TEXT NOT NULL,
-                      last_active_at TEXT,
-                      hunger INTEGER NOT NULL DEFAULT 35,
-                      energy INTEGER NOT NULL DEFAULT 65,
-                      last_fed_at TEXT,
-                      llm_temperature REAL NOT NULL DEFAULT 0.25,
-                      llm_top_p REAL NOT NULL DEFAULT 0.95,
-                      llm_frequency_penalty REAL NOT NULL DEFAULT 0.2,
-                      llm_presence_penalty REAL NOT NULL DEFAULT 0.15,
-                      llm_max_tokens INTEGER NOT NULL DEFAULT 4096)''')
-
         c.execute('''CREATE TABLE IF NOT EXISTS runs
                      (id TEXT PRIMARY KEY,
                       conversation_id TEXT UNIQUE NOT NULL,
@@ -5940,82 +4444,6 @@ def init_db():
                       ended_at TEXT,
                       summary TEXT NOT NULL DEFAULT '',
                       promoted_count INTEGER NOT NULL DEFAULT 0)''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS pet_memories
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      kind TEXT NOT NULL,
-                      title TEXT NOT NULL,
-                      content TEXT NOT NULL,
-                      importance INTEGER NOT NULL DEFAULT 50,
-                      source_run_id TEXT,
-                      created_at TEXT NOT NULL,
-                      updated_at TEXT NOT NULL)''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS pet_capabilities
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      name TEXT NOT NULL,
-                      kind TEXT NOT NULL,
-                      path TEXT NOT NULL,
-                      description TEXT NOT NULL DEFAULT '',
-                      source_run_id TEXT,
-                      status TEXT NOT NULL DEFAULT 'active',
-                      created_at TEXT NOT NULL,
-                      updated_at TEXT NOT NULL)''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS workflow_executions
-                     (id TEXT PRIMARY KEY,
-                      conversation_id TEXT NOT NULL,
-                      run_id TEXT NOT NULL,
-                      user_message_id INTEGER,
-                      assistant_message_id INTEGER,
-                      workflow_name TEXT NOT NULL,
-                      workflow_version TEXT NOT NULL DEFAULT '',
-                      router_version TEXT NOT NULL DEFAULT '',
-                      status TEXT NOT NULL DEFAULT 'running',
-                      started_at TEXT NOT NULL,
-                      ended_at TEXT,
-                      final_outcome TEXT NOT NULL DEFAULT '',
-                      error_text TEXT NOT NULL DEFAULT '',
-                      user_feedback TEXT NOT NULL DEFAULT 'neutral',
-                      tool_count INTEGER NOT NULL DEFAULT 0,
-                      artifact_paths_json TEXT NOT NULL DEFAULT '[]',
-                      route_metadata_json TEXT NOT NULL DEFAULT '{}',
-                      FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                      FOREIGN KEY(run_id) REFERENCES runs(id),
-                      FOREIGN KEY(user_message_id) REFERENCES messages(id),
-                      FOREIGN KEY(assistant_message_id) REFERENCES messages(id))''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS workflow_steps
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      execution_id TEXT NOT NULL,
-                      step_index INTEGER NOT NULL,
-                      step_name TEXT NOT NULL DEFAULT '',
-                      tool_name TEXT NOT NULL DEFAULT '',
-                      arguments_json TEXT NOT NULL DEFAULT '{}',
-                      result_ok INTEGER NOT NULL DEFAULT 0,
-                      result_summary TEXT NOT NULL DEFAULT '',
-                      result_json TEXT NOT NULL DEFAULT '{}',
-                      latency_ms INTEGER NOT NULL DEFAULT 0,
-                      auto_generated INTEGER NOT NULL DEFAULT 0,
-                      created_at TEXT NOT NULL,
-                      FOREIGN KEY(execution_id) REFERENCES workflow_executions(id))''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS workflow_evaluations
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      execution_id TEXT NOT NULL,
-                      evaluator TEXT NOT NULL,
-                      metric TEXT NOT NULL,
-                      score REAL,
-                      passed INTEGER NOT NULL DEFAULT 0,
-                      notes_json TEXT NOT NULL DEFAULT '{}',
-                      created_at TEXT NOT NULL,
-                      FOREIGN KEY(execution_id) REFERENCES workflow_executions(id))''')
-
-        c.execute('''CREATE TABLE IF NOT EXISTS pet_events
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      type TEXT NOT NULL,
-                      payload_json TEXT NOT NULL DEFAULT '{}',
-                      created_at TEXT NOT NULL)''')
 
         try:
             c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
@@ -6041,36 +4469,11 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-        for statement in (
-            'ALTER TABLE pet_profile ADD COLUMN hunger INTEGER NOT NULL DEFAULT 35',
-            'ALTER TABLE pet_profile ADD COLUMN energy INTEGER NOT NULL DEFAULT 65',
-            'ALTER TABLE pet_profile ADD COLUMN last_fed_at TEXT',
-            'ALTER TABLE pet_profile ADD COLUMN llm_temperature REAL NOT NULL DEFAULT 0.25',
-            'ALTER TABLE pet_profile ADD COLUMN llm_top_p REAL NOT NULL DEFAULT 0.95',
-            'ALTER TABLE pet_profile ADD COLUMN llm_frequency_penalty REAL NOT NULL DEFAULT 0.2',
-            'ALTER TABLE pet_profile ADD COLUMN llm_presence_penalty REAL NOT NULL DEFAULT 0.15',
-            'ALTER TABLE pet_profile ADD COLUMN llm_max_tokens INTEGER NOT NULL DEFAULT 4096',
-            'ALTER TABLE pet_profile ADD COLUMN affection INTEGER NOT NULL DEFAULT 50',
-            'ALTER TABLE pet_profile ADD COLUMN pets_today INTEGER NOT NULL DEFAULT 0',
-            'ALTER TABLE pet_profile ADD COLUMN last_pet_date TEXT',
-            'ALTER TABLE pet_profile ADD COLUMN streak INTEGER NOT NULL DEFAULT 0',
-            'ALTER TABLE pet_profile ADD COLUMN last_visit_date TEXT',
-        ):
-            try:
-                c.execute(statement)
-            except sqlite3.OperationalError:
-                pass
-
         try:
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_conversation_id ON runs(conversation_id)')
-            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_conversation_id ON workflow_executions(conversation_id, started_at)')
-            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_assistant_message_id ON workflow_executions(assistant_message_id)')
-            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_executions_feedback ON workflow_executions(user_feedback, workflow_name)')
-            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_steps_execution_id ON workflow_steps(execution_id, step_index)')
-            c.execute('CREATE INDEX IF NOT EXISTS idx_workflow_evaluations_execution_id ON workflow_evaluations(execution_id, created_at)')
         except sqlite3.OperationalError:
             pass
 
@@ -6119,82 +4522,6 @@ class RenameRequest(BaseModel):
     title: str
 
 
-class PetAdoptRequest(BaseModel):
-    name: str
-    theme_primary: str
-    theme_secondary: str
-    theme_accent: str
-    avatar_style: str = "agent"
-    curious: int = 60
-    cautious: int = 60
-    playful: int = 40
-    talkative: int = 45
-    independent: int = 55
-    custom_backstory: str = ""
-    system_prompt_suffix: str = ""
-    llm_temperature: float = 0.25
-    llm_top_p: float = 0.95
-    llm_frequency_penalty: float = 0.2
-    llm_presence_penalty: float = 0.15
-    llm_max_tokens: int = 4096
-
-
-class PetUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    status: Optional[str] = None
-    theme_primary: Optional[str] = None
-    theme_secondary: Optional[str] = None
-    theme_accent: Optional[str] = None
-    avatar_style: Optional[str] = None
-    curious: Optional[int] = None
-    cautious: Optional[int] = None
-    playful: Optional[int] = None
-    talkative: Optional[int] = None
-    independent: Optional[int] = None
-    custom_backstory: Optional[str] = None
-    system_prompt_suffix: Optional[str] = None
-    llm_temperature: Optional[float] = None
-    llm_top_p: Optional[float] = None
-    llm_frequency_penalty: Optional[float] = None
-    llm_presence_penalty: Optional[float] = None
-    llm_max_tokens: Optional[int] = None
-
-
-class PetFeedRequest(BaseModel):
-    kind: str = "snack"
-    note: str = ""
-    source_run_id: Optional[str] = None
-
-
-class PetMemoryCreateRequest(BaseModel):
-    kind: str
-    title: str
-    content: str
-    importance: int = 50
-    source_run_id: Optional[str] = None
-
-
-class PetMemoryUpdateRequest(BaseModel):
-    kind: Optional[str] = None
-    title: Optional[str] = None
-    content: Optional[str] = None
-    importance: Optional[int] = None
-
-
-class CapabilityPromoteRequest(BaseModel):
-    run_id: str
-    source_path: str
-    name: str
-    kind: str
-    description: str = ""
-
-
-class CapabilityUpdateRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-
-
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str
@@ -6213,30 +4540,6 @@ class FeedbackRequest(BaseModel):
 class WorkspaceFileUpdateRequest(BaseModel):
     path: str
     content: str
-
-
-class SwitchModelRequest(BaseModel):
-    profile: str
-
-
-class ModelDownloadRequest(BaseModel):
-    source: str
-    force: bool = False
-
-
-class ModelDeleteRequest(BaseModel):
-    model_id: str
-
-
-class ModelActivateRequest(BaseModel):
-    model_id: str
-
-
-class UiModelReadyRequest(BaseModel):
-    model_name: str
-    profile: str
-    composer_available: bool = False
-    websocket_connected: bool = False
 
 
 class VoiceSynthesisRequest(BaseModel):
@@ -6579,9 +4882,6 @@ def save_message(conv_id: str, role: str, content: str) -> int:
 
     conn.commit()
     conn.close()
-    touch_pet_activity()
-    if role == 'assistant':
-        feed_pet("task", note="completed_turn", source_run_id=build_run_id(conv_id))
     return message_id
 
 
@@ -6910,170 +5210,6 @@ async def get_voice_file(filename: str):
         pass
     return FileResponse(target, media_type=guess_audio_media_type(target), filename=target.name)
 
-
-@app.get("/api/pet")
-async def get_pet():
-    profile = ensure_default_agent_profile()
-    return {"exists": True, "pet": profile, "stats": get_pet_stats()}
-
-
-@app.post("/api/pet/adopt")
-async def adopt_pet(request: PetAdoptRequest):
-    profile = upsert_pet_profile(request.model_dump(), create=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("adopted", json.dumps({"name": profile["name"]}), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "pet": profile, "stats": get_pet_stats()}
-
-
-@app.patch("/api/pet")
-async def update_pet(request: PetUpdateRequest):
-    payload = {key: value for key, value in request.model_dump().items() if value is not None}
-    profile = upsert_pet_profile(payload, create=False)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("updated", json.dumps(payload), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "pet": profile, "stats": get_pet_stats()}
-
-
-@app.post("/api/pet/restart")
-async def restart_pet():
-    profile = ensure_default_agent_profile()
-    ensure_pet_dirs()
-    runtime_path = get_pet_root() / "state" / "runtime.json"
-    payload = {"status": "active", "last_restart_at": utcnow_iso(), "mode": "restart"}
-    with runtime_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE pet_profile SET status = ?, updated_at = ? WHERE id = 1', ("active", utcnow_iso()))
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("restart", json.dumps(payload), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "message": f"{profile['name']} restarted."}
-
-
-@app.post("/api/pet/respawn")
-async def respawn_pet():
-    profile = ensure_default_agent_profile()
-    ensure_pet_dirs()
-    runtime_path = get_pet_root() / "state" / "runtime.json"
-    payload = {"status": "active", "last_respawn_at": utcnow_iso(), "mode": "respawn"}
-    with runtime_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute('UPDATE pet_profile SET status = ?, updated_at = ? WHERE id = 1', ("active", utcnow_iso()))
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("respawn", json.dumps(payload), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "message": f"{profile['name']} runtime reset."}
-
-
-@app.post("/api/pet/feed")
-async def feed_pet_route(request: PetFeedRequest):
-    profile = feed_pet(request.kind, request.note, request.source_run_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Agent profile unavailable")
-    return {
-        "status": "success",
-        "pet": profile,
-        "stats": get_pet_stats(),
-        "message": f"{profile['name']} enjoyed a {request.kind}.",
-    }
-
-
-@app.get("/api/pet/memories")
-async def get_pet_memories():
-    return {"memories": list_pet_memories()}
-
-
-@app.post("/api/pet/memories")
-async def create_memory(request: PetMemoryCreateRequest):
-    memory = create_pet_memory(request.model_dump())
-    profile = feed_pet("knowledge", note=memory.get("title", ""), source_run_id=memory.get("source_run_id"))
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("memory_added", json.dumps({"id": memory.get("id"), "title": memory.get("title")}), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "memory": memory, "pet": profile, "stats": get_pet_stats()}
-
-
-@app.patch("/api/pet/memories/{memory_id}")
-async def update_memory(memory_id: int, request: PetMemoryUpdateRequest):
-    memory = update_pet_memory_record(memory_id, request.model_dump())
-    if not memory:
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return {"status": "success", "memory": memory}
-
-
-@app.delete("/api/pet/memories/{memory_id}")
-async def delete_memory(memory_id: int):
-    if not delete_pet_memory_record(memory_id):
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return {"status": "success"}
-
-
-@app.get("/api/pet/capabilities")
-async def get_pet_capability_list():
-    return {"capabilities": list_pet_capabilities()}
-
-
-@app.post("/api/pet/capabilities/promote")
-async def promote_capability(request: CapabilityPromoteRequest):
-    capability = promote_run_artifact(request.model_dump())
-    profile = feed_pet("capability", note=capability.get("name", ""), source_run_id=capability.get("source_run_id"))
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        'INSERT INTO pet_events (type, payload_json, created_at) VALUES (?, ?, ?)',
-        ("capability_promoted", json.dumps({"id": capability.get("id"), "name": capability.get("name")}), utcnow_iso()),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "success", "capability": capability, "pet": profile, "stats": get_pet_stats()}
-
-
-@app.patch("/api/pet/capabilities/{capability_id}")
-async def update_capability(capability_id: int, request: CapabilityUpdateRequest):
-    capability = update_pet_capability_record(capability_id, request.model_dump())
-    if not capability:
-        raise HTTPException(status_code=404, detail="Capability not found")
-    return {"status": "success", "capability": capability}
-
-
-@app.delete("/api/pet/capabilities/{capability_id}")
-async def delete_capability(capability_id: int):
-    if not delete_pet_capability_record(capability_id):
-        raise HTTPException(status_code=404, detail="Capability not found")
-    return {"status": "success"}
-
-@app.get("/api/pet/bond")
-async def get_bond():
-    ensure_default_agent_profile()
-    return get_pet_bond()
-
-
-@app.post("/api/pet/bond/pet")
-async def pet_the_dog():
-    ensure_default_agent_profile()
-    return register_pet_action()
-
-
 @app.get("/api/conversations")
 async def get_conversations():
     try:
@@ -7231,69 +5367,6 @@ async def search_chats(query: str):
         return {'results': results, 'count': len(results)}
     except Exception as e:
         return {'results': [], 'count': 0}
-
-@app.post("/api/execute-code")
-async def execute_code(request: dict):
-    if not EXECUTE_CODE_ENABLED:
-        raise HTTPException(status_code=403, detail="Ad-hoc code execution is disabled on this server")
-
-    code = request.get('code', '').strip()
-    language = request.get('language', 'python').lower()
-    conversation_id = request.get('conversation_id', '').strip()
-    workspace_path_raw = request.get('path', '').strip()
-
-    if not code:
-        raise HTTPException(status_code=400, detail="No code provided")
-    if len(code) > 10000:
-        raise HTTPException(status_code=400, detail="Code too long (max 10KB)")
-
-    try:
-        if language == 'python':
-            import tempfile
-
-            workspace_dir: Optional[pathlib.Path] = None
-            temp_dir = None
-            if conversation_id:
-                workspace_dir = resolve_workspace_relative_path(conversation_id, workspace_path_raw)
-                if workspace_dir.is_file():
-                    workspace_dir = workspace_dir.parent
-                workspace_dir.mkdir(parents=True, exist_ok=True)
-                temp_dir = str(workspace_dir)
-
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=temp_dir) as f:
-                f.write(code)
-                temp_file = f.name
-
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    'python3', temp_file,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(workspace_dir) if workspace_dir else None,
-                    env={**os.environ, 'PYTHONPATH': ''}
-                )
-
-                try:
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
-                    return {
-                        'success': process.returncode == 0,
-                        'stdout': stdout.decode('utf-8', errors='replace'),
-                        'stderr': stderr.decode('utf-8', errors='replace'),
-                        'returncode': process.returncode
-                    }
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                    return {'success': False, 'error': 'Code execution timed out (5 second limit)'}
-            finally:
-                try:
-                    os.unlink(temp_file)
-                except:
-                    pass
-        else:
-            return {'success': False, 'error': f'Unsupported language: {language}. Use Python.'}
-    except Exception as e:
-        return {'success': False, 'error': f'Execution error: {str(e)}'}
 
 @app.get("/api/files/list")
 async def list_files(path: str = "."):
@@ -8200,120 +6273,6 @@ async def workspace_run_command_result(
         "returncode": process.returncode,
         "cwd": format_workspace_path(cwd_path, workspace),
     }
-
-
-async def _send_terminal_json(websocket: WebSocket, payload: Dict[str, Any]) -> None:
-    """Best-effort terminal websocket send."""
-    try:
-        await websocket.send_json(payload)
-    except Exception:
-        pass
-
-
-async def _stream_terminal_output(websocket: WebSocket, master_fd: int) -> None:
-    """Forward PTY output into the browser terminal."""
-    while True:
-        try:
-            chunk = await asyncio.to_thread(os.read, master_fd, 4096)
-        except OSError:
-            break
-        if not chunk:
-            break
-        await _send_terminal_json(
-            websocket,
-            {
-                "type": "terminal_output",
-                "content": chunk.decode("utf-8", errors="replace"),
-            },
-        )
-
-
-async def _close_terminal_session(session: Optional[TerminalSession]) -> None:
-    """Terminate and dispose a PTY-backed terminal session."""
-    if not session:
-        return
-
-    if session.reader_task and not session.reader_task.done():
-        session.reader_task.cancel()
-        try:
-            await session.reader_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-    try:
-        os.close(session.master_fd)
-    except OSError:
-        pass
-
-    if session.process.returncode is None:
-        try:
-            session.process.terminate()
-            await asyncio.wait_for(session.process.wait(), timeout=1.0)
-        except Exception:
-            try:
-                session.process.kill()
-                await session.process.wait()
-            except Exception:
-                pass
-
-
-def _resize_terminal_session(session: TerminalSession, cols: int, rows: int) -> None:
-    """Propagate browser terminal dimensions into the PTY."""
-    safe_cols = max(20, min(int(cols), 500))
-    safe_rows = max(5, min(int(rows), 200))
-    winsize = struct.pack("HHHH", safe_rows, safe_cols, 0, 0)
-    fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, winsize)
-
-
-async def _start_terminal_session(conversation_id: str, websocket: WebSocket) -> TerminalSession:
-    """Create a new interactive shell session rooted in the workspace."""
-    workspace_path = get_workspace_path(conversation_id)
-    shell_path = os.getenv("SHELL", "").strip() or "/bin/bash"
-    if not pathlib.Path(shell_path).exists():
-        shell_path = "/bin/sh"
-
-    master_fd, slave_fd = pty.openpty()
-    process = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            shell_path,
-            "-i",
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            cwd=str(workspace_path),
-            env={
-                **os.environ,
-                "TERM": "xterm-256color",
-                "PYTHONPATH": "",
-            },
-            start_new_session=True,
-        )
-    finally:
-        try:
-            os.close(slave_fd)
-        except OSError:
-            pass
-
-    reader_task = asyncio.create_task(_stream_terminal_output(websocket, master_fd))
-    session = TerminalSession(
-        conversation_id=conversation_id,
-        workspace_path=workspace_path,
-        process=process,
-        master_fd=master_fd,
-        reader_task=reader_task,
-    )
-    await _send_terminal_json(
-        websocket,
-        {
-            "type": "terminal_status",
-            "content": f"Shell connected in {workspace_path.name or '.'}",
-        },
-    )
-    return session
-
 
 def conversation_search_history_result(
     conversation_id: str,
@@ -10124,307 +8083,6 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     return bool(words & WEB_SEARCH_HINTS)
 
 
-def choose_turn_workflow_name(
-    *,
-    slash_command: Optional[Dict[str, str]] = None,
-    mode: str = "normal",
-    auto_execute_workspace: bool = False,
-    enabled_tools: Optional[List[str]] = None,
-) -> str:
-    """Map the chosen route to a compact workflow label for later analysis."""
-    normalized_mode = str(mode or "normal").strip().lower()
-    tools = [str(name or "").strip() for name in (enabled_tools or []) if str(name or "").strip()]
-
-    if slash_command:
-        slash_name = normalize_direct_slash_command(slash_command.get("name", "")) or "unknown"
-        return f"slash_{slash_name}"
-    if normalized_mode == "deep" or auto_execute_workspace:
-        return "deep_orchestrated"
-    if "workspace.render" in tools:
-        return "normal_render_tool_loop"
-    if any(name.startswith("web.") for name in tools):
-        return "normal_web_tool_loop"
-    if any(name.startswith("workspace.") or name == "spreadsheet.describe" for name in tools):
-        return "normal_workspace_tool_loop"
-    if "conversation.search_history" in tools:
-        return "normal_history_tool_loop"
-    if tools:
-        return "normal_tool_loop"
-    return "direct_answer"
-
-
-def build_turn_route_metadata(
-    *,
-    mode: str,
-    requested_mode: str,
-    workspace_intent: str,
-    enabled_tools: List[str],
-    auto_execute_workspace: bool,
-    slash_command: Optional[Dict[str, str]] = None,
-    learned_router: Optional[Dict[str, Any]] = None,
-    learned_tool_policy: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Capture deterministic routing facts for offline workflow analysis."""
-    metadata: Dict[str, Any] = {
-        "mode": str(mode or "normal"),
-        "requested_mode": str(requested_mode or "normal"),
-        "workspace_intent": str(workspace_intent or "none"),
-        "enabled_tools": list(enabled_tools or []),
-        "auto_execute_workspace": bool(auto_execute_workspace),
-    }
-    if slash_command:
-        metadata["slash_command"] = {
-            "name": normalize_direct_slash_command(slash_command.get("name", "")) or "",
-            "raw_name": str(slash_command.get("raw_name", "")).strip().lower(),
-        }
-    if learned_router:
-        metadata["learned_router"] = learned_router
-    if learned_tool_policy:
-        metadata["learned_tool_policy"] = learned_tool_policy
-    return metadata
-
-
-def get_learned_router_model() -> Optional[Dict[str, Any]]:
-    """Load the optional learned router model with a small mtime cache."""
-    if not LEARNED_ROUTER_ENABLED:
-        return None
-
-    model_path = pathlib.Path(WORKFLOW_ROUTER_MODEL_PATH)
-    if not model_path.exists():
-        return None
-
-    try:
-        model_mtime = model_path.stat().st_mtime
-    except OSError:
-        return None
-
-    cached_path = str(LEARNED_ROUTER_CACHE.get("path", ""))
-    cached_mtime = LEARNED_ROUTER_CACHE.get("mtime")
-    if (
-        cached_path == str(model_path)
-        and cached_mtime == model_mtime
-        and LEARNED_ROUTER_CACHE.get("model") is not None
-    ):
-        return LEARNED_ROUTER_CACHE.get("model")
-
-    try:
-        model = load_workflow_router_model(model_path)
-    except Exception as exc:
-        if not LEARNED_ROUTER_CACHE.get("load_failed"):
-            logger.warning("Failed to load learned router model from %s: %s", model_path, exc)
-        LEARNED_ROUTER_CACHE.update({
-            "path": str(model_path),
-            "mtime": model_mtime,
-            "model": None,
-            "load_failed": True,
-        })
-        return None
-
-    LEARNED_ROUTER_CACHE.update({
-        "path": str(model_path),
-        "mtime": model_mtime,
-        "model": model,
-        "load_failed": False,
-    })
-    return model
-
-
-def get_learned_tool_policy_model() -> Optional[Dict[str, Any]]:
-    """Load the optional learned tool-policy model with a small mtime cache."""
-    if not LEARNED_TOOL_POLICY_ENABLED:
-        return None
-
-    model_path = pathlib.Path(TOOL_POLICY_MODEL_PATH)
-    if not model_path.exists():
-        return None
-
-    try:
-        model_mtime = model_path.stat().st_mtime
-    except OSError:
-        return None
-
-    cached_path = str(LEARNED_TOOL_POLICY_CACHE.get("path", ""))
-    cached_mtime = LEARNED_TOOL_POLICY_CACHE.get("mtime")
-    if (
-        cached_path == str(model_path)
-        and cached_mtime == model_mtime
-        and LEARNED_TOOL_POLICY_CACHE.get("model") is not None
-    ):
-        return LEARNED_TOOL_POLICY_CACHE.get("model")
-
-    try:
-        model = load_workflow_router_model(model_path)
-    except Exception as exc:
-        if not LEARNED_TOOL_POLICY_CACHE.get("load_failed"):
-            logger.warning("Failed to load learned tool policy model from %s: %s", model_path, exc)
-        LEARNED_TOOL_POLICY_CACHE.update({
-            "path": str(model_path),
-            "mtime": model_mtime,
-            "model": None,
-            "load_failed": True,
-        })
-        return None
-
-    LEARNED_TOOL_POLICY_CACHE.update({
-        "path": str(model_path),
-        "mtime": model_mtime,
-        "model": model,
-        "load_failed": False,
-    })
-    return model
-
-
-def resolve_learned_router_mode(
-    message: str,
-    history: List[Dict[str, str]],
-    requested_mode: str,
-    slash_command: Optional[Dict[str, str]],
-) -> tuple[str, Dict[str, Any]]:
-    """Optionally let a trained router upgrade a normal turn into deep mode."""
-    normalized_requested_mode = str(requested_mode or "normal").strip().lower() or "normal"
-    decision: Dict[str, Any] = {
-        "enabled": bool(LEARNED_ROUTER_ENABLED),
-        "requested_mode": normalized_requested_mode,
-        "resolved_mode": normalized_requested_mode,
-        "applied": False,
-        "reason": "",
-    }
-
-    if slash_command:
-        decision["reason"] = "slash_command"
-        return normalized_requested_mode, decision
-    if normalized_requested_mode == "deep":
-        decision["reason"] = "explicit_deep"
-        return normalized_requested_mode, decision
-    if not LEARNED_ROUTER_ENABLED:
-        decision["reason"] = "disabled"
-        return normalized_requested_mode, decision
-    if request_is_about_limitations(message):
-        decision["reason"] = "limitations_request"
-        return normalized_requested_mode, decision
-
-    model = get_learned_router_model()
-    if not model:
-        decision["reason"] = "model_unavailable"
-        decision["model_path"] = WORKFLOW_ROUTER_MODEL_PATH
-        return normalized_requested_mode, decision
-
-    prediction = predict_workflow_router(model, history, message, top_k=3)
-    decision.update({
-        "model_path": WORKFLOW_ROUTER_MODEL_PATH,
-        "model_schema_version": str(model.get("schema_version", "")),
-        "predicted_workflow": str(prediction.get("label", "")),
-        "confidence": round(float(prediction.get("confidence", 0.0)), 4),
-        "top_labels": prediction.get("top_labels", []),
-        "tokens_used": int(prediction.get("tokens_used", 0)),
-    })
-
-    if decision["predicted_workflow"] != "deep_orchestrated":
-        decision["reason"] = "predicted_non_deep"
-        return normalized_requested_mode, decision
-    if float(prediction.get("confidence", 0.0)) < LEARNED_ROUTER_MIN_CONFIDENCE:
-        decision["reason"] = "low_confidence"
-        return normalized_requested_mode, decision
-
-    decision["applied"] = True
-    decision["reason"] = "predicted_deep"
-    decision["resolved_mode"] = "deep"
-    logger.info(
-        "Learned router upgraded turn to deep mode (confidence=%.3f, message=%r)",
-        float(prediction.get("confidence", 0.0)),
-        str(message or "")[:160],
-    )
-    return "deep", decision
-
-
-def learned_tool_policy_tools_for_label(label: str, features: FeatureFlags) -> List[str]:
-    """Map a tool-policy label to a safe tool subset allowed for this turn."""
-    normalized = str(label or "").strip()
-    if normalized == "workspace_read":
-        return allowed_workspace_tools(features, include_write=False, include_render=False) if features.agent_tools else []
-    if normalized == "history_search":
-        return ["conversation.search_history"] if features.local_rag else []
-    if normalized == "web_search":
-        return ["web.search", "web.fetch_page"] if features.web_search else []
-    return []
-
-
-def resolve_learned_tool_policy(
-    message: str,
-    history: List[Dict[str, str]],
-    features: FeatureFlags,
-    enabled_tools: List[str],
-    slash_command: Optional[Dict[str, str]],
-) -> tuple[List[str], Dict[str, Any]]:
-    """Optionally add safe read-only tools when heuristics chose none."""
-    decision: Dict[str, Any] = {
-        "enabled": bool(LEARNED_TOOL_POLICY_ENABLED),
-        "applied": False,
-        "reason": "",
-        "resolved_tools": list(enabled_tools),
-    }
-
-    if slash_command:
-        decision["reason"] = "slash_command"
-        return enabled_tools, decision
-    if enabled_tools:
-        decision["reason"] = "heuristics_selected_tools"
-        return enabled_tools, decision
-    if not LEARNED_TOOL_POLICY_ENABLED:
-        decision["reason"] = "disabled"
-        return enabled_tools, decision
-    if request_is_about_limitations(message):
-        decision["reason"] = "limitations_request"
-        return enabled_tools, decision
-
-    model = get_learned_tool_policy_model()
-    if not model:
-        decision["reason"] = "model_unavailable"
-        decision["model_path"] = TOOL_POLICY_MODEL_PATH
-        return enabled_tools, decision
-
-    prediction = predict_workflow_router(model, history, message, top_k=3)
-    label = str(prediction.get("label", "")).strip()
-    decision.update({
-        "model_path": TOOL_POLICY_MODEL_PATH,
-        "model_schema_version": str(model.get("schema_version", "")),
-        "predicted_label": label,
-        "confidence": round(float(prediction.get("confidence", 0.0)), 4),
-        "top_labels": prediction.get("top_labels", []),
-        "tokens_used": int(prediction.get("tokens_used", 0)),
-    })
-
-    if label in {"", "no_tool", "workspace_write", "workspace_command", "workspace_render"}:
-        decision["reason"] = "no_safe_runtime_mapping"
-        return enabled_tools, decision
-    if float(prediction.get("confidence", 0.0)) < LEARNED_TOOL_POLICY_MIN_CONFIDENCE:
-        decision["reason"] = "low_confidence"
-        return enabled_tools, decision
-
-    suggested_tools = learned_tool_policy_tools_for_label(label, features)
-    if not suggested_tools:
-        decision["reason"] = "tools_not_allowed"
-        return enabled_tools, decision
-
-    merged_tools: List[str] = []
-    for tool_name in list(enabled_tools) + list(suggested_tools):
-        if tool_name not in merged_tools:
-            merged_tools.append(tool_name)
-
-    decision["applied"] = True
-    decision["reason"] = "predicted_safe_tools"
-    decision["suggested_tools"] = list(suggested_tools)
-    decision["resolved_tools"] = list(merged_tools)
-    logger.info(
-        "Learned tool policy added tools %s (label=%s, confidence=%.3f, message=%r)",
-        suggested_tools,
-        label,
-        float(prediction.get("confidence", 0.0)),
-        str(message or "")[:160],
-    )
-    return merged_tools, decision
-
-
 def direct_response_tool_recovery_candidates(
     conversation_id: str,
     message: str,
@@ -11161,6 +8819,185 @@ async def deep_review(session: DeepSession) -> str:
     await persist_task_state(session)
     return session.draft_response
 
+
+def create_deep_session(
+    *,
+    websocket: WebSocket,
+    conversation_id: str,
+    message: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    workspace_enabled: bool,
+    task_request: Optional[str] = None,
+    execution_requested: bool = False,
+    auto_execute: bool = False,
+    plan_override_builder_steps: Optional[List[str]] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> DeepSession:
+    """Create a deep-session object with the shared defaults used across entry points."""
+    return DeepSession(
+        websocket=websocket,
+        conversation_id=conversation_id,
+        message=message,
+        task_request=task_request or message,
+        history=history,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens,
+        features=features,
+        context=build_recent_context(history),
+        workspace_enabled=workspace_enabled,
+        execution_requested=execution_requested,
+        auto_execute=auto_execute,
+        plan_override_builder_steps=normalize_plan_override_steps(plan_override_builder_steps),
+        workflow_execution=workflow_execution,
+    )
+
+
+async def apply_deep_session_plan_override(session: DeepSession) -> bool:
+    """Apply any edited builder-step overrides onto a restored deep plan."""
+    if not session.plan or not session.plan_override_builder_steps:
+        return False
+    previous_steps = [
+        str(step).strip()
+        for step in session.plan.get("builder_steps", [])
+        if str(step).strip()
+    ]
+    session.plan = apply_plan_builder_step_override(session.plan, session.plan_override_builder_steps)
+    if previous_steps != session.plan.get("builder_steps", []):
+        await send_assistant_note(
+            session.websocket,
+            "Updated the saved build steps from the plan card before execution.",
+        )
+        return True
+    return False
+
+
+async def bootstrap_deep_session(
+    session: DeepSession,
+    *,
+    resume_task_state_allowed: bool = True,
+) -> None:
+    """Run the shared confirmation/resume/inspect bootstrap for deep sessions."""
+    try:
+        await deep_confirm_understanding(session)
+    except Exception as exc:
+        logger.warning("Deep mode confirmation failed, continuing: %s", exc)
+
+    if resume_task_state_allowed:
+        try:
+            await maybe_resume_task_state(session)
+        except Exception as exc:
+            logger.warning("Deep mode resume failed, continuing fresh: %s", exc)
+
+    await apply_deep_session_plan_override(session)
+    await deep_inspect_workspace(session)
+
+
+async def run_deep_plan_preview_flow(session: DeepSession) -> str:
+    """Build and publish the current deep plan preview."""
+    await deep_decompose(session, preview_only=True)
+    await send_plan_ready(session.websocket, session.plan, format_deep_execution_prompt(session.plan))
+    return render_deep_plan_preview(session.plan)
+
+
+async def run_deep_execution_flow(
+    session: DeepSession,
+    *,
+    requires_existing_plan: bool = False,
+    missing_plan_message: str = "I couldn't find a saved plan to execute in this chat. Ask me to generate the plan again first.",
+    blocked_write_renderer: Optional[Callable[[DeepSession], str]] = None,
+) -> str:
+    """Run the shared deep plan/build/verify/review pipeline."""
+    decision = decide_deep_route(
+        DeepRouteRequest(
+            requires_existing_plan=requires_existing_plan,
+            has_plan=bool(session.plan),
+            should_preview_plan=False,
+            execution_requested=session.execution_requested,
+            auto_execute=session.auto_execute,
+            workspace_write=session.features.workspace_write,
+        )
+    )
+    if decision.action == "missing_plan":
+        return missing_plan_message
+
+    await deep_decompose(session)
+    logger.info("Deep mode execution strategy: %s", session.plan.get("strategy", "parallel subtasks"))
+
+    decision = decide_deep_route(
+        DeepRouteRequest(
+            requires_existing_plan=False,
+            has_plan=bool(session.plan),
+            should_preview_plan=False,
+            execution_requested=session.execution_requested,
+            auto_execute=session.auto_execute,
+            workspace_write=session.features.workspace_write,
+        )
+    )
+    if decision.action == "blocked_write":
+        await send_plan_ready(session.websocket, session.plan, format_deep_execution_prompt(session.plan))
+        renderer = blocked_write_renderer or (lambda current_session: render_saved_plan_write_access_message(current_session.plan))
+        return renderer(session)
+
+    build_result = await deep_build_workspace(session)
+    if build_result.needs_user_confirmation:
+        return build_result.summary
+    await deep_parallel_solve(session)
+    await deep_verify(session)
+    return await deep_review(session)
+
+
+async def maybe_refine_deep_response(
+    session: DeepSession,
+    draft_response: str,
+) -> str:
+    """Run the optional critique/refinement pass for deep-mode responses."""
+    if not DEEP_CRITIQUE_ENABLED or is_fast_profile_active():
+        return draft_response
+
+    await send_activity_event(
+        session.websocket,
+        "verify",
+        "Review",
+        "Reviewing the draft.",
+    )
+    critique = await critique_response(session.task_request or session.message, draft_response)
+    if critique["pass"]:
+        return draft_response
+
+    issues = critique["issues"] or "Tighten correctness, completeness, and structure."
+    logger.info("Deep mode critique requested refinement: %s", issues)
+    await send_activity_event(
+        session.websocket,
+        "synthesize",
+        "Refine",
+        "Refining the draft.",
+    )
+
+    refine_messages = [
+        {"role": "system", "content": REFINE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"User's question:\n{session.task_request or session.message}\n\n"
+                f"Current draft:\n{draft_response}\n\n"
+                f"Issues to fix:\n{issues}"
+            ),
+        },
+    ]
+    refined = await vllm_chat_complete(refine_messages, max_tokens=session.max_tokens, temperature=0.15)
+    refined_response = strip_stream_special_tokens(refined)
+
+    follow_up = await critique_response(session.task_request or session.message, refined_response)
+    if follow_up["pass"]:
+        return refined_response
+
+    logger.info("Deep mode refined draft still failed critique, returning refined version: %s", follow_up["issues"])
+    return refined_response
+
+
 # ==================== WebSocket Handlers ====================
 
 async def orchestrated_chat(
@@ -11183,16 +9020,14 @@ async def orchestrated_chat(
         "Choosing the execution path.",
     )
 
-    session = DeepSession(
+    session = create_deep_session(
         websocket=websocket,
         conversation_id=conversation_id,
         message=message,
-        task_request=message,
         history=history,
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=features,
-        context=build_recent_context(history),
         workspace_enabled=(
             auto_execute
             or should_resume_saved_workspace_task(conversation_id, message, features)
@@ -11219,96 +9054,30 @@ async def orchestrated_chat(
         ),
     )
 
-    try:
-        await deep_confirm_understanding(session)
-    except Exception as e:
-        logger.warning("Deep mode confirmation failed, continuing: %s", e)
+    await bootstrap_deep_session(session, resume_task_state_allowed=True)
 
-    try:
-        await maybe_resume_task_state(session)
-    except Exception as e:
-        logger.warning("Deep mode resume failed, continuing fresh: %s", e)
+    decision = decide_deep_route(
+        DeepRouteRequest(
+            requires_existing_plan=session.execution_requested,
+            has_plan=bool(session.plan),
+            should_preview_plan=should_preview_deep_plan(session),
+            execution_requested=session.execution_requested,
+            auto_execute=session.auto_execute,
+            workspace_write=session.features.workspace_write,
+        )
+    )
 
-    if session.plan and session.plan_override_builder_steps:
-        previous_steps = [
-            str(step).strip()
-            for step in session.plan.get("builder_steps", [])
-            if str(step).strip()
-        ]
-        session.plan = apply_plan_builder_step_override(session.plan, session.plan_override_builder_steps)
-        if previous_steps != session.plan.get("builder_steps", []):
-            await send_assistant_note(
-                session.websocket,
-                "Updated the saved build steps from the plan card before execution.",
-            )
-
-    await deep_inspect_workspace(session)
-
-    if session.execution_requested and not session.plan:
-        return "I couldn't find a saved plan to execute in this chat. Ask me to generate the plan again first."
-
-    if should_preview_deep_plan(session):
-        await deep_decompose(session, preview_only=True)
-        await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
-        return render_deep_plan_preview(session.plan)
-
-    if session.execution_requested or session.auto_execute:
-        await deep_decompose(session)
-        logger.info("Deep mode execution strategy: %s", session.plan.get("strategy", "parallel subtasks"))
-        if not session.features.workspace_write:
-            await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
-            return render_saved_plan_write_access_message(session.plan)
-        build_result = await deep_build_workspace(session)
-        if build_result.needs_user_confirmation:
-            return build_result.summary
-        await deep_parallel_solve(session)
-        await deep_verify(session)
-        draft_response = await deep_review(session)
+    if decision.action == "preview_plan":
+        draft_response = await run_deep_plan_preview_flow(session)
+    elif decision.action in {"execute_plan", "blocked_write", "missing_plan"}:
+        draft_response = await run_deep_execution_flow(
+            session,
+            requires_existing_plan=session.execution_requested,
+        )
     else:
         draft_response = await deep_answer_directly(session)
 
-    if not DEEP_CRITIQUE_ENABLED or is_fast_profile_active():
-        return draft_response
-
-    await send_activity_event(
-        websocket,
-        "verify",
-        "Review",
-        "Reviewing the draft.",
-    )
-    critique = await critique_response(session.task_request or message, draft_response)
-    if critique["pass"]:
-        return draft_response
-
-    issues = critique["issues"] or "Tighten correctness, completeness, and structure."
-    logger.info("Deep mode critique requested refinement: %s", issues)
-    await send_activity_event(
-        websocket,
-        "synthesize",
-        "Refine",
-        "Refining the draft.",
-    )
-
-    refine_messages = [
-        {"role": "system", "content": REFINE_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"User's question:\n{session.task_request or message}\n\n"
-                f"Current draft:\n{draft_response}\n\n"
-                f"Issues to fix:\n{issues}"
-            ),
-        },
-    ]
-    refined = await vllm_chat_complete(refine_messages, max_tokens=max_tokens, temperature=0.15)
-    refined_response = strip_stream_special_tokens(refined)
-
-    follow_up = await critique_response(session.task_request or message, refined_response)
-    if follow_up["pass"]:
-        return refined_response
-
-    logger.info("Deep mode refined draft still failed critique, returning refined version: %s", follow_up["issues"])
-    return refined_response
+    return await maybe_refine_deep_response(session, draft_response)
 
 
 def build_seeded_tool_history(
@@ -11479,7 +9248,7 @@ async def handle_direct_plan_command(
             and not task_state_has_pending_follow_up(payload)
         ):
             return "I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first."
-        session = DeepSession(
+        session = create_deep_session(
             websocket=websocket,
             conversation_id=conversation_id,
             message=cleaned_request,
@@ -11487,10 +9256,8 @@ async def handle_direct_plan_command(
             system_prompt=system_prompt,
             max_tokens=max_tokens,
             features=command_features,
-            task_request=cleaned_request,
-            context=build_recent_context(history),
             workspace_enabled=True,
-            execution_requested=is_explicit_plan_execution_request(cleaned_request),
+            execution_requested=True,
             workflow_execution=workflow_execution,
         )
         await send_activity_event(
@@ -11499,23 +9266,14 @@ async def handle_direct_plan_command(
             "Analyze",
             "Slash /plan is resuming the saved execution plan.",
         )
-        await deep_confirm_understanding(session)
-        await maybe_resume_task_state(session)
-        await deep_inspect_workspace(session)
-        if not session.plan:
-            return "I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first."
-        await deep_decompose(session)
-        if not command_features.workspace_write:
-            await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
-            return render_saved_plan_write_access_message(session.plan)
-        build_result = await deep_build_workspace(session)
-        if build_result.needs_user_confirmation:
-            return build_result.summary
-        await deep_parallel_solve(session)
-        await deep_verify(session)
-        return await deep_review(session)
+        await bootstrap_deep_session(session, resume_task_state_allowed=True)
+        return await run_deep_execution_flow(
+            session,
+            requires_existing_plan=True,
+            missing_plan_message="I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first.",
+        )
 
-    session = DeepSession(
+    session = create_deep_session(
         websocket=websocket,
         conversation_id=conversation_id,
         message=cleaned_request,
@@ -11523,10 +9281,8 @@ async def handle_direct_plan_command(
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=command_features,
-        task_request=cleaned_request,
-        context=build_recent_context(history),
         workspace_enabled=True,
-        execution_requested=is_explicit_plan_execution_request(cleaned_request),
+        execution_requested=True,
         workflow_execution=workflow_execution,
     )
     await send_activity_event(
@@ -11535,11 +9291,8 @@ async def handle_direct_plan_command(
         "Analyze",
         "Slash /plan selected the planning flow.",
     )
-    await deep_confirm_understanding(session)
-    await deep_inspect_workspace(session)
-    await deep_decompose(session, preview_only=True)
-    await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
-    return render_deep_plan_preview(session.plan)
+    await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    return await run_deep_plan_preview_flow(session)
 
 
 async def handle_direct_code_command(
@@ -11558,7 +9311,7 @@ async def handle_direct_code_command(
         return "Use `/code <task>` to inspect the workspace and implement a change."
 
     command_features = replace(features, agent_tools=True)
-    session = DeepSession(
+    session = create_deep_session(
         websocket=websocket,
         conversation_id=conversation_id,
         message=cleaned_request,
@@ -11566,8 +9319,6 @@ async def handle_direct_code_command(
         system_prompt=system_prompt,
         max_tokens=max_tokens,
         features=command_features,
-        task_request=cleaned_request,
-        context=build_recent_context(history),
         workspace_enabled=True,
         execution_requested=is_explicit_plan_execution_request(cleaned_request),
         workflow_execution=workflow_execution,
@@ -11578,24 +9329,16 @@ async def handle_direct_code_command(
         "Analyze",
         "Slash /code selected the direct code workflow.",
     )
-    await deep_confirm_understanding(session)
-    await deep_inspect_workspace(session)
-    await deep_decompose(session)
-
-    if not command_features.workspace_write:
-        await send_plan_ready(websocket, session.plan, format_deep_execution_prompt(session.plan))
-        return (
+    await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    return await run_deep_execution_flow(
+        session,
+        requires_existing_plan=False,
+        blocked_write_renderer=lambda current_session: (
             "I planned the code change, but write access was not granted for this turn.\n\n"
-            f"{format_deep_plan_note(session.plan)}\n\n"
+            f"{format_deep_plan_note(current_session.plan)}\n\n"
             "Approve workspace edits and run the saved plan again, or edit the build steps in the plan card first."
-        )
-
-    build_result = await deep_build_workspace(session)
-    if build_result.needs_user_confirmation:
-        return build_result.summary
-    await deep_parallel_solve(session)
-    await deep_verify(session)
-    return await deep_review(session)
+        ),
+    )
 
 
 async def handle_direct_slash_command(
@@ -11630,8 +9373,21 @@ async def handle_direct_slash_command(
     return f"Unsupported slash command: /{slash_command.get('raw_name') or name}"
 
 
-async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
-    """Process a single chat turn so the websocket loop can also handle stop requests."""
+def format_turn_route_activity(
+    assessment: TurnAssessment,
+    *,
+    mode: str,
+    promoted_to_planning: bool,
+) -> str:
+    """Render the high-level skill-loop routing summary for the activity log."""
+    lines = [format_turn_assessment_summary(assessment), f"Mode {mode}. Intent {assessment.workspace_intent}."]
+    if promoted_to_planning:
+        lines.append("Explicit planning language promoted this turn into the planning loop.")
+    return " ".join(line for line in lines if line)
+
+
+async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
+    """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
     attachments_raw = data.get('attachments', [])
@@ -11640,128 +9396,163 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         for item in attachments_raw[:MAX_ATTACHMENTS_PER_MESSAGE]
         if isinstance(item, str) and str(item).strip()
     ]
-
-    if not message:
-        await websocket.send_json({'type': 'error', 'content': 'Empty message'})
-        return
-
     custom_system_prompt = data.get('system_prompt')
     requested_mode = data.get('mode', 'normal')
-    mode = requested_mode
     features = parse_feature_flags(data.get('features'))
-    workflow_execution: Optional[WorkflowExecutionContext] = None
     slash_command = (
         parse_direct_slash_command_payload(data.get("slash_command"))
         or infer_direct_slash_command_from_message(message)
     )
 
+    attachment_context = await build_attachment_context(conv_id, attachments, message)
+    saved_user_message = f"{message}\n\n{attachment_context}" if attachment_context else message
+    if slash_command:
+        slash_request = (
+            f"{slash_command.get('args', '')}\n\n{attachment_context}".strip()
+            if attachment_context else
+            str(slash_command.get("args", "")).strip()
+        )
+        history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
+        user_message_id = save_message(conv_id, 'user', saved_user_message)
+        effective_message = slash_request or saved_user_message
+    else:
+        effective_message = saved_user_message
+        user_message_id = save_message(conv_id, 'user', effective_message)
+        history = get_conversation_history(conv_id, current_query=effective_message)
+
+    system_prompt = build_effective_system_prompt(
+        custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
+        effective_message,
+    )
+    mode = str(requested_mode or "normal").strip().lower() or "normal"
+    agent_params = get_agent_llm_params()
+    max_tokens = agent_params["max_tokens"]
+    workspace_intent = classify_workspace_intent(effective_message)
+    enabled_tools = (
+        select_enabled_tools(conv_id, effective_message, features, history=history)
+        if TOOL_LOOP_ENABLED else []
+    )
+
+    resume_saved_workspace = (
+        not slash_command
+        and should_resume_saved_workspace_task(conv_id, effective_message, features)
+    )
+    auto_execute_workspace = (
+        not slash_command
+        and (
+            should_auto_execute_workspace_task(effective_message, features)
+            or resume_saved_workspace
+        )
+    )
+    workspace_requested = (
+        should_use_workspace_tools(conv_id, effective_message, features)
+        or auto_execute_workspace
+        or resume_saved_workspace
+    )
+    local_rag_requested = should_offer_local_rag(effective_message, features)
+    web_search_requested = should_offer_web_search(effective_message, features)
+    assessment = build_turn_assessment(
+        message=effective_message,
+        requested_mode=requested_mode,
+        resolved_mode=mode,
+        workspace_intent=workspace_intent,
+        enabled_tools=enabled_tools,
+        workspace_requested=workspace_requested,
+        has_attachment_context=bool(attachment_context),
+        slash_command_name=(slash_command or {}).get("name", ""),
+        local_rag_requested=local_rag_requested,
+        web_search_requested=web_search_requested,
+        auto_execute_workspace=auto_execute_workspace,
+        resume_saved_workspace=resume_saved_workspace,
+        execution_requested=is_explicit_plan_execution_request(effective_message),
+        workspace_run_commands_enabled=features.workspace_run_commands,
+    )
+    promoted_to_planning = False
+    if (
+        not slash_command
+        and mode != "deep"
+        and assessment.explicit_planning_request
+        and workspace_requested
+    ):
+        mode = "deep"
+        promoted_to_planning = True
+        assessment = build_turn_assessment(
+            message=effective_message,
+            requested_mode=requested_mode,
+            resolved_mode=mode,
+            workspace_intent=workspace_intent,
+            enabled_tools=enabled_tools,
+            workspace_requested=workspace_requested,
+            has_attachment_context=bool(attachment_context),
+            slash_command_name="",
+            local_rag_requested=local_rag_requested,
+            web_search_requested=web_search_requested,
+            auto_execute_workspace=auto_execute_workspace,
+            resume_saved_workspace=resume_saved_workspace,
+            execution_requested=is_explicit_plan_execution_request(effective_message),
+            workspace_run_commands_enabled=features.workspace_run_commands,
+        )
+
+    return PreparedTurnRequest(
+        conversation_id=conv_id,
+        user_message_id=user_message_id,
+        saved_user_message=saved_user_message,
+        effective_message=effective_message,
+        history=history,
+        system_prompt=system_prompt,
+        requested_mode=requested_mode,
+        resolved_mode=mode,
+        features=features,
+        slash_command=slash_command,
+        max_tokens=max_tokens,
+        workspace_intent=workspace_intent,
+        enabled_tools=enabled_tools,
+        auto_execute_workspace=auto_execute_workspace,
+        resume_saved_workspace=resume_saved_workspace,
+        plan_override_builder_steps=normalize_plan_override_steps(data.get("plan_override_steps")),
+        promoted_to_planning=promoted_to_planning,
+        assessment=assessment,
+    )
+
+
+async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
+    """Process a single chat turn so the websocket loop can also handle stop requests."""
+    message = data.get('message', '').strip()
+    conv_id = data.get('conversation_id')
+
+    if not message:
+        await websocket.send_json({'type': 'error', 'content': 'Empty message'})
+        return
+
+    workflow_execution: Optional[WorkflowExecutionContext] = None
+
     try:
-        attachment_context = await build_attachment_context(conv_id, attachments, message)
-        saved_user_message = f"{message}\n\n{attachment_context}" if attachment_context else message
-        slash_request = ""
-        if slash_command:
-            slash_request = (
-                f"{slash_command.get('args', '')}\n\n{attachment_context}".strip()
-                if attachment_context else
-                str(slash_command.get("args", "")).strip()
-            )
-            history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
-            user_message_id = save_message(conv_id, 'user', saved_user_message)
-            effective_message = slash_request or saved_user_message
-        else:
-            effective_message = saved_user_message
-            user_message_id = save_message(conv_id, 'user', effective_message)
-            history = get_conversation_history(conv_id, current_query=effective_message)
-        system_prompt = build_effective_system_prompt(
-            custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
-            effective_message,
-        )
-        mode, learned_router_decision = resolve_learned_router_mode(
-            effective_message,
-            history,
-            requested_mode,
-            slash_command,
-        )
-        agent_params = get_agent_llm_params()
-        max_tokens = agent_params["max_tokens"]
+        prepared = await prepare_turn_request(data)
+        mode = prepared.resolved_mode
+        slash_command = prepared.slash_command
+        features = prepared.features
+        history = prepared.history
+        system_prompt = prepared.system_prompt
+        max_tokens = prepared.max_tokens
+        enabled_tools = list(prepared.enabled_tools)
+        effective_message = prepared.effective_message
         deep_succeeded = False
-        workspace_intent = classify_workspace_intent(effective_message)
-        enabled_tools = (
-            select_enabled_tools(conv_id, effective_message, features, history=history)
-            if TOOL_LOOP_ENABLED else []
-        )
-        if TOOL_LOOP_ENABLED:
-            enabled_tools, learned_tool_policy_decision = resolve_learned_tool_policy(
-                effective_message,
-                history,
-                features,
-                enabled_tools,
-                slash_command,
-            )
-        else:
-            learned_tool_policy_decision = {
-                "enabled": False,
-                "applied": False,
-                "reason": "tool_loop_disabled",
-                "resolved_tools": list(enabled_tools),
-            }
-        resume_saved_workspace = (
-            not slash_command
-            and should_resume_saved_workspace_task(conv_id, effective_message, features)
-        )
-        auto_execute_workspace = (
-            not slash_command
-            and (
-                should_auto_execute_workspace_task(effective_message, features)
-                or resume_saved_workspace
-            )
-        )
-        plan_override_builder_steps = normalize_plan_override_steps(data.get("plan_override_steps"))
         workflow_execution = create_workflow_execution(
             conv_id,
-            user_message_id,
-            choose_turn_workflow_name(
-                slash_command=slash_command,
-                mode=mode,
-                auto_execute_workspace=auto_execute_workspace,
-                enabled_tools=enabled_tools,
-            ),
-            build_turn_route_metadata(
-                mode=mode,
-                requested_mode=requested_mode,
-                workspace_intent=workspace_intent,
-                enabled_tools=enabled_tools,
-                auto_execute_workspace=auto_execute_workspace,
-                slash_command=slash_command,
-                learned_router=learned_router_decision,
-                learned_tool_policy=learned_tool_policy_decision,
-            ),
+            prepared.user_message_id,
+            "chat_turn",
+            {"assessment": prepared.assessment.as_metadata()},
         )
 
         await send_activity_event(
             websocket,
             "evaluate",
-            "Evaluate",
+            "Skill Loop",
             (
-                f"Slash /{slash_command.get('name')} selected."
-                if slash_command else
-                (
-                    f"Mode {mode}. Intent {workspace_intent}. "
-                    f"Tools: {', '.join(enabled_tools) if enabled_tools else 'none'}. "
-                    f"Auto-execute workspace build: {'yes' if auto_execute_workspace else 'no'}."
-                    + (
-                        f" Learned router elevated this turn to deep mode "
-                        f"(p={float(learned_router_decision.get('confidence', 0.0)):.2f})."
-                        if learned_router_decision.get("applied")
-                        else ""
-                    )
-                    + (
-                        f" Learned tool policy added "
-                        f"{', '.join(learned_tool_policy_decision.get('suggested_tools', []))} "
-                        f"(p={float(learned_tool_policy_decision.get('confidence', 0.0)):.2f})."
-                        if learned_tool_policy_decision.get("applied")
-                        else ""
-                    )
+                format_turn_route_activity(
+                    prepared.assessment,
+                    mode=mode,
+                    promoted_to_planning=prepared.promoted_to_planning,
                 )
             ),
         )
@@ -11790,7 +9581,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             await websocket.send_json({'type': 'done'})
             return
 
-        if mode == 'deep' or auto_execute_workspace:
+        if mode == 'deep' or prepared.auto_execute_workspace:
             try:
                 full_response = await orchestrated_chat(
                     websocket,
@@ -11800,8 +9591,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     system_prompt,
                     max_tokens,
                     features,
-                    auto_execute=auto_execute_workspace,
-                    plan_override_builder_steps=plan_override_builder_steps,
+                    auto_execute=prepared.auto_execute_workspace,
+                    plan_override_builder_steps=prepared.plan_override_builder_steps,
                     workflow_execution=workflow_execution,
                 )
                 assistant_message_id = save_message(conv_id, 'assistant', full_response)
@@ -11816,16 +9607,6 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 deep_succeeded = True
             except Exception as e:
                 logger.warning("Deep/auto workspace mode failed, falling back: %s", e)
-                if workflow_execution:
-                    workflow_execution.route_metadata["fallback_from"] = workflow_execution.workflow_name
-                    workflow_execution.route_metadata["fallback_reason"] = "deep_error"
-                    workflow_execution.workflow_name = choose_turn_workflow_name(
-                        slash_command=None,
-                        mode="normal",
-                        auto_execute_workspace=False,
-                        enabled_tools=enabled_tools,
-                    )
-                    persist_workflow_execution_route(workflow_execution)
                 await websocket.send_json({
                     'type': 'status',
                     'content': 'Workspace execution path failed, using normal mode...',
@@ -11852,7 +9633,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 enabled_tools,
                 tool_max_tokens,
                 tool_step_limit,
-                classify_workspace_intent(effective_message),
+                prepared.workspace_intent,
             )
 
             if enabled_tools:
@@ -11917,15 +9698,6 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         ),
                     )
                     full_response = tool_outcome.final_text
-                    if workflow_execution:
-                        workflow_execution.route_metadata["recovery_tools"] = list(recovery_tools)
-                        workflow_execution.workflow_name = choose_turn_workflow_name(
-                            slash_command=None,
-                            mode="normal",
-                            auto_execute_workspace=False,
-                            enabled_tools=recovery_tools,
-                        )
-                        persist_workflow_execution_route(workflow_execution)
                 leaked_call = extract_leaked_tool_call(full_response)
                 if leaked_call:
                     logger.warning(
@@ -12066,97 +9838,8 @@ async def chat_websocket(websocket: WebSocket):
         keepalive_task.cancel()
         logger.error(f"WebSocket error: {e}")
 
-@app.websocket("/ws/logs")
-async def logs_websocket(websocket: WebSocket):
-    await websocket.accept()
-
-    try:
-        existing_logs = log_capture.getvalue()
-        if existing_logs:
-            await websocket.send_json({'type': 'log', 'content': existing_logs})
-
-        last_size = len(existing_logs)
-
-        while True:
-            await asyncio.sleep(0.5)
-            current_logs = log_capture.getvalue()
-            if len(current_logs) > last_size:
-                await websocket.send_json({'type': 'log', 'content': current_logs[last_size:]})
-                last_size = len(current_logs)
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.error(f"Log WebSocket error: {e}")
-
-
-@app.websocket("/ws/terminal/{conversation_id}")
-async def terminal_websocket(websocket: WebSocket, conversation_id: str):
-    await websocket.accept()
-    session: Optional[TerminalSession] = None
-
-    try:
-        if not INTERACTIVE_TERMINAL_ENABLED:
-            await _send_terminal_json(
-                websocket,
-                {
-                    "type": "terminal_unavailable",
-                    "content": "Interactive terminal is disabled on this server",
-                },
-            )
-            return
-
-        session = await _start_terminal_session(conversation_id, websocket)
-        while True:
-            data = await websocket.receive_json()
-            msg_type = str(data.get("type", "")).strip().lower()
-
-            if msg_type == "input":
-                content = str(data.get("content", ""))
-                if content:
-                    try:
-                        os.write(session.master_fd, content.encode("utf-8", errors="replace"))
-                    except OSError:
-                        await _send_terminal_json(websocket, {"type": "terminal_status", "content": "Terminal write failed"})
-                continue
-
-            if msg_type == "signal":
-                if str(data.get("signal", "")).strip().lower() == "interrupt" and session.process.returncode is None:
-                    try:
-                        os.killpg(session.process.pid, signal.SIGINT)
-                    except ProcessLookupError:
-                        pass
-                    await _send_terminal_json(websocket, {"type": "terminal_status", "content": "Sent Ctrl+C"})
-                continue
-
-            if msg_type == "restart":
-                await _close_terminal_session(session)
-                session = await _start_terminal_session(conversation_id, websocket)
-                await _send_terminal_json(websocket, {"type": "terminal_cleared"})
-                continue
-
-            if msg_type == "resize":
-                try:
-                    _resize_terminal_session(
-                        session,
-                        int(data.get("cols", 80)),
-                        int(data.get("rows", 24)),
-                    )
-                except Exception:
-                    pass
-                continue
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        logger.error("Terminal websocket error: %s", exc)
-        await _send_terminal_json(websocket, {"type": "terminal_status", "content": f"Terminal error: {exc}"})
-    finally:
-        await _close_terminal_session(session)
-
-
 async def get_model_runtime_summary() -> Dict[str, Any]:
-    """Collect model state for health and dashboard views."""
+    """Collect model state for health checks and lightweight UI status."""
     loaded_model_name = await fetch_loaded_model_name()
     selected_profile = get_active_model_profile()
     loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
@@ -12171,23 +9854,8 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
     model_ok = await vllm_health_check()
     if model_ok:
         mark_model_load_completed(loaded_model_name or selected_profile["name"])
-    else:
-        failure = await get_vllm_start_failure()
-        if failure:
-            if (
-                loading.get("status") != "failed"
-                or loading.get("model_name") != tracked_model_name
-                or loading.get("detail") != failure.get("detail")
-            ):
-                mark_model_load_failed(
-                    tracked_model_name,
-                    failure.get("detail", ""),
-                    reason=str(loading.get("reason") or "startup"),
-                    profile_key=tracked_profile_key,
-                    container=failure.get("container"),
-                )
-        elif loading.get("status") not in {"loading", "failed"} or loading.get("model_name") != tracked_model_name:
-            mark_model_load_started(tracked_model_name, reason="startup", profile_key=tracked_profile_key)
+    elif loading.get("status") not in {"loading", "failed"} or loading.get("model_name") != tracked_model_name:
+        mark_model_load_started(tracked_model_name, reason="startup", profile_key=tracked_profile_key)
     available_profiles = [
         serialize_model_profile(
             profile,
@@ -12231,287 +9899,6 @@ async def health():
         "voice": voice,
         "message": message,
     }
-
-
-@app.post("/api/ui/model-ready")
-async def log_ui_model_ready(request: UiModelReadyRequest):
-    logger.info(
-        "Model %s is ready in web UI (profile=%s, websocket_connected=%s, composer_available=%s)",
-        request.model_name,
-        request.profile,
-        request.websocket_connected,
-        request.composer_available,
-    )
-    return {"status": "ok"}
-
-# ==================== Dashboard ====================
-
-def get_cache_info(model_name: str):
-    """Get HuggingFace model cache info"""
-    model_dir = model_name.replace("/", "--")
-    cache_dir = os.path.join(HF_CACHE_PATH, "hub", f"models--{model_dir}")
-
-    if not os.path.exists(cache_dir):
-        return {"status": "not_downloaded", "size_bytes": 0, "size_display": "0 B", "last_modified": None}
-
-    total_size = 0
-    file_count = 0
-    for dirpath, _, filenames in os.walk(cache_dir):
-        for f in filenames:
-            try:
-                total_size += os.path.getsize(os.path.join(dirpath, f))
-                file_count += 1
-            except OSError:
-                pass
-
-    snapshots_dir = os.path.join(cache_dir, "snapshots")
-    has_snapshots = os.path.exists(snapshots_dir) and bool(os.listdir(snapshots_dir))
-
-    last_modified = None
-    try:
-        last_modified = datetime.fromtimestamp(os.path.getmtime(cache_dir)).isoformat()
-    except Exception:
-        pass
-
-    if total_size > 1024**3:
-        size_display = f"{total_size / (1024**3):.1f} GB"
-    elif total_size > 1024**2:
-        size_display = f"{total_size / (1024**2):.1f} MB"
-    else:
-        size_display = f"{total_size / 1024:.1f} KB"
-
-    return {
-        "model_id": model_name,
-        "cache_dir": cache_dir,
-        "status": "valid" if has_snapshots else "incomplete",
-        "size_bytes": total_size,
-        "size_display": size_display,
-        "file_count": file_count,
-        "last_modified": last_modified,
-    }
-
-
-def normalize_model_source(source: str) -> str:
-    """Accept a Hugging Face model id or model URL and normalize it to repo_id."""
-    raw = (source or "").strip()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Enter a Hugging Face model id or URL")
-
-    if raw.startswith("https://") or raw.startswith("http://"):
-        parsed = urlparse(raw)
-        host = (parsed.netloc or "").lower()
-        if host not in {"huggingface.co", "www.huggingface.co", "hf.co"}:
-            raise HTTPException(status_code=400, detail="Only Hugging Face model links are supported")
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) < 2:
-            raise HTTPException(status_code=400, detail="Could not determine the model id from that Hugging Face URL")
-        if parts[0] in {"models", "datasets", "spaces"} and len(parts) >= 3:
-            if parts[0] != "models":
-                raise HTTPException(status_code=400, detail="Only Hugging Face model repositories are supported")
-            model_id = "/".join(parts[1:3])
-        else:
-            model_id = "/".join(parts[:2])
-    else:
-        model_id = raw
-
-    model_id = model_id.strip("/")
-    if not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)?", model_id):
-        raise HTTPException(status_code=400, detail="Model id must look like 'owner/name' or 'name'")
-    return model_id
-
-
-KNOWN_INCOMPATIBLE_MODEL_TYPES: Dict[str, str] = {
-    "gemma4": (
-        "This app's current vLLM runtime cannot load Gemma 4 checkpoints yet because the bundled "
-        "Transformers stack does not recognize the `gemma4` architecture."
-    ),
-}
-
-
-def _normalize_string_list(value: Any) -> List[str]:
-    """Normalize a config field into a compact list of strings."""
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
-
-
-def infer_model_compatibility_from_name(model_id: str) -> Optional[Dict[str, Any]]:
-    """Fallback compatibility hint based on the model id when config metadata is unavailable."""
-    lowered = (model_id or "").strip().lower()
-    if "gemma-4" in lowered or lowered.endswith("/gemma4") or "gemma4" in lowered:
-        return {
-            "status": "incompatible",
-            "model_type": "gemma4",
-            "architectures": [],
-            "detail": KNOWN_INCOMPATIBLE_MODEL_TYPES["gemma4"],
-            "checked_via": "model_id",
-        }
-    return None
-
-
-async def inspect_model_compatibility(model_id: str, *, local_files_only: bool = False) -> Dict[str, Any]:
-    """Best-effort compatibility preflight for the current vLLM runtime."""
-    fallback = infer_model_compatibility_from_name(model_id)
-    result: Dict[str, Any] = {
-        "status": "unknown",
-        "model_type": None,
-        "architectures": [],
-        "detail": "",
-        "checked_via": "none",
-    }
-    if fallback:
-        result.update(fallback)
-
-    if hf_hub_download is None:
-        if not result.get("detail"):
-            result["detail"] = "Compatibility checks are unavailable because huggingface_hub is not installed."
-        return result
-
-    try:
-        config_path = await asyncio.to_thread(
-            hf_hub_download,
-            repo_id=model_id,
-            repo_type="model",
-            filename="config.json",
-            cache_dir=HF_CACHE_PATH,
-            local_files_only=local_files_only,
-        )
-    except Exception as exc:
-        if local_files_only:
-            if not result.get("detail"):
-                result["detail"] = "Compatibility has not been checked for this cached model yet."
-            return result
-        if not result.get("detail"):
-            logger.warning("Compatibility preflight failed for %s: %s", model_id, exc)
-            result["detail"] = f"Could not inspect compatibility before download: {exc}"
-        return result
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as fh:
-            config = json.load(fh)
-    except Exception as exc:
-        if not result.get("detail"):
-            result["detail"] = f"Downloaded config.json but could not parse it: {exc}"
-        result["checked_via"] = "config"
-        return result
-
-    model_type = str(config.get("model_type") or "").strip() or None
-    architectures = _normalize_string_list(config.get("architectures"))
-    result.update(
-        {
-            "model_type": model_type,
-            "architectures": architectures,
-            "checked_via": "config",
-        }
-    )
-    if model_type in KNOWN_INCOMPATIBLE_MODEL_TYPES:
-        result.update(
-            {
-                "status": "incompatible",
-                "detail": KNOWN_INCOMPATIBLE_MODEL_TYPES[model_type],
-            }
-        )
-        return result
-
-    if not result.get("detail"):
-        result["detail"] = (
-            f"Config reports model_type `{model_type}`."
-            if model_type
-            else "Compatibility could not be determined from config.json."
-        )
-    return result
-
-
-def iter_model_cache_dirs() -> List[pathlib.Path]:
-    """Return all Hugging Face model cache directories."""
-    hub_root = pathlib.Path(HF_CACHE_PATH) / "hub"
-    if not hub_root.exists():
-        return []
-    return sorted(
-        [path for path in hub_root.iterdir() if path.is_dir() and path.name.startswith("models--")],
-        key=lambda path: path.name.lower(),
-    )
-
-
-def cache_dir_to_model_id(cache_dir: pathlib.Path) -> str:
-    """Convert a Hugging Face cache directory name into a repo id."""
-    name = cache_dir.name
-    if name.startswith("models--"):
-        name = name[len("models--"):]
-    return name.replace("--", "/")
-
-
-async def list_cached_models() -> List[Dict[str, Any]]:
-    """List model repositories currently present in the Hugging Face cache."""
-    runtime_model_names = {profile["name"] for profile in MODEL_PROFILES.values()}
-    active_name = get_active_model_name()
-    jobs_by_model = {job.get("model_id"): job for job in MODEL_DOWNLOAD_JOBS.values()}
-    items: List[Dict[str, Any]] = []
-    for cache_dir in iter_model_cache_dirs():
-        model_id = cache_dir_to_model_id(cache_dir)
-        info = get_cache_info(model_id)
-        compatibility = await inspect_model_compatibility(model_id, local_files_only=True)
-        info.update(
-            {
-                "download_url": f"https://huggingface.co/{quote_plus(model_id, safe='/')}",
-                "managed_by_profile": model_id in runtime_model_names,
-                "active_profile": model_id == active_name,
-                "download_job": jobs_by_model.get(model_id),
-                "compatibility": compatibility,
-            }
-        )
-        items.append(info)
-    items.sort(key=lambda item: ((not item["active_profile"]), item["model_id"].lower()))
-    return items
-
-
-def current_model_download_jobs() -> List[Dict[str, Any]]:
-    """Return current background model download jobs."""
-    jobs = [dict(job) for job in MODEL_DOWNLOAD_JOBS.values()]
-    jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
-    return jobs
-
-
-async def run_model_download_job(job_id: str, model_id: str) -> None:
-    """Download a Hugging Face model snapshot into the shared cache."""
-    job = MODEL_DOWNLOAD_JOBS[job_id]
-    job["status"] = "downloading"
-    job["started_at"] = datetime.now().isoformat()
-    job["error"] = None
-    try:
-        if snapshot_download is None:
-            raise RuntimeError("huggingface_hub is not installed in the chat-app image")
-        await asyncio.to_thread(
-            snapshot_download,
-            repo_id=model_id,
-            repo_type="model",
-            cache_dir=HF_CACHE_PATH,
-            local_files_only=False,
-            resume_download=True,
-        )
-        info = get_cache_info(model_id)
-        job["status"] = "completed"
-        job["completed_at"] = datetime.now().isoformat()
-        job["cache"] = info
-    except Exception as exc:
-        logger.error("Model download failed for %s", model_id, exc_info=True)
-        job["status"] = "error"
-        job["completed_at"] = datetime.now().isoformat()
-        job["error"] = str(exc)
-
-
-def model_is_managed_by_profile(model_id: str) -> bool:
-    """Return whether the model is referenced by a configured runtime profile."""
-    return any(profile["name"] == model_id for profile in MODEL_PROFILES.values())
-
-
-def model_cache_dir(model_id: str) -> pathlib.Path:
-    """Return the cache directory for a model id."""
-    model_dir = model_id.replace("/", "--")
-    return pathlib.Path(HF_CACHE_PATH) / "hub" / f"models--{model_dir}"
-
 
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse a stored ISO timestamp safely."""
@@ -12591,37 +9978,6 @@ def mark_model_load_completed(model_name: str):
     persist_model_state()
 
 
-def mark_model_load_failed(
-    model_name: str,
-    detail: str,
-    *,
-    reason: Optional[str] = None,
-    profile_key: Optional[str] = None,
-    container: Optional[Dict[str, Any]] = None,
-):
-    """Record a failed model load so the UI can surface the startup error."""
-    global MODEL_LOADING_STATUS
-    now_dt = datetime.now()
-    loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
-    started_at = _parse_iso_datetime(loading.get("started_at"))
-    duration = max(0.0, (now_dt - started_at).total_seconds()) if started_at else None
-
-    MODEL_LOADING_STATUS = {
-        "status": "failed",
-        "phase": "failed",
-        "reason": reason or loading.get("reason") or "startup",
-        "model_name": model_name,
-        "profile_key": profile_key or loading.get("profile_key") or ACTIVE_MODEL_PROFILE,
-        "started_at": loading.get("started_at") if started_at else None,
-        "updated_at": now_dt.isoformat(),
-        "failed_at": now_dt.isoformat(),
-        "last_duration_seconds": round(duration, 1) if duration is not None else None,
-        "detail": (detail or "").strip() or "vLLM failed to start.",
-        "container": container or loading.get("container"),
-    }
-    persist_model_state()
-
-
 def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
     """Return current loading state with historical ETA estimates."""
     history = model_load_history_summary(model_name)
@@ -12664,308 +10020,14 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
         "container": loading.get("container"),
     }
 
-@app.get("/api/dashboard")
-async def get_dashboard():
-    runtime = await get_model_runtime_summary()
-
-    # Get vLLM container status via Docker socket
-    container_status = None
-    docker_control_available = DOCKER_CONTROL_ENABLED and os.path.exists("/var/run/docker.sock")
-    if docker_control_available:
-        try:
-            resp = await docker_api_request("GET", "/containers/vllm/json")
-            if resp.status_code == 200:
-                container_status = summarize_vllm_container_state(resp.json())
-        except Exception:
-            pass
-
-    cache_info = get_cache_info(runtime["selected_profile"]["name"])
-
-    return {
-        "model_name": runtime["loaded_model_name"],
-        "selected_model_name": runtime["selected_profile"]["name"],
-        "selected_profile": runtime["selected_profile"],
-        "selected_profile_key": runtime["selected_profile"]["key"],
-        "active_profile": runtime["active_profile"],
-        "active_profile_key": runtime["active_profile"]["key"],
-        "available_profiles": runtime["available_profiles"],
-        "vllm_host": VLLM_HOST,
-        "model_available": runtime["model_ok"],
-        "loading": runtime["loading"],
-        "container": container_status,
-        "cache": cache_info,
-        "docker_control_available": docker_control_available,
-        "interactive_terminal_enabled": INTERACTIVE_TERMINAL_ENABLED,
-        "execute_code_enabled": EXECUTE_CODE_ENABLED,
-    }
-
-@app.get("/api/models/library")
-async def get_model_library():
-    return {
-        "cache_root": str(pathlib.Path(HF_CACHE_PATH) / "hub"),
-        "models": await list_cached_models(),
-        "jobs": current_model_download_jobs(),
-        "profiles": list(MODEL_PROFILES.values()),
-        "active_model_name": get_active_model_name(),
-        "loading": get_model_loading_stats(get_active_model_name(), False),
-    }
-
-@app.post("/api/models/library/download")
-async def download_model_to_library(request: ModelDownloadRequest):
-    global MODEL_DOWNLOAD_LOCK
-
-    model_id = normalize_model_source(request.source)
-    compatibility = await inspect_model_compatibility(model_id)
-    if compatibility.get("status") == "incompatible" and not request.force:
-        return {
-            "status": "warning",
-            "message": compatibility.get("detail") or f"{model_id} is not compatible with the current runtime.",
-            "model_id": model_id,
-            "compatibility": compatibility,
-            "can_download_anyway": True,
-        }
-
-    if MODEL_DOWNLOAD_LOCK is None:
-        MODEL_DOWNLOAD_LOCK = asyncio.Lock()
-
-    async with MODEL_DOWNLOAD_LOCK:
-        for job in MODEL_DOWNLOAD_JOBS.values():
-            if job.get("model_id") == model_id and job.get("status") in {"queued", "downloading"}:
-                return {
-                    "status": "accepted",
-                    "message": f"{model_id} is already downloading.",
-                    "job": job,
-                    "compatibility": job.get("compatibility") or compatibility,
-                }
-
-        existing_cache = get_cache_info(model_id)
-        if existing_cache.get("status") == "valid":
-            return {
-                "status": "success",
-                "message": f"{model_id} is already cached.",
-                "cache": existing_cache,
-                "compatibility": compatibility,
-            }
-
-        job_id = uuid.uuid4().hex
-        job = {
-            "id": job_id,
-            "model_id": model_id,
-            "source": request.source.strip(),
-            "status": "queued",
-            "created_at": datetime.now().isoformat(),
-            "started_at": None,
-            "completed_at": None,
-            "error": None,
-            "compatibility": compatibility,
-        }
-        MODEL_DOWNLOAD_JOBS[job_id] = job
-        asyncio.create_task(run_model_download_job(job_id, model_id))
-
-    return {
-        "status": "accepted",
-        "message": f"Started downloading {model_id} into the shared Hugging Face cache.",
-        "job": job,
-        "compatibility": compatibility,
-    }
-
-@app.post("/api/models/library/delete")
-async def delete_model_from_library(request: ModelDeleteRequest):
-    model_id = normalize_model_source(request.model_id)
-
-    active_job = next(
-        (
-            job for job in MODEL_DOWNLOAD_JOBS.values()
-            if job.get("model_id") == model_id and job.get("status") in {"queued", "downloading"}
-        ),
-        None,
-    )
-    if active_job:
-        raise HTTPException(status_code=409, detail=f"{model_id} is currently downloading")
-
-    if model_is_managed_by_profile(model_id):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{model_id} is configured as one of the runtime model profiles. Change the profile config before deleting it.",
-        )
-
-    cache_dir = model_cache_dir(model_id)
-    if not cache_dir.exists():
-        raise HTTPException(status_code=404, detail=f"No cached files found for {model_id}")
-
-    shutil.rmtree(cache_dir)
-    logger.info("Deleted model cache: %s", cache_dir)
-    return {
-        "status": "success",
-        "message": f"Deleted cached files for {model_id}.",
-        "model_id": model_id,
-    }
-
-@app.post("/api/models/library/activate")
-async def activate_model_from_library(request: ModelActivateRequest):
-    global ACTIVE_MODEL_LOCK
-
-    ensure_docker_control_enabled()
-    model_id = normalize_model_source(request.model_id)
-    if get_cache_info(model_id).get("status") == "not_downloaded":
-        raise HTTPException(status_code=404, detail=f"{model_id} is not cached yet")
-    compatibility = await inspect_model_compatibility(model_id, local_files_only=True)
-    if compatibility.get("status") == "incompatible":
-        raise HTTPException(status_code=409, detail=compatibility.get("detail") or f"{model_id} is not compatible with the current runtime")
-
-    if ACTIVE_MODEL_LOCK is None:
-        ACTIVE_MODEL_LOCK = asyncio.Lock()
-
-    async with ACTIVE_MODEL_LOCK:
-        if get_active_model_name() == model_id:
-            return {
-                "status": "success",
-                "message": f"{model_id} is already selected.",
-                "model_name": model_id,
-                "profile": ACTIVE_MODEL_PROFILE,
-            }
-
-        previous_profile = get_active_model_profile()
-        mark_model_load_started(model_id, reason="activate", profile_key="custom")
-        try:
-            await recreate_vllm_container("custom", model_name=model_id)
-            await wait_for_vllm_startup(model_id)
-        except HTTPException as exc:
-            logger.error("Failed to activate cached model %s: %s", model_id, exc.detail)
-            rollback_note = ""
-            try:
-                restored_model = await rollback_vllm_target(previous_profile)
-                rollback_note = f" Restored {restored_model}."
-            except Exception as rollback_exc:
-                rollback_detail = (
-                    rollback_exc.detail if isinstance(rollback_exc, HTTPException) else str(rollback_exc)
-                )
-                logger.error("Rollback after failed activation also failed: %s", rollback_detail, exc_info=True)
-                mark_model_load_failed(
-                    model_id,
-                    f"{exc.detail} Rollback also failed: {rollback_detail}",
-                    reason="activate",
-                    profile_key="custom",
-                )
-            raise HTTPException(status_code=500, detail=f"{exc.detail}{rollback_note}")
-        persist_active_model_selection("custom", model_id)
-        return {
-            "status": "success",
-            "message": f"Switching to {model_id}. vLLM is reloading now.",
-            "model_name": model_id,
-            "profile": "custom",
-        }
-
-@app.post("/api/vllm/restart")
-async def restart_vllm():
-    try:
-        ensure_docker_control_enabled()
-        mark_model_load_started(get_active_model_name(), reason="restart", profile_key=get_active_model_profile()["key"])
-        resp = await docker_api_request("POST", "/containers/vllm/restart", params={"t": 10})
-        if resp.status_code == 204:
-            return {"status": "success", "message": "vLLM is restarting. Model will reload in a few minutes."}
-        return {"status": "error", "message": f"Restart failed (HTTP {resp.status_code})"}
-    except Exception as e:
-        logger.error(f"Failed to restart vLLM: {e}")
-        return {"status": "error", "message": str(e)}
-
-@app.post("/api/model/switch")
-async def switch_model(request: SwitchModelRequest):
-    global ACTIVE_MODEL_PROFILE, ACTIVE_MODEL_LOCK
-
-    ensure_docker_control_enabled()
-    target_key = request.profile.strip().lower()
-    if target_key not in MODEL_PROFILES:
-        raise HTTPException(status_code=400, detail=f"Unknown model profile: {request.profile}")
-
-    if ACTIVE_MODEL_LOCK is None:
-        ACTIVE_MODEL_LOCK = asyncio.Lock()
-
-    async with ACTIVE_MODEL_LOCK:
-        current_key = ACTIVE_MODEL_PROFILE
-        if current_key == target_key:
-            profile = MODEL_PROFILES[target_key]
-            return {
-                "status": "success",
-                "message": f"{profile['label']} is already selected.",
-                "model_name": profile["name"],
-                "profile": target_key,
-            }
-
-        logger.info("Switching vLLM profile from %s to %s", current_key, target_key)
-        previous_profile = get_active_model_profile()
-        target_profile = MODEL_PROFILES[target_key]
-        compatibility = await inspect_model_compatibility(target_profile["name"])
-        if compatibility.get("status") == "incompatible":
-            raise HTTPException(
-                status_code=409,
-                detail=compatibility.get("detail") or f"{target_profile['name']} is not compatible with the current runtime",
-            )
-        mark_model_load_started(target_profile["name"], reason="switch", profile_key=target_key)
-        try:
-            await recreate_vllm_container(target_key)
-            await wait_for_vllm_startup(target_profile["name"])
-        except HTTPException as exc:
-            logger.error("Failed to switch vLLM profile to %s: %s", target_key, exc.detail)
-            rollback_note = ""
-            try:
-                restored_model = await rollback_vllm_target(previous_profile)
-                rollback_note = f" Restored {restored_model}."
-            except Exception as rollback_exc:
-                rollback_detail = (
-                    rollback_exc.detail if isinstance(rollback_exc, HTTPException) else str(rollback_exc)
-                )
-                logger.error("Rollback after failed profile switch also failed: %s", rollback_detail, exc_info=True)
-                mark_model_load_failed(
-                    target_profile["name"],
-                    f"{exc.detail} Rollback also failed: {rollback_detail}",
-                    reason="switch",
-                    profile_key=target_key,
-                )
-            raise HTTPException(status_code=500, detail=f"{exc.detail}{rollback_note}")
-        persist_active_model_selection(target_key, None)
-        return {
-            "status": "success",
-            "message": f"Switching to {target_profile['label']} ({target_profile['name']}). vLLM is reloading now.",
-            "model_name": target_profile["name"],
-            "profile": target_key,
-        }
-
-@app.post("/api/model/redownload")
-async def redownload_model():
-    try:
-        ensure_docker_control_enabled()
-        mark_model_load_started(get_active_model_name(), reason="redownload", profile_key=get_active_model_profile()["key"])
-        # Stop vLLM first
-        await docker_api_request("POST", "/containers/vllm/stop", params={"t": 10})
-
-        # Delete model cache
-        model_dir = get_active_model_name().replace("/", "--")
-        cache_dir = os.path.join(HF_CACHE_PATH, "hub", f"models--{model_dir}")
-        if os.path.exists(cache_dir):
-            shutil.rmtree(cache_dir)
-            logger.info(f"Deleted model cache: {cache_dir}")
-
-        # Start vLLM (will re-download on boot)
-        await docker_api_request("POST", "/containers/vllm/start")
-
-        return {"status": "success", "message": "Cache cleared. vLLM is restarting and will re-download the model."}
-    except Exception as e:
-        logger.error(f"Failed to redownload model: {e}")
-        return {"status": "error", "message": str(e)}
-
 @app.on_event("startup")
 async def startup_event():
-    global ACTIVE_MODEL_LOCK, MODEL_DOWNLOAD_LOCK
+    global ACTIVE_MODEL_LOCK
     ACTIVE_MODEL_LOCK = asyncio.Lock()
-    MODEL_DOWNLOAD_LOCK = asyncio.Lock()
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
     logger.info(f"Selected model profile: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
     logger.info(f"vLLM: {VLLM_HOST}")
-    logger.info("Docker control enabled: %s", DOCKER_CONTROL_ENABLED)
-    logger.info("Interactive terminal enabled: %s", INTERACTIVE_TERMINAL_ENABLED)
-    logger.info("Execute-code endpoint enabled: %s", EXECUTE_CODE_ENABLED)
     logger.info("=" * 60)
 
     # Check model availability in background

@@ -3,9 +3,7 @@
 // ==================== State ====================
 
 let ws = null;
-let logWs = null;
 let currentConvId = generateId();
-const uiSessionId = generateId();
 let isGenerating = false;
 let activeStreamConversationId = null;
 let streamingAssistantMessage = null;
@@ -16,14 +14,6 @@ let markedReady = false;
 let healthPollInterval = null;
 let pastedBlocks = []; // tracks collapsed long pastes: [{placeholder, actual}]
 let deepMode = localStorage.getItem('deepMode') === 'true';
-let availableModelProfiles = [];
-let selectedModelProfileKey = '';
-let activeModelProfileKey = '';
-let modelSwitchInFlight = false;
-let dockerControlAvailable = false;
-let uiReadyReportInFlight = false;
-let lastReportedUiReadyKey = '';
-let dashboardRefreshTimer = null;
 let chatCommandAllowlists = loadStoredObject('chatCommandAllowlists', {});
 let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
 let websocketConnected = false;
@@ -33,12 +23,6 @@ let workspaceEntries = [];
 let workspaceTree = null;
 let workspaceStats = { files: 0, directories: 0 };
 let workspaceActivity = [];
-let terminalEntries = [];
-let terminalLiveBuffer = '';
-let terminalWs = null;
-let terminalEmulator = null;
-let terminalFitAddon = null;
-let terminalUnavailableReason = '';
 let buildSteps = [];
 let currentBuildStepIndex = null;
 let selectedWorkspaceFile = '';
@@ -70,9 +54,6 @@ let currentAssistantTurnArtifactPaths = new Set();
 let latestAssistantTurnArtifactPaths = new Set();
 let slashMenuItems = [];
 let slashMenuSelectedIndex = 0;
-let petProfile = null;
-let petExists = false;
-let welcomeMascotRuntime = null;
 let welcomeHintTimer = null;
 let currentRunId = null;
 let pendingExecutionPlan = null;
@@ -115,23 +96,6 @@ const SPEECH_SPEED_OPTIONS = Object.freeze([
 ]);
 const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
-const LEGACY_COMPY_THEME = Object.freeze({
-    theme_primary: '#2563eb',
-    theme_secondary: '#0f172a',
-    theme_accent: '#dbeafe',
-});
-const WOLFY_THEME_PALETTES = Object.freeze({
-    light: Object.freeze({
-        theme_primary: '#d97706',
-        theme_secondary: '#6b4f2a',
-        theme_accent: '#f5e6c8',
-    }),
-    dark: Object.freeze({
-        theme_primary: '#f59e0b',
-        theme_secondary: '#f3d7ad',
-        theme_accent: '#5b3a12',
-    }),
-});
 const DISCOVERY_HINTS = Object.freeze([
     'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
     'I can help with logic, math, and careful reasoning from the information you give me.',
@@ -325,49 +289,7 @@ function applyTheme(mode) {
     const icon = document.getElementById('themeIcon');
     if (icon) icon.textContent = mode === 'dark' ? 'Dark' : 'Light';
 
-    applyPetTheme(petProfile, mode);
     updateThemeChrome(mode, colors);
-}
-
-function normalizeThemeColor(value) {
-    return String(value || '').trim().toLowerCase();
-}
-
-function resolveDefaultWolfyPalette(mode) {
-    return mode === 'dark' ? WOLFY_THEME_PALETTES.dark : WOLFY_THEME_PALETTES.light;
-}
-
-function paletteMatchesProfile(profile, palette) {
-    return (
-        normalizeThemeColor(profile?.theme_primary) === palette.theme_primary &&
-        normalizeThemeColor(profile?.theme_secondary) === palette.theme_secondary &&
-        normalizeThemeColor(profile?.theme_accent) === palette.theme_accent
-    );
-}
-
-function shouldUseThemeResponsivePetPalette(profile) {
-    if (!profile) return true;
-    return (
-        paletteMatchesProfile(profile, LEGACY_COMPY_THEME) ||
-        paletteMatchesProfile(profile, WOLFY_THEME_PALETTES.light) ||
-        paletteMatchesProfile(profile, WOLFY_THEME_PALETTES.dark)
-    );
-}
-
-function applyPetTheme(profile, mode) {
-    const root = document.documentElement;
-    const currentMode = mode || root.dataset.theme || localStorage.getItem('theme') || 'light';
-    const fallback = resolveDefaultWolfyPalette(currentMode);
-    const colors = shouldUseThemeResponsivePetPalette(profile)
-        ? fallback
-        : {
-            theme_primary: profile?.theme_primary || fallback.theme_primary,
-            theme_secondary: profile?.theme_secondary || fallback.theme_secondary,
-            theme_accent: profile?.theme_accent || fallback.theme_accent,
-        };
-    root.style.setProperty('--pet_primary', colors.theme_primary);
-    root.style.setProperty('--pet_secondary', colors.theme_secondary);
-    root.style.setProperty('--pet_accent', colors.theme_accent);
 }
 
 function toggleTheme() {
@@ -420,31 +342,6 @@ function generateId() {
     });
 }
 
-function setModelNote(modelName) {
-    const note = document.querySelector('.model-note');
-    if (note && modelName) note.textContent = modelName;
-    if (modelName) window.MODEL_NAME = modelName;
-    syncModelSummaryButton();
-}
-
-function formatCompactModelName(modelName) {
-    const raw = String(modelName || '').trim();
-    if (!raw) return '';
-
-    let compact = raw.split('/').pop() || raw;
-    compact = compact.replace(/_/g, '-');
-    compact = compact.replace(/^meta-llama-/i, 'Llama-');
-    compact = compact.replace(/^meta-/i, '');
-    compact = compact.replace(/^deepseek-ai-/i, 'DeepSeek-');
-    compact = compact.replace(
-        /(?:-(?:instruct|instruction|chat|assistant|reasoning|thinking|preview|beta|distill|coder|it|awq(?:[-_a-z0-9]*)?|gptq(?:[-_a-z0-9]*)?|gguf|fp8|bf16|int4|int8|sft|rlhf))+$/ig,
-        '',
-    );
-    compact = compact.replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
-    if (!compact) return '';
-    return compact.charAt(0).toUpperCase() + compact.slice(1);
-}
-
 function syncReasoningSelector() {
     const select = document.getElementById('reasoningSelect');
     if (!select) return;
@@ -480,55 +377,6 @@ function syncReasoningToggleButton() {
         ? 'High reasoning effort enabled. Tap to switch to low.'
         : 'Low reasoning effort enabled. Tap to switch to high.';
     button.setAttribute('aria-label', deepMode ? 'Reasoning effort: high' : 'Reasoning effort: low');
-}
-
-function getModelSummaryLabel() {
-    if (modelSwitchInFlight) return 'Switching...';
-    const fullName = String(window.MODEL_NAME || '').trim();
-    if (!fullName) return modelAvailable ? 'Model' : 'Loading model...';
-    return formatCompactModelName(fullName) || fullName;
-}
-
-function syncModelSummaryButton() {
-    const button = document.getElementById('modelSummaryButton');
-    if (!button) return;
-
-    const fullName = String(window.MODEL_NAME || '').trim();
-    const label = getModelSummaryLabel();
-    const hoverCopyEl = document.querySelector('.model-summary-hover-copy');
-    const hoverMetaEl = document.querySelector('.model-summary-hover-meta');
-
-    const labelEl = button.querySelector('.model-summary-label');
-    if (labelEl) labelEl.textContent = label;
-    else button.textContent = label;
-    button.classList.toggle('is-loading', !fullName || modelSwitchInFlight);
-
-    if (hoverCopyEl) {
-        hoverCopyEl.textContent = modelSwitchInFlight
-            ? 'A model switch is in progress. Open the library to track it or pick another runtime.'
-            : 'Open the local model library to switch runtimes or add a new one.';
-    }
-    if (hoverMetaEl) {
-        hoverMetaEl.textContent = modelSwitchInFlight
-            ? 'Status: Switching model...'
-            : (
-                fullName
-                    ? `Current: ${fullName}`
-                    : (modelAvailable ? 'Current: Choose a model' : 'Current: Loading available models...')
-            );
-    }
-
-    button.title = modelSwitchInFlight
-        ? 'A model change is in progress. Open Models for status.'
-        : (
-            fullName
-                ? `Current model: ${fullName}. Open Models to switch downloaded models or add new ones.`
-                : 'Open Models to view downloaded models and add a new one.'
-        );
-    button.setAttribute(
-        'aria-label',
-        fullName ? `Open Models. Current model: ${fullName}` : 'Open Models'
-    );
 }
 
 function dismissMobileKeyboard(force = false) {
@@ -582,44 +430,6 @@ function observeMobileComposerSize() {
     });
     mobileComposerResizeObserver.observe(inputArea);
     syncMobileViewportState();
-}
-
-function extractProfileKey(profileValue) {
-    if (!profileValue) return '';
-    if (typeof profileValue === 'string') return profileValue;
-    if (typeof profileValue === 'object' && typeof profileValue.key === 'string') return profileValue.key;
-    return '';
-}
-
-function applyModelRuntime(data = {}) {
-    availableModelProfiles = Array.isArray(data.available_profiles) ? data.available_profiles : [];
-    selectedModelProfileKey = extractProfileKey(data.selected_profile) || extractProfileKey(data.selected_profile_key) || selectedModelProfileKey;
-    activeModelProfileKey = extractProfileKey(data.active_profile) || extractProfileKey(data.active_profile_key) || activeModelProfileKey;
-    dockerControlAvailable = Boolean(data.docker_control_available);
-    if (Object.prototype.hasOwnProperty.call(data, 'model_available')) {
-        const loadFailed = data.loading?.status === 'failed';
-        updateStatus(data.model_available ? 'connected' : (loadFailed ? 'disconnected' : 'loading'));
-    }
-    if (!selectedModelProfileKey && Array.isArray(availableModelProfiles)) {
-        selectedModelProfileKey = availableModelProfiles.find(profile => profile.selected)?.key || '';
-    }
-    if (!activeModelProfileKey && Array.isArray(availableModelProfiles)) {
-        activeModelProfileKey = availableModelProfiles.find(profile => profile.active)?.key || selectedModelProfileKey;
-    }
-    setModelNote(data.selected_model_name || data.model_name || data.loaded_model_name || window.MODEL_NAME);
-    syncModelSummaryButton();
-    maybeReportUiModelReady();
-}
-
-async function loadComposerRuntime() {
-    try {
-        const resp = await fetch('/api/dashboard');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        applyModelRuntime(data);
-    } catch (error) {
-        syncModelSummaryButton();
-    }
 }
 
 function loadFeatureSettings() {
@@ -705,14 +515,12 @@ function updateStatus(status) {
     modelAvailable = status === 'connected';
     renderStatusDot(status);
     syncSendButton();
-    if (modelAvailable && websocketConnected) maybeReportUiModelReady();
 }
 
 function setWebsocketConnected(connected) {
     websocketConnected = Boolean(connected);
     syncStatusIndicator();
     syncSendButton();
-    if (modelAvailable && websocketConnected) maybeReportUiModelReady();
 }
 
 function setLoadingText(text) {
@@ -734,41 +542,6 @@ function buildHttpFallbackPayload(payload = {}) {
         };
     }
     return nextPayload;
-}
-
-function isComposerAvailable() {
-    const input = document.getElementById('input');
-    return Boolean(modelAvailable && input && !input.disabled && canUseWebsocketTransport());
-}
-
-async function maybeReportUiModelReady() {
-    const profile = selectedModelProfileKey || activeModelProfileKey || '';
-    const modelName = window.MODEL_NAME || '';
-    if (!isComposerAvailable() || !profile || !modelName || uiReadyReportInFlight) return;
-
-    const readyKey = `${uiSessionId}:${profile}:${modelName}`;
-    if (readyKey === lastReportedUiReadyKey) return;
-
-    uiReadyReportInFlight = true;
-    try {
-        const resp = await fetch('/api/ui/model-ready', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model_name: modelName,
-                profile,
-                composer_available: true,
-                websocket_connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
-            }),
-        });
-        if (resp.ok) {
-            lastReportedUiReadyKey = readyKey;
-        }
-    } catch (error) {
-        console.debug('Failed to report UI model readiness:', error);
-    } finally {
-        uiReadyReportInFlight = false;
-    }
 }
 
 function syncChatShellLayout() {
@@ -1515,17 +1288,10 @@ function startHealthPolling() {
             const health = await resp.json();
             if (health.model_available) {
                 updateStatus('connected');
-                modelSwitchInFlight = false;
-                loadComposerRuntime();
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
             } else if (health.loading?.status === 'failed') {
                 updateStatus('disconnected');
-                modelSwitchInFlight = false;
-                loadComposerRuntime();
-                if (document.getElementById('dashboardOverlay')?.classList.contains('show')) {
-                    loadDashboard();
-                }
                 clearInterval(healthPollInterval);
                 healthPollInterval = null;
             } else {
@@ -1544,7 +1310,6 @@ function handleChatEvent(data) {
     if (data.type === 'start') {
         removeLoading();
         ensureStreamingAssistantMessage();
-        clearTerminalOutput();
         currentAssistantTurnStartedAt = Date.now();
         currentAssistantTurnArtifactPaths = new Set();
         recordWorkspaceActivity('Turn', 'Turn started.');
@@ -1586,17 +1351,9 @@ function handleChatEvent(data) {
         );
     } else if (data.type === 'tool_start') {
         setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
-        if (data.name === 'workspace.run_command') {
-            const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
-            recordTerminalCommandStart(command, data.arguments?.cwd || '.');
-        }
     } else if (data.type === 'tool_result') {
         setLoadingText(data.content || (data.ok === false ? 'Tool failed' : 'Tool finished'));
         if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
-        if (data.name === 'workspace.run_command') {
-            const command = Array.isArray(data.arguments?.command) ? data.arguments.command.join(' ') : '';
-            recordTerminalCommandResult(command, data.payload || {});
-        }
         if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
             openWorkspaceFile(data.payload.path);
         }
@@ -1732,7 +1489,6 @@ function connectWS() {
         fetch('/health').then(r => r.json()).then(health => {
             if (health.model_available) {
                 updateStatus('connected');
-                loadComposerRuntime();
             } else {
                 if (!modelAvailable) updateStatus('loading');
                 startHealthPolling();
@@ -1779,24 +1535,6 @@ function connectWS() {
     };
 }
 
-function connectLogWS() {
-    if (logWs && logWs.readyState === WebSocket.OPEN) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    logWs = new WebSocket(`${protocol}//${window.location.host}/ws/logs`);
-    logWs.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'log') {
-            const el = document.getElementById('dashLogs');
-            if (el) {
-                el.textContent += data.content;
-                el.scrollTop = el.scrollHeight;
-            }
-        }
-    };
-    logWs.onerror = () => { logWs = null; };
-    logWs.onclose = () => { logWs = null; };
-}
-
 // ==================== Menu ====================
 
 function toggleMenu() {
@@ -1826,410 +1564,6 @@ function closeMenu() {
         button.setAttribute('aria-expanded', 'false');
     }
     syncChatShellLayout();
-}
-
-// ==================== Dashboard ====================
-
-function showDashboard() {
-    dismissMobileKeyboard(true);
-    document.getElementById('dashboardOverlay').classList.add('show');
-    loadDashboard();
-    connectLogWS();
-}
-function closeDashboard() {
-    document.getElementById('dashboardOverlay').classList.remove('show');
-    if (dashboardRefreshTimer) {
-        clearTimeout(dashboardRefreshTimer);
-        dashboardRefreshTimer = null;
-    }
-}
-
-function scheduleDashboardRefresh(delay = 5000) {
-    if (dashboardRefreshTimer) clearTimeout(dashboardRefreshTimer);
-    if (!document.getElementById('dashboardOverlay').classList.contains('show')) return;
-    dashboardRefreshTimer = setTimeout(() => {
-        dashboardRefreshTimer = null;
-        loadDashboard();
-    }, delay);
-}
-
-function formatDashboardDate(value) {
-    if (!value) return '--';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-    });
-}
-
-function formatDurationSeconds(value) {
-    if (value === null || value === undefined || Number.isNaN(Number(value))) return '--';
-    const total = Math.max(0, Math.round(Number(value)));
-    const minutes = Math.floor(total / 60);
-    const seconds = total % 60;
-    if (minutes <= 0) return `${seconds}s`;
-    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
-}
-
-async function loadDashboard() {
-    const el = document.getElementById('dashboardContent');
-    if (!el) return;
-    try {
-        const [runtimeResp, libraryResp] = await Promise.all([
-            fetch('/api/dashboard'),
-            fetch('/api/models/library'),
-        ]);
-        const data = await runtimeResp.json();
-        const library = await libraryResp.json();
-        // Keep the composer/send state aligned with the same runtime snapshot the
-        // dashboard is showing, so opening Models can recover from a missed ready update.
-        applyModelRuntime(data);
-
-        const loading = data.loading || {};
-        const loadFailed = loading.status === 'failed';
-        const statusClass = data.model_available ? 'connected' : (loadFailed ? 'error' : 'loading');
-        const statusText = data.model_available ? 'Connected' : (loadFailed ? 'Failed' : 'Loading / Unavailable');
-        const containerInfo = data.container || {};
-        const containerStatus = data.container
-            ? (containerInfo.restarting
-                ? `Restarting${containerInfo.restart_count ? ` (${containerInfo.restart_count})` : ''}`
-                : (containerInfo.running ? 'Running' : containerInfo.status || 'Stopped'))
-            : 'Unknown';
-        const cache = data.cache || {};
-        const cacheStatus = cache.status || 'unknown';
-        const cacheSize = cache.size_display || '--';
-        const cacheDate = formatDashboardDate(cache.last_modified);
-        const failureDetail = loadFailed ? String(loading.detail || 'vLLM failed to start.') : '';
-        const failureExitCode = loadFailed && loading.container ? loading.container.exit_code : null;
-        const jobs = Array.isArray(library.jobs) ? library.jobs : [];
-        const models = Array.isArray(library.models) ? library.models : [];
-        const runtimeControlAvailable = Boolean(data.docker_control_available);
-        const currentModelName = data.model_name || '--';
-        const requestedModelName = data.selected_model_name || currentModelName;
-        dockerControlAvailable = runtimeControlAvailable;
-        const actionBody = runtimeControlAvailable
-            ? `
-                <button class="dash-btn" onclick="dashRestart()">
-                    Restart vLLM
-                    <div class="btn-desc">Restart the inference server without changing the selected model</div>
-                </button>
-                <button class="dash-btn danger" onclick="dashRedownload()">
-                    Redownload Active Model
-                    <div class="btn-desc">Delete the current download and fetch it again from Hugging Face</div>
-                </button>
-            `
-            : `
-                <div class="dash-card">
-                    <div class="dash-row"><span class="label">Runtime control</span><span class="value">Disabled</span></div>
-                    <div style="color:var(--text_secondary);font-size:13px;margin-top:10px;">
-                        Restart, load-model, and redownload actions need Docker control enabled on this server. The library below still shows everything already downloaded.
-                    </div>
-                </div>
-            `;
-        const modelCards = models.length
-            ? models.map(model => {
-                const jobActive = Boolean(model.download_job && ['queued', 'downloading'].includes(model.download_job.status));
-                const isValid = model.status === 'valid';
-                const compatibility = model.compatibility || {};
-                const incompatible = compatibility.status === 'incompatible';
-                const statusText = jobActive
-                    ? 'Downloading'
-                    : (isValid ? 'Downloaded' : 'Incomplete download');
-                const loadDisabled = Boolean(!runtimeControlAvailable || !isValid || jobActive || model.active_profile || incompatible);
-                const deleteDisabled = Boolean(model.managed_by_profile || jobActive);
-                const loadTitle = incompatible
-                    ? (compatibility.detail || 'This model is not compatible with the current runtime.')
-                    : model.active_profile
-                    ? 'This model is already active.'
-                    : (!runtimeControlAvailable
-                        ? 'Loading a model requires Docker control on the server.'
-                        : (jobActive
-                            ? 'This model is still downloading.'
-                            : (!isValid ? 'Finish downloading this model before loading it.' : `Load ${model.model_id}`)));
-                const deleteTitle = model.managed_by_profile
-                    ? 'This download is protected because it belongs to a configured default model.'
-                    : (jobActive
-                        ? 'Wait for the download to finish before deleting it.'
-                        : `Delete downloaded files for ${model.model_id}`);
-                return `
-                <div class="model-library-card${model.active_profile ? ' is-active' : ''}">
-                    <div class="model-library-head">
-                        <div>
-                            <div class="model-library-title">${escapeHtml(model.model_id || 'Unknown model')}</div>
-                            <div class="model-library-meta">
-                                ${escapeHtml(statusText)} • ${escapeHtml(model.size_display || '--')} • Updated ${escapeHtml(formatDashboardDate(model.last_modified))}
-                            </div>
-                        </div>
-                        <div class="model-library-badges">
-                            ${model.active_profile ? '<span class="model-badge active">In Use</span>' : ''}
-                            ${model.managed_by_profile ? '<span class="model-badge">Default</span>' : ''}
-                            ${jobActive ? '<span class="model-badge">Downloading</span>' : ''}
-                            ${incompatible ? '<span class="model-badge danger">Unsupported</span>' : ''}
-                            ${!isValid && !jobActive ? '<span class="model-badge warning">Incomplete</span>' : ''}
-                        </div>
-                    </div>
-                    ${incompatible ? `<div class="model-library-note warning">${escapeHtml(compatibility.detail || 'This model is not compatible with the current runtime.')}</div>` : ''}
-                    <div class="model-library-actions">
-                        <button class="dash-btn dash-btn-compact" onclick='window.open(${JSON.stringify(model.download_url)}, "_blank", "noopener")'>View</button>
-                        <button class="dash-btn dash-btn-compact" onclick='dashActivateModel(${JSON.stringify(model.model_id)})' ${loadDisabled ? 'disabled' : ''} title="${escapeHtml(loadTitle)}">${model.active_profile ? 'In Use' : 'Load Model'}</button>
-                        <button class="dash-btn dash-btn-compact danger" onclick='dashDeleteModel(${JSON.stringify(model.model_id)})' ${deleteDisabled ? 'disabled' : ''} title="${escapeHtml(deleteTitle)}">${model.managed_by_profile ? 'Protected' : 'Delete Download'}</button>
-                    </div>
-                </div>
-            `;
-            }).join('')
-            : '<div class="dash-empty">No downloaded models in the library yet.</div>';
-        const jobCards = jobs.length
-            ? jobs.map(job => {
-                const compatibility = job.compatibility || {};
-                const incompatible = compatibility.status === 'incompatible';
-                return `
-                <div class="model-job ${job.status === 'error' ? 'is-error' : ''}">
-                    <div class="model-job-head">
-                        <span class="model-job-id">${escapeHtml(job.model_id || 'Unknown model')}</span>
-                        <span class="model-job-status">${escapeHtml(job.status || 'queued')}</span>
-                    </div>
-                    <div class="model-job-meta">Started ${escapeHtml(formatDashboardDate(job.started_at || job.created_at))}</div>
-                    ${incompatible ? `<div class="model-job-error">${escapeHtml(compatibility.detail || 'This model is not compatible with the current runtime.')}</div>` : ''}
-                    ${job.error ? `<div class="model-job-error">${escapeHtml(job.error)}</div>` : ''}
-                </div>
-            `;
-            }).join('')
-            : '<div class="dash-empty">No active or recent downloads yet.</div>';
-
-        el.innerHTML = `
-            <div class="dash-section">
-                <h4>Model Runtime</h4>
-                <div class="dash-card">
-                    <div class="dash-row"><span class="label">Current Model</span><span class="value">${escapeHtml(currentModelName)}</span></div>
-                    <div class="dash-row"><span class="label">Requested Model</span><span class="value">${escapeHtml(requestedModelName)}</span></div>
-                    <div class="dash-row"><span class="label">Runtime Control</span><span class="value">${runtimeControlAvailable ? 'Enabled' : 'Disabled'}</span></div>
-                    <div class="dash-row"><span class="label">Status</span><span class="value"><span class="status-dot ${statusClass}"></span>${statusText}</span></div>
-                    <div class="dash-row"><span class="label">Container</span><span class="value">${containerStatus}</span></div>
-                    <div class="dash-row"><span class="label">Load Phase</span><span class="value">${escapeHtml(loading.phase || (data.model_available ? 'ready' : 'loading'))}</span></div>
-                    <div class="dash-row"><span class="label">Progress</span><span class="value">${loading.progress !== null && loading.progress !== undefined ? `${Math.round(Number(loading.progress) * 100)}%` : '--'}</span></div>
-                    <div class="dash-row"><span class="label">Elapsed</span><span class="value">${escapeHtml(formatDurationSeconds(loading.elapsed_seconds))}</span></div>
-                    <div class="dash-row"><span class="label">ETA</span><span class="value">${escapeHtml(formatDurationSeconds(loading.eta_seconds))}</span></div>
-                    <div class="dash-row"><span class="label">Avg Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.average_seconds))}</span></div>
-                    <div class="dash-row"><span class="label">Last Load</span><span class="value">${escapeHtml(formatDurationSeconds(loading.history?.last_seconds))}</span></div>
-                    <div class="dash-row"><span class="label">History</span><span class="value">${escapeHtml(String(loading.history?.sample_count || 0))} samples</span></div>
-                    ${loadFailed ? `<div class="dash-row"><span class="label">Failure</span><span class="value">${escapeHtml(failureDetail)}</span></div>` : ''}
-                    ${loadFailed && failureExitCode !== null && failureExitCode !== undefined ? `<div class="dash-row"><span class="label">Exit Code</span><span class="value">${escapeHtml(String(failureExitCode))}</span></div>` : ''}
-                </div>
-            </div>
-            <div class="dash-section">
-                <h4>Active Model Cache</h4>
-                <div class="dash-card">
-                    <div class="dash-row"><span class="label">Status</span><span class="value">${cacheStatus}</span></div>
-                    <div class="dash-row"><span class="label">Size</span><span class="value">${cacheSize}</span></div>
-                    <div class="dash-row"><span class="label">Last Updated</span><span class="value">${cacheDate}</span></div>
-                </div>
-            </div>
-            <div class="dash-section">
-                <h4>Actions</h4>
-                <div class="dash-actions">
-                    <button class="dash-btn" onclick="dashValidate()">
-                        Validate Active Cache
-                        <div class="btn-desc">Check that the currently selected model files are present and complete</div>
-                    </button>
-                    ${actionBody}
-                </div>
-            </div>
-            <div class="dash-section">
-                <h4>Library</h4>
-                <div class="dash-card model-library-shell">
-                    <div class="model-library-subhead">
-                        <span>Add Model</span>
-                    </div>
-                    <div class="model-library-intro">Paste a Hugging Face model URL or repo id to download a new model into the shared library used by this app. Try entries like <code>google/gemma-4-E4B-it</code> or <code>Qwen/Qwen3-8B</code>.</div>
-                    <div class="model-library-form">
-                        <input id="modelLibraryInput" class="dash-input" placeholder="e.g. google/gemma-4-E4B-it or https://huggingface.co/google/gemma-4-E4B-it">
-                        <button class="dash-btn" onclick="dashDownloadModel()">Add to Library</button>
-                    </div>
-                    <div class="model-library-subhead">
-                        <span>Downloaded Models (${models.length})</span>
-                        <button class="dash-link-btn" onclick="loadDashboard()">Refresh</button>
-                    </div>
-                    <div class="model-library-hint">Everything listed here is already downloaded into the local shared Hugging Face cache.</div>
-                    <div class="model-library-list">${modelCards}</div>
-                    <div class="model-library-subhead">
-                        <span>Download Activity</span>
-                    </div>
-                    <div class="model-jobs">${jobCards}</div>
-                </div>
-            </div>
-            <div class="dash-section">
-                <h4>Logs</h4>
-                <div class="dash-logs" id="dashLogs"></div>
-            </div>
-        `;
-        if (jobs.some(job => ['queued', 'downloading'].includes(job.status))) {
-            scheduleDashboardRefresh(3000);
-        } else {
-            scheduleDashboardRefresh(12000);
-        }
-    } catch (e) {
-        el.innerHTML = `<div style="padding:20px;color:var(--text_secondary)">Failed to load dashboard: ${e.message}</div>`;
-        scheduleDashboardRefresh(12000);
-    }
-}
-
-async function dashValidate() {
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Validating...';
-    try {
-        const resp = await fetch('/api/dashboard');
-        const data = await resp.json();
-        const cache = data.cache || {};
-        if (cache.status === 'valid') {
-            btn.textContent = 'Cache is valid';
-            btn.style.borderColor = 'var(--status_connected)';
-        } else if (cache.status === 'incomplete') {
-            btn.textContent = 'Cache incomplete — try redownloading';
-            btn.style.borderColor = '#f59e0b';
-        } else {
-            btn.textContent = 'No cache found — try redownloading';
-            btn.style.borderColor = 'var(--status_disconnected)';
-        }
-    } catch (e) {
-        btn.textContent = 'Validation failed: ' + e.message;
-    }
-    setTimeout(() => { btn.disabled = false; loadDashboard(); }, 3000);
-}
-
-async function dashRestart() {
-    if (!confirm('Restart vLLM? The model will reload (takes a few minutes).')) return;
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Restarting...';
-    try {
-        const resp = await fetch('/api/vllm/restart', { method: 'POST' });
-        const data = await resp.json();
-        btn.textContent = data.message || 'Restarting...';
-        updateStatus('loading');
-        startHealthPolling();
-    } catch (e) {
-        btn.textContent = 'Restart failed: ' + e.message;
-    }
-    setTimeout(() => { btn.disabled = false; }, 5000);
-}
-
-async function dashRedownload() {
-    if (!confirm('This will delete the active model download and fetch it again from Hugging Face. This may take a while. Continue?')) return;
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Clearing cache and restarting...';
-    try {
-        const resp = await fetch('/api/model/redownload', { method: 'POST' });
-        const data = await resp.json();
-        btn.textContent = data.message || 'Redownloading...';
-        updateStatus('loading');
-        startHealthPolling();
-    } catch (e) {
-        btn.textContent = 'Failed: ' + e.message;
-    }
-    setTimeout(() => { btn.disabled = false; }, 10000);
-}
-
-async function requestModelDownload(source, force = false) {
-    return fetch('/api/models/library/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source, force }),
-    });
-}
-
-async function dashDownloadModel() {
-    const input = document.getElementById('modelLibraryInput');
-    const source = (input?.value || '').trim();
-    if (!source) {
-        alert('Enter a Hugging Face model URL or repo id first.');
-        return;
-    }
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Starting download...';
-    try {
-        let resp = await requestModelDownload(source, false);
-        let data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.message || 'Download failed');
-        if (data.status === 'warning' && data.can_download_anyway) {
-            const detail = data.compatibility?.detail || data.message || 'This model may not work with the current runtime.';
-            const confirmed = confirm(`${detail}\n\nCancel to skip the download, or press OK to download it anyway.`);
-            if (!confirmed) {
-                btn.textContent = 'Canceled';
-                return;
-            }
-            btn.textContent = 'Starting download anyway...';
-            resp = await requestModelDownload(source, true);
-            data = await resp.json();
-            if (!resp.ok) throw new Error(data.detail || data.message || 'Download failed');
-        }
-        input.value = '';
-        btn.textContent = data.message || 'Download started';
-        loadDashboard();
-    } catch (e) {
-        btn.textContent = 'Failed: ' + e.message;
-    }
-    setTimeout(() => {
-        btn.disabled = false;
-        btn.textContent = 'Add to Library';
-    }, 3000);
-}
-
-async function dashDeleteModel(modelId) {
-    const confirmed = confirm(`Delete the downloaded files for ${modelId}?\n\nThis removes that model from the local library cache.`);
-    if (!confirmed) return;
-
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Deleting...';
-    try {
-        const resp = await fetch('/api/models/library/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_id: modelId }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.message || 'Delete failed');
-        loadDashboard();
-    } catch (e) {
-        btn.disabled = false;
-        btn.textContent = 'Failed: ' + e.message;
-    }
-}
-
-async function dashActivateModel(modelId) {
-    if (!dockerControlAvailable) {
-        alert('Loading a downloaded model needs Docker control on this server.');
-        return;
-    }
-    const confirmed = confirm(`Load ${modelId}?\n\nThis will restart vLLM and switch the active model to this downloaded checkpoint.`);
-    if (!confirmed) return;
-
-    const btn = event.target.closest('.dash-btn');
-    btn.disabled = true;
-    btn.textContent = 'Activating...';
-    try {
-        const resp = await fetch('/api/models/library/activate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_id: modelId }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.message || 'Activation failed');
-        setModelNote(data.model_name || modelId);
-        updateStatus('loading');
-        startHealthPolling();
-        loadDashboard();
-    } catch (e) {
-        btn.disabled = false;
-        btn.textContent = 'Failed: ' + e.message;
-    }
 }
 
 // ==================== Settings ====================
@@ -2298,7 +1632,7 @@ async function clearBrowserPersistence() {
 
 async function resetAllAppData() {
     const firstConfirmation = confirm(
-        'Delete all chats, workspaces, artifacts, pet memory, and saved browser preferences?\n\nThis also removes packages and files installed inside conversation workspaces.'
+        'Delete all chats, workspaces, artifacts, and saved browser preferences?\n\nThis also removes packages and files installed inside conversation workspaces.'
     );
     if (!firstConfirmation) return;
 
@@ -2323,71 +1657,12 @@ async function resetAllAppData() {
     }
 }
 
-async function loadPet() {
-    try {
-        const resp = await fetch('/api/pet');
-        const data = await resp.json();
-        petExists = Boolean(data.exists);
-        petProfile = data.pet || null;
-        applyPetTheme(petProfile);
-    } catch (e) {
-        console.error('Failed to load agent profile:', e);
-    }
-}
-
-async function promoteWorkspaceFile(path) {
-    if (!petExists || !currentRunId || !path) return;
-    const name = prompt('Capability name:', basename(path));
-    if (!name) return;
-    const description = prompt('Capability description:', `Promoted from ${path}`) || '';
-    try {
-        const resp = await fetch('/api/pet/capabilities/promote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                run_id: currentRunId,
-                source_path: path,
-                name,
-                kind: 'artifact',
-                description,
-            }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-        await loadPet();
-    } catch (e) {
-        alert(`Failed to promote artifact: ${e.message}`);
-    }
-}
-
 function buildWelcomeMarkup() {
     return `<div class="welcome">
             <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
-                <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
-                    <span class="wolfy-stage" aria-hidden="true">
-                        <span class="wolfy-shadow"></span>
-                        <canvas class="wolfy-canvas" width="66" height="66"></canvas>
-                        <span class="wolfy-bark-lines">
-                            <span></span>
-                            <span></span>
-                            <span></span>
-                        </span>
-                    </span>
-                    <span class="bond-reaction" id="bondReaction" hidden></span>
-                </button>
                 <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
-                <span class="bond-note" id="bondNote"></span>
             </div>
         </div>`;
-}
-
-function destroyWelcomeMascot() {
-    if (!welcomeMascotRuntime) return;
-    welcomeMascotRuntime.destroyed = true;
-    window.clearInterval(welcomeMascotRuntime.cycleTimer);
-    window.clearTimeout(welcomeMascotRuntime.poseTimer);
-    window.cancelAnimationFrame(welcomeMascotRuntime.spriteRaf);
-    welcomeMascotRuntime = null;
 }
 
 function stopWelcomeHintRotation() {
@@ -2418,282 +1693,6 @@ function startWelcomeHintRotation() {
     welcomeHintTimer = window.setInterval(renderHint, WELCOME_HINT_ROTATE_MS);
 }
 
-const WOLFY_FRAME_SIZE = 66;
-const WOLFY_MATTE_DISTANCE = 18;
-const WOLFY_BASELINE_PAD = 2;
-const WOLFY_SPRITE_SPECS = Object.freeze({
-    sit: Object.freeze({ src: '/static/assets/wolfy/wolf_tail.png', frames: [0, 1], frame_ms: 450, loop: true }),
-    walk: Object.freeze({ src: '/static/assets/wolfy/wolf_run.png', frames: [0, 1, 2, 3, 4], frame_ms: 120, loop: true }),
-    rest: Object.freeze({ src: '/static/assets/wolfy/wolf_sit.png', frames: [3], frame_ms: 1000, loop: false }),
-    bark: Object.freeze({ src: '/static/assets/wolfy/wolf_tail.png', frames: [0, 1], frame_ms: 160, loop: true }),
-    pet: Object.freeze({ src: '/static/assets/wolfy/wolf_jump.png', frames: [0, 1, 2, 3], frame_ms: 150, loop: false }),
-    jump: Object.freeze({ src: '/static/assets/wolfy/wolf_jump.png', frames: [0, 1, 2, 3], frame_ms: 150, loop: false }),
-    dig: Object.freeze({ src: '/static/assets/wolfy/wolf_run.png', frames: [1, 2, 3, 4], frame_ms: 90, loop: true }),
-});
-const wolfySheetCache = new Map();
-
-function getWolfySpriteSpec(pose) {
-    return WOLFY_SPRITE_SPECS[pose] || WOLFY_SPRITE_SPECS.sit;
-}
-
-function wolfyColorDistance(data, offset, matte) {
-    return (
-        Math.abs(data[offset] - matte[0]) +
-        Math.abs(data[offset + 1] - matte[1]) +
-        Math.abs(data[offset + 2] - matte[2])
-    );
-}
-
-function loadWolfySheet(src) {
-    if (wolfySheetCache.has(src)) return wolfySheetCache.get(src);
-    const promise = new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
-            if (!ctx) {
-                reject(new Error(`Failed to create canvas context for ${src}`));
-                return;
-            }
-            ctx.drawImage(img, 0, 0);
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const data = imageData.data;
-            const matte = [data[0], data[1], data[2]];
-            for (let i = 0; i < data.length; i += 4) {
-                if (!data[i + 3]) continue;
-                if (wolfyColorDistance(data, i, matte) <= WOLFY_MATTE_DISTANCE) {
-                    data[i + 3] = 0;
-                }
-            }
-            ctx.putImageData(imageData, 0, 0);
-            const frameCount = Math.max(1, Math.floor(canvas.width / WOLFY_FRAME_SIZE));
-            const bounds = [];
-            for (let frame = 0; frame < frameCount; frame++) {
-                const frameOffsetX = frame * WOLFY_FRAME_SIZE;
-                let minX = WOLFY_FRAME_SIZE;
-                let minY = WOLFY_FRAME_SIZE;
-                let maxX = -1;
-                let maxY = -1;
-                for (let y = 0; y < WOLFY_FRAME_SIZE; y++) {
-                    for (let x = 0; x < WOLFY_FRAME_SIZE; x++) {
-                        const px = frameOffsetX + x;
-                        const offset = (y * canvas.width + px) * 4;
-                        if (data[offset + 3] === 0) continue;
-                        if (x < minX) minX = x;
-                        if (y < minY) minY = y;
-                        if (x > maxX) maxX = x;
-                        if (y > maxY) maxY = y;
-                    }
-                }
-                if (maxX < minX || maxY < minY) {
-                    bounds.push({
-                        x: frameOffsetX,
-                        y: 0,
-                        width: WOLFY_FRAME_SIZE,
-                        height: WOLFY_FRAME_SIZE,
-                    });
-                    continue;
-                }
-                bounds.push({
-                    x: frameOffsetX + minX,
-                    y: minY,
-                    width: maxX - minX + 1,
-                    height: maxY - minY + 1,
-                });
-            }
-            resolve({ canvas, bounds });
-        };
-        img.onerror = () => reject(new Error(`Failed to load ${src}`));
-        img.src = src;
-    });
-    wolfySheetCache.set(src, promise);
-    return promise;
-}
-
-function preloadWolfySheets() {
-    const uniqueSources = [...new Set(Object.values(WOLFY_SPRITE_SPECS).map(spec => spec.src))];
-    return Promise.all(uniqueSources.map(src => loadWolfySheet(src).then(sheet => [src, sheet])));
-}
-
-function renderWolfyFrame(runtime, now = performance.now()) {
-    if (!runtime.canvasEl || !runtime.canvasCtx) return;
-    const spec = getWolfySpriteSpec(runtime.pose);
-    const sheet = runtime.loadedSheets?.get(spec.src);
-    if (!sheet) return;
-
-    const elapsed = Math.max(0, now - runtime.poseStartedAt);
-    const step = Math.floor(elapsed / spec.frame_ms);
-    const frameIndex = spec.loop ? step % spec.frames.length : Math.min(step, spec.frames.length - 1);
-    const frame = spec.frames[frameIndex];
-
-    runtime.canvasCtx.clearRect(0, 0, runtime.canvasEl.width, runtime.canvasEl.height);
-    const frameBounds = sheet.bounds?.[frame] || {
-        x: frame * WOLFY_FRAME_SIZE,
-        y: 0,
-        width: WOLFY_FRAME_SIZE,
-        height: WOLFY_FRAME_SIZE,
-    };
-    const drawX = Math.round((runtime.canvasEl.width - frameBounds.width) / 2);
-    const drawY = runtime.canvasEl.height - frameBounds.height - WOLFY_BASELINE_PAD;
-    runtime.canvasCtx.drawImage(
-        sheet.canvas,
-        frameBounds.x,
-        frameBounds.y,
-        frameBounds.width,
-        frameBounds.height,
-        drawX,
-        drawY,
-        frameBounds.width,
-        frameBounds.height,
-    );
-}
-
-function startWolfySpriteLoop(runtime) {
-    window.cancelAnimationFrame(runtime.spriteRaf);
-    const tick = (now) => {
-        if (runtime.destroyed) return;
-        renderWolfyFrame(runtime, now);
-        runtime.spriteRaf = window.requestAnimationFrame(tick);
-    };
-    runtime.spriteRaf = window.requestAnimationFrame(tick);
-}
-
-let currentBond = { affection: 50, pets_today: 0, streak: 0, mood: 'content', capped: false, max_pets_per_day: 12 };
-
-function updateBondNote() {
-    const el = document.getElementById('bondNote');
-    if (!el) return;
-    const b = currentBond;
-    if (b.mood === 'happy') el.textContent = `Streak ${b.streak}d`;
-    else if (b.mood === 'content') el.textContent = b.streak > 0 ? `Streak ${b.streak}d` : '';
-    else if (b.mood === 'lonely') el.textContent = 'Lonely...';
-    else el.textContent = 'Neglected';
-}
-
-function getMoodCycle(mood) {
-    switch (mood) {
-        case 'happy': return { poses: ['walk', 'sit', 'jump', 'bark', 'sit', 'walk', 'sit'], interval: 2800, durations: { walk: 1200, bark: 800, jump: 600 } };
-        case 'content': return { poses: ['sit', 'sit', 'walk', 'jump', 'sit'], interval: 5000, durations: { walk: 1400, jump: 600 } };
-        case 'lonely': return { poses: ['rest', 'rest', 'sit', 'rest'], interval: 6000, durations: { sit: 2000 } };
-        case 'neglected': return { poses: ['dig', 'rest', 'dig', 'rest', 'rest'], interval: 4500, durations: { dig: 1800 } };
-        default: return { poses: ['sit'], interval: 5000, durations: {} };
-    }
-}
-
-async function loadBondState() {
-    try {
-        const resp = await fetch('/api/pet/bond');
-        if (resp.ok) currentBond = await resp.json();
-    } catch (e) { /* offline */ }
-    updateBondNote();
-}
-
-function showBondReaction(text) {
-    const el = document.getElementById('bondReaction');
-    if (!el) return;
-    el.textContent = text;
-    el.hidden = false;
-    el.classList.remove('pop');
-    void el.offsetWidth;
-    el.classList.add('pop');
-    setTimeout(() => { el.hidden = true; }, 900);
-}
-
-function initWelcomeMascot() {
-    destroyWelcomeMascot();
-
-    const mascot = document.querySelector('.welcome-mascot');
-    if (!mascot) return;
-
-    const runtime = {
-        canvasEl: mascot.querySelector('.wolfy-canvas'),
-        canvasCtx: mascot.querySelector('.wolfy-canvas')?.getContext('2d'),
-        cycleTimer: null,
-        cycleIndex: 0,
-        destroyed: false,
-        loadedSheets: new Map(),
-        petting: false,
-        pose: mascot.dataset.pose || 'sit',
-        poseStartedAt: performance.now(),
-        poseTimer: null,
-        spriteRaf: 0,
-    };
-    if (runtime.canvasCtx) runtime.canvasCtx.imageSmoothingEnabled = false;
-
-    const setPose = (pose) => {
-        runtime.pose = pose;
-        runtime.poseStartedAt = performance.now();
-        mascot.dataset.pose = pose;
-        renderWolfyFrame(runtime, runtime.poseStartedAt);
-    };
-
-    const queuePose = (pose, duration, nextPose = 'sit') => {
-        window.clearTimeout(runtime.poseTimer);
-        setPose(pose);
-        if (duration) {
-            runtime.poseTimer = window.setTimeout(() => setPose(nextPose), duration);
-        }
-    };
-
-    function startCycle() {
-        window.clearInterval(runtime.cycleTimer);
-        const mc = getMoodCycle(currentBond.mood);
-        runtime.cycleIndex = 0;
-        runtime.cycleTimer = window.setInterval(() => {
-            if (runtime.petting) return;
-            const pose = mc.poses[runtime.cycleIndex % mc.poses.length];
-            runtime.cycleIndex++;
-            const dur = mc.durations[pose] || mc.interval * 0.6;
-            queuePose(pose, dur, currentBond.mood === 'lonely' || currentBond.mood === 'neglected' ? 'rest' : 'sit');
-        }, mc.interval);
-    }
-
-    mascot.addEventListener('click', async () => {
-        runtime.petting = true;
-        if (currentBond.capped) {
-            queuePose('bark', 800, 'sit');
-            setTimeout(() => { runtime.petting = false; }, 1000);
-            return;
-        }
-        queuePose('pet', 600, 'bark');
-        try {
-            const resp = await fetch('/api/pet/bond/pet', { method: 'POST' });
-            if (resp.ok) {
-                const prev = currentBond.mood;
-                currentBond = await resp.json();
-                updateBondNote();
-                showBondReaction('+');
-                if (currentBond.mood !== prev) startCycle();
-            }
-        } catch (e) { /* offline */ }
-        setTimeout(() => {
-            runtime.petting = false;
-            queuePose('sit', 0);
-        }, 1200);
-    });
-
-    loadBondState().then(() => {
-        const defaultPose = currentBond.mood === 'lonely' || currentBond.mood === 'neglected' ? 'rest' : 'sit';
-        setPose(defaultPose);
-        startCycle();
-    });
-
-    preloadWolfySheets()
-        .then(entries => {
-            if (runtime.destroyed) return;
-            entries.forEach(([src, sheet]) => runtime.loadedSheets.set(src, sheet));
-            renderWolfyFrame(runtime, performance.now());
-            startWolfySpriteLoop(runtime);
-        })
-        .catch(error => {
-            console.error('Failed to load Wolfy sprite sheets', error);
-        });
-
-    welcomeMascotRuntime = runtime;
-}
-
 // ==================== Chat ====================
 
 function autoResizeTextarea(textarea) {
@@ -2708,7 +1707,6 @@ function autoResizeTextarea(textarea) {
 }
 
 function exitWelcomeMode() {
-    destroyWelcomeMascot();
     stopWelcomeHintRotation();
     const area = document.getElementById('inputArea');
     if (area) area.classList.remove('welcome-mode');
@@ -2728,7 +1726,6 @@ function enterWelcomeMode() {
     if (chat) chat.classList.add('welcome-layout');
     const input = document.getElementById('input');
     if (input) input.style.height = '';
-    initWelcomeMascot();
     startWelcomeHintRotation();
 }
 
@@ -2842,7 +1839,6 @@ function syncSendButton() {
         send.classList.add('is-stop');
         send.setAttribute('aria-label', showInterruptAction ? 'Interrupt with message' : 'Stop response');
         send.title = showInterruptAction ? 'Interrupt with message' : 'Stop response';
-        syncModelSelector();
         syncInterveneButton();
         renderExecutionPlanApproval();
         return;
@@ -2856,7 +1852,6 @@ function syncSendButton() {
     send.setAttribute('aria-label', canApprovePlan ? 'Start plan' : 'Send message');
     send.title = canApprovePlan ? 'Start plan' : 'Send message';
     send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !(hasPendingContent || canApprovePlan);
-    syncModelSelector();
     syncInterveneButton();
     renderExecutionPlanApproval();
 }
@@ -3905,207 +2900,6 @@ function recordWorkspaceActivity(kind, text, options = {}) {
     };
     workspaceActivity = collapseWorkspaceActivityEntries(workspaceActivity, entry).slice(-WORKSPACE_ACTIVITY_LIMIT);
     renderWorkspaceActivity();
-}
-
-function renderTerminalOutput() {
-    const outputEl = document.getElementById('terminalOutput');
-    const statusEl = document.getElementById('terminalStatusLabel');
-    if (!outputEl) return;
-    if (terminalUnavailableReason) {
-        outputEl.innerHTML = `<div class="workspace-empty terminal-empty">${escapeHtml(terminalUnavailableReason)}</div>`;
-        if (statusEl) statusEl.textContent = 'Interactive workspace shell unavailable';
-        return;
-    }
-    if (terminalEmulator) {
-        const emptyEl = outputEl.querySelector('.workspace-empty');
-        if (emptyEl) emptyEl.hidden = true;
-        if (statusEl) {
-            const connected = terminalWs && terminalWs.readyState === WebSocket.OPEN;
-            statusEl.textContent = connected ? 'Interactive workspace shell connected' : 'Interactive workspace shell disconnected';
-        }
-        return;
-    }
-    if (!terminalEntries.length && !terminalLiveBuffer) {
-        outputEl.innerHTML = '<div class="workspace-empty terminal-empty">Workspace command output will appear here during a turn.</div>';
-        if (statusEl) statusEl.textContent = 'Interactive workspace shell';
-        return;
-    }
-
-    outputEl.innerHTML = '';
-    if (terminalLiveBuffer) {
-        const live = document.createElement('div');
-        live.className = 'terminal-live';
-        live.textContent = terminalLiveBuffer;
-        outputEl.appendChild(live);
-    }
-    terminalEntries.forEach(entry => {
-        const row = document.createElement('div');
-        row.className = 'terminal-entry';
-        const stdout = entry.stdout ? `<div class="terminal-stream">${escapeHtml(entry.stdout)}</div>` : '';
-        const stderr = entry.stderr ? `<div class="terminal-stream is-error">${escapeHtml(entry.stderr)}</div>` : '';
-        row.innerHTML = `
-            <div class="terminal-command">$ ${escapeHtml(entry.command || '')}</div>
-            ${stdout}
-            ${stderr}
-            <div class="terminal-meta">${escapeHtml(entry.meta || '')}</div>
-        `;
-        outputEl.appendChild(row);
-    });
-    if (statusEl) {
-        const connected = terminalWs && terminalWs.readyState === WebSocket.OPEN;
-        statusEl.textContent = connected ? 'Interactive workspace shell connected' : 'Interactive workspace shell disconnected';
-    }
-    outputEl.scrollTop = outputEl.scrollHeight;
-}
-
-function clearTerminalOutput() {
-    terminalEntries = [];
-    terminalLiveBuffer = '';
-    if (terminalEmulator) terminalEmulator.clear();
-    renderTerminalOutput();
-}
-
-function recordTerminalCommandStart(command, cwd) {
-    if (!command) return;
-    const meta = [`Running in ${cwd || '.'}`];
-    terminalEntries = terminalEntries.concat({
-        id: Date.now() + Math.random(),
-        command,
-        stdout: '',
-        stderr: '',
-        meta: meta.join(' • '),
-        pending: true,
-    }).slice(-WORKSPACE_ACTIVITY_LIMIT);
-    renderTerminalOutput();
-}
-
-function connectTerminalWS() {
-    if (!featureSettings.agent_tools || !featureSettings.workspace_panel || !currentConvId) return;
-    if (terminalUnavailableReason) return;
-    if (terminalWs && (terminalWs.readyState === WebSocket.OPEN || terminalWs.readyState === WebSocket.CONNECTING)) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    terminalWs = new WebSocket(`${protocol}//${window.location.host}/ws/terminal/${encodeURIComponent(currentConvId)}`);
-    terminalWs.onopen = () => {
-        terminalUnavailableReason = '';
-        initializeTerminalEmulator();
-        if (terminalEmulator) {
-            terminalEmulator.clear();
-            fitTerminalEmulator();
-            sendTerminalResize();
-        }
-        renderTerminalOutput();
-    };
-    terminalWs.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'terminal_output') {
-            terminalLiveBuffer += data.content || '';
-            if (terminalEmulator) terminalEmulator.write(data.content || '');
-            renderTerminalOutput();
-        } else if (data.type === 'terminal_status') {
-            const statusEl = document.getElementById('terminalStatusLabel');
-            if (statusEl) statusEl.textContent = data.content || 'Interactive workspace shell';
-        } else if (data.type === 'terminal_unavailable') {
-            terminalUnavailableReason = data.content || 'Interactive terminal is unavailable on this server.';
-            if (terminalWs) {
-                try { terminalWs.close(); } catch (e) {}
-            }
-            renderTerminalOutput();
-        } else if (data.type === 'terminal_cleared') {
-            terminalLiveBuffer = '';
-            if (terminalEmulator) terminalEmulator.clear();
-            renderTerminalOutput();
-        }
-    };
-    terminalWs.onclose = () => {
-        renderTerminalOutput();
-        setTimeout(() => {
-            if (!terminalUnavailableReason && currentConvId && featureSettings.agent_tools && featureSettings.workspace_panel) connectTerminalWS();
-        }, 1500);
-    };
-    terminalWs.onerror = () => {
-        renderTerminalOutput();
-    };
-}
-
-function closeTerminalWS() {
-    if (terminalWs) {
-        try { terminalWs.close(); } catch (e) {}
-    }
-    terminalWs = null;
-}
-
-function initializeTerminalEmulator() {
-    if (terminalEmulator) return terminalEmulator;
-    const mount = document.getElementById('terminalCanvas');
-    if (!mount || !window.Terminal) return null;
-    terminalEmulator = new window.Terminal({
-        cursorBlink: true,
-        convertEol: true,
-        fontFamily: '"IBM Plex Mono", "Courier New", monospace',
-        fontSize: 12,
-        theme: {
-            background: '#0b1220',
-            foreground: '#dce7f6',
-        },
-    });
-    if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
-        terminalFitAddon = new window.FitAddon.FitAddon();
-        terminalEmulator.loadAddon(terminalFitAddon);
-    }
-    terminalEmulator.open(mount);
-    terminalEmulator.onData((data) => {
-        sendTerminalMessage({ type: 'input', content: data });
-    });
-    terminalEmulator.onResize((size) => {
-        sendTerminalMessage({ type: 'resize', cols: size.cols, rows: size.rows });
-    });
-    fitTerminalEmulator();
-    return terminalEmulator;
-}
-
-function fitTerminalEmulator() {
-    if (terminalFitAddon && typeof terminalFitAddon.fit === 'function') {
-        try { terminalFitAddon.fit(); } catch (e) {}
-    }
-}
-
-function sendTerminalResize() {
-    if (!terminalEmulator) return;
-    sendTerminalMessage({ type: 'resize', cols: terminalEmulator.cols, rows: terminalEmulator.rows });
-}
-
-function sendTerminalMessage(payload) {
-    if (!terminalWs || terminalWs.readyState !== WebSocket.OPEN) return false;
-    terminalWs.send(JSON.stringify(payload));
-    return true;
-}
-
-function interruptTerminal() {
-    sendTerminalMessage({ type: 'signal', signal: 'interrupt' });
-}
-
-function restartTerminal() {
-    sendTerminalMessage({ type: 'restart' });
-}
-
-function recordTerminalCommandResult(command, payload = {}) {
-    if (!command && !terminalEntries.length) return;
-    const returncode = payload.returncode;
-    const cwd = payload.cwd || '.';
-    const next = {
-        command: command || terminalEntries[terminalEntries.length - 1]?.command || '',
-        stdout: payload.stdout || '',
-        stderr: payload.stderr || payload.error || '',
-        meta: returncode == null ? `Command failed • ${cwd}` : `Exit ${returncode} • ${cwd}`,
-        pending: false,
-    };
-    const lastEntry = terminalEntries[terminalEntries.length - 1];
-    if (lastEntry?.pending && (!command || lastEntry.command === command)) {
-        terminalEntries[terminalEntries.length - 1] = { ...lastEntry, ...next };
-    } else {
-        terminalEntries = terminalEntries.concat({ id: Date.now() + Math.random(), ...next }).slice(-WORKSPACE_ACTIVITY_LIMIT);
-    }
-    renderTerminalOutput();
 }
 
 function renderFileList() {
@@ -5962,7 +4756,6 @@ async function loadConversation(id, options = {}) {
     clearBuildSteps();
     dismissExecutionPlan();
     if (!preserveActivity) clearWorkspaceActivity();
-    if (!preserveActivity) clearTerminalOutput();
     closeInlineViewer();
     clearPendingAttachments();
     const resp = await fetch(`/api/conversation/${id}`);
@@ -6005,7 +4798,6 @@ function newChat() {
     clearBuildSteps();
     dismissExecutionPlan();
     clearWorkspaceActivity();
-    clearTerminalOutput();
     closeInlineViewer();
     clearPendingAttachments();
     document.getElementById('messages').innerHTML = buildWelcomeMarkup();
@@ -6086,7 +4878,6 @@ document.addEventListener('keydown', (e) => {
     if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
     if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
-    if (document.getElementById('dashboardOverlay').classList.contains('show')) { closeDashboard(); return; }
     if (document.getElementById('menuOverlay').classList.contains('show')) { closeMenu(); return; }
     if (workspacePanelOpen) { closeWorkspacePanel(); }
 });
@@ -6109,21 +4900,17 @@ document.addEventListener('click', (event) => {
 
 updateStatus('loading');
 connectWS();
-loadPet();
 loadConversations();
 applyFeatureSettingsToUI();
 syncMobileReasoningBadge();
 refreshVoiceRuntime();
-loadComposerRuntime();
 refreshWorkspace(true);
-initWelcomeMascot();
 startWelcomeHintRotation();
 
 setTimeout(() => {
     fetch('/health').then(r => r.json()).then(health => {
         if (health.model_available) {
             updateStatus('connected');
-            loadComposerRuntime();
         } else {
             if (!modelAvailable) updateStatus('loading');
             startHealthPolling();
@@ -6144,7 +4931,6 @@ setInterval(() => {
     fetch('/health').then(r => r.json()).then(health => {
         if (health.model_available) {
             updateStatus('connected');
-            loadComposerRuntime();
         } else if (!healthPollInterval) {
             startHealthPolling();
         }
@@ -6204,17 +4990,11 @@ if (window.visualViewport) {
 }
 
 syncReasoningSelector();
-syncModelSelector();
 renderWorkspaceActivity();
-renderTerminalOutput();
 applyViewerMetadata('inlineViewer', '');
 syncWorkspaceViewMode();
 syncMobileViewportState();
 syncChatShellLayout();
-window.addEventListener('resize', () => {
-    fitTerminalEmulator();
-    sendTerminalResize();
-});
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
         stopSpeaking();

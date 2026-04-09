@@ -155,19 +155,11 @@ The UI also receives:
 - `plan_ready`
 - `build_steps`
 
-Those events drive the workspace activity timeline, build-step checklist, loading text, and terminal status.
-
-## Workflow persistence
-
-Each chat turn now creates a workflow execution record in SQLite before any answer path runs.
-
-- `workflow_executions` stores the chosen route (`direct_answer`, tool loop, slash flow, deep orchestrated flow, auto-executed workspace flow), final outcome, artifact paths, and tool count.
-- `workflow_steps` stores per-tool step history including arguments, summarized results, latency, and whether a step was auto-generated (for example, auto-verify after a patch).
-- Route metadata is updated if a deep attempt falls back to normal mode or if a direct answer is retried with tools.
+Those events drive the workspace activity timeline, build-step checklist, and loading text.
 
 ## Related files
 
-- `app.py` — orchestration, tool execution, workspace APIs, terminal session, voice APIs
+- `app.py` — orchestration, tool execution, workspace APIs, and voice APIs
 - `prompts.py` — base prompts plus tool-use instructions
 - `static/app.js` — feature toggles, per-turn approvals, activity rendering, workspace UI
 - `docs/api.md` — endpoint and WebSocket payload reference
