@@ -2,19 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+COPY requirements.txt requirements-voice.txt ./
+
 # Install dependencies
-RUN pip install --no-cache-dir \
-    fastapi \
-    python-multipart \
-    uvicorn[standard] \
-    websockets \
-    httpx \
-    huggingface_hub \
-    beautifulsoup4 \
-    jinja2 \
-    aiofiles \
-    pandas \
-    openpyxl
+RUN pip install --no-cache-dir -r requirements.txt
 
 # System deps for voice tools (STT/TTS) and text PDF extraction
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,10 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Voice: OpenAI Whisper (STT) and Piper (TTS)
-RUN pip install --no-cache-dir openai-whisper piper-tts
+RUN pip install --no-cache-dir -r requirements-voice.txt
 
-# Copy application (app imports themes, prompts, thinking_stream, workflow_router)
-COPY app.py themes.py prompts.py thinking_stream.py workflow_router.py .
+# Copy only the current top-level Python modules used by the app entrypoint.
+COPY app.py embeddings.py themes.py prompts.py thinking_stream.py deep_flow.py turn_strategy.py ./
 COPY static/ static/
 
 # Create data directory

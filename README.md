@@ -72,6 +72,42 @@ Once started, open **http://localhost:8000**. The model loads in the background 
 
 Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-chat/runs) on the host via the default `/app/runs` bind mount, so files the assistant creates remain visible outside the container.
 
+## Local Mac development
+
+If you develop on macOS but run inference on another machine, you do not need the full Docker stack locally.
+
+Create a virtual environment and install the app dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Optional voice dependencies:
+
+```bash
+pip install -r requirements-voice.txt
+```
+
+Then run the app locally while pointing it at your remote OpenAI-compatible server:
+
+```bash
+export VLLM_HOST=http://YOUR-SERVER:8000/v1
+export DB_PATH=./data/chat.db
+export MODEL_STATE_PATH=./data/model_state.json
+export HF_CACHE_PATH=$HOME/.cache/huggingface
+export RUNS_ROOT=./runs
+export WORKSPACE_ROOT=./workspaces
+python3 app.py
+```
+
+Notes:
+
+- `fastembed` runs on CPU, so semantic retrieval works fine on a Mac without CUDA.
+- The checked-in `docker-compose.yml` is mainly for the bundled local `vllm` + app stack and assumes NVIDIA GPU support for the `vllm` service.
+- macOS can use the built-in `say` command for TTS, so `requirements-voice.txt` is optional unless you specifically want the Whisper/Piper server pipeline.
+
 ## Documentation
 
 - [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services, where to edit prompts/themes

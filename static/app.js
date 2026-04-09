@@ -25,6 +25,7 @@ let workspaceStats = { files: 0, directories: 0 };
 let workspaceActivity = [];
 let buildSteps = [];
 let currentBuildStepIndex = null;
+let currentPlanFocus = null;
 let selectedWorkspaceFile = '';
 let selectedSpreadsheetSheet = '';
 let workspaceRefreshTimer = null;
@@ -1312,9 +1313,19 @@ function handleChatEvent(data) {
         ensureStreamingAssistantMessage();
         currentAssistantTurnStartedAt = Date.now();
         currentAssistantTurnArtifactPaths = new Set();
+        currentPlanFocus = null;
         recordWorkspaceActivity('Turn', 'Turn started.');
     } else if (data.type === 'reasoning_note') {
-        recordWorkspaceActivity('Think', 'Reasoning noted.');
+        const noteText = data.content || 'Reasoning noted.';
+        recordWorkspaceActivity('Think', noteText, {
+            phase: data.phase || 'think',
+            stepLabel: data.step_label || '',
+        });
+        updatePlanFocus({
+            text: noteText,
+            phase: data.phase || 'think',
+            stepLabel: data.step_label || currentBuildStepLabel(),
+        });
     } else if (data.type === 'assistant_note') {
         ensureStreamingAssistantMessage();
         replaceAssistantAnswer(data.content || '');
@@ -1349,6 +1360,11 @@ function handleChatEvent(data) {
                 stepLabel: data.step_label || '',
             },
         );
+        updatePlanFocus({
+            text: data.content || 'Working...',
+            phase: data.phase || 'status',
+            stepLabel: data.step_label || currentBuildStepLabel(),
+        });
     } else if (data.type === 'tool_start') {
         setLoadingText(data.content || `Using ${data.name || 'tool'}...`);
     } else if (data.type === 'tool_result') {
@@ -2400,6 +2416,7 @@ function renderBuildSteps() {
 function clearBuildSteps() {
     buildSteps = [];
     currentBuildStepIndex = null;
+    currentPlanFocus = null;
     renderBuildSteps();
     syncInterveneButton();
 }
@@ -2436,6 +2453,7 @@ function updateBuildSteps(steps, activeIndex = null, completedCount = 0, stepDet
     buildSteps = normalizeBuildStepStatePayload(steps, activeIndex, completedCount, stepDetails);
     currentBuildStepIndex = activeIndex !== null ? activeIndex : null;
     renderBuildSteps();
+    requestAnimationFrame(scrollActivePlanStepIntoView);
     syncInterveneButton();
 }
 
@@ -2468,22 +2486,25 @@ function renderExecutionPlanApproval() {
     const draft = document.getElementById('planApprovalDraft');
     const reasoning = document.getElementById('planApprovalReasoning');
     const summary = document.getElementById('planApprovalSummary');
+    const currentBox = document.getElementById('planApprovalCurrent');
+    const currentStep = document.getElementById('planApprovalCurrentStep');
+    const currentText = document.getElementById('planApprovalCurrentText');
     const checklist = document.getElementById('planApprovalChecklist');
     const checklistList = document.getElementById('planApprovalSteps');
     if (!panel || !summary || !checklist || !checklistList) return;
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
     const hasChecklist = buildSteps.length > 0;
+    const activeStep = currentBuildStepIndex !== null ? buildSteps[currentBuildStepIndex] : null;
+    const activeSubstep = Array.isArray(activeStep?.substeps)
+        ? activeStep.substeps.find(item => item?.state === 'active')
+        : null;
     panel.hidden = !hasPlan && !hasChecklist;
 
     if (title) {
         title.textContent = hasChecklist ? 'Plan Progress' : 'Plan Preview';
     }
     if (subtitle) {
-        const activeStep = currentBuildStepIndex !== null ? buildSteps[currentBuildStepIndex] : null;
-        const activeSubstep = Array.isArray(activeStep?.substeps)
-            ? activeStep.substeps.find(item => item?.state === 'active')
-            : null;
         subtitle.textContent = hasChecklist
             ? (
                 activeSubstep?.text
@@ -2512,12 +2533,30 @@ function renderExecutionPlanApproval() {
     }
     summary.textContent = hasSummary ? pendingExecutionPlan.summary : '';
 
+    const activeFocusStep = compactWorkspaceActivityText(currentPlanFocus?.stepLabel || currentBuildStepLabel());
+    const activeFocusText = compactWorkspaceActivityText(
+        currentPlanFocus?.text
+        || (activeSubstep?.text
+            ? `Working inside ${activeSubstep.text}.`
+            : (activeStep?.text ? `Working inside ${activeStep.text}.` : '')),
+    );
+    if (currentBox) {
+        currentBox.hidden = !hasChecklist || (!activeFocusStep && !activeFocusText);
+    }
+    if (currentStep) {
+        currentStep.textContent = activeFocusStep;
+    }
+    if (currentText) {
+        currentText.textContent = activeFocusText;
+    }
+
     checklist.hidden = !hasChecklist;
     checklistList.innerHTML = '';
     if (hasChecklist) {
-        buildSteps.forEach(step => {
+        buildSteps.forEach((step, stepIndex) => {
             const item = document.createElement('li');
             item.className = `is-${step.state}`;
+            item.dataset.stepIndex = String(stepIndex);
 
             const marker = document.createElement('span');
             marker.className = 'plan-approval-step-marker';
@@ -2530,12 +2569,14 @@ function renderExecutionPlanApproval() {
             item.appendChild(marker);
             item.appendChild(label);
 
-            const hasNestedContent = Boolean(
+            const recentActivity = step.state === 'active' ? collectRecentStepActivity(stepIndex) : [];
+            const completionSummary = summarizeCompletedStep(step);
+            const hasNestedContent = step.state === 'active' && Boolean(
                 step.goal
                 || step.successSignal
                 || step.progressNote
                 || (Array.isArray(step.substeps) && step.substeps.length)
-                || (Array.isArray(step.completedNotes) && step.completedNotes.length)
+                || recentActivity.length
             );
             if (hasNestedContent) {
                 const nested = document.createElement('div');
@@ -2546,6 +2587,39 @@ function renderExecutionPlanApproval() {
                     goal.className = 'plan-approval-step-goal';
                     goal.textContent = step.goal;
                     nested.appendChild(goal);
+                }
+
+                if (recentActivity.length) {
+                    const activityBlock = document.createElement('div');
+                    activityBlock.className = 'plan-approval-step-activity';
+
+                    const activityLabel = document.createElement('div');
+                    activityLabel.className = 'plan-approval-step-activity-label';
+                    activityLabel.textContent = 'Recent activity';
+                    activityBlock.appendChild(activityLabel);
+
+                    const activityList = document.createElement('div');
+                    activityList.className = 'plan-approval-step-activity-list';
+                    recentActivity.forEach(entry => {
+                        const activityRow = document.createElement('div');
+                        activityRow.className = 'plan-approval-step-activity-item';
+
+                        const activityMeta = formatPlanActivityMeta(entry);
+                        if (activityMeta) {
+                            const meta = document.createElement('span');
+                            meta.className = 'plan-approval-step-activity-meta';
+                            meta.textContent = activityMeta;
+                            activityRow.appendChild(meta);
+                        }
+
+                        const activityTextEl = document.createElement('span');
+                        activityTextEl.className = 'plan-approval-step-activity-text';
+                        activityTextEl.textContent = truncateWorkspaceActivityText(String(entry?.text || '').trim(), 160);
+                        activityRow.appendChild(activityTextEl);
+                        activityList.appendChild(activityRow);
+                    });
+                    activityBlock.appendChild(activityList);
+                    nested.appendChild(activityBlock);
                 }
 
                 if (Array.isArray(step.substeps) && step.substeps.length) {
@@ -2579,7 +2653,7 @@ function renderExecutionPlanApproval() {
                         if (subSummary && substep.state === 'complete') {
                             const summaryEl = document.createElement('span');
                             summaryEl.className = 'plan-approval-substep-summary';
-                            summaryEl.textContent = subSummary;
+                            summaryEl.textContent = truncateWorkspaceActivityText(subSummary, 160);
                             subCopy.appendChild(summaryEl);
                         }
 
@@ -2605,6 +2679,11 @@ function renderExecutionPlanApproval() {
                 }
 
                 item.appendChild(nested);
+            } else if (step.state === 'complete' && completionSummary) {
+                const summaryEl = document.createElement('div');
+                summaryEl.className = 'plan-approval-step-summaryline';
+                summaryEl.textContent = truncateWorkspaceActivityText(completionSummary, 170);
+                item.appendChild(summaryEl);
             }
             checklistList.appendChild(item);
         });
@@ -2824,6 +2903,50 @@ function currentBuildStepLabel() {
     return `Step ${currentBuildStepIndex + 1}: ${step.text}`;
 }
 
+function updatePlanFocus({ text = '', stepLabel = '', phase = 'status' } = {}) {
+    const normalizedText = compactWorkspaceActivityText(text || '');
+    const normalizedStepLabel = compactWorkspaceActivityText(stepLabel || currentBuildStepLabel());
+    if (!normalizedText && !normalizedStepLabel) return;
+    currentPlanFocus = {
+        text: normalizedText,
+        stepLabel: normalizedStepLabel,
+        phase: String(phase || 'status').trim() || 'status',
+    };
+    renderExecutionPlanApproval();
+}
+
+function summarizeCompletedStep(step = {}) {
+    const reports = Array.isArray(step?.completedReports) ? step.completedReports : [];
+    const notes = Array.isArray(step?.completedNotes) ? step.completedNotes : [];
+    const reportSummary = String(reports[reports.length - 1]?.summary || '').trim();
+    if (reportSummary) return reportSummary;
+    return String(notes[notes.length - 1] || '').trim();
+}
+
+function collectRecentStepActivity(stepIndex, limit = 3) {
+    const prefix = `step ${stepIndex + 1}`;
+    return workspaceActivity
+        .filter(entry => {
+            const label = String(entry?.stepLabel || '').trim().toLowerCase();
+            return label === prefix || label.startsWith(`${prefix}:`) || label.startsWith(`${prefix}.`);
+        })
+        .slice(-limit);
+}
+
+function formatPlanActivityMeta(entry = {}) {
+    const parts = [];
+    if (entry.kind) parts.push(String(entry.kind));
+    if (entry.time) parts.push(String(entry.time));
+    return parts.join(' • ');
+}
+
+function scrollActivePlanStepIntoView() {
+    const checklist = document.getElementById('planApprovalChecklist');
+    if (!checklist || checklist.hidden) return;
+    const activeItem = checklist.querySelector('.plan-approval-steps > li.is-active, .plan-approval-substeps li.is-active');
+    activeItem?.scrollIntoView({ block: 'nearest' });
+}
+
 function shouldCollapseWorkspaceActivity(entry) {
     return ['tool', 'inspect', 'execute', 'verify', 'synthesize'].includes(entry.phase)
         && /tool|result/i.test(entry.kind);
@@ -2835,6 +2958,7 @@ function collapseWorkspaceActivityEntries(entries, nextEntry) {
     const sameSignature = previous.kind === nextEntry.kind
         && previous.phase === nextEntry.phase
         && previous.text === nextEntry.text
+        && previous.stepLabel === nextEntry.stepLabel
         && previous.error === nextEntry.error;
     if (sameSignature) {
         const merged = {
@@ -2846,6 +2970,9 @@ function collapseWorkspaceActivityEntries(entries, nextEntry) {
     }
 
     if (shouldCollapseWorkspaceActivity(previous) && shouldCollapseWorkspaceActivity(nextEntry)) {
+        if (previous.stepLabel !== nextEntry.stepLabel) {
+            return entries.concat(nextEntry);
+        }
         const previousCount = previous.repeats || 1;
         const merged = {
             ...nextEntry,

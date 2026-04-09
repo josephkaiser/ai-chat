@@ -290,8 +290,38 @@ textarea {
     font: 12px/1.55 "IBM Plex Mono", "Courier New", monospace;
     color: var(--text_primary);
 }
+.plan-approval-current {
+    margin: 12px 16px 0;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 16%, var(--dense-border));
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent_primary) 8%, var(--bg_primary));
+    display: grid;
+    gap: 4px;
+}
+.plan-approval-current-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text_secondary);
+}
+.plan-approval-current-step {
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.45;
+    color: var(--text_primary);
+}
+.plan-approval-current-text {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text_secondary);
+}
 .plan-approval-checklist {
-    padding: 10px 16px 0;
+    padding: 10px 16px 12px;
+    max-height: min(44vh, 360px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 .plan-approval-steps {
     margin: 0;
@@ -326,7 +356,7 @@ textarea {
     grid-column: 2;
     display: grid;
     gap: 8px;
-    padding: 2px 0 2px 0;
+    padding: 4px 0 2px 0;
 }
 .plan-approval-step-goal,
 .plan-approval-step-progress,
@@ -335,6 +365,49 @@ textarea {
     line-height: 1.5;
 }
 .plan-approval-step-goal {
+    color: var(--text_secondary);
+}
+.plan-approval-step-summaryline {
+    grid-column: 2;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text_tertiary);
+}
+.plan-approval-step-activity {
+    display: grid;
+    gap: 6px;
+}
+.plan-approval-step-activity-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text_tertiary);
+}
+.plan-approval-step-activity-list {
+    display: grid;
+    gap: 6px;
+    max-height: 132px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+.plan-approval-step-activity-item {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg_primary) 84%, var(--bg_secondary));
+}
+.plan-approval-step-activity-meta,
+.plan-approval-step-activity-text {
+    font-size: 11px;
+    line-height: 1.45;
+}
+.plan-approval-step-activity-meta {
+    color: var(--text_tertiary);
+}
+.plan-approval-step-activity-text {
     color: var(--text_secondary);
 }
 .plan-approval-step-progress {
@@ -409,6 +482,10 @@ textarea {
 }
 .plan-approval-steps li.is-active {
     color: var(--text_primary);
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 20%, var(--dense-border));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent_primary) 5%, var(--bg_primary));
 }
 .plan-approval-steps li.is-active .plan-approval-step-marker {
     color: var(--accent_primary);
@@ -3316,6 +3393,12 @@ pre:hover .copy-btn { opacity: 1; }
     }
     .messages {
         padding: 10px 6px 12px;
+    }
+    .plan-approval-checklist {
+        max-height: min(38vh, 300px);
+    }
+    .plan-approval-step-activity-list {
+        max-height: 108px;
     }
     .chat.welcome-layout .messages {
         padding: clamp(8px, 4vh, 20px) 6px 18px;

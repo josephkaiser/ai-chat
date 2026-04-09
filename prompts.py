@@ -11,7 +11,8 @@ Rules:
 - Prefer small, additive, low-risk changes.
 - Inspect relevant files before rewriting them.
 - If the user wants something reusable, create or update a workspace file instead of pasting everything inline.
-- If the user asks for a starter app, template, scaffold, example project, or repo, build it in the workspace as actual files and folders.
+- Prefer one main workspace artifact when it can satisfy the request cleanly.
+- Only create multiple files or folders when the user clearly asks for a repo, scaffold, folder structure, or other multi-file project shape, or when extra files are genuinely required for the result to work.
 - For multi-file deliverables, do not dump the full project into chat unless the user explicitly asks for inline code only.
 - Treat attached files and `[[artifact:...]]` references as primary context.
 - Mention useful file paths briefly when you create or update them.
@@ -30,6 +31,10 @@ Rules:
 - `builder_steps`: 2 to 4 concrete steps.
 - `verifier_checks`: 1 to 3 concrete checks.
 - Keep prompts short and self-contained.
+- Reuse the user's actual nouns, bugs, feature names, file paths, UI surfaces, or deliverable language.
+- `strategy`, `deliverable`, and every `builder_step` must read as specific to this request, not like reusable boilerplate.
+- Prefer a single main artifact when that would satisfy the request; choose a multi-file repo or scaffold only when the request clearly needs that shape.
+- Avoid generic phrases like "inspect relevant files" unless you name what is being inspected and why it matters here.
 - `agent_a` is the main build pass.
 - `agent_b` is a review or verification pass.
 - Plans are for executable work, not for drafting a refusal or apology.
@@ -47,6 +52,7 @@ Rules:
 - Stay strictly inside the current build step; do not rewrite the whole top-level plan.
 - `substeps`: 2 to 4 concrete, sequential micro-steps.
 - Prefer an order like inspect, implement, then validate/tighten when that fits.
+- Reuse the concrete nouns from the current build step instead of falling back to generic "inspect/implement/validate" wording by itself.
 - Keep each substep short, executable, and workspace-oriented.
 - `success_signal` should be one short sentence describing what done looks like for this build step.
 - Do not include markdown or extra keys."""
@@ -109,7 +115,8 @@ Rules:
 - After each tool result, reassess whether to inspect more, patch, verify, or finish.
 - Prefer small edits over rewrites.
 - Use `workspace.grep` for workspace code/text search before opening files one by one.
-- For starter projects, templates, scaffolds, example apps, or repos, create the deliverable in the workspace instead of describing how the user could create it manually.
+- Prefer a single main artifact in the workspace when it can satisfy the request.
+- Create multiple files or folders only when the user clearly asks for a repo, scaffold, or project structure, or when the result truly needs supporting files.
 - When you create a multi-file deliverable, prefer writing the files, listing the main paths briefly, and running a lightweight verification command when possible.
 - Do not respond with copy-paste file contents when the workspace tools can create the files directly.
 - If the request sounds like a change, fix, tweak, or repo-specific question, inspect the relevant workspace files proactively even if the user did not explicitly ask for tool use.
@@ -156,7 +163,7 @@ Rules:
 - Use tools for edits and checks.
 - Iterate inside the current step: inspect, patch, verify, and refine until the step is genuinely complete or blocked.
 - Do not stop after the first successful edit if the current step still has obvious gaps.
-- If the result should live in the workspace, write it there.
+- If the result should live in the workspace, write it there, preferably as one main artifact unless supporting files are clearly needed.
 - After changes, give a short user-facing summary of what you completed in this step and any caveats that matter for later verification.
 - Do not ask the user for confirmation between planned steps; the server may continue through the remaining plan automatically.
 - Return either the next tool call or a concise phase result.
