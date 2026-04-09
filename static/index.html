@@ -10,7 +10,6 @@
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
@@ -25,8 +24,6 @@
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/indent-fold.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/comment-fold.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 </head>
 <body>
     <!-- Menu button with status dot -->
@@ -51,7 +48,6 @@
             </div>
             <div class="menu-actions">
                 <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
-                <button onclick="closeMenu(); showDashboard()"><span>Models</span><kbd class="shortcut-hint"></kbd></button>
                 <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
             </div>
             <div class="menu-search">
@@ -59,19 +55,6 @@
                 <div class="search-results" id="searchResults"></div>
             </div>
             <div class="menu-chats" id="conversations"></div>
-        </div>
-    </div>
-
-    <!-- Dashboard overlay -->
-    <div class="overlay" id="dashboardOverlay" onclick="closeDashboard()">
-        <div class="dashboard-panel" onclick="event.stopPropagation()">
-            <div class="panel-header">
-                <span>Models</span>
-                <button onclick="closeDashboard()">&times;</button>
-            </div>
-            <div class="dashboard-content" id="dashboardContent">
-                <div style="text-align:center; padding:30px; color:var(--text_secondary)">Loading...</div>
-            </div>
         </div>
     </div>
 
@@ -195,14 +178,14 @@
                             </div>
                         </div>
                         <div class="settings-group">
-                            <div class="settings-group-title">About Wolfy</div>
+                            <div class="settings-group-title">About</div>
                             <div class="settings-about">
                                 <div class="settings-about-aside">
-                                    <div class="settings-about-heading">Why Wolfy exists</div>
+                                    <div class="settings-about-heading">Why this app exists</div>
                                     <div class="settings-about-signoff">Joseph Kaiser</div>
                                 </div>
                                 <div class="settings-about-copy">
-                                    <p>Thank you for trying Wolfy. It means you are part of a small group willing to set up an obscure repository in 2026 after AI-powered development exploded.</p>
+                                    <p>Thank you for trying AI Chat. The goal is a focused local coding assistant that stays useful without piling on unnecessary product layers.</p>
                                     <p>The project is meant to be enjoyable to use, honest about what it is, respectful of the user, and economical with hardware while still being genuinely useful.</p>
                                     <p>If you run into bugs or have ideas to improve it, please post an issue on GitHub. Your attention and contributions are incredibly valuable.</p>
                                 </div>
@@ -213,7 +196,7 @@
                             <div class="settings-row settings-row-danger">
                                 <div class="settings-row-copy">
                                     <span class="settings-row-label">Reset App Data</span>
-                                    <span class="settings-row-note">Delete all chats, workspaces, installed workspace packages, artifacts, pet memory, and saved browser preferences to return to a fresh base state.</span>
+                                    <span class="settings-row-note">Delete all chats, workspaces, installed workspace packages, artifacts, and saved browser preferences to return to a fresh base state.</span>
                                 </div>
                                 <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">Delete All Data</button>
                             </div>
@@ -237,20 +220,7 @@
                 <div class="messages" id="messages">
                     <div class="welcome">
                         <div class="welcome-brand" aria-label="{{ app_title }}">
-                            <button class="welcome-mascot" type="button" aria-label="Wolf mascot. Click to pet." data-pose="sit">
-                                <span class="wolfy-stage" aria-hidden="true">
-                                    <span class="wolfy-shadow"></span>
-                                    <canvas class="wolfy-canvas" width="66" height="66"></canvas>
-                                    <span class="wolfy-bark-lines">
-                                        <span></span>
-                                        <span></span>
-                                        <span></span>
-                                    </span>
-                                </span>
-                                <span class="bond-reaction" id="bondReaction" hidden></span>
-                            </button>
                             <h1 class="welcome-title">{{ app_title }}</h1>
-                            <span class="bond-note" id="bondNote"></span>
                         </div>
                     </div>
                 </div>
@@ -297,30 +267,6 @@
                                         <div class="composer-hover-card" aria-hidden="true">
                                             <span class="composer-hover-title">Add</span>
                                             <span class="composer-hover-text">Attach files, screenshots, audio, or workspace snippets to the next message.</span>
-                                        </div>
-                                    </div>
-                                    <div class="composer-action-item composer-action-item-model">
-                                        <button id="modelSummaryButton" class="composer-control composer-control-circle model-summary-button" onclick="showDashboard()" title="Open Models" aria-label="Open Models">
-                                            <span class="composer-glyph model-summary-glyph" aria-hidden="true">AI</span>
-                                            <span class="composer-icon model-summary-icon" aria-hidden="true">
-                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                                    <rect x="7" y="7" width="10" height="10" rx="2"></rect>
-                                                    <path d="M9 1.5v3"></path>
-                                                    <path d="M15 1.5v3"></path>
-                                                    <path d="M9 19.5v3"></path>
-                                                    <path d="M15 19.5v3"></path>
-                                                    <path d="M1.5 9h3"></path>
-                                                    <path d="M1.5 15h3"></path>
-                                                    <path d="M19.5 9h3"></path>
-                                                    <path d="M19.5 15h3"></path>
-                                                </svg>
-                                            </span>
-                                            <span class="sr-only model-summary-label">Loading model...</span>
-                                        </button>
-                                        <div class="composer-hover-card composer-hover-card-wide" aria-hidden="true">
-                                            <span class="composer-hover-title">Models</span>
-                                            <span class="composer-hover-text model-summary-hover-copy">Open the local model library to switch runtimes or add a new one.</span>
-                                            <span class="composer-hover-meta model-summary-hover-meta">Current: Loading model...</span>
                                         </div>
                                     </div>
                                     <button id="reasoningToggleButton" class="composer-control reasoning-toggle-button" onclick="toggleDeepModeMobile()" title="Toggle reasoning effort" aria-label="Toggle reasoning effort">

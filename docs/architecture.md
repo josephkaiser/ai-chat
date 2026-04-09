@@ -2,53 +2,51 @@
 
 ## Project structure
 
-```
+```text
 ai-chat/
 ├── app.py               # FastAPI app: routes, WebSockets, SQLite, vLLM client
-├── themes.py            # Light/dark palettes → CSS custom properties for the UI
+├── themes.py            # Light/dark palettes → CSS custom properties
 ├── prompts.py           # Default system prompt text
-├── thinking_stream.py   # Model stream → “thinking” vs visible answer (WebSocket framing)
-├── workflow_router.py   # Lightweight learned router training/inference helpers
+├── thinking_stream.py   # Model stream → “thinking” vs visible answer
+├── turn_strategy.py     # Turn assessment and top-level routing decisions
+├── deep_flow.py         # Deep-mode routing decisions
 ├── chat                 # CLI to start/stop the stack
-├── training/            # Dataset export + lightweight training scripts
 ├── static/
-│   ├── index.html       # Web UI template (Jinja)
-│   ├── app.js           # Frontend: WebSocket client, markdown, theme application
-│   └── style.css        # Layout and components (colors via CSS variables)
+│   ├── index.html       # Web UI template
+│   ├── app.js           # Frontend runtime
+│   └── style.css        # Layout and components
 ├── docker-compose.yml   # vLLM + chat-app services
-├── Dockerfile           # Chat app image (copies the four Python modules above)
+├── Dockerfile           # Chat app image
 ├── docs/                # Documentation
 └── data/
-    └── chat.db          # SQLite database (volume in Docker)
+    └── chat.db          # SQLite database
 ```
 
 ## How the pieces connect
 
-- **`app.py`** is the entrypoint. It mounts static files, renders `index.html`, and implements REST + WebSocket handlers. It also now owns the chat harness, workspace APIs, terminal sessions, dashboard endpoints, voice pipeline, tool execution loop, per-conversation runs/workspaces, and workflow-execution persistence.
-- **`themes.py`** defines small named palettes (e.g. paper, ink, panel). Those expand to the `--bg_primary`, `--text_secondary`, … keys that **`static/style.css`** already expects. At runtime, `GET /` injects JSON into the page; **`static/app.js`** calls `applyTheme()` to set `document.documentElement` styles.
-- **`prompts.py`** holds **`DEFAULT_SYSTEM_PROMPT`** plus the tool-use and execution prompts that shape both normal tool turns and deep-mode planning/build flows.
-- **`thinking_stream.py`** implements **`ThinkingStreamSplitter`**: it parses model output for paired thinking tags (must match **`THINK_TAG_PAIRS` in `static/app.js`**) and emits the WebSocket payloads (`think_start`, `think_token`, `think_end`, and normal `token`).
-- **`workflow_router.py`** contains the zero-dependency learned workflow router used both by the training scripts and by the app's optional runtime routing hook.
-- **`static/app.js`** is now a substantial client runtime, not just a chat socket wrapper. It manages feature toggles, model/profile controls, reasoning mode, attachments, slash commands, workspace activity, the file modal, terminal streaming, dashboard actions, and voice playback/recording.
+- `app.py` is the entrypoint. It mounts static files, renders `index.html`, and implements REST and WebSocket handlers. It owns the chat harness, workspace APIs, voice pipeline, tool execution loop, and per-conversation workspaces.
+- `turn_strategy.py` evaluates each user turn against the app’s main skill loop: local RAG, web search, file creation, coding mode, planning mode, execution mode, and verification needs.
+- `deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
+- `prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
+- `thinking_stream.py` parses model output into thinking and visible-answer streams. Its tag pairs must stay aligned with `THINK_TAG_PAIRS` in `static/app.js`.
+- `themes.py` defines named palettes that expand into the CSS variables expected by `static/style.css`.
+- `static/app.js` manages the client runtime: streaming chat events, slash commands, plan approval, workspace activity, file viewing/editing, attachments, and voice playback/recording.
 
 ## Tech stack
 
-- **Backend:** Python 3.11, FastAPI, Uvicorn, httpx (OpenAI-compatible chat completions to vLLM)
-- **Frontend:** Vanilla JS, Marked.js, highlight.js (CDN)
-- **LLM:** vLLM (OpenAI-compatible API); model name is configured via env / compose (see [Configuration](configuration.md))
-- **Database:** SQLite (conversations, messages, conversation summaries, per-conversation runs/workspaces, workflow execution telemetry, pet state, and assistant feedback for history scoring)
-- **Streaming:** WebSocket `/ws/chat` for token and thinking-region events
-- **Workspace terminal:** WebSocket `/ws/terminal/{conversation_id}` for PTY-backed command output
-- **Dashboard / ops:** Optional Docker socket access from the chat container for vLLM restart and cache paths (see `GET /api/dashboard` and related endpoints in [API](api.md))
+- Backend: Python 3.11, FastAPI, Uvicorn, httpx
+- Frontend: Vanilla JS, Marked.js, highlight.js, CodeMirror
+- LLM runtime: vLLM via an OpenAI-compatible API
+- Database: SQLite for conversations, messages, summaries, per-conversation runs/workspaces, and assistant feedback
+- Streaming: WebSocket `/ws/chat`
 
 ## Persistence model
 
 - Every conversation gets a stable run id plus a dedicated workspace directory on disk.
-- `messages.feedback` stores assistant feedback (`positive`, `negative`, `neutral`), which is surfaced through the conversation API and reused during message reranking.
-- `workflow_executions` and `workflow_steps` capture how a turn was routed, which tools ran, what artifacts were produced, and whether any auto-generated verification steps were inserted. The `workflow_evaluations` table exists as a companion slot for later evaluator data.
-- Voice artifacts live under `VOICE_ROOT`, outside the conversation workspace, and are cleaned up by cache pruning plus conversation/app reset flows.
+- Assistant message feedback is stored in SQLite and reused during history ranking.
+- Voice artifacts live under `VOICE_ROOT` and are cleaned up by pruning plus conversation/app reset flows.
 
 ## Additional guides
 
-- [Harness And Tools](harness.md) — how the runtime chooses tools, executes them, and reports progress
-- [UI Features](ui.md) — the modern chat/workspace UI surface and its major controls
+- [Harness And Tools](harness.md) — how turns are routed, tools run, and progress is reported
+- [UI Features](ui.md) — the current chat/workspace UI surface
