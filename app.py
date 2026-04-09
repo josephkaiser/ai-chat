@@ -48,10 +48,15 @@ from pydantic import BaseModel, Field
 
 from deep_flow import DeepRouteRequest, decide_deep_route
 try:
+    import numpy as np
+except Exception:
+    np = None
+try:
     import pandas as pd
 except Exception:
     pd = None
 
+from embeddings import configured_embedding_model_name, embed_passages, embed_queries, embeddings_available
 from prompts import (
     CONVERSATION_SUMMARY_SYSTEM_PROMPT,
     CRITIQUE_SYSTEM_PROMPT,
@@ -171,11 +176,15 @@ TEXT_DOCUMENT_EXTENSIONS = {
 }
 DOCUMENT_INDEX_SIZE_LIMIT = int(os.getenv("DOCUMENT_INDEX_SIZE_LIMIT", str(25 * 1024 * 1024)))
 DOCUMENT_TEXT_READ_LIMIT = int(os.getenv("DOCUMENT_TEXT_READ_LIMIT", str(8 * 1024 * 1024)))
-DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "2200"))
-DOCUMENT_CHUNK_OVERLAP_CHARS = int(os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", "240"))
+DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "900"))
+DOCUMENT_CHUNK_OVERLAP_CHARS = int(os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", "120"))
 DOCUMENT_RETRIEVAL_CONTEXT_BUDGET = int(os.getenv("DOCUMENT_RETRIEVAL_CONTEXT_BUDGET", "9000"))
 DOCUMENT_RETRIEVAL_MAX_WINDOWS = int(os.getenv("DOCUMENT_RETRIEVAL_MAX_WINDOWS", "4"))
 DOCUMENT_RETRIEVAL_FTS_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_FTS_LIMIT", "18"))
+DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT", "32"))
+MESSAGE_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("MESSAGE_RETRIEVAL_SEMANTIC_LIMIT", "24"))
+EMBEDDING_TEXT_CHAR_LIMIT = int(os.getenv("EMBEDDING_TEXT_CHAR_LIMIT", "2400"))
+RETRIEVAL_RRF_K = int(os.getenv("RETRIEVAL_RRF_K", "60"))
 DOCUMENT_COMMAND_TIMEOUT_SECONDS = float(os.getenv("DOCUMENT_COMMAND_TIMEOUT_SECONDS", "30"))
 PDFTOTEXT_BIN = shutil.which("pdftotext") or ""
 PDFINFO_BIN = shutil.which("pdfinfo") or ""
@@ -1371,6 +1380,99 @@ def clean_document_text(text: str) -> str:
     return cleaned.strip()
 
 
+def embedding_backend_active() -> bool:
+    """Return whether the optional semantic retriever is ready to use."""
+    return bool(np is not None and embeddings_available())
+
+
+def active_embedding_model_name() -> str:
+    """Return the configured semantic embedding model label."""
+    return configured_embedding_model_name().strip() or "semantic-default"
+
+
+def current_document_chunk_settings() -> Dict[str, int]:
+    """Return the chunking settings that define the stored document index shape."""
+    return {
+        "chunk_target_chars": int(DOCUMENT_CHUNK_TARGET_CHARS),
+        "chunk_overlap_chars": int(DOCUMENT_CHUNK_OVERLAP_CHARS),
+    }
+
+
+def cached_document_index_matches_settings(source: Optional[Dict[str, Any]]) -> bool:
+    """Return whether a cached document index matches the current chunk settings."""
+    metadata = (source or {}).get("metadata") or {}
+    return (
+        int(metadata.get("chunk_target_chars", 0) or 0) == DOCUMENT_CHUNK_TARGET_CHARS
+        and int(metadata.get("chunk_overlap_chars", 0) or 0) == DOCUMENT_CHUNK_OVERLAP_CHARS
+    )
+
+
+def trim_embedding_text(text: str, limit: int = EMBEDDING_TEXT_CHAR_LIMIT) -> str:
+    """Normalize and cap text before sending it to the embedding model."""
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: max(0, limit - 3)].rstrip(' ,.;:')}..."
+
+
+def build_message_embedding_text(role: str, content: str) -> str:
+    """Build a semantic-search-friendly representation of one message."""
+    cleaned_content = trim_embedding_text(content)
+    cleaned_role = str(role or "").strip().lower() or "message"
+    return f"{cleaned_role}: {cleaned_content}" if cleaned_content else cleaned_role
+
+
+def build_document_chunk_embedding_text(path: str, section_title: str, content: str) -> str:
+    """Build a semantic-search-friendly representation of one stored chunk."""
+    parts = []
+    cleaned_path = trim_embedding_text(path, limit=220)
+    cleaned_section = trim_embedding_text(section_title, limit=220)
+    cleaned_content = trim_embedding_text(content)
+    if cleaned_path:
+        parts.append(f"path: {cleaned_path}")
+    if cleaned_section:
+        parts.append(f"section: {cleaned_section}")
+    if cleaned_content:
+        parts.append(cleaned_content)
+    return "\n".join(parts)
+
+
+def normalize_embedding_vector(vector: Any) -> Optional["np.ndarray"]:
+    """Normalize a dense embedding so cosine similarity becomes a dot product."""
+    if np is None or vector is None:
+        return None
+    array = np.asarray(vector, dtype=np.float32)
+    if array.size == 0:
+        return None
+    norm = float(np.linalg.norm(array))
+    if norm <= 0.0:
+        return None
+    return array / norm
+
+
+def serialize_embedding_vector(vector: Any) -> Optional[bytes]:
+    """Store normalized embeddings compactly in SQLite."""
+    normalized = normalize_embedding_vector(vector)
+    if normalized is None:
+        return None
+    return normalized.astype(np.float16).tobytes()
+
+
+def deserialize_embedding_vector(blob: Any) -> Optional["np.ndarray"]:
+    """Decode one normalized embedding vector from SQLite."""
+    if np is None or not blob:
+        return None
+    try:
+        vector = np.frombuffer(blob, dtype=np.float16).astype(np.float32)
+    except Exception:
+        return None
+    if vector.size == 0:
+        return None
+    return vector
+
+
 def parse_pdfinfo_output(stdout: str) -> Dict[str, Any]:
     """Convert `pdfinfo` key-value output into structured metadata."""
     metadata: Dict[str, Any] = {}
@@ -1633,6 +1735,7 @@ def store_document_index(
     metadata = dict(payload.get("metadata") or {})
     metadata["section_titles"] = section_titles[:12]
     metadata["chunk_count"] = len(chunks)
+    metadata.update(current_document_chunk_settings())
     indexed_at = utcnow_iso()
     c = conn.cursor()
     delete_document_index(conn, conversation_id, rel_path)
@@ -1657,11 +1760,27 @@ def store_document_index(
             indexed_at,
         ),
     )
+    chunk_embeddings: List[Optional[bytes]] = []
+    if chunks and embedding_backend_active():
+        vectors = embed_passages([
+            build_document_chunk_embedding_text(
+                rel_path,
+                str(chunk.get("section_title") or ""),
+                str(chunk.get("content") or ""),
+            )
+            for chunk in chunks
+        ])
+        chunk_embeddings = [None] * len(chunks)
+        for index, vector in enumerate(vectors[: len(chunks)]):
+            chunk_embeddings[index] = serialize_embedding_vector(vector)
+    active_model = active_embedding_model_name() if embedding_backend_active() else ""
     for chunk in chunks:
+        chunk_blob = chunk_embeddings[int(chunk.get("chunk_index", 0))] if chunk_embeddings else None
         c.execute(
             '''INSERT INTO document_chunks
-               (conversation_id, path, chunk_index, page_start, page_end, section_title, content, char_count, metadata_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+               (conversation_id, path, chunk_index, page_start, page_end, section_title, content, char_count, metadata_json,
+                embedding, embedding_model, embedded_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 conversation_id,
                 rel_path,
@@ -1672,6 +1791,9 @@ def store_document_index(
                 str(chunk.get("content") or ""),
                 len(str(chunk.get("content") or "")),
                 json.dumps(chunk.get("metadata") or {}),
+                chunk_blob,
+                active_model if chunk_blob else "",
+                indexed_at if chunk_blob else None,
                 indexed_at,
             ),
         )
@@ -1739,7 +1861,12 @@ def ensure_document_index(conversation_id: str, rel_path: str) -> Dict[str, Any]
 
     fingerprint = build_document_fingerprint(target)
     cached = get_document_source_record(conversation_id, format_workspace_path(target, workspace))
-    if cached and cached.get("fingerprint") == fingerprint and cached.get("status") in {"ready", "empty"}:
+    if (
+        cached
+        and cached.get("fingerprint") == fingerprint
+        and cached.get("status") in {"ready", "empty"}
+        and cached_document_index_matches_settings(cached)
+    ):
         return cached
 
     rel_file_path = format_workspace_path(target, workspace)
@@ -1800,11 +1927,221 @@ def ensure_document_index(conversation_id: str, rel_path: str) -> Dict[str, Any]
         "extractor": payload.get("extractor") or "",
         "page_count": payload.get("page_count"),
         "title": payload.get("title") or target.name,
-        "metadata": payload.get("metadata") or {},
+        "metadata": {
+            **(payload.get("metadata") or {}),
+            **current_document_chunk_settings(),
+        },
         "status": "ready",
         "error": "",
         "indexed_at": utcnow_iso(),
     }
+
+
+def reciprocal_rank_fusion_bonus(rank: Optional[int], k: int = RETRIEVAL_RRF_K) -> float:
+    """Convert a 0-based rank into a small, stable fusion bonus."""
+    if rank is None:
+        return 0.0
+    return 1.0 / (max(1, int(k)) + max(0, int(rank)) + 1)
+
+
+def exact_text_hit_bonus(query: str, *fields: str) -> float:
+    """Reward literal matches so filenames, headings, and error strings stay strong."""
+    lowered_query = " ".join(str(query or "").strip().lower().split())
+    if len(lowered_query) < 2:
+        return 0.0
+    for field in fields:
+        if lowered_query and lowered_query in str(field or "").lower():
+            return 0.45
+    return 0.0
+
+
+def embed_message_rows(conn: sqlite3.Connection, rows: List[tuple]) -> int:
+    """Embed persisted messages in batches and store the normalized vectors."""
+    if not rows or not embedding_backend_active():
+        return 0
+    texts = [build_message_embedding_text(row[1], row[2]) for row in rows]
+    vectors = embed_passages(texts)
+    active_model = active_embedding_model_name()
+    embedded_at = utcnow_iso()
+    updates = []
+    for row, vector in zip(rows, vectors):
+        blob = serialize_embedding_vector(vector)
+        if blob is None:
+            continue
+        updates.append((blob, active_model, embedded_at, int(row[0])))
+    if updates:
+        conn.executemany(
+            'UPDATE messages SET embedding = ?, embedding_model = ?, embedded_at = ? WHERE id = ?',
+            updates,
+        )
+    return len(updates)
+
+
+def ensure_message_embeddings(conversation_id: str) -> int:
+    """Backfill semantic embeddings for one conversation on demand."""
+    if not embedding_backend_active():
+        return 0
+    active_model = active_embedding_model_name()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            '''SELECT id, role, content
+               FROM messages
+               WHERE conversation_id = ?
+                 AND TRIM(COALESCE(content, '')) != ''
+                 AND (embedding IS NULL OR COALESCE(embedding_model, '') != ?)
+               ORDER BY id ASC''',
+            (conversation_id, active_model),
+        ).fetchall()
+        if not rows:
+            return 0
+        updated = embed_message_rows(conn, rows)
+        if updated:
+            conn.commit()
+        return updated
+    finally:
+        conn.close()
+
+
+def ensure_document_chunk_embeddings(conversation_id: str, rel_paths: List[str]) -> int:
+    """Backfill semantic embeddings for indexed chunks on demand."""
+    if not embedding_backend_active() or not rel_paths:
+        return 0
+    active_model = active_embedding_model_name()
+    placeholders = ", ".join("?" for _ in rel_paths)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            f'''SELECT id, path, section_title, content
+                FROM document_chunks
+                WHERE conversation_id = ?
+                  AND path IN ({placeholders})
+                  AND TRIM(COALESCE(content, '')) != ''
+                  AND (embedding IS NULL OR COALESCE(embedding_model, '') != ?)
+                ORDER BY path ASC, chunk_index ASC''',
+            [conversation_id, *rel_paths, active_model],
+        ).fetchall()
+        if not rows:
+            return 0
+        vectors = embed_passages([
+            build_document_chunk_embedding_text(row[1], row[2], row[3])
+            for row in rows
+        ])
+        embedded_at = utcnow_iso()
+        updates = []
+        for row, vector in zip(rows, vectors):
+            blob = serialize_embedding_vector(vector)
+            if blob is None:
+                continue
+            updates.append((blob, active_model, embedded_at, int(row[0])))
+        if updates:
+            conn.executemany(
+                'UPDATE document_chunks SET embedding = ?, embedding_model = ?, embedded_at = ? WHERE id = ?',
+                updates,
+            )
+            conn.commit()
+        return len(updates)
+    finally:
+        conn.close()
+
+
+def fetch_semantic_message_candidates(
+    conversation_id: str,
+    query: str,
+    limit: int = MESSAGE_RETRIEVAL_SEMANTIC_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Return semantic nearest-neighbor candidates from one conversation."""
+    if not embedding_backend_active():
+        return []
+    vectors = embed_queries([trim_embedding_text(query)])
+    query_vector = normalize_embedding_vector(vectors[0]) if vectors else None
+    if query_vector is None:
+        return []
+    ensure_message_embeddings(conversation_id)
+    active_model = active_embedding_model_name()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            '''SELECT id, role, content, timestamp, feedback, embedding
+               FROM messages
+               WHERE conversation_id = ?
+                 AND embedding IS NOT NULL
+                 AND COALESCE(embedding_model, '') = ?''',
+            (conversation_id, active_model),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    ranked = []
+    for row in rows:
+        vector = deserialize_embedding_vector(row[5])
+        if vector is None or vector.shape != query_vector.shape:
+            continue
+        similarity = float(np.dot(query_vector, vector))
+        if similarity <= 0.0:
+            continue
+        ranked.append({
+            "id": row[0],
+            "role": row[1],
+            "content": row[2],
+            "timestamp": row[3],
+            "feedback": message_feedback_value(row[1], row[4]),
+            "semantic_similarity": round(similarity, 4),
+        })
+    ranked.sort(key=lambda item: (item.get("semantic_similarity", 0.0), item.get("timestamp", "")), reverse=True)
+    return ranked[: max(1, int(limit))]
+
+
+def fetch_semantic_document_candidates(
+    conversation_id: str,
+    rel_paths: List[str],
+    query: str,
+    limit: int = DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Return semantic nearest-neighbor candidates from indexed attachment chunks."""
+    if not embedding_backend_active() or not rel_paths:
+        return []
+    vectors = embed_queries([trim_embedding_text(query)])
+    query_vector = normalize_embedding_vector(vectors[0]) if vectors else None
+    if query_vector is None:
+        return []
+    ensure_document_chunk_embeddings(conversation_id, rel_paths)
+    active_model = active_embedding_model_name()
+    placeholders = ", ".join("?" for _ in rel_paths)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            f'''SELECT id, path, chunk_index, page_start, page_end, section_title, content, embedding
+                FROM document_chunks
+                WHERE conversation_id = ?
+                  AND path IN ({placeholders})
+                  AND embedding IS NOT NULL
+                  AND COALESCE(embedding_model, '') = ?''',
+            [conversation_id, *rel_paths, active_model],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    ranked = []
+    for row in rows:
+        vector = deserialize_embedding_vector(row[7])
+        if vector is None or vector.shape != query_vector.shape:
+            continue
+        similarity = float(np.dot(query_vector, vector))
+        if similarity <= 0.0:
+            continue
+        ranked.append({
+            "id": row[0],
+            "path": row[1],
+            "chunk_index": int(row[2] or 0),
+            "page_start": row[3],
+            "page_end": row[4],
+            "section_title": row[5] or "",
+            "content": row[6] or "",
+            "semantic_similarity": round(similarity, 4),
+        })
+    ranked.sort(key=lambda item: (item.get("semantic_similarity", 0.0), -(item.get("page_start") or 0)), reverse=True)
+    return ranked[: max(1, int(limit))]
 
 
 def fetch_document_chunk_rows(
@@ -1912,6 +2249,10 @@ def fetch_ranked_document_candidates(
                         "content": row[6] or "",
                         "query_rank": None,
                         "hyde_rank": None,
+                        "semantic_query_rank": None,
+                        "semantic_hyde_rank": None,
+                        "semantic_query_similarity": None,
+                        "semantic_hyde_similarity": None,
                         "fts_rank": row[7],
                     },
                 )
@@ -1938,28 +2279,96 @@ def fetch_ranked_document_candidates(
                     "content": row[6] or "",
                     "query_rank": None,
                     "hyde_rank": None,
+                    "semantic_query_rank": None,
+                    "semantic_hyde_rank": None,
+                    "semantic_query_similarity": None,
+                    "semantic_hyde_similarity": None,
                     "fts_rank": None,
                 }
     finally:
         conn.close()
+
+    semantic_query_rows = fetch_semantic_document_candidates(
+        conversation_id,
+        rel_paths,
+        query,
+        limit=max(DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT, limit * 2),
+    ) if query else []
+    semantic_hyde_rows = fetch_semantic_document_candidates(
+        conversation_id,
+        rel_paths,
+        hyde_query,
+        limit=max(DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT // 2, limit),
+    ) if hyde_query else []
+
+    for position, row in enumerate(semantic_query_rows):
+        item = candidates.setdefault(
+            row["id"],
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "chunk_index": int(row.get("chunk_index", 0)),
+                "page_start": row.get("page_start"),
+                "page_end": row.get("page_end"),
+                "section_title": row.get("section_title", ""),
+                "content": row.get("content", ""),
+                "query_rank": None,
+                "hyde_rank": None,
+                "semantic_query_rank": None,
+                "semantic_hyde_rank": None,
+                "semantic_query_similarity": None,
+                "semantic_hyde_similarity": None,
+                "fts_rank": None,
+            },
+        )
+        item["semantic_query_rank"] = position
+        item["semantic_query_similarity"] = row.get("semantic_similarity")
+
+    for position, row in enumerate(semantic_hyde_rows):
+        item = candidates.setdefault(
+            row["id"],
+            {
+                "id": row["id"],
+                "path": row["path"],
+                "chunk_index": int(row.get("chunk_index", 0)),
+                "page_start": row.get("page_start"),
+                "page_end": row.get("page_end"),
+                "section_title": row.get("section_title", ""),
+                "content": row.get("content", ""),
+                "query_rank": None,
+                "hyde_rank": None,
+                "semantic_query_rank": None,
+                "semantic_hyde_rank": None,
+                "semantic_query_similarity": None,
+                "semantic_hyde_similarity": None,
+                "fts_rank": None,
+            },
+        )
+        item["semantic_hyde_rank"] = position
+        item["semantic_hyde_similarity"] = row.get("semantic_similarity")
 
     ranked: List[Dict[str, Any]] = []
     normalized_query_text = " ".join(query_tokens)
     normalized_hyde_text = " ".join(hyde_tokens)
     for item in candidates.values():
         content = item.get("content", "")
+        path = item.get("path", "")
         section = item.get("section_title", "")
         score = 0.0
-        if item.get("query_rank") is not None:
-            score += 2.2 / (2 + int(item["query_rank"]))
-        if item.get("hyde_rank") is not None:
-            score += 1.6 / (2 + int(item["hyde_rank"]))
+        score += 160.0 * reciprocal_rank_fusion_bonus(item.get("query_rank"))
+        score += 110.0 * reciprocal_rank_fusion_bonus(item.get("hyde_rank"))
+        score += 180.0 * reciprocal_rank_fusion_bonus(item.get("semantic_query_rank"))
+        score += 120.0 * reciprocal_rank_fusion_bonus(item.get("semantic_hyde_rank"))
+        score += 1.4 * max(0.0, float(item.get("semantic_query_similarity") or 0.0))
+        score += 0.8 * max(0.0, float(item.get("semantic_hyde_similarity") or 0.0))
         score += 0.9 * compute_overlap_score(query_tokens, f"{section}\n{content}")
         score += 0.55 * compute_overlap_score(hyde_tokens, f"{section}\n{content}")
+        score += 0.35 * compute_overlap_score(query_tokens, path)
         if normalized_query_text and normalized_query_text in " ".join(tokenize_retrieval_text(content)):
             score += 0.35
         if normalized_query_text and normalized_query_text in " ".join(tokenize_retrieval_text(section)):
             score += 0.2
+        score += exact_text_hit_bonus(query, path, section, content)
         if query:
             score += 0.2 * SequenceMatcher(None, query[:180].lower(), content[:260].lower()).ratio()
         if hyde_query:
@@ -2166,7 +2575,7 @@ async def build_attachment_context(conversation_id: str, paths: List[str], messa
         lines.extend(f"- {path}" for path in cleaned)
 
     if ready_paths:
-        hyde_query = await generate_hyde_query(message, ready_paths)
+        hyde_query = "" if embedding_backend_active() else await generate_hyde_query(message, ready_paths)
         ranked = fetch_ranked_document_candidates(conversation_id, ready_paths, message, hyde_query=hyde_query)
         windows = pack_document_context_windows(conversation_id, ranked)
         if windows:
@@ -2734,6 +3143,127 @@ class PatchApplicationError(ValueError):
         self.details = details
 
 
+PLAN_REQUEST_STOPWORDS = {
+    "about", "above", "after", "again", "against", "also", "always", "because", "been",
+    "before", "being", "below", "between", "brief", "build", "change", "changes",
+    "check", "could", "deliverable", "does", "done", "each", "every", "exact", "feature",
+    "final", "first", "from", "have", "into", "just", "keep", "look", "looks", "make",
+    "next", "only", "other", "plan", "please", "relevant", "request", "result", "should",
+    "show", "specific", "specifics", "still", "surface", "surfaces", "that", "their",
+    "them", "then", "there", "these", "they", "this", "those", "turn", "using", "what",
+    "when", "where", "which", "with", "within", "work", "would",
+}
+
+PLAN_REQUEST_SHORT_TOKENS = {
+    "ai", "api", "app", "bug", "ci", "css", "db", "dx", "fix", "go", "js", "md", "ml",
+    "qa", "ts", "ui", "ux",
+}
+
+GENERIC_PLAN_PATTERNS = (
+    "inspect the most relevant",
+    "inspect the relevant",
+    "inspect relevant",
+    "build or revise",
+    "build the main deliverable",
+    "make the smallest useful",
+    "re-read the result",
+    "run a focused check",
+    "extract the exact task",
+    "draft the answer",
+    "tighten the draft",
+    "do the most useful concrete work",
+    "implement the next concrete slice",
+    "validate the slice",
+    "grounded in the workspace",
+    "grounded in inspected evidence",
+    "inspect, build, verify",
+)
+
+
+def summarize_request_for_plan(message: str, limit: int = 96) -> str:
+    """Return a short request-focused snippet to ground planner text."""
+    cleaned = " ".join((message or "").strip().split()).strip(" .")
+    if not cleaned:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[: max(0, limit - 3)].rstrip(' ,.;:')}..."
+
+
+def extract_request_terms_for_plan(message: str, limit: int = 12) -> List[str]:
+    """Pick durable request terms that help detect boilerplate planner text."""
+    lowered = " ".join((message or "").strip().lower().split())
+    if not lowered:
+        return []
+    terms: List[str] = []
+    for token in re.findall(r"[a-z0-9][a-z0-9._/-]*", lowered):
+        if token.isdigit():
+            continue
+        if token in PLAN_REQUEST_STOPWORDS:
+            continue
+        if len(token) < 4 and token not in PLAN_REQUEST_SHORT_TOKENS and not any(ch in token for ch in "./_-"):
+            continue
+        if token not in terms:
+            terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def plan_text_is_generic(text: str, request_terms: List[str]) -> bool:
+    """Return whether planner text still reads like reusable boilerplate."""
+    lowered = " ".join((text or "").strip().lower().split())
+    if not lowered:
+        return True
+    if request_terms and any(term in lowered for term in request_terms):
+        return False
+    return any(pattern in lowered for pattern in GENERIC_PLAN_PATTERNS)
+
+
+def build_request_specific_step(step_index: int, total_steps: int, request_focus: str) -> str:
+    """Rewrite a generic build step so it stays anchored to the current request."""
+    if total_steps <= 1:
+        return f"Implement the targeted change and verify it for: {request_focus}"
+    if step_index <= 0:
+        return f"Inspect the concrete code paths, UI surfaces, or artifacts involved in: {request_focus}"
+    if total_steps == 2:
+        return f"Implement the targeted change and verify it for: {request_focus}"
+    if total_steps >= 3 and step_index == total_steps - 2:
+        return f"Tighten the wiring, copy, or edge cases needed to finish: {request_focus}"
+    if step_index >= total_steps - 1:
+        return f"Verify the result against this request and close obvious gaps: {request_focus}"
+    return f"Implement the targeted change needed for: {request_focus}"
+
+
+def apply_plan_request_specificity_guardrails(message: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite overly generic planner output so the visible plan reflects the actual request."""
+    normalized = normalize_deep_plan(plan)
+    request_focus = summarize_request_for_plan(message)
+    if not request_focus:
+        return normalized
+
+    request_terms = extract_request_terms_for_plan(message)
+    if plan_text_is_generic(normalized.get("strategy", ""), request_terms):
+        normalized["strategy"] = (
+            "Inspect the exact surfaces implicated by the request, make the targeted change, "
+            f"and verify the outcome: {request_focus}"
+        )
+    if plan_text_is_generic(normalized.get("deliverable", ""), request_terms):
+        normalized["deliverable"] = (
+            "A concrete result, grounded in inspected evidence, that directly addresses: "
+            f"{request_focus}"
+        )
+
+    builder_steps = list(normalized.get("builder_steps", []))
+    normalized["builder_steps"] = [
+        build_request_specific_step(idx, len(builder_steps), request_focus)
+        if plan_text_is_generic(step, request_terms)
+        else step
+        for idx, step in enumerate(builder_steps)
+    ]
+    return normalize_deep_plan(normalized)
+
+
 def normalize_deep_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce planner output into the structure the deep pipeline expects."""
     normalized = dict(plan or {})
@@ -2878,27 +3408,27 @@ def build_heuristic_step_subplan(
     lowered = str(step or "").strip().lower()
     if any(term in lowered for term in ("create", "scaffold", "structure", "top-level", "starter repo")):
         substeps = [
-            "Lay down the concrete files, folders, and wiring this step depends on.",
-            "Fill in the first working implementation slice instead of leaving placeholders.",
-            "Tighten the surrounding docs or config so this slice is runnable and reviewable.",
+            f"Lay down the concrete files, folders, and wiring needed for: {step}",
+            f"Fill in the first working implementation slice required by: {step}",
+            f"Tighten the surrounding docs or config so this slice is runnable and reviewable for: {step}",
         ]
     elif any(term in lowered for term in ("tighten", "polish", "docs", "wiring", "gap")):
         substeps = [
-            "Inspect the current output for missing wiring, docs, or sharp edges tied to this step.",
-            "Apply the smallest useful edits that close the most obvious gaps.",
-            "Re-read the touched files and check that the step now feels cohesive.",
+            f"Inspect the current output for missing wiring, docs, or sharp edges tied to: {step}",
+            f"Apply the smallest useful edits that close the most obvious gaps in: {step}",
+            f"Re-read the touched files and check that this step now feels cohesive: {step}",
         ]
     elif any(term in lowered for term in ("verify", "check", "test", "validate")):
         substeps = [
-            "Inspect the files or commands most relevant to the verification target.",
-            "Run the narrowest useful command or direct file check for this step.",
-            "Summarize what passed, what failed, and what still needs tightening.",
+            f"Inspect the files or commands most relevant to the verification target in: {step}",
+            f"Run the narrowest useful command or direct file check for: {step}",
+            f"Summarize what passed, what failed, and what still needs tightening for: {step}",
         ]
     else:
         substeps = [
-            "Inspect the specific files, artifacts, or gaps tied to this build step.",
-            "Implement the next concrete slice needed to move this step forward.",
-            "Validate the slice and tighten any obvious follow-up issues inside this step.",
+            f"Inspect the specific files, artifacts, or gaps tied to this build step: {step}",
+            f"Implement the next concrete slice needed to move this step forward: {step}",
+            f"Validate the slice and tighten any obvious follow-up issues inside: {step}",
         ]
 
     return normalize_step_subplan(
@@ -3144,12 +3674,38 @@ def workspace_is_effectively_empty(snapshot: Dict[str, Any]) -> bool:
 
 def request_is_repo_scaffold(message: str) -> bool:
     """Return whether the user is asking for a starter repo or scaffold to be created."""
-    text = (message or "").strip().lower()
+    text = " ".join((message or "").strip().lower().split())
     if not text:
         return False
+    explicit_repo_phrases = (
+        "scaffold a repo",
+        "scaffold the repo",
+        "generate a repo",
+        "generate the repo",
+        "create a repo",
+        "create the repo",
+        "repo scaffold",
+        "repository scaffold",
+        "starter repo",
+        "project scaffold",
+        "project structure",
+        "repo structure",
+        "repository structure",
+        "folder structure",
+        "directory structure",
+        "file tree",
+        "multi-file project",
+        "multi file project",
+    )
+    if any(phrase in text for phrase in explicit_repo_phrases):
+        return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
-    repo_scope_terms = {"repo", "repository", "codebase", "project", "app", "service", "api"}
-    return bool(words & WORKSPACE_TEMPLATE_TERMS) and bool(words & repo_scope_terms)
+    repo_shape_terms = {
+        "repo", "repository", "codebase", "folders", "folder", "directories", "directory",
+        "tree", "layout", "structure", "scaffold", "boilerplate",
+    }
+    build_terms = {"build", "bootstrap", "create", "generate", "make", "scaffold", "seed", "starter", "template"}
+    return bool(words & build_terms) and bool(words & repo_shape_terms)
 
 
 def build_empty_workspace_steps(message: str) -> List[str]:
@@ -3161,9 +3717,9 @@ def build_empty_workspace_steps(message: str) -> List[str]:
             "Tighten obvious gaps, wiring, and docs before verification.",
         ]
     return [
-        "Create the requested files directly in the empty workspace and add any needed top-level structure.",
-        "Implement the first useful working slice instead of stopping at placeholders.",
-        "Tighten obvious gaps before verification.",
+        "Create the smallest useful workspace artifact first, preferably as a single file.",
+        "Add supporting files only if they materially improve usability or are required for the request to work.",
+        "Tighten obvious gaps and verify the artifact before finishing.",
     ]
 
 
@@ -3171,14 +3727,14 @@ def build_empty_workspace_strategy(message: str) -> str:
     """Describe the execution approach for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "Scaffold the requested repo directly into the empty workspace, then implement the first useful slice and verify it."
-    return "Start creating the requested files in the empty workspace immediately, then implement the first useful slice and verify it."
+    return "Start with one main workspace artifact in the empty workspace, expand to supporting files only when they materially help, then verify the result."
 
 
 def build_empty_workspace_deliverable(message: str) -> str:
     """Describe the expected deliverable for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "A usable starter repo scaffold written into the workspace and ready to inspect or download."
-    return "A concrete workspace artifact written into the empty workspace and grounded in the user's request."
+    return "One main workspace artifact written into the empty workspace, with only the minimum supporting files needed for the request."
 
 
 def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> List[str]:
@@ -3190,8 +3746,8 @@ def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> Lis
             audit_check,
         ]
     return [
-        "Confirm the new files now exist in the workspace and match the request.",
-        "Run the narrowest useful syntax or smoke check for the created slice.",
+        "Confirm the main artifact now exists in the workspace and matches the request.",
+        "Run the narrowest useful syntax or smoke check for the artifact and any minimal supporting files.",
         audit_check,
     ]
 
@@ -3229,6 +3785,7 @@ def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Di
             normalized["deliverable"] = build_empty_workspace_deliverable(session.message)
             normalized["builder_steps"] = build_empty_workspace_steps(session.message)
             normalized["verifier_checks"] = build_empty_workspace_verifier_checks(session.message, audit_check)
+    normalized = apply_plan_request_specificity_guardrails(session.task_request or session.message, normalized)
     return normalize_deep_plan(normalized)
 
 
@@ -3286,7 +3843,7 @@ def render_deep_confirmation(message: str, workspace_enabled: bool) -> str:
     if len(request) > 180:
         request = request[:177].rstrip() + "..."
     next_step = "inspect the workspace first" if workspace_enabled else "work from the conversation context first"
-    return f"I’m working on: {request or 'the current request'}. I’ll {next_step} and then respond with the best verified answer I can."
+    return f"I'm working on: {request or 'the current request'}. I'll {next_step} and then respond with the best verified answer I can."
 
 
 PLAN_EXECUTION_MARKERS = (
@@ -4158,9 +4715,20 @@ async def send_assistant_note(websocket: WebSocket, content: str):
     await websocket.send_json({"type": "assistant_note", "content": content})
 
 
-async def send_reasoning_note(websocket: WebSocket, content: str):
+async def send_reasoning_note(
+    websocket: WebSocket,
+    content: str,
+    *,
+    step_label: Optional[str] = None,
+    phase: str = "think",
+):
     """Emit a short reasoning-only note that should not appear as final output."""
-    await websocket.send_json({"type": "reasoning_note", "content": content})
+    await websocket.send_json({
+        "type": "reasoning_note",
+        "content": content,
+        "step_label": step_label or "",
+        "phase": (phase or "think").strip() or "think",
+    })
 
 
 async def send_activity_event(
@@ -4389,6 +4957,9 @@ def setup_document_tables(conn: sqlite3.Connection):
             content TEXT NOT NULL,
             char_count INTEGER NOT NULL DEFAULT 0,
             metadata_json TEXT NOT NULL DEFAULT '{}',
+            embedding BLOB,
+            embedding_model TEXT,
+            embedded_at TEXT,
             created_at TEXT NOT NULL,
             UNIQUE(conversation_id, path, chunk_index))'''
     )
@@ -4403,6 +4974,23 @@ def setup_document_tables(conn: sqlite3.Connection):
                  conversation_id UNINDEXED
                  )'''
         )
+
+
+def ensure_embedding_columns(conn: sqlite3.Connection):
+    """Add optional semantic-retrieval columns when running against an older database."""
+    c = conn.cursor()
+    for statement in (
+        'ALTER TABLE messages ADD COLUMN embedding BLOB',
+        'ALTER TABLE messages ADD COLUMN embedding_model TEXT',
+        'ALTER TABLE messages ADD COLUMN embedded_at TEXT',
+        'ALTER TABLE document_chunks ADD COLUMN embedding BLOB',
+        'ALTER TABLE document_chunks ADD COLUMN embedding_model TEXT',
+        'ALTER TABLE document_chunks ADD COLUMN embedded_at TEXT',
+    ):
+        try:
+            c.execute(statement)
+        except sqlite3.OperationalError:
+            pass
 
 
 def init_db():
@@ -4425,6 +5013,9 @@ def init_db():
                       content TEXT,
                       timestamp TEXT,
                       feedback TEXT,
+                      embedding BLOB,
+                      embedding_model TEXT,
+                      embedded_at TEXT,
                       FOREIGN KEY(conversation_id) REFERENCES conversations(id))''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS conversation_summaries
@@ -4503,6 +5094,7 @@ def init_db():
             logger.warning("SQLite FTS setup failed, falling back to LIKE search: %s", exc)
 
         setup_document_tables(conn)
+        ensure_embedding_columns(conn)
 
         conn.commit()
         conn.close()
@@ -6288,6 +6880,7 @@ def conversation_search_history_result(
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     fts_query = normalize_fts_query(cleaned_query)
+    lexical_rows: List[Dict[str, Any]]
 
     try:
         if not fts_query:
@@ -6311,7 +6904,7 @@ def conversation_search_history_result(
                 "fts_rank": row[5],
             }
             for row in c.fetchall()
-        ], cleaned_query, safe_limit)
+        ], cleaned_query, max(safe_limit * 4, 12))
     except sqlite3.OperationalError:
         search_term = f"%{cleaned_query}%"
         c.execute(
@@ -6331,6 +6924,61 @@ def conversation_search_history_result(
             }
             for row in c.fetchall()
         ]
+
+    semantic_rows = fetch_semantic_message_candidates(
+        conversation_id,
+        cleaned_query,
+        limit=max(MESSAGE_RETRIEVAL_SEMANTIC_LIMIT, safe_limit * 4),
+    )
+
+    candidate_rows: Dict[int, Dict[str, Any]] = {}
+    for position, row in enumerate(lexical_rows):
+        candidate_rows[int(row["id"])] = {
+            **row,
+            "lexical_rank": position,
+            "semantic_rank": None,
+            "semantic_similarity": None,
+        }
+    for position, row in enumerate(semantic_rows):
+        item = candidate_rows.setdefault(
+            int(row["id"]),
+            {
+                **row,
+                "lexical_rank": None,
+                "semantic_rank": None,
+                "semantic_similarity": None,
+            },
+        )
+        item["semantic_rank"] = position
+        item["semantic_similarity"] = row.get("semantic_similarity")
+        item.setdefault("feedback", row.get("feedback", ""))
+
+    if candidate_rows:
+        recency_order = {
+            row_id: index
+            for index, row_id in enumerate(
+                item["id"] for item in sorted(candidate_rows.values(), key=lambda item: item.get("timestamp", ""))
+            )
+        }
+        total_candidates = max(1, len(candidate_rows))
+        ranked_rows = []
+        for item in candidate_rows.values():
+            score = 0.0
+            score += 160.0 * reciprocal_rank_fusion_bonus(item.get("lexical_rank"))
+            score += 185.0 * reciprocal_rank_fusion_bonus(item.get("semantic_rank"))
+            score += 1.1 * max(0.0, float(item.get("semantic_similarity") or 0.0))
+            score += exact_text_hit_bonus(cleaned_query, item.get("content", ""))
+            score += calculate_message_relevance_score(
+                item,
+                cleaned_query,
+                recency_order.get(int(item["id"]), 0),
+                total_candidates,
+            )
+            ranked_rows.append({**item, "score": round(score, 4)})
+        ranked_rows.sort(key=lambda item: (item.get("score", 0.0), item.get("timestamp", "")), reverse=True)
+        ranked_rows = ranked_rows[:safe_limit]
+    else:
+        ranked_rows = []
 
     matches = []
     for row in ranked_rows:
@@ -8166,7 +8814,7 @@ async def deep_confirm_understanding(session: DeepSession) -> str:
     """Send a brief confirmation of the assistant's current understanding."""
     confirmation = render_deep_confirmation(session.task_request or session.message, session.workspace_enabled)
     if confirmation:
-        await send_reasoning_note(session.websocket, confirmation)
+        await send_reasoning_note(session.websocket, confirmation, phase="inspect")
     return confirmation
 
 
@@ -8185,6 +8833,12 @@ async def deep_plan_step_subtasks(
         return normalized
 
     step_label = f"Step {step_index + 1}: {step}"
+    await send_reasoning_note(
+        session.websocket,
+        f"Planning inside {step_label}. I'm only decomposing this step so execution stays scoped.",
+        step_label=step_label,
+        phase="plan",
+    )
     await send_activity_event(
         session.websocket,
         "plan",
@@ -8343,6 +8997,12 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
         for sub_idx in range(len(completed_substeps), len(substeps)):
             current_substep = substeps[sub_idx]
             substep_label = f"Step {idx + 1}.{sub_idx + 1}: {current_substep}"
+            await send_reasoning_note(
+                session.websocket,
+                f"Current focus is {substep_label}. I'm staying inside this substep until it is complete or blocked.",
+                step_label=substep_label,
+                phase="execute",
+            )
             await send_activity_event(
                 session.websocket,
                 "execute",
@@ -8598,6 +9258,13 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
         "Plan",
         "Turning the inspected request into a grounded execution plan.",
     )
+    request_focus = summarize_request_for_plan(session.task_request or session.message)
+    if request_focus:
+        await send_reasoning_note(
+            session.websocket,
+            f"Planning specifically around this request: {request_focus}",
+            phase="plan",
+        )
     if is_fast_profile_active():
         session.plan = build_heuristic_deep_plan(session)
     else:

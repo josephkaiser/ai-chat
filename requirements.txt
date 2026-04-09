@@ -1,0 +1,13 @@
+fastapi
+python-multipart
+uvicorn[standard]
+websockets
+httpx
+huggingface_hub
+beautifulsoup4
+jinja2
+aiofiles
+numpy
+fastembed
+pandas
+openpyxl
