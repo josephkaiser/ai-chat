@@ -12,20 +12,18 @@ The composer supports:
 - slash commands for common coding tasks
 - send-or-interrupt behavior from the primary action button
 
-The client also preserves several preferences in `localStorage`, including feature toggles, speech playback settings, and workspace panel visibility.
+The client preserves a handful of browser preferences in `localStorage`, including speech playback settings and workspace panel visibility.
 
-## Settings and feature toggles
+## Settings and About
 
 The Settings panel exposes:
 
-- **Agent Dev Tools** — allow workspace-aware tool execution
-- **Workspace Panel** — show or hide the workspace UI
-- **Local RAG** — allow conversation-history recall
-- **Web Search** — allow freshness-sensitive web lookups
 - **Auto-Speak Replies** — queue fresh assistant replies through server TTS when available
 - **Speech Speed** — adjust playback speed for generated audio
 - **Appearance** and **System Prompt** controls
 - **Reset App Data** danger zone
+
+The main menu also includes a separate **About** surface for the author note and project intent.
 
 ## Workspace panel
 

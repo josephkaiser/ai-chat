@@ -11,14 +11,14 @@ html {
     -webkit-text-size-adjust: 100%;
 }
 body {
-    --bg_glow_accent_mix: 2.2%;
-    --bg_glow_accent_falloff: 58%;
-    --bg_glow_base_mix: 34%;
+    --bg_glow_accent_mix: 3.2%;
+    --bg_glow_accent_falloff: 60%;
+    --bg_glow_base_mix: 22%;
     font-family: var(--font_sans);
     background:
         radial-gradient(circle at top left, color-mix(in srgb, var(--accent_primary) var(--bg_glow_accent_mix), transparent), transparent var(--bg_glow_accent_falloff)),
-        radial-gradient(circle at top right, color-mix(in srgb, var(--accent_primary) 1.2%, transparent), transparent 54%),
-        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) var(--bg_glow_base_mix), var(--bg_primary)) 0%, var(--bg_primary) 34%, color-mix(in srgb, var(--bg_primary) 97%, var(--bg_secondary)) 100%);
+        radial-gradient(circle at 82% 0%, color-mix(in srgb, var(--accent_secondary) 5%, transparent), transparent 48%),
+        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) var(--bg_glow_base_mix), var(--bg_primary)) 0%, var(--bg_primary) 38%, color-mix(in srgb, var(--bg_primary) 96%, var(--bg_secondary)) 100%);
     color: var(--text_primary);
     height: 100vh;
     height: 100dvh;
@@ -33,9 +33,9 @@ textarea {
     font: inherit;
 }
 :root[data-theme="dark"] body {
-    --bg_glow_accent_mix: 1.15%;
-    --bg_glow_accent_falloff: 60%;
-    --bg_glow_base_mix: 18%;
+    --bg_glow_accent_mix: 4.8%;
+    --bg_glow_accent_falloff: 64%;
+    --bg_glow_base_mix: 26%;
 }
 :root {
     /* Fallback theme tokens (overridden by JS applyTheme) */
@@ -46,36 +46,36 @@ textarea {
     --font-size-control: 12px;
     --font-size-meta: 11px;
     --font-size-micro: 10px;
-    --bg_primary: #fffefb;
-    --bg_secondary: #f5f0e8;
-    --bg_tertiary: #e9eced;
-    --bg_quaternary: #f5f0e8;
-    --text_primary: #366c9c;
-    --text_secondary: #8194b1;
-    --text_tertiary: #b0c9df;
-    --accent_primary: #8194b1;
-    --accent_hover: #366c9c;
-    --accent_secondary: #2563eb;
-    --msg_user_bg: #e9eced;
-    --msg_user_text: #366c9c;
-    --msg_assistant_bg: #fffefb;
-    --msg_assistant_text: #366c9c;
+    --bg_primary: #171512;
+    --bg_secondary: #201d19;
+    --bg_tertiary: #322d27;
+    --bg_quaternary: #26211d;
+    --text_primary: #f3ece3;
+    --text_secondary: #b5aa9d;
+    --text_tertiary: #7b7267;
+    --accent_primary: #be9b73;
+    --accent_hover: #e2c29d;
+    --accent_secondary: #d9714b;
+    --msg_user_bg: #0f0e0d;
+    --msg_user_text: #f3ece3;
+    --msg_assistant_bg: transparent;
+    --msg_assistant_text: #f3ece3;
     --status_connected: #10b981;
     --status_disconnected: #ef4444;
-    --btn_primary: #8194b1;
-    --btn_primary_hover: #366c9c;
+    --btn_primary: #be9b73;
+    --btn_primary_hover: #e2c29d;
     --btn_danger: #ef4444;
     --btn_danger_hover: #dc2626;
-    --btn_secondary: #e9eced;
-    --btn_secondary_hover: #b0c9df;
+    --btn_secondary: #322d27;
+    --btn_secondary_hover: #464038;
     --modal_overlay: rgba(0,0,0,0.5);
-    --modal_bg: #fffefb;
-    --scrollbar_track: #f5f0e8;
-    --scrollbar_thumb: #b0c9df;
-    --scrollbar_thumb_hover: #8194b1;
+    --modal_bg: #201d19;
+    --scrollbar_track: #201d19;
+    --scrollbar_thumb: #4d463d;
+    --scrollbar_thumb_hover: #695f54;
     --chrome-gutter: clamp(10px, 1.4vw, 16px);
     --chrome-top-lane: clamp(44px, 6vh, 58px);
-    --sidebar-toggle-size: 36px;
+    --sidebar-toggle-size: 38px;
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -83,19 +83,19 @@ textarea {
     --mobile-keyboard-gap: 0px;
     --mobile-composer-height: 132px;
     --mobile-viewport-height: 100dvh;
-    --chat-column-max: 660px;
-    --menu-sidebar-width: clamp(236px, 19vw, 282px);
-    --workspace-sidebar-width: clamp(260px, 30vw, 360px);
-    --workspace-viewer-width: clamp(320px, 31vw, 520px);
-    --workspace-pane-gap: 10px;
+    --chat-column-max: 760px;
+    --menu-sidebar-width: clamp(252px, 19vw, 300px);
+    --workspace-sidebar-width: clamp(318px, 24vw, 392px);
+    --workspace-viewer-width: clamp(420px, 32vw, 640px);
+    --workspace-pane-gap: 12px;
     --workspace-shell-width: var(--workspace-sidebar-width);
     --workspace-shell-width-split: calc(var(--workspace-sidebar-width) + var(--workspace-viewer-width) + var(--workspace-pane-gap));
     --workspace-shell-width-compact: clamp(320px, 38vw, 420px);
     --menu-toggle-open-left: calc(min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 20px);
     --workspace-toggle-open-right: calc(min(var(--workspace-shell-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 12px);
-    --panel-radius: 16px;
-    --surface-radius: 12px;
-    --dense-border: color-mix(in srgb, var(--bg_tertiary) 88%, transparent);
+    --panel-radius: 22px;
+    --surface-radius: 16px;
+    --dense-border: color-mix(in srgb, var(--bg_tertiary) 94%, transparent);
     --text-button-padding-y: 5px;
     --text-button-padding-x: 8px;
     --text-row-gap: 2px;
@@ -118,8 +118,8 @@ textarea {
     display: flex;
     min-height: 0;
     position: relative;
-    padding: var(--chrome-top-lane) var(--chrome-gutter) var(--chrome-gutter);
-    gap: 8px;
+    padding: calc(var(--safe-top) + 18px) var(--chrome-gutter) var(--chrome-gutter);
+    gap: 14px;
 }
 .chat-main {
     flex: 1;
@@ -146,7 +146,7 @@ textarea {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 18px 20px 10px;
+    padding: 26px 26px 14px;
 }
 .welcome {
     text-align: center;
@@ -171,8 +171,8 @@ textarea {
     font-size: clamp(1.5rem, 3.1vw, 2.1rem);
     margin: 0;
     letter-spacing: -0.06em;
-    color: #6f8591;
-    text-shadow: 0 1px 0 rgba(255,255,255,0.72);
+    color: color-mix(in srgb, var(--accent_hover) 44%, var(--text_primary));
+    text-shadow: none;
 }
 
 .input-area-stack {
@@ -276,6 +276,12 @@ textarea {
     -webkit-box-orient: vertical;
     overflow: hidden;
 }
+.permission-panel-note {
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--text_secondary);
+}
 .permission-panel-actions {
     display: flex;
     align-items: center;
@@ -323,8 +329,52 @@ textarea {
 .plan-approval-dismiss:hover {
     color: var(--text_primary);
 }
+.plan-approval-callout {
+    margin: 0 12px 12px;
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text_primary);
+}
+.plan-approval-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px 12px;
+}
+.plan-approval-button {
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg_primary) 86%, var(--bg_secondary));
+    color: var(--text_primary);
+    min-width: 88px;
+    padding: 8px 14px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.plan-approval-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent_primary) 30%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+}
+.plan-approval-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.plan-approval-button-approve {
+    color: color-mix(in srgb, var(--accent_hover) 74%, var(--text_primary));
+    border-color: color-mix(in srgb, var(--accent_primary) 34%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 14%, var(--bg_primary));
+}
 .plan-approval-editor {
-    padding: 10px 12px 0;
+    padding: 0 12px 12px;
 }
 .plan-approval-editor-label {
     display: block;
@@ -357,8 +407,14 @@ textarea {
     line-height: 1.4;
     color: var(--text_tertiary);
 }
+.plan-approval-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
 .plan-approval-reasoning {
-    margin: 10px 12px 12px;
+    margin: 0 12px 12px;
     border: 1px solid color-mix(in srgb, var(--accent_primary) 12%, var(--dense-border));
     border-radius: 10px;
     background: color-mix(in srgb, var(--bg_primary) 72%, var(--bg_secondary));
@@ -413,7 +469,7 @@ textarea {
     color: var(--text_secondary);
 }
 .plan-approval-checklist {
-    padding: 10px 16px 12px;
+    padding: 0 16px 12px;
     max-height: min(44vh, 360px);
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -794,23 +850,23 @@ textarea {
     right: calc(var(--safe-right) + var(--chrome-gutter));
     z-index: 1100;
     border: 1px solid var(--dense-border);
-    background: color-mix(in srgb, var(--bg_secondary) 88%, transparent);
+    background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
     color: var(--text_primary);
-    border-radius: 999px;
-    width: 36px;
-    height: 36px;
+    border-radius: 14px;
+    width: 38px;
+    height: 38px;
     padding: 0;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 18px 28px rgba(0,0,0,0.24);
     transition: right 0.24s ease, transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 .workspace-toggle:hover {
     transform: translateY(-1px);
-    background: var(--bg_secondary);
+    background: color-mix(in srgb, var(--bg_secondary) 82%, var(--bg_primary));
 }
 .workspace-toggle.active {
     color: var(--text_primary);
@@ -837,11 +893,11 @@ textarea {
     flex-direction: column;
     opacity: 0;
     background:
-        linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 4%, var(--bg_secondary)), color-mix(in srgb, var(--accent_primary) 3%, var(--bg_primary)));
+        linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 6%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     border: 1px solid var(--dense-border);
-    border-radius: 14px;
+    border-radius: var(--panel-radius);
     overflow: hidden;
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 20px 46px rgba(0, 0, 0, 0.22);
     transform: translateX(100%);
     pointer-events: auto;
     transition: opacity 0.22s ease, transform 0.24s ease;
@@ -858,7 +914,7 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 10px 10px 8px 50px;
+    padding: 14px 14px 12px 56px;
     border-bottom: 1px solid var(--dense-border);
 }
 .workspace-heading {
@@ -866,13 +922,14 @@ textarea {
     flex: 1 1 auto;
 }
 .workspace-title {
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 600;
+    letter-spacing: -0.02em;
 }
 .workspace-subtitle {
     margin-top: 2px;
-    font-size: var(--font-size-micro);
-    color: var(--text_tertiary);
+    font-size: 11px;
+    color: var(--text_secondary);
 }
 .workspace-actions {
     display: flex;
@@ -889,18 +946,18 @@ textarea {
     white-space: nowrap;
 }
 .workspace-refresh {
-    border: 1px solid transparent;
-    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+    background: color-mix(in srgb, var(--bg_primary) 48%, transparent);
     color: var(--text_secondary);
-    border-radius: 8px;
+    border-radius: 999px;
     padding: var(--text-button-padding-y) var(--text-button-padding-x);
     font-size: var(--font-size-meta);
     line-height: 1.1;
     cursor: pointer;
 }
 .workspace-refresh:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
-    background: color-mix(in srgb, var(--accent_primary) 6%, transparent);
+    border-color: color-mix(in srgb, var(--accent_primary) 22%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, transparent);
     color: var(--text_primary);
 }
 .workspace-download-button {
@@ -922,17 +979,17 @@ textarea {
 .workspace-body {
     flex: 1;
     min-height: 0;
-    padding: 6px;
+    padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 10px;
     overflow: hidden;
 }
 .workspace-section {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 }
 .workspace-section-fill {
     flex: 1 1 auto;
@@ -948,14 +1005,151 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 0 2px;
+    padding: 0 4px;
 }
 .workspace-section-title {
-    font-size: var(--font-size-micro);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text_tertiary);
+}
+.workspace-section-meta {
+    font-size: 10px;
+    color: var(--text_tertiary);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.workspace-artifact-list {
+    display: grid;
+    gap: 8px;
+    max-height: min(34vh, 292px);
+    overflow: auto;
+    padding-right: 2px;
+}
+.workspace-artifact-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--bg_primary) 58%, var(--bg_secondary));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+.workspace-artifact-card.active {
+    border-color: color-mix(in srgb, var(--accent_primary) 32%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+}
+.workspace-artifact-card.is-live {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent_primary) 12%, transparent);
+}
+.workspace-artifact-main {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    min-width: 0;
+}
+.workspace-artifact-icon {
+    width: 42px;
+    min-width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
+    background: color-mix(in srgb, var(--bg_secondary) 72%, var(--bg_primary));
+    color: var(--accent_hover);
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+.workspace-artifact-copy {
+    min-width: 0;
+    display: grid;
+    gap: 4px;
+}
+.workspace-artifact-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.workspace-artifact-badge,
+.workspace-artifact-state {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.workspace-artifact-badge {
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+    color: var(--accent_hover);
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, transparent);
+}
+.workspace-artifact-state {
+    background: color-mix(in srgb, var(--status_connected) 12%, var(--bg_primary));
+    color: color-mix(in srgb, var(--status_connected) 80%, white 20%);
+    border: 1px solid color-mix(in srgb, var(--status_connected) 18%, transparent);
+}
+.workspace-artifact-title,
+.workspace-artifact-path,
+.workspace-artifact-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.workspace-artifact-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text_primary);
+}
+.workspace-artifact-path {
+    font-size: 11px;
+    color: var(--text_secondary);
+}
+.workspace-artifact-meta {
+    font-size: 10px;
     color: var(--text_tertiary);
+    letter-spacing: 0.03em;
+}
+.workspace-artifact-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.workspace-artifact-action {
+    border: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+    background: color-mix(in srgb, var(--bg_primary) 48%, transparent);
+    color: var(--text_secondary);
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.workspace-artifact-action:hover,
+.workspace-artifact-action:focus-visible {
+    color: var(--text_primary);
+    border-color: color-mix(in srgb, var(--accent_primary) 28%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 9%, transparent);
+    transform: translateY(-1px);
 }
 .workspace-activity-list {
     max-height: min(34vh, 260px);
@@ -965,18 +1159,18 @@ textarea {
     gap: 0;
     padding: 4px 7px;
     border: 1px solid var(--dense-border);
-    border-radius: 10px;
-    background: var(--bg_primary);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg_primary) 62%, var(--bg_secondary));
     font-family: var(--font_mono);
 }
 .workspace-file-list {
     height: 100%;
     overflow: auto;
     border: 1px solid var(--dense-border);
-    border-radius: 10px;
+    border-radius: 16px;
     background:
-        linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 3%, var(--bg_primary)), color-mix(in srgb, var(--accent_primary) 2%, var(--bg_secondary)));
-    padding: 6px 4px 8px;
+        linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 5%, var(--bg_primary)), color-mix(in srgb, var(--bg_secondary) 92%, black 8%));
+    padding: 8px 6px 10px;
 }
 .workspace-tree-node {
     display: flex;
@@ -999,20 +1193,20 @@ textarea {
     align-items: center;
     gap: 6px;
     border: none;
-    border-radius: 8px;
+    border-radius: 12px;
     background: transparent;
     color: var(--text_primary);
-    padding: 5px 6px 5px calc(6px + (var(--workspace-depth, 0) * 12px));
+    padding: 7px 8px 7px calc(8px + (var(--workspace-depth, 0) * 12px));
     text-align: left;
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
 }
 .workspace-tree-main:hover {
-    background: color-mix(in srgb, var(--accent_primary) 8%, transparent);
+    background: color-mix(in srgb, var(--accent_primary) 10%, transparent);
 }
 .workspace-tree-node.active > .workspace-tree-row > .workspace-tree-main {
     background: color-mix(in srgb, var(--accent_primary) 14%, var(--bg_primary));
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent_primary) 42%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent_primary) 32%, transparent);
 }
 .workspace-tree-node.is-changed > .workspace-tree-row > .workspace-tree-main {
     background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
@@ -1058,8 +1252,8 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--accent_primary) 35%, transparent);
     border-radius: 999px;
     padding: 3px 7px;
-    color: var(--accent_primary);
-    background: color-mix(in srgb, var(--accent_primary) 10%, transparent);
+    color: var(--accent_hover);
+    background: color-mix(in srgb, var(--accent_primary) 12%, transparent);
     font-size: var(--font-size-micro);
     font-weight: 700;
     letter-spacing: 0.04em;
@@ -1092,8 +1286,8 @@ textarea {
 .workspace-footer {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 6px;
+    gap: 8px;
+    padding: 8px;
     border-top: 1px solid var(--dense-border);
 }
 .workspace-activity-drawer {
@@ -1114,7 +1308,7 @@ textarea {
 .workspace-console-toggle {
     align-self: flex-end;
     border: 1px solid var(--dense-border);
-    background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
+    background: color-mix(in srgb, var(--bg_primary) 54%, transparent);
     color: var(--text_secondary);
     border-radius: 999px;
     min-width: 44px;
@@ -1303,24 +1497,25 @@ textarea {
     color: inherit;
 }
 .workspace-empty {
-    padding: 10px;
-    border: 1px dashed var(--dense-border);
-    border-radius: 10px;
+    padding: 14px;
+    border: 1px dashed color-mix(in srgb, var(--dense-border) 90%, transparent);
+    border-radius: 16px;
     color: var(--text_secondary);
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.55;
+    background: color-mix(in srgb, var(--bg_primary) 46%, transparent);
 }
 
 .ide-workspace {
     position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
+    top: calc(var(--safe-top) + var(--chrome-gutter));
+    right: calc(var(--safe-right) + var(--chrome-gutter));
+    bottom: calc(var(--safe-bottom) + var(--chrome-gutter));
     width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 0;
     overflow: visible;
     visibility: hidden;
     opacity: 0;
@@ -1328,6 +1523,13 @@ textarea {
     transform: translateX(calc(var(--workspace-shell-width) * 0.25));
     transition: opacity 0.22s ease, transform 0.24s ease, visibility 0.24s step-end;
     z-index: 960;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
+    border-radius: 26px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 7%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
+    box-shadow: 0 24px 52px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(14px);
 }
 .chat.workspace-reader-open {
     --workspace-shell-width: var(--workspace-shell-width-split);
@@ -1354,11 +1556,14 @@ textarea {
 }
 .workspace-view-button {
     border: 1px solid var(--dense-border);
-    background: color-mix(in srgb, var(--bg_secondary) 88%, transparent);
+    background: color-mix(in srgb, var(--bg_primary) 54%, transparent);
     color: var(--text_secondary);
     border-radius: 999px;
-    padding: 6px 11px;
-    font-size: 12px;
+    padding: 7px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     line-height: 1;
     cursor: pointer;
     transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, transform 0.15s ease;
@@ -1370,8 +1575,8 @@ textarea {
 }
 .workspace-view-button.active {
     border-color: var(--accent_primary);
-    background: color-mix(in srgb, var(--accent_primary) 12%, var(--bg_secondary));
-    color: var(--text_primary);
+    background: color-mix(in srgb, var(--accent_primary) 14%, var(--bg_secondary));
+    color: var(--accent_hover);
 }
 .workspace-view-button:disabled {
     opacity: 0.55;
@@ -1387,10 +1592,10 @@ textarea {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--dense-border);
-    border-radius: 14px;
-    background: var(--bg_secondary);
+    border-radius: var(--panel-radius);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 94%, transparent), color-mix(in srgb, var(--bg_primary) 88%, black 12%));
     overflow: hidden;
-    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 20px 46px rgba(0, 0, 0, 0.2);
     pointer-events: auto;
 }
 .ide-viewer.is-hidden {
@@ -1404,7 +1609,7 @@ textarea {
     align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
-    padding: 10px 12px 8px;
+    padding: 14px 14px 12px;
     border-bottom: 1px solid var(--dense-border);
 }
 .ide-viewer-heading {
@@ -1412,8 +1617,9 @@ textarea {
     flex: 1 1 auto;
 }
 .ide-viewer-title {
-    font-size: 13px;
+    font-size: 15px;
     font-weight: 600;
+    letter-spacing: -0.02em;
 }
 .ide-viewer-subtitle {
     margin-top: 2px;
@@ -1424,7 +1630,7 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 4px;
+    gap: 6px;
     flex-wrap: wrap;
 }
 .ide-viewer-actions .workspace-refresh,
@@ -1459,8 +1665,8 @@ textarea {
     line-height: 1;
 }
 .ide-editor-mode {
-    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
-    color: var(--text_primary);
+    background: color-mix(in srgb, var(--accent_primary) 12%, var(--bg_primary));
+    color: var(--accent_hover);
 }
 .ide-editor-status {
     color: var(--text_secondary);
@@ -1492,7 +1698,7 @@ textarea {
 .ide-viewer-body {
     flex: 1;
     min-height: 0;
-    padding: 8px;
+    padding: 10px;
     position: relative;
     background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
 }
@@ -1502,10 +1708,11 @@ textarea {
     align-items: center;
     justify-content: center;
     text-align: center;
-    border: 1px dashed var(--dense-border);
-    border-radius: 14px;
+    border: 1px dashed color-mix(in srgb, var(--dense-border) 92%, transparent);
+    border-radius: 18px;
     color: var(--text_secondary);
     padding: 20px;
+    background: color-mix(in srgb, var(--bg_primary) 54%, transparent);
 }
 .ide-viewer-empty[data-kind="loading"] {
     border-style: solid;
@@ -1528,8 +1735,8 @@ textarea {
     margin-bottom: 0;
     resize: none;
     border: 1px solid var(--dense-border);
-    border-radius: 12px;
-    background: var(--bg_primary);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
     color: var(--text_primary);
     padding: 10px;
     font-family: "IBM Plex Mono", "Courier New", monospace;
@@ -1542,15 +1749,15 @@ textarea {
 .ide-viewer-pane .CodeMirror {
     height: 100%;
     border: 1px solid var(--dense-border);
-    border-radius: 12px;
-    background: var(--bg_primary);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
     color: var(--text_primary);
     font-family: "IBM Plex Mono", "Courier New", monospace;
     font-size: 11px;
     line-height: 1.45;
 }
 .ide-viewer-pane .CodeMirror-gutters {
-    background: color-mix(in srgb, var(--bg_secondary) 80%, var(--bg_primary));
+    background: color-mix(in srgb, var(--bg_secondary) 88%, var(--bg_primary));
     border-right: 1px solid var(--bg_tertiary);
 }
 .ide-viewer-pane .CodeMirror-foldgutter {
@@ -1573,9 +1780,9 @@ textarea {
     height: 100%;
     overflow: auto;
     border: 1px solid var(--dense-border);
-    border-radius: 12px;
-    background: var(--bg_primary);
-    padding: 10px;
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
+    padding: 12px;
 }
 /* === Menu Button === */
 .menu-btn {
@@ -1583,22 +1790,22 @@ textarea {
     top: calc(var(--safe-top) + 14px);
     left: calc(var(--safe-left) + var(--chrome-gutter));
     z-index: 1100;
-    width: 36px;
-    height: 36px;
+    width: 38px;
+    height: 38px;
     border: 1px solid var(--dense-border);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg_secondary) 88%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
     color: var(--text_primary);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.12);
-    backdrop-filter: blur(10px);
+    box-shadow: 0 18px 28px rgba(0,0,0,0.24);
+    backdrop-filter: blur(12px);
     transition: left 0.24s ease, background 0.2s, border-color 0.2s, transform 0.15s;
 }
 .menu-btn:hover {
-    background: var(--bg_secondary);
+    background: color-mix(in srgb, var(--bg_secondary) 82%, var(--bg_primary));
     border-color: color-mix(in srgb, var(--accent_primary) 35%, var(--dense-border));
     transform: translateY(-1px);
 }
@@ -1691,12 +1898,12 @@ textarea {
     width: min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2)));
     max-width: calc(100vw - (var(--chrome-gutter) * 2));
     height: 100dvh;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 4%, var(--bg_secondary)), color-mix(in srgb, var(--accent_primary) 3%, var(--bg_primary)));
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 6%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     display: flex;
     flex-direction: column;
     border: 1px solid var(--dense-border);
     border-radius: 0;
-    box-shadow: 0 14px 32px rgba(0,0,0,0.1);
+    box-shadow: 0 20px 42px rgba(0,0,0,0.22);
     opacity: 1;
     transform: translateX(-100%);
     pointer-events: auto;
@@ -2120,6 +2327,11 @@ textarea {
     line-height: 1.2;
     letter-spacing: -0.02em;
 }
+.about-title {
+    font-size: 16px;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+}
 .settings-header button {
     width: 32px;
     height: 32px;
@@ -2310,6 +2522,9 @@ textarea {
     line-height: 1.6;
     color: var(--text_secondary);
 }
+.about-panel {
+    width: min(clamp(540px, 54vw, 720px), calc(100vw - 40px));
+}
 .settings-group-danger .settings-group-title {
     color: var(--btn_danger);
 }
@@ -2416,26 +2631,29 @@ textarea {
     flex-direction: column;
     width: min(100%, var(--chat-column-max));
     max-width: 100%;
-    margin-bottom: 12px;
+    margin-bottom: 18px;
 }
 .message.user { align-items: flex-end; }
 .message.assistant { align-items: stretch; }
 .message-content {
     width: fit-content;
     max-width: 100%;
-    padding: 8px 11px;
-    border-radius: 12px;
-    line-height: 1.45;
+    padding: 10px 12px;
+    border-radius: 18px;
+    line-height: 1.55;
     word-wrap: break-word;
     overflow-wrap: break-word;
     position: relative;
-    font-size: var(--font-size-chat);
+    font-size: 14px;
 }
 .message.user .message-content {
-    background: var(--msg_user_bg);
+    background: color-mix(in srgb, var(--msg_user_bg) 92%, black 8%);
     color: var(--msg_user_text);
-    border-bottom-right-radius: 4px;
-    max-width: 86%;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+    border-bottom-right-radius: 10px;
+    max-width: 78%;
+    padding: 14px 18px;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.18);
 }
 .message.assistant .message-content {
     background: var(--msg_assistant_bg);
@@ -2443,12 +2661,14 @@ textarea {
     width: 100%;
     max-width: 100%;
     margin: 0;
+    padding: 0;
+    border-radius: 0;
 }
 .message-timestamp {
     font-size: 10px;
     color: var(--text_tertiary);
-    margin-top: 3px;
-    padding: 0 4px;
+    margin-top: 6px;
+    padding: 0 2px;
 }
 .message.user .message-timestamp { text-align: right; }
 .message.assistant .message-timestamp {
@@ -2462,7 +2682,7 @@ textarea {
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
-    padding: 2px 4px;
+    padding: 10px 0 0;
     opacity: 0;
     transition: opacity 0.15s;
 }
@@ -2475,19 +2695,23 @@ textarea {
     opacity: 1;
 }
 .action-btn {
-    background: none;
-    border: none;
+    background: color-mix(in srgb, var(--bg_primary) 48%, transparent);
+    border: 1px solid color-mix(in srgb, var(--dense-border) 86%, transparent);
     color: var(--text_tertiary);
     cursor: pointer;
     font-size: 12px;
-    padding: 2px 8px;
-    border-radius: 4px;
+    padding: 5px 10px;
+    border-radius: 999px;
     display: flex;
     align-items: center;
     gap: 4px;
-    transition: color 0.15s, background 0.15s;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
-.action-btn:hover { color: var(--text_primary); background: var(--bg_tertiary); }
+.action-btn:hover {
+    color: var(--text_primary);
+    background: color-mix(in srgb, var(--accent_primary) 10%, transparent);
+    border-color: color-mix(in srgb, var(--accent_primary) 22%, var(--dense-border));
+}
 .action-btn:disabled {
     cursor: default;
     opacity: 0.6;
@@ -2502,7 +2726,7 @@ textarea {
     flex-wrap: wrap;
     gap: 2px;
     padding-left: 6px;
-    border-left: 1px solid color-mix(in srgb, var(--text_tertiary) 18%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--text_tertiary) 20%, transparent);
 }
 .feedback-btn {
     min-width: 62px;
@@ -2556,31 +2780,31 @@ textarea {
     flex-direction: column;
     max-width: none;
     margin: 0;
-    background: color-mix(in srgb, var(--bg_primary) 96%, var(--bg_secondary));
-    border-radius: 14px;
-    border: 1px solid color-mix(in srgb, var(--text_tertiary) 22%, var(--dense-border));
-    box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+    background: color-mix(in srgb, var(--bg_secondary) 90%, var(--bg_primary));
+    border-radius: 26px;
+    border: 1px solid color-mix(in srgb, var(--text_tertiary) 18%, var(--dense-border));
+    box-shadow: 0 20px 36px rgba(0,0,0,0.2);
     transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-    padding: 9px 9px 8px;
-    gap: 6px;
+    padding: 12px 12px 10px;
+    gap: 8px;
 }
 .input-container:focus-within {
     border-color: color-mix(in srgb, var(--accent_primary) 28%, var(--dense-border));
-    box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+    box-shadow: 0 24px 40px rgba(0,0,0,0.24);
 }
 .input-container textarea {
     width: 100%;
     border: none;
     outline: none;
-    min-height: 60px;
+    min-height: 74px;
     max-height: 220px;
-    padding: 4px 2px 1px;
+    padding: 6px 4px 2px;
     background: transparent;
     color: var(--text_primary);
     font-family: inherit;
-    font-size: var(--font-size-chat);
+    font-size: 15px;
     resize: none;
-    line-height: 1.42;
+    line-height: 1.5;
     overflow-y: auto;
 }
 .input-area.composer-compact .input-container {
@@ -2684,9 +2908,9 @@ textarea {
 .composer-control,
 .composer-select {
     border: 1px solid color-mix(in srgb, var(--text_tertiary) 24%, var(--dense-border));
-    background: color-mix(in srgb, var(--bg_primary) 92%, var(--bg_secondary));
+    background: color-mix(in srgb, var(--bg_primary) 54%, transparent);
     color: var(--text_secondary);
-    height: 30px;
+    height: 34px;
     border-radius: 999px;
     cursor: pointer;
     font-size: var(--font-size-control);
@@ -2952,10 +3176,10 @@ textarea {
 }
 #send {
     border: 1px solid color-mix(in srgb, var(--accent_primary) 56%, transparent);
-    background: color-mix(in srgb, var(--accent_primary) 86%, white 14%);
-    color: #fff;
-    width: 32px;
-    height: 32px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 88%, white 12%), color-mix(in srgb, var(--accent_secondary) 82%, var(--accent_primary)));
+    color: #120f0b;
+    width: 36px;
+    height: 36px;
     border-radius: 50%;
     cursor: pointer;
     display: flex;
@@ -3020,21 +3244,22 @@ textarea {
 .message-content blockquote {
     border-left: 3px solid var(--accent_primary);
     padding-left: 10px;
-    margin: 6px 0;
+    margin: 10px 0;
     color: var(--text_secondary);
 }
 .message-content code {
     font-family: 'Courier New', Courier, monospace;
     font-size: 0.9em;
-    background: var(--bg_tertiary);
-    padding: 1px 4px;
-    border-radius: 3px;
+    background: color-mix(in srgb, var(--bg_secondary) 88%, black 12%);
+    padding: 2px 6px;
+    border-radius: 6px;
 }
 .message-content pre {
-    background: var(--bg_primary);
-    border-radius: 8px;
-    padding: 10px;
-    margin: 8px 0;
+    background: color-mix(in srgb, var(--bg_secondary) 86%, black 14%);
+    border: 1px solid color-mix(in srgb, var(--dense-border) 86%, transparent);
+    border-radius: 16px;
+    padding: 14px;
+    margin: 12px 0;
     max-width: 100%;
     overflow-x: hidden;
     white-space: pre-wrap;
@@ -3069,9 +3294,9 @@ textarea {
     top: 8px;
     right: 8px;
     padding: 4px 8px;
-    background: var(--bg_tertiary);
-    border: none;
-    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg_primary) 68%, transparent);
+    border: 1px solid color-mix(in srgb, var(--dense-border) 86%, transparent);
+    border-radius: 999px;
     color: var(--text_secondary);
     cursor: pointer;
     font-size: 11px;
@@ -3122,14 +3347,14 @@ pre:hover .copy-btn { opacity: 1; }
     left: 0;
     right: 0;
     top: 50%;
-    border-top: 1px solid color-mix(in srgb, var(--bg_tertiary) 82%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--bg_tertiary) 88%, transparent);
     transform: translateY(-50%);
 }
 .think-label,
 .think-chevron {
     position: relative;
     z-index: 1;
-    background: var(--bg_secondary);
+    background: var(--bg_primary);
 }
 .think-label {
     padding-right: 4px;
@@ -3176,9 +3401,9 @@ pre:hover .copy-btn { opacity: 1; }
 }
 .turn-status-box {
     border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--bg_primary) 84%, var(--bg_secondary));
-    padding: 8px 10px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg_primary) 76%, var(--bg_secondary));
+    padding: 10px 12px;
 }
 .turn-status-heading {
     display: flex;
@@ -3372,17 +3597,20 @@ pre:hover .copy-btn { opacity: 1; }
 }
 .file-modal-tab {
     border: 1px solid var(--bg_tertiary);
-    background: var(--bg_primary);
+    background: color-mix(in srgb, var(--bg_primary) 54%, transparent);
     color: var(--text_secondary);
     border-radius: 999px;
     padding: 7px 12px;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
 }
 .file-modal-tab.active {
     border-color: var(--accent_primary);
-    background: color-mix(in srgb, var(--accent_primary) 12%, var(--bg_primary));
-    color: var(--text_primary);
+    background: color-mix(in srgb, var(--accent_primary) 14%, var(--bg_primary));
+    color: var(--accent_hover);
 }
 .file-modal-pane {
     flex: 1;
@@ -3917,6 +4145,13 @@ pre:hover .copy-btn { opacity: 1; }
     }
     .workspace-actions {
         width: auto;
+    }
+    .workspace-artifact-card {
+        grid-template-columns: 1fr;
+    }
+    .workspace-artifact-actions {
+        justify-content: flex-start;
+        flex-wrap: wrap;
     }
     .workspace-body {
         padding: 8px 8px 10px;

@@ -29,17 +29,17 @@ For a new capability, try to wire all of these together:
 4. **Workspace-first install path**
    Prefer reusable artifacts that live inside the conversation workspace.
    For Python work, the default pattern is:
-   - create or reuse `.venv`
+   - create or reuse the managed chat Python environment
    - install dependencies there with pip
    - write scripts into the workspace
-   - verify with the same workspace environment
+   - verify with the same managed environment
 
 5. **Tool-loop behavior**
    The assistant should:
    - inspect before acting when that improves accuracy
    - call web tools to verify package names/docs when useful
    - pause only when a gated tool is actually used
-   - pivot gracefully if the user denies approval
+   - pause at the approval boundary if the user denies approval
    - keep long-running installs stoppable
 
 ## Python capability pattern
@@ -47,7 +47,7 @@ For a new capability, try to wire all of these together:
 The current Python workflow is the reference example:
 
 1. Use `web.search` or `web.fetch_page` when package choice or API usage is uncertain.
-2. Create `.venv` in the workspace if needed.
+2. Create or reuse the managed chat Python environment if needed.
 3. Install packages with `/pip` or `workspace.run_command`.
 4. Write the Python script or artifact into the workspace.
 5. Run a focused verify command in the same environment.

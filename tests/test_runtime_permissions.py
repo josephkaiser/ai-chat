@@ -67,27 +67,21 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("git", request.title.lower())
 
     def test_python_m_pip_install_permission_is_scoped_to_pip(self):
-        previous_root = app.WORKSPACE_ROOT
-        try:
-            with tempfile.TemporaryDirectory() as tempdir:
-                app.WORKSPACE_ROOT = tempdir
-                app.get_workspace_path("conv-pip")
-                request = app.build_tool_permission_request(
-                    "conv-pip",
-                    {
-                        "id": "call-pip",
-                        "name": "workspace.run_command",
-                        "arguments": {"command": ["python3", "-m", "pip", "install", "pandas"], "cwd": "."},
-                    },
-                )
-        finally:
-            app.WORKSPACE_ROOT = previous_root
+        request = app.build_tool_permission_request(
+            "conv-pip",
+            {
+                "id": "call-pip",
+                "name": "workspace.run_command",
+                "arguments": {"command": ["python3", "-m", "pip", "install", "pandas"], "cwd": "."},
+            },
+        )
 
         self.assertIsNotNone(request)
         self.assertEqual(request.key, "exec:pip.install")
         self.assertEqual(request.approval_target, "command")
         self.assertEqual(request.title, "Allow pip install?")
         self.assertIn("pandas", request.content.lower())
+        self.assertIn("managed python environment", request.content.lower())
 
     def test_python_venv_setup_permission_is_scoped(self):
         previous_root = app.WORKSPACE_ROOT
@@ -126,12 +120,94 @@ class RuntimePermissionTests(unittest.TestCase):
             app.COMMAND_TIMEOUT_SECONDS,
         )
 
+    def test_workspace_list_files_hides_dotfiles_until_explicitly_targeted(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            (workspace / "app.py").write_text("print('hi')\n", encoding="utf-8")
+            (workspace / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+            (workspace / ".venv").mkdir(parents=True, exist_ok=True)
+            (workspace / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            original = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                root_listing = app.workspace_list_files_result("conv-hidden")
+                hidden_listing = app.workspace_list_files_result("conv-hidden", ".venv")
+            finally:
+                app.get_workspace_path = original
+
+        self.assertEqual([item["name"] for item in root_listing["items"]], ["app.py"])
+        self.assertEqual(hidden_listing["path"], ".venv")
+        self.assertEqual([item["name"] for item in hidden_listing["items"]], ["pyvenv.cfg"])
+
+    def test_validate_workspace_command_allows_managed_python_env_paths(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir) / "workspace"
+            env_root = pathlib.Path(tempdir) / "python-env"
+            workspace.mkdir(parents=True, exist_ok=True)
+            env_bin = env_root / ("Scripts" if app.os.name == "nt" else "bin")
+            env_bin.mkdir(parents=True, exist_ok=True)
+            pip_name = "pip.exe" if app.os.name == "nt" else "pip"
+            pip_path = env_bin / pip_name
+            pip_path.write_text("", encoding="utf-8")
+
+            original_workspace = app.get_workspace_path
+            original_env = app.get_managed_python_env_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                app.get_managed_python_env_path = lambda _conversation_id, create=False: env_root
+                app.validate_workspace_command(
+                    "conv-managed",
+                    [str(pip_path), "install", "pandas"],
+                    workspace,
+                )
+            finally:
+                app.get_workspace_path = original_workspace
+                app.get_managed_python_env_path = original_env
+
     def test_tool_permission_allowlist_round_trip(self):
         features = app.FeatureFlags()
 
         self.assertFalse(app.is_tool_permission_allowlisted(features, "tool:web.search"))
         app.remember_approved_tool_permission(features, "tool:web.search")
         self.assertTrue(app.is_tool_permission_allowlisted(features, "tool:web.search"))
+
+    def test_permission_blocked_message_explains_pause_and_resume(self):
+        request = app.PermissionApprovalRequest(
+            key="exec:git",
+            approval_target="command",
+            title="Allow git status?",
+            content="The assistant wants to run git status in the workspace",
+            preview="git status",
+        )
+
+        message = app.render_permission_blocked_message(request)
+
+        self.assertIn("paused here", message)
+        self.assertIn("Needed command approval: Allow git status.", message)
+        self.assertIn("Request details: git status", message)
+        self.assertIn("Approve it for this chat and then say continue", message)
+
+    def test_permission_denied_result_includes_resume_message(self):
+        request = app.PermissionApprovalRequest(
+            key="tool:web.search",
+            approval_target="tool",
+            title="Use web search?",
+            content="The assistant wants to search the web",
+        )
+        denied = app.build_permission_denied_result(
+            {"id": "call-denied", "name": "web.search"},
+            request,
+        )
+
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error_code"], "permission_denied")
+        self.assertIn("paused here", denied["message_to_user"])
+
+    def test_render_deep_plan_preview_points_to_approval_panel(self):
+        preview = app.render_deep_plan_preview({"builder_steps": ["Inspect code", "Apply fix"]})
+
+        self.assertIn("approval panel", preview)
+        self.assertIn("Approve And Run", preview)
 
     def test_natural_python_build_request_auto_executes_workspace_flow(self):
         message = "Start making a python model to keep track of AVGO daily and build a DCF tracker."

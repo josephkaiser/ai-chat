@@ -64,7 +64,6 @@ let currentRunId = null;
 let pendingExecutionPlan = null;
 let pendingPermissionRequest = null;
 let activeClientTurnId = '';
-let recentPermissionResponses = {};
 let dictationActive = false;
 let currentAudio = null;
 let speechQueue = [];
@@ -80,6 +79,7 @@ let mobileComposerResizeObserver = null;
 let mobileKeyboardInset = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
 const COMPACT_WORKSPACE_MEDIA_QUERY = '(max-width: 1180px)';
+const DEFAULT_THEME = 'dark';
 const SEND_BUTTON_ICON = buildComposerIconMarkup('<path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>');
 const STOP_BUTTON_ICON = buildComposerIconMarkup('<rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.8"></rect>');
 const MIC_BUTTON_ICON = buildComposerIconMarkup('<rect x="9" y="4.5" width="6" height="10" rx="3"></rect><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0"></path><path d="M12 17v2.5"></path><path d="M9.5 19.5h5"></path>');
@@ -107,7 +107,6 @@ const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
 const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
-const RECENT_PERMISSION_RESPONSE_TTL_MS = 15000;
 const DISCOVERY_HINTS = Object.freeze([
     'Try Python! Ask me to build a small script, explain it, and verify it.',
     'Try Python! Say: "Make a quick script for this and keep it in the workspace."',
@@ -168,10 +167,11 @@ const DIRECT_SLASH_COMMANDS = Object.freeze({
 });
 
 const WORKSPACE_ACTIVITY_LIMIT = 80;
+const WORKSPACE_ARTIFACT_LIMIT = 6;
 const INLINE_VIEWER_AUTOSAVE_DELAY_MS = 700;
 const INLINE_VIEWER_UNDO_LIMIT = 40;
 const LIVE_AREA_READ_ONLY = true;
-const DEFAULT_INLINE_VIEWER_EMPTY_TEXT = 'Browse the workspace tree and open a file to read it here.';
+const DEFAULT_INLINE_VIEWER_EMPTY_TEXT = 'Select an artifact or file to preview it here.';
 const MESSAGE_SCROLL_BOTTOM_THRESHOLD = 96;
 const PLAN_EXECUTION_MARKERS = Object.freeze([
     'execute approved plan',
@@ -317,7 +317,7 @@ function applyTheme(mode) {
 }
 
 function toggleTheme() {
-    const current = localStorage.getItem('theme') || 'light';
+    const current = localStorage.getItem('theme') || DEFAULT_THEME;
     applyTheme(current === 'light' ? 'dark' : 'light');
     // Re-render markdown for new theme
     document.querySelectorAll('.message.assistant[data-rendered="true"]').forEach(msg => {
@@ -328,7 +328,7 @@ function toggleTheme() {
 }
 
 // Apply theme immediately
-applyTheme(localStorage.getItem('theme') || 'light');
+applyTheme(localStorage.getItem('theme') || DEFAULT_THEME);
 
 // ==================== Marked Init ====================
 
@@ -479,9 +479,9 @@ function observeMobileComposerSize() {
 }
 
 function loadFeatureSettings() {
+    localStorage.removeItem('feature.workspace_panel');
     return {
         agent_tools: true,
-        workspace_panel: localStorage.getItem('feature.workspace_panel') !== 'false',
         local_rag: true,
         web_search: true,
     };
@@ -508,6 +508,7 @@ function persistFeatureSettings() {
     Object.entries(featureSettings).forEach(([key, value]) => {
         localStorage.setItem(`feature.${key}`, value ? 'true' : 'false');
     });
+    localStorage.removeItem('feature.workspace_panel');
 }
 
 function persistVoiceSettings() {
@@ -657,9 +658,8 @@ function applyWorkspacePanelState() {
     const root = document.getElementById('chatRoot');
     if (!panel || !toggle) return;
     const agentToolsEnabled = featureSettings.agent_tools;
-    const workspacePanelEnabled = featureSettings.workspace_panel;
     const mobileViewport = workspaceUsesMobileLayout();
-    const workspaceAllowed = agentToolsEnabled && workspacePanelEnabled;
+    const workspaceAllowed = agentToolsEnabled;
     if (!workspaceAllowed) {
         workspacePanelOpen = false;
     }
@@ -769,7 +769,7 @@ function closeWorkspacePanel() {
 }
 
 function toggleWorkspacePanel() {
-    if (!featureSettings.agent_tools || !featureSettings.workspace_panel) return;
+    if (!featureSettings.agent_tools) return;
     dismissMobileKeyboard(true);
     if (!workspacePanelOpen) closeMenu();
     workspacePanelOpen = !workspacePanelOpen;
@@ -779,14 +779,9 @@ function toggleWorkspacePanel() {
 
 function syncFeatureControls() {
     const agentTools = document.getElementById('settingAgentTools');
-    const workspacePanel = document.getElementById('settingWorkspacePanel');
     const localRag = document.getElementById('settingLocalRag');
     const webSearch = document.getElementById('settingWebSearch');
     if (agentTools) agentTools.checked = featureSettings.agent_tools;
-    if (workspacePanel) {
-        workspacePanel.checked = featureSettings.workspace_panel;
-        workspacePanel.disabled = !featureSettings.agent_tools;
-    }
     if (localRag) localRag.checked = featureSettings.local_rag;
     if (webSearch) webSearch.checked = featureSettings.web_search;
     const autoSpeak = document.getElementById('settingAutoSpeak');
@@ -807,7 +802,7 @@ function syncFeatureControls() {
 }
 
 function applyFeatureSettingsToUI() {
-    if (!featureSettings.agent_tools || !featureSettings.workspace_panel) {
+    if (!featureSettings.agent_tools) {
         workspacePanelOpen = false;
     }
     if (!featureSettings.agent_tools) {
@@ -823,12 +818,9 @@ function applyFeatureSettingsToUI() {
 function updateFeatureSetting(name, enabled) {
     if (!(name in featureSettings)) return;
     featureSettings[name] = enabled;
-    if (name === 'agent_tools' && !enabled) {
-        featureSettings.workspace_panel = false;
-    }
     persistFeatureSettings();
     applyFeatureSettingsToUI();
-    if (name === 'agent_tools' || name === 'workspace_panel') refreshWorkspace(true);
+    if (name === 'agent_tools') refreshWorkspace(true);
 }
 
 async function downloadWorkspaceZip() {
@@ -1063,7 +1055,6 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
     return {
         ...featureSettings,
         agent_tools: true,
-        workspace_panel: true,
         local_rag: true,
         web_search: true,
         workspace_write: workspaceWrite,
@@ -1071,14 +1062,6 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
         allowed_commands: allowedCommands,
         allowed_tool_permissions: allowedToolPermissions,
     };
-}
-
-function buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget = 'tool') {
-    const conv = String(conversationId || currentConvId || '').trim().toLowerCase();
-    const key = String(permissionKey || '').trim().toLowerCase();
-    const target = String(approvalTarget || 'tool').trim().toLowerCase();
-    if (!conv || !key) return '';
-    return `${conv}::${target}::${key}`;
 }
 
 function beginClientTurn() {
@@ -1093,45 +1076,12 @@ function clearActiveClientTurn(turnId = '') {
     }
 }
 
-function pruneRecentPermissionResponses(now = Date.now()) {
-    Object.entries(recentPermissionResponses).forEach(([key, value]) => {
-        if (!value || typeof value !== 'object') {
-            delete recentPermissionResponses[key];
-            return;
-        }
-        if (now - Number(value.timestamp || 0) > RECENT_PERMISSION_RESPONSE_TTL_MS) {
-            delete recentPermissionResponses[key];
-        }
-    });
-}
-
-function rememberRecentPermissionResponse(conversationId, permissionKey, approvalTarget, approved) {
-    pruneRecentPermissionResponses();
-    const cacheKey = buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget);
-    if (!cacheKey) return;
-    recentPermissionResponses[cacheKey] = {
-        approved: Boolean(approved),
-        timestamp: Date.now(),
-    };
-}
-
-function getRecentPermissionResponse(conversationId, permissionKey, approvalTarget) {
-    pruneRecentPermissionResponses();
-    const cacheKey = buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget);
-    if (!cacheKey) return null;
-    const value = recentPermissionResponses[cacheKey];
-    if (!value || typeof value !== 'object') return null;
-    return {
-        approved: Boolean(value.approved),
-        timestamp: Number(value.timestamp || 0),
-    };
-}
-
 function renderPermissionPanel() {
     const panel = document.getElementById('permissionPanel');
     const title = document.getElementById('permissionPanelTitle');
     const text = document.getElementById('permissionPanelText');
     const preview = document.getElementById('permissionPanelPreview');
+    const note = document.getElementById('permissionPanelNote');
     const allowButton = document.getElementById('permissionAllowButton');
     const denyButton = document.getElementById('permissionDenyButton');
     if (!panel) return;
@@ -1157,8 +1107,12 @@ function renderPermissionPanel() {
         preview.hidden = !previewText;
         preview.textContent = previewText;
     }
-    if (allowButton) allowButton.textContent = pendingPermissionRequest.allowLabel || 'Allow';
-    if (denyButton) denyButton.textContent = pendingPermissionRequest.denyLabel || 'Deny';
+    if (note) {
+        note.textContent = pendingPermissionRequest.note
+            || 'Approving allows this for this chat and resumes immediately. If you do not approve it, the task pauses here.';
+    }
+    if (allowButton) allowButton.textContent = pendingPermissionRequest.allowLabel || 'Approve and continue';
+    if (denyButton) denyButton.textContent = pendingPermissionRequest.denyLabel || 'Pause task';
     const input = document.getElementById('input');
     const inputHasDraft = Boolean((input && input.value.trim()) || pendingAttachments.length);
     if (allowButton && !inputHasDraft) {
@@ -1194,16 +1148,15 @@ function respondToPendingPermission(approved) {
     const title = pendingPermissionRequest.title || 'Permission';
     const conversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
     const clientTurnId = String(pendingPermissionRequest.clientTurnId || activeClientTurnId || '').trim();
-    rememberRecentPermissionResponse(conversationId, permissionKey, approvalTarget, approved);
     if (approved) {
         rememberApprovalForPendingRequest();
-        recordWorkspaceActivity('Approve', `${title} approved for this chat.`);
+        recordWorkspaceActivity('Approve', `${title} approved for this chat. Resuming the task.`);
         setLoadingText(`${title} approved. Resuming...`);
         showTransientComposerHint('Approved. The assistant is resuming. Type to interrupt, or press Stop.', 7000);
     } else {
-        recordWorkspaceActivity('Blocked', `${title} denied for this chat.`);
-        setLoadingText(`${title} denied. Continuing without it...`);
-        showTransientComposerHint('Denied. You can add guidance, interrupt with a message, or let the turn continue.', 7000);
+        recordWorkspaceActivity('Blocked', `${title} was not approved for this chat. The task is pausing here.`);
+        setLoadingText(`${title} not approved. Pausing this task...`);
+        showTransientComposerHint('Not approved. This task will pause here. Approve it later and say continue to resume.', 7000);
     }
     if (canUseWebsocketTransport()) {
         ws.send(JSON.stringify({
@@ -1711,19 +1664,6 @@ function handleChatEvent(data) {
         const clientTurnId = String(data.client_turn_id || '').trim();
         const permissionKey = String(data.permission_key || '').trim().toLowerCase();
         const approvalTarget = String(data.approval_target || 'tool').trim().toLowerCase();
-        if (!activeClientTurnId || !clientTurnId || clientTurnId !== activeClientTurnId) {
-            if (canUseWebsocketTransport()) {
-                ws.send(JSON.stringify({
-                    type: 'permission_response',
-                    conversation_id: permissionConversationId || currentConvId,
-                    client_turn_id: clientTurnId,
-                    permission_key: permissionKey,
-                    approval_target: approvalTarget,
-                    approved: false,
-                }));
-            }
-            return;
-        }
         if (permissionConversationId && permissionConversationId !== currentConvId) {
             if (canUseWebsocketTransport()) {
                 ws.send(JSON.stringify({
@@ -1737,11 +1677,12 @@ function handleChatEvent(data) {
             }
             return;
         }
-        if (!hasActiveTurnForConversation(permissionConversationId)) {
+        const requestConversationId = permissionConversationId || currentConvId;
+        if (!hasActiveTurnForConversation(requestConversationId) && !isGenerating) {
             if (canUseWebsocketTransport()) {
                 ws.send(JSON.stringify({
                     type: 'permission_response',
-                    conversation_id: permissionConversationId || currentConvId,
+                    conversation_id: requestConversationId,
                     client_turn_id: clientTurnId,
                     permission_key: permissionKey,
                     approval_target: approvalTarget,
@@ -1750,32 +1691,17 @@ function handleChatEvent(data) {
             }
             return;
         }
-        const recentDecision = getRecentPermissionResponse(
-            permissionConversationId || currentConvId,
-            permissionKey,
-            approvalTarget,
-        );
-        if (recentDecision && canUseWebsocketTransport()) {
-            ws.send(JSON.stringify({
-                type: 'permission_response',
-                conversation_id: permissionConversationId || currentConvId,
-                client_turn_id: clientTurnId,
-                permission_key: permissionKey,
-                approval_target: approvalTarget,
-                approved: recentDecision.approved,
-            }));
-            return;
-        }
         pendingPermissionRequest = {
-            conversationId: permissionConversationId || currentConvId,
+            conversationId: requestConversationId,
             clientTurnId,
             permissionKey,
             approvalTarget,
             title: data.title || 'Permission needed',
             content: data.content || 'The assistant needs your approval to continue.',
             preview: data.preview || '',
-            allowLabel: data.allow_label || 'Allow',
-            denyLabel: data.deny_label || 'Deny',
+            note: data.note || '',
+            allowLabel: data.allow_label || 'Approve and continue',
+            denyLabel: data.deny_label || 'Pause task',
         };
         renderPermissionPanel();
         recordWorkspaceActivity('Permission', pendingPermissionRequest.content, {
@@ -1978,11 +1904,22 @@ function closeMenu() {
 
 function showSettings() {
     dismissMobileKeyboard(true);
+    closeAbout();
     syncFeatureControls();
     document.getElementById('settingsOverlay').classList.add('show');
 }
 function closeSettings() {
     document.getElementById('settingsOverlay').classList.remove('show');
+}
+
+function showAbout() {
+    dismissMobileKeyboard(true);
+    closeSettings();
+    document.getElementById('aboutOverlay').classList.add('show');
+}
+
+function closeAbout() {
+    document.getElementById('aboutOverlay').classList.remove('show');
 }
 
 function setResetButtonState(isBusy) {
@@ -2278,6 +2215,13 @@ function focusExecutionPlanDraft(position = 'end') {
     return true;
 }
 
+function focusExecutionPlanApproveButton() {
+    const button = document.getElementById('planApprovalApproveButton');
+    if (!button || button.disabled || button.offsetParent === null) return false;
+    button.focus({ preventScroll: true });
+    return true;
+}
+
 function syncInterveneButton() {
     const textarea = document.getElementById('interveneInput');
     const button = document.getElementById('interveneButton');
@@ -2310,10 +2254,9 @@ function syncSendButton() {
     send.classList.remove('is-stop');
     const hasDraft = Boolean(input && input.value.trim());
     const hasPendingContent = hasDraft || pendingAttachments.length > 0;
-    const canApprovePlan = Boolean(pendingExecutionPlan?.executePrompt) && !hasPendingContent;
-    send.setAttribute('aria-label', canApprovePlan ? 'Start plan' : 'Send message');
-    send.title = canApprovePlan ? 'Start plan' : 'Send message';
-    send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !(hasPendingContent || canApprovePlan);
+    send.setAttribute('aria-label', 'Send message');
+    send.title = 'Send message';
+    send.disabled = !modelAvailable || !input || audioAttachmentUploadInFlight || !hasPendingContent;
     syncInterveneButton();
     renderExecutionPlanApproval();
 }
@@ -2409,7 +2352,7 @@ function buildSlashCommands() {
         {
             name: 'pip',
             label: '/pip',
-            description: 'Create or reuse `.venv`, then install Python packages with pip.',
+            description: 'Install Python packages into the managed chat environment and use them in follow-up commands.',
             kind: 'tool',
             keywords: ['python package', 'dependency', 'install library', 'pip'],
             onSelect: () => {
@@ -2631,6 +2574,17 @@ function sortWorkspaceFilesByRecent(entries) {
     });
 }
 
+function workspaceArtifactIconLabel(path) {
+    const ext = ((path || '').split('.').pop() || '').trim().toUpperCase();
+    if (ext && ext.length <= 4) return ext;
+    if (isHtmlPath(path)) return 'WEB';
+    if (isMarkdownPath(path)) return 'DOC';
+    if (/\.(csv|tsv|xlsx|xls|xlsm|json|ya?ml|toml)$/i.test(path || '')) return 'DATA';
+    if (/\.(png|jpg|jpeg|gif|svg|webp)$/i.test(path || '')) return 'IMG';
+    if (/\.(js|jsx|ts|tsx|py|rb|go|rs|java|c|cc|cpp|hpp|css|sh|sql)$/i.test(path || '')) return 'CODE';
+    return 'FILE';
+}
+
 function normalizeWorkspacePath(path) {
     const value = String(path || '.').trim();
     return value === '' || value === '.' ? '.' : value.replace(/^\.\/+/, '').replace(/\/+/g, '/');
@@ -2638,6 +2592,117 @@ function normalizeWorkspacePath(path) {
 
 function compareWorkspacePaths(a, b) {
     return normalizeWorkspacePath(a) === normalizeWorkspacePath(b);
+}
+
+function getWorkspaceArtifactEntries(limit = WORKSPACE_ARTIFACT_LIMIT) {
+    const files = Array.isArray(workspaceEntries)
+        ? workspaceEntries.filter(entry => entry && entry.type === 'file')
+        : [];
+    if (!files.length) return [];
+
+    const fileMap = new Map(files.map(entry => [normalizeWorkspacePath(entry.path), entry]));
+    const seen = new Set();
+    const ordered = [];
+    const addEntryPath = (path) => {
+        const normalized = normalizeWorkspacePath(path);
+        const entry = fileMap.get(normalized);
+        if (!entry || seen.has(normalized)) return;
+        seen.add(normalized);
+        ordered.push(entry);
+    };
+
+    if (selectedWorkspaceFile) addEntryPath(selectedWorkspaceFile);
+    latestAssistantTurnArtifactPaths.forEach(path => addEntryPath(path));
+    files
+        .filter(entry => isWorkspaceEntryRecentlyChanged(entry))
+        .sort((a, b) => {
+            const aModified = new Date(a.modified_at || 0).getTime() || 0;
+            const bModified = new Date(b.modified_at || 0).getTime() || 0;
+            return bModified - aModified;
+        })
+        .forEach(entry => addEntryPath(entry.path));
+    sortWorkspaceFilesByRecent(files).forEach(entry => addEntryPath(entry.path));
+
+    return ordered.slice(0, limit);
+}
+
+function renderWorkspaceArtifactList() {
+    const listEl = document.getElementById('workspaceArtifactList');
+    const countEl = document.getElementById('workspaceArtifactsCount');
+    if (!listEl || !countEl) return;
+
+    const files = Array.isArray(workspaceEntries)
+        ? workspaceEntries.filter(entry => entry && entry.type === 'file')
+        : [];
+    const artifacts = getWorkspaceArtifactEntries();
+    const fileCount = files.length;
+    countEl.textContent = fileCount
+        ? (artifacts.length < fileCount
+            ? `${artifacts.length} of ${fileCount}`
+            : `${fileCount} item${fileCount === 1 ? '' : 's'}`)
+        : 'No files';
+
+    if (!fileCount) {
+        listEl.innerHTML = '<div class="workspace-empty">Waiting for the first artifact. Ask the assistant to create or edit a file and it will show up here.</div>';
+        return;
+    }
+
+    listEl.innerHTML = '';
+    artifacts.forEach(entry => {
+        const card = document.createElement('article');
+        const isActive = compareWorkspacePaths(entry.path, selectedWorkspaceFile);
+        const isChanged = isWorkspaceEntryRecentlyChanged(entry);
+        card.className = `workspace-artifact-card${isActive ? ' active' : ''}${isChanged ? ' is-live' : ''}`;
+
+        const openButton = document.createElement('button');
+        openButton.type = 'button';
+        openButton.className = 'workspace-artifact-main';
+        openButton.onclick = () => openWorkspaceFile(entry.path);
+
+        const badge = artifactBadgeForPath(entry.path);
+        const modified = formatRelativeTime(entry.modified_at);
+        const meta = [formatBytes(entry.size || 0)];
+        if (modified) meta.push(modified);
+        openButton.innerHTML = `
+            <span class="workspace-artifact-icon">${escapeHtml(workspaceArtifactIconLabel(entry.path))}</span>
+            <span class="workspace-artifact-copy">
+                <span class="workspace-artifact-head">
+                    <span class="workspace-artifact-badge">${escapeHtml(badge)}</span>
+                    ${isChanged ? '<span class="workspace-artifact-state">Live</span>' : ''}
+                </span>
+                <span class="workspace-artifact-title">${escapeHtml(entry.name || basename(entry.path) || entry.path)}</span>
+                <span class="workspace-artifact-path">${escapeHtml(entry.path)}</span>
+                <span class="workspace-artifact-meta">${escapeHtml(meta.join(' • '))}</span>
+            </span>
+        `;
+        card.appendChild(openButton);
+
+        const actions = document.createElement('div');
+        actions.className = 'workspace-artifact-actions';
+
+        const openAction = document.createElement('button');
+        openAction.type = 'button';
+        openAction.className = 'workspace-artifact-action';
+        openAction.textContent = isActive ? 'Open' : 'Preview';
+        openAction.onclick = (event) => {
+            event.stopPropagation();
+            openWorkspaceFile(entry.path);
+        };
+        actions.appendChild(openAction);
+
+        const insertAction = document.createElement('button');
+        insertAction.type = 'button';
+        insertAction.className = 'workspace-artifact-action';
+        insertAction.textContent = 'Insert';
+        insertAction.onclick = (event) => {
+            event.stopPropagation();
+            insertArtifactReference(entry.path);
+        };
+        actions.appendChild(insertAction);
+
+        card.appendChild(actions);
+        listEl.appendChild(card);
+    });
 }
 
 function isWorkspaceEntryRecentlyChanged(entry) {
@@ -3108,9 +3173,16 @@ function renderExecutionPlanApproval() {
     const panel = document.getElementById('planApprovalPanel');
     const title = document.getElementById('planApprovalTitle');
     const subtitle = document.getElementById('planApprovalSubtitle');
+    const callout = document.getElementById('planApprovalCallout');
     const dismissButton = document.getElementById('planApprovalDismiss');
+    const actions = document.getElementById('planApprovalActions');
+    const approveButton = document.getElementById('planApprovalApproveButton');
+    const editButton = document.getElementById('planApprovalEditButton');
     const editor = document.getElementById('planApprovalEditor');
     const draft = document.getElementById('planApprovalDraft');
+    const editActions = document.getElementById('planApprovalEditActions');
+    const cancelEditButton = document.getElementById('planApprovalCancelEditButton');
+    const runEditedButton = document.getElementById('planApprovalRunEditedButton');
     const reasoning = document.getElementById('planApprovalReasoning');
     const summary = document.getElementById('planApprovalSummary');
     const currentBox = document.getElementById('planApprovalCurrent');
@@ -3124,7 +3196,10 @@ function renderExecutionPlanApproval() {
     panel.hidden = !hasPlan;
 
     if (!hasPlan) {
+        if (actions) actions.hidden = true;
         if (editor) editor.hidden = true;
+        if (editActions) editActions.hidden = true;
+        if (callout) callout.hidden = true;
         if (reasoning) reasoning.hidden = true;
         if (currentBox) currentBox.hidden = true;
         checklist.hidden = true;
@@ -3133,16 +3208,60 @@ function renderExecutionPlanApproval() {
         return;
     }
 
-    if (title) title.textContent = 'Plan';
-    if (subtitle) subtitle.textContent = 'Edit the main steps if needed, then press Enter or Send to run it.';
+    const isEditing = Boolean(pendingExecutionPlan?.isEditing);
+    const sourceSteps = isEditing ? getExecutionPlanDraftSteps() : getExecutionPlanSourceSteps();
+    const canRun = sourceSteps.length > 0 && !isGenerating && modelAvailable;
+    const stepCount = sourceSteps.length;
 
-    if (editor) editor.hidden = false;
+    if (title) title.textContent = 'Approval Required';
+    if (subtitle) {
+        subtitle.textContent = isEditing
+            ? 'Edit the execution steps here. Approving the edited plan will run them in the workspace for this request.'
+            : 'Review the execution steps here. Approving will run them in the workspace for this request.';
+    }
+    if (callout) {
+        callout.hidden = false;
+        if (!stepCount) {
+            callout.textContent = isEditing
+                ? 'Edit the execution steps, then approve the revised plan to run it in the workspace for this request.'
+                : 'Approving will run this plan in the workspace for this request.';
+        } else if (isEditing) {
+            callout.textContent = stepCount === 1
+                ? 'You are editing 1 execution step. Approve Edited Plan will run it in the workspace for this request.'
+                : `You are editing ${stepCount} execution steps. Approve Edited Plan will run them in the workspace for this request.`;
+        } else {
+            callout.textContent = stepCount === 1
+                ? 'Approving will run this 1-step plan in the workspace for this request.'
+                : `Approving will run these ${stepCount} steps in the workspace for this request.`;
+        }
+    }
+
+    if (actions) actions.hidden = isEditing;
+    if (approveButton) {
+        approveButton.disabled = !canRun;
+        approveButton.textContent = 'Approve And Run';
+    }
+    if (editButton) {
+        editButton.disabled = isGenerating;
+        editButton.textContent = 'Edit Steps';
+    }
+
+    if (editor) editor.hidden = !isEditing;
     if (draft) {
         const nextDraftText = hasPlan ? String(pendingExecutionPlan?.draftText || '') : '';
         if (draft.value !== nextDraftText) {
             draft.value = nextDraftText;
         }
         autoResizeTextarea(draft);
+    }
+    if (editActions) editActions.hidden = !isEditing;
+    if (cancelEditButton) {
+        cancelEditButton.disabled = isGenerating;
+        cancelEditButton.textContent = 'Cancel Edit';
+    }
+    if (runEditedButton) {
+        runEditedButton.disabled = !canRun;
+        runEditedButton.textContent = 'Approve Edited Plan';
     }
 
     const hasSummary = Boolean(pendingExecutionPlan?.summary);
@@ -3152,8 +3271,19 @@ function renderExecutionPlanApproval() {
     if (currentBox) currentBox.hidden = true;
     if (currentStep) currentStep.textContent = '';
     if (currentText) currentText.textContent = '';
-    checklist.hidden = true;
+    checklist.hidden = isEditing || !sourceSteps.length;
     checklistList.innerHTML = '';
+    if (!isEditing && sourceSteps.length) {
+        sourceSteps.forEach((stepText, index) => {
+            const item = document.createElement('li');
+            item.className = 'is-pending';
+            item.innerHTML = `
+                <span class="plan-approval-step-marker">${index + 1}.</span>
+                <span class="plan-approval-step-label">${escapeHtml(stepText)}</span>
+            `;
+            checklistList.appendChild(item);
+        });
+    }
 
     if (dismissButton) dismissButton.hidden = false;
 }
@@ -3169,7 +3299,7 @@ function handleExecutionPlanDraftChange(textarea) {
 function handleExecutionPlanDraftKeyDown(event) {
     if (event.key === 'Escape') {
         event.preventDefault();
-        focusInputAtStart();
+        cancelExecutionPlanEdit();
         return;
     }
     if (event.key === 'ArrowDown') {
@@ -3187,17 +3317,41 @@ function handleExecutionPlanDraftKeyDown(event) {
     }
 }
 
+function startExecutionPlanEdit() {
+    if (!pendingExecutionPlan || isGenerating) return;
+    pendingExecutionPlan.isEditing = true;
+    renderExecutionPlanApproval();
+    requestAnimationFrame(() => {
+        focusExecutionPlanDraft('end');
+    });
+}
+
+function cancelExecutionPlanEdit() {
+    if (!pendingExecutionPlan) {
+        focusInputAtStart();
+        return;
+    }
+    pendingExecutionPlan.isEditing = false;
+    pendingExecutionPlan.draftText = formatExecutionPlanDraft(getExecutionPlanSourceSteps());
+    renderExecutionPlanApproval();
+    if (!focusExecutionPlanApproveButton()) {
+        focusInputAtStart();
+    }
+}
+
 function storeExecutionPlan(summary, executePrompt, builderSteps = [], options = {}) {
     const cleanedPrompt = String(executePrompt || '').trim();
     if (!cleanedPrompt) return;
     const normalizedBuilderSteps = normalizeExecutionPlanSteps(builderSteps);
+    const normalizedSourceSteps = normalizedBuilderSteps.length
+        ? normalizedBuilderSteps
+        : extractExecutionPlanStepsFromPrompt(cleanedPrompt);
     pendingExecutionPlan = {
         summary: String(summary || '').trim(),
         executePrompt: cleanedPrompt,
-        builderSteps: normalizedBuilderSteps.length ? normalizedBuilderSteps : extractExecutionPlanStepsFromPrompt(cleanedPrompt),
-        draftText: formatExecutionPlanDraft(
-            normalizedBuilderSteps.length ? normalizedBuilderSteps : extractExecutionPlanStepsFromPrompt(cleanedPrompt),
-        ),
+        builderSteps: normalizedSourceSteps,
+        draftText: formatExecutionPlanDraft(normalizedSourceSteps),
+        isEditing: false,
     };
     renderExecutionPlanApproval();
     syncSendButton();
@@ -3206,7 +3360,11 @@ function storeExecutionPlan(summary, executePrompt, builderSteps = [], options =
         const input = document.getElementById('input');
         const hasDraft = Boolean(input && input.value.trim());
         if (!hasDraft && !pendingAttachments.length) {
-            focusInputAtStart();
+            requestAnimationFrame(() => {
+                if (!focusExecutionPlanApproveButton()) {
+                    focusInputAtStart();
+                }
+            });
         }
     }
 }
@@ -3230,21 +3388,23 @@ function approveExecutionPlan() {
     hideSlashMenu();
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
-    addMessage(APPROVED_PLAN_EXECUTION_MESSAGE, 'user', null, { forceScroll: true });
     showLoading();
+    setLoadingText('Execution plan approved. Starting workspace execution...');
     clearBuildSteps();
     clearWorkspaceActivity();
-    recordWorkspaceActivity('Request', 'Yes, run the approved plan in the workspace.');
+    recordWorkspaceActivity('Approval', 'Execution plan approved. Starting workspace execution.');
 
     isGenerating = true;
     activeStreamConversationId = currentConvId;
     streamingAssistantMessage = null;
+    const clientTurnId = beginClientTurn();
     dismissExecutionPlan();
     syncSendButton();
     dispatchChatPayload({
         message: APPROVED_PLAN_EXECUTION_MESSAGE,
         attachments: [],
         conversation_id: currentConvId,
+        client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,
@@ -3501,15 +3661,17 @@ function renderFileList() {
     if (!listEl || !pathEl) return;
 
     if (!workspaceTree) {
-        pathEl.textContent = 'Root';
+        pathEl.textContent = 'Ready for artifacts';
         listEl.innerHTML = '';
+        renderWorkspaceArtifactList();
         return;
     }
 
     const summary = [];
     if (workspaceStats.files > 0) summary.push(`${workspaceStats.files} file${workspaceStats.files === 1 ? '' : 's'}`);
     if (workspaceStats.directories > 0) summary.push(`${workspaceStats.directories} folder${workspaceStats.directories === 1 ? '' : 's'}`);
-    pathEl.textContent = summary.join(' • ') || 'Root';
+    pathEl.textContent = summary.join(' • ') || 'Ready for artifacts';
+    renderWorkspaceArtifactList();
     renderWorkspaceTrees();
 }
 
@@ -4233,8 +4395,8 @@ function applyViewerMetadata(prefix, path) {
     const titleEl = document.getElementById(`${prefix}Title`);
     const subtitleEl = document.getElementById(`${prefix}Subtitle`);
     const preview = document.getElementById(`${prefix}Preview`);
-    if (titleEl) titleEl.textContent = path ? basename(path) : 'File Viewer';
-    if (subtitleEl) subtitleEl.textContent = path || 'Select a workspace file to read it here.';
+    if (titleEl) titleEl.textContent = path ? basename(path) : 'Artifact Preview';
+    if (subtitleEl) subtitleEl.textContent = path || 'Select a generated file or workspace file to preview it here.';
     if (!path) {
         setViewerContent(prefix, '');
         if (preview) preview.innerHTML = '';
@@ -4689,10 +4851,7 @@ function handlePrimaryAction() {
         }
         return;
     }
-    if (!draft && !hasPendingAttachments && pendingExecutionPlan?.executePrompt) {
-        approveExecutionPlan();
-        return;
-    }
+    if (!draft && !hasPendingAttachments) return;
     sendMessage();
 }
 
@@ -5428,6 +5587,7 @@ async function refreshWorkspace(force = false) {
         closeInlineViewer();
         pathEl.textContent = 'Agent tools disabled';
         listEl.innerHTML = '<div class="workspace-empty">Agent dev tools are turned off.</div>';
+        renderWorkspaceArtifactList();
         renderBuildSteps();
         renderWorkspaceActivity();
         return;
@@ -5453,9 +5613,11 @@ async function refreshWorkspace(force = false) {
     } catch (e) {
         currentRunId = null;
         workspaceTree = null;
+        workspaceEntries = [];
         workspaceStats = { files: 0, directories: 0 };
         pathEl.textContent = 'Workspace unavailable';
         listEl.innerHTML = `<div class="workspace-empty">Workspace is unavailable: ${escapeHtml(e.message)}</div>`;
+        renderWorkspaceArtifactList();
     }
 }
 
@@ -5692,6 +5854,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (document.getElementById('renameModal').classList.contains('show')) { closeRenameModal(); return; }
     if (document.getElementById('systemPromptModal').classList.contains('show')) { closeSystemPromptModal(); return; }
+    if (document.getElementById('aboutOverlay').classList.contains('show')) { closeAbout(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
     if (document.getElementById('menuOverlay').classList.contains('show')) { closeMenu(); return; }
     if (workspacePanelOpen) { closeWorkspacePanel(); }
