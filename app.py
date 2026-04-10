@@ -6553,15 +6553,26 @@ async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Opt
 @app.get("/api/workspace/{conversation_id}/download")
 async def download_workspace(conversation_id: str):
     workspace = get_workspace_path(conversation_id)
+    archive_entries: List[tuple[pathlib.Path, str]] = []
+    for file_path in workspace.rglob("*"):
+        if not file_path.is_file():
+            continue
+        rel_path = file_path.relative_to(workspace).as_posix()
+        if rel_path == ".ai" or rel_path.startswith(".ai/"):
+            continue
+        archive_entries.append((file_path, rel_path))
+
+    if not archive_entries:
+        return Response(status_code=204)
+
     archive = io.BytesIO()
 
     with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in workspace.rglob("*"):
-            if file_path.is_file():
-                zf.write(file_path, arcname=file_path.relative_to(workspace).as_posix())
+        for file_path, rel_path in archive_entries:
+            zf.write(file_path, arcname=rel_path)
 
     headers = {
-        "Content-Disposition": f'attachment; filename="{sanitize_conversation_id(conversation_id)}-workspace.zip"'
+        "Content-Disposition": 'attachment; filename="workspace.zip"'
     }
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
 

@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import pathlib
+import asyncio
 
 try:
     import app
@@ -96,6 +98,35 @@ class RuntimePermissionTests(unittest.TestCase):
                 "verify",
             )
         )
+
+    def test_workspace_download_uses_clean_filename(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+            original = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                response = asyncio.run(app.download_workspace("conv-download"))
+            finally:
+                app.get_workspace_path = original
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Disposition"), 'attachment; filename="workspace.zip"')
+        self.assertEqual(response.media_type, "application/zip")
+
+    def test_workspace_download_skips_internal_only_workspaces(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            (workspace / ".ai").mkdir(parents=True, exist_ok=True)
+            (workspace / ".ai" / "task-state.json").write_text("{}", encoding="utf-8")
+            original = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                response = asyncio.run(app.download_workspace("conv-download-empty"))
+            finally:
+                app.get_workspace_path = original
+
+        self.assertEqual(response.status_code, 204)
 
 
 if __name__ == "__main__":
