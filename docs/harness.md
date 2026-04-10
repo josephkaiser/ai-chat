@@ -39,7 +39,7 @@ Important guardrails:
 - Tool budgets are capped by `tool_loop_step_limit_for_request(...)`.
 - Token budgets are reduced for tool-oriented turns by `tool_loop_token_budget(...)`.
 - `workspace.run_command` takes an argv array, not a shell string.
-- Python capability setup follows a workspace-local pattern: create `.venv`, install packages there with pip, then run focused checks against that same environment.
+- Python capability setup uses a server-managed chat environment outside the workspace, so installs do not flood the workspace tree or exports.
 - `workspace.patch_file` uses exact-match edits so changes stay narrow and predictable.
 - `workspace.render` is only exposed when the prompt strongly implies “render/preview/display this HTML”.
 - Final answer text is post-processed to strip unsupported claims that a file was created or updated when no successful workspace write happened.
@@ -108,8 +108,8 @@ How tools are exposed:
 For Python-heavy turns, the intended flow is:
 
 1. Research packages or docs with `web.search` / `web.fetch_page` when package choice is uncertain.
-2. Create or reuse `.venv` inside the conversation workspace.
-3. Install packages with pip into that workspace-local environment.
+2. Create or reuse the managed Python environment for the conversation when package work is needed.
+3. Install packages with pip into that managed environment.
 4. Write scripts or artifacts into the workspace.
 5. Verify with a focused command from the same environment.
 
@@ -126,7 +126,7 @@ Current inline approval buckets are:
 - per-executable commands such as `git`, `bash`, or `python3`
 - scoped Python setup actions such as `python -m venv` and `pip install`
 
-If the user denies one of those requests, the tool loop gets a normal failed tool result and the model is expected to pivot gracefully instead of failing the whole turn.
+If the user denies one of those requests, the task pauses at that approval boundary and waits for the user to approve it and resume.
 
 Install-like Python setup commands are exempt from the short command timeout. They run until completion unless they fail or the user presses Stop / Interrupt, in which case the server cancels the subprocess cleanly.
 
@@ -141,6 +141,7 @@ Each conversation gets its own workspace on the server. The harness uses that wo
 - downloadable zip exports
 
 The browser can inspect the same workspace through the workspace panel and file modal, so tool output is visible outside the model transcript.
+Dot-prefixed entries stay hidden in the browser workspace view unless a hidden path is targeted explicitly.
 
 ## Activity events
 

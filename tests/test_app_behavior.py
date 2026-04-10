@@ -2,7 +2,7 @@ import pathlib
 import tempfile
 import unittest
 
-from prompts import DEFAULT_SYSTEM_PROMPT
+from prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT
 import workspace_reader
 
 
@@ -114,6 +114,18 @@ class AppBehaviorTests(unittest.TestCase):
     def test_default_prompt_no_longer_instructs_step_by_step_confirmation(self):
         self.assertNotIn("ask a short yes-or-no question", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("complete answer in one pass", DEFAULT_SYSTEM_PROMPT)
+
+    def test_prompts_favor_context_window_aware_progress_over_tiny_changes(self):
+        combined = "\n".join((DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT))
+        self.assertNotIn("smallest useful", combined)
+        self.assertNotIn("shortest useful tool sequence", combined)
+        self.assertIn("context window is limited", combined)
+        self.assertIn("durable progress", combined)
+        self.assertIn("highest-leverage next tool call", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("make measurable progress or finish", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("Match the scale of the change to the current step", DEEP_BUILD_SYSTEM_PROMPT)
+        self.assertIn("managed chat-scoped Python environment", TOOL_USE_SYSTEM_PROMPT)
+        self.assertNotIn(".venv", TOOL_USE_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

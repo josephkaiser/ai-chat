@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" id="themeColorMeta" content="#f5f0e8">
+    <meta name="theme-color" id="themeColorMeta" content="#1c1a17">
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
@@ -52,6 +52,7 @@
             <div class="menu-actions">
                 <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
                 <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
+                <button onclick="closeMenu(); showAbout()"><span>About</span><kbd class="shortcut-hint"></kbd></button>
             </div>
             <div class="menu-search">
                 <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
@@ -74,7 +75,7 @@
             <div class="settings-content">
                 <div class="settings-view" id="settingsMainView">
                     <div class="settings-intro">
-                        <p>Adjust appearance, workspace behavior, voice playback, and local data from one place.</p>
+                        <p>Adjust appearance, voice playback, and local data from one place.</p>
                     </div>
                     <section class="settings-sheet" aria-label="Settings">
                         <div class="settings-group">
@@ -93,22 +94,6 @@
                                 </span>
                                 <span class="settings-row-meta">Edit</span>
                             </button>
-                        </div>
-                        <div class="settings-group">
-                            <div class="settings-group-title">Workspace</div>
-                            <label class="settings-row settings-row-check">
-                                <span class="settings-row-copy">
-                                    <span class="settings-row-label">Workspace Panel</span>
-                                    <span class="settings-row-note">Show the optional workspace browser so you can inspect files and artifacts the assistant creates.</span>
-                                </span>
-                                <input class="settings-check" type="checkbox" id="settingWorkspacePanel" onchange="updateFeatureSetting('workspace_panel', this.checked)">
-                            </label>
-                            <div class="settings-row">
-                                <div class="settings-row-copy">
-                                    <span class="settings-row-label">Runtime Tool Approvals</span>
-                                    <span class="settings-row-note">Web access, workspace usage, edits, and commands are now approved inline during a reply instead of here.</span>
-                                </div>
-                            </div>
                         </div>
                         <div class="settings-group">
                             <div class="settings-group-title">Voice</div>
@@ -165,8 +150,39 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="settings-group settings-group-danger">
+                            <div class="settings-group-title">Data</div>
+                            <div class="settings-row settings-row-danger">
+                                <div class="settings-row-copy">
+                                    <span class="settings-row-label">Reset App Data</span>
+                                    <span class="settings-row-note">Delete all chats, workspaces, installed workspace packages, artifacts, and saved browser preferences to return to a fresh base state.</span>
+                                </div>
+                                <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">Delete All Data</button>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- About overlay -->
+    <div class="overlay" id="aboutOverlay" onclick="closeAbout()">
+        <div class="settings-panel about-panel" onclick="event.stopPropagation()">
+            <div class="panel-header settings-header">
+                <div class="settings-heading">
+                    <span class="settings-eyebrow">From The Author</span>
+                    <span class="about-title">About</span>
+                </div>
+                <button onclick="closeAbout()" aria-label="Close about dialog">&times;</button>
+            </div>
+            <div class="settings-content">
+                <div class="settings-view">
+                    <div class="settings-intro">
+                        <p>A short note on what this app is trying to be.</p>
+                    </div>
+                    <section class="settings-sheet" aria-label="About">
                         <div class="settings-group">
-                            <div class="settings-group-title">About</div>
                             <div class="settings-about">
                                 <div class="settings-about-aside">
                                     <div class="settings-about-heading">Why this app exists</div>
@@ -177,16 +193,6 @@
                                     <p>The project is meant to be enjoyable to use, honest about what it is, respectful of the user, and economical with hardware while still being genuinely useful.</p>
                                     <p>If you run into bugs or have ideas to improve it, please post an issue on GitHub. Your attention and contributions are incredibly valuable.</p>
                                 </div>
-                            </div>
-                        </div>
-                        <div class="settings-group settings-group-danger">
-                            <div class="settings-group-title">Data</div>
-                            <div class="settings-row settings-row-danger">
-                                <div class="settings-row-copy">
-                                    <span class="settings-row-label">Reset App Data</span>
-                                    <span class="settings-row-note">Delete all chats, workspaces, installed workspace packages, artifacts, and saved browser preferences to return to a fresh base state.</span>
-                                </div>
-                                <button class="settings-danger-button" id="resetAppButton" onclick="resetAllAppData()">Delete All Data</button>
                             </div>
                         </div>
                     </section>
@@ -224,15 +230,24 @@
                         <div class="plan-approval-panel" id="planApprovalPanel" hidden>
                             <div class="plan-approval-header">
                                 <div>
-                                    <div class="plan-approval-title" id="planApprovalTitle">Plan</div>
-                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Edit the main steps if needed, then press Enter or Send to run it.</div>
+                                    <div class="plan-approval-title" id="planApprovalTitle">Approval Required</div>
+                                    <div class="plan-approval-subtitle" id="planApprovalSubtitle">Review the execution steps here. Approving will run them in the workspace for this request.</div>
                                 </div>
                                 <button type="button" class="plan-approval-dismiss" id="planApprovalDismiss" onclick="dismissExecutionPlan()" aria-label="Dismiss execution plan">&times;</button>
                             </div>
+                            <div class="plan-approval-callout" id="planApprovalCallout">Approving will run this plan in the workspace for this request.</div>
+                            <div class="plan-approval-actions" id="planApprovalActions">
+                                <button type="button" class="plan-approval-button plan-approval-button-approve" id="planApprovalApproveButton" onclick="approveExecutionPlan()">Approve And Run</button>
+                                <button type="button" class="plan-approval-button" id="planApprovalEditButton" onclick="startExecutionPlanEdit()">Edit Steps</button>
+                            </div>
                             <div class="plan-approval-editor" id="planApprovalEditor" hidden>
-                                <label class="plan-approval-editor-label" for="planApprovalDraft">Main steps</label>
+                                <label class="plan-approval-editor-label" for="planApprovalDraft">Execution steps</label>
                                 <textarea class="plan-approval-draft" id="planApprovalDraft" spellcheck="false" oninput="handleExecutionPlanDraftChange(this)" onkeydown="handleExecutionPlanDraftKeyDown(event)"></textarea>
-                                <div class="plan-approval-editor-hint">Keep this tight. Press Ctrl+Enter or Cmd+Enter to run the edited plan, or use Send.</div>
+                                <div class="plan-approval-editor-hint">Make any changes you want, then click Approve Edited Plan. Ctrl/Cmd+Enter also approves and runs.</div>
+                                <div class="plan-approval-edit-actions" id="planApprovalEditActions" hidden>
+                                    <button type="button" class="plan-approval-button" id="planApprovalCancelEditButton" onclick="cancelExecutionPlanEdit()">Cancel Edit</button>
+                                    <button type="button" class="plan-approval-button plan-approval-button-approve" id="planApprovalRunEditedButton" onclick="approveExecutionPlan()">Approve Edited Plan</button>
+                                </div>
                             </div>
                             <details class="plan-approval-reasoning" id="planApprovalReasoning" hidden>
                                 <summary>Reasoning for this turn</summary>
@@ -252,10 +267,11 @@
                                 <div class="permission-panel-title" id="permissionPanelTitle">Permission needed</div>
                                 <div class="permission-panel-text" id="permissionPanelText">The assistant needs your approval to continue.</div>
                                 <div class="permission-panel-preview" id="permissionPanelPreview" hidden></div>
+                                <div class="permission-panel-note" id="permissionPanelNote">Approving allows this for this chat and resumes immediately. If you do not approve it, the task pauses here.</div>
                             </div>
                             <div class="permission-panel-actions">
-                                <button type="button" class="permission-panel-button permission-panel-button-allow" id="permissionAllowButton" onclick="respondToPendingPermission(true)">Allow</button>
-                                <button type="button" class="permission-panel-button permission-panel-button-deny" id="permissionDenyButton" onclick="respondToPendingPermission(false)">Deny</button>
+                                <button type="button" class="permission-panel-button permission-panel-button-allow" id="permissionAllowButton" onclick="respondToPendingPermission(true)">Approve and continue</button>
+                                <button type="button" class="permission-panel-button permission-panel-button-deny" id="permissionDenyButton" onclick="respondToPendingPermission(false)">Pause task</button>
                             </div>
                         </div>
                         <div class="input-container" onclick="focusInput()">
@@ -307,7 +323,7 @@
                         <div class="workspace-header">
                             <button class="workspace-view-button workspace-header-view-toggle" id="workspaceTreeContentToggle" type="button" onclick="setWorkspaceViewMode('reader')">Content</button>
                             <div class="workspace-heading">
-                                <div class="workspace-title">Workspace</div>
+                                <div class="workspace-title">Artifacts</div>
                                 <div class="workspace-subtitle" id="workspacePath">Root</div>
                             </div>
                             <div class="workspace-actions">
@@ -315,9 +331,18 @@
                             </div>
                         </div>
                         <div class="workspace-body">
+                            <div class="workspace-section">
+                                <div class="workspace-section-header">
+                                    <div class="workspace-section-title">Recent</div>
+                                    <div class="workspace-section-meta" id="workspaceArtifactsCount">0 items</div>
+                                </div>
+                                <div class="workspace-artifact-list" id="workspaceArtifactList">
+                                    <div class="workspace-empty">Files the assistant creates will show up here as artifacts.</div>
+                                </div>
+                            </div>
                             <div class="workspace-section workspace-section-fill">
                                 <div class="workspace-section-header">
-                                    <div class="workspace-section-title">Workspace Tree</div>
+                                    <div class="workspace-section-title">All Files</div>
                                     <button class="workspace-refresh workspace-download-button" onclick="downloadWorkspaceZip()" title="Download workspace zip" aria-label="Download workspace zip">
                                         <span class="workspace-download-icon" aria-hidden="true">
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
@@ -334,7 +359,7 @@
                             </div>
                         </div>
                         <div class="workspace-footer">
-                            <div class="workspace-activity-drawer" id="workspaceActivityDrawer" hidden>
+                        <div class="workspace-activity-drawer" id="workspaceActivityDrawer" hidden>
                                 <div class="workspace-section-header workspace-activity-header">
                                     <div class="workspace-section-title">Activity Log</div>
                                     <button class="workspace-refresh" onclick="toggleWorkspaceConsole()" title="Hide activity log" aria-label="Hide activity log">Close</button>
@@ -350,8 +375,8 @@
                         <div class="ide-viewer-header">
                             <button class="workspace-view-button workspace-header-view-toggle" id="inlineViewerTreeToggle" type="button" onclick="setWorkspaceViewMode('tree')">Files</button>
                             <div class="ide-viewer-heading">
-                                <div class="ide-viewer-title" id="inlineViewerTitle">File Viewer</div>
-                                <div class="ide-viewer-subtitle" id="inlineViewerSubtitle">Select a workspace file to read it here.</div>
+                                <div class="ide-viewer-title" id="inlineViewerTitle">Artifact Preview</div>
+                                <div class="ide-viewer-subtitle" id="inlineViewerSubtitle">Select a generated file or workspace file to preview it here.</div>
                             </div>
                             <div class="ide-viewer-actions">
                                 <div class="ide-editor-statusbar">

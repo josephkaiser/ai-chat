@@ -12,13 +12,13 @@ from __future__ import annotations
 
 def _light_tokens() -> dict[str, str]:
     """A handful of named colors; the rest are aliases for readability in CSS."""
-    paper = "#fffefb"
-    panel = "#f5f0e8"
-    rail = "#e9eced"
-    ink = "#366c9c"
-    muted = "#8194b1"
-    faint = "#b0c9df"
-    accent = "#2563eb"
+    paper = "#f6efe6"
+    panel = "#ede2d5"
+    rail = "#d8c8b7"
+    ink = "#2f241c"
+    muted = "#7d6958"
+    faint = "#ae9d8f"
+    accent = "#d56c45"
     danger = "#ef4444"
     danger_dark = "#dc2626"
     ok = "#10b981"
@@ -31,17 +31,17 @@ def _light_tokens() -> dict[str, str]:
         "text_primary": ink,
         "text_secondary": muted,
         "text_tertiary": faint,
-        "accent_primary": muted,
-        "accent_hover": ink,
+        "accent_primary": "#b98f67",
+        "accent_hover": "#7a4d2f",
         "accent_secondary": accent,
         "msg_user_bg": rail,
         "msg_user_text": ink,
-        "msg_assistant_bg": paper,
+        "msg_assistant_bg": "transparent",
         "msg_assistant_text": ink,
         "status_connected": ok,
         "status_disconnected": danger,
-        "btn_primary": muted,
-        "btn_primary_hover": ink,
+        "btn_primary": "#b98f67",
+        "btn_primary_hover": "#7a4d2f",
         "btn_danger": danger,
         "btn_danger_hover": danger_dark,
         "btn_secondary": rail,
@@ -55,15 +55,15 @@ def _light_tokens() -> dict[str, str]:
 
 
 def _dark_tokens() -> dict[str, str]:
-    surface = "#1a1a1a"
-    raised = "#242424"
-    border = "#333333"
-    ink = "#e0e0e0"
-    muted = "#a0a0a0"
-    faint = "#808080"
-    accent = "#4a9eff"
-    cool = "#8194b1"
-    cool_hi = "#b0c9df"
+    surface = "#171512"
+    raised = "#201d19"
+    border = "#322d27"
+    ink = "#f3ece3"
+    muted = "#b5aa9d"
+    faint = "#7b7267"
+    accent = "#d9714b"
+    cool = "#be9b73"
+    cool_hi = "#e2c29d"
     danger = "#ef4444"
     danger_dark = "#dc2626"
     ok = "#10b981"
@@ -79,9 +79,9 @@ def _dark_tokens() -> dict[str, str]:
         "accent_primary": cool,
         "accent_hover": cool_hi,
         "accent_secondary": accent,
-        "msg_user_bg": border,
+        "msg_user_bg": "#0f0e0d",
         "msg_user_text": ink,
-        "msg_assistant_bg": raised,
+        "msg_assistant_bg": "transparent",
         "msg_assistant_text": ink,
         "status_connected": ok,
         "status_disconnected": danger,

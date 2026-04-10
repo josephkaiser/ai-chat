@@ -32,6 +32,7 @@ import tempfile
 import time
 import traceback
 import uuid
+import venv
 import zipfile
 from html import unescape
 from dataclasses import dataclass, field, replace
@@ -666,6 +667,59 @@ def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Pat
     return get_run_workspace_root(run["id"], create=create)
 
 
+def get_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the server-owned Python environment path for one conversation."""
+    run = get_run_record(conversation_id)
+    run_id = str(run.get("id", "")).strip() if isinstance(run, dict) else ""
+    if not run_id:
+        run_id = build_run_id(conversation_id)
+    env_root = (get_run_root(run_id, create=create) / "python-env").resolve()
+    if create:
+        env_root.parent.mkdir(parents=True, exist_ok=True)
+    return env_root
+
+
+def managed_python_bin_dir(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the binary/scripts directory for the managed Python environment."""
+    env_root = get_managed_python_env_path(conversation_id, create=create)
+    return env_root / ("Scripts" if os.name == "nt" else "bin")
+
+
+def managed_python_python_path(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the Python executable inside the managed chat environment."""
+    executable = "python.exe" if os.name == "nt" else "python"
+    return managed_python_bin_dir(conversation_id, create=create) / executable
+
+
+def managed_python_pip_path(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the pip executable inside the managed chat environment."""
+    executable = "pip.exe" if os.name == "nt" else "pip"
+    return managed_python_bin_dir(conversation_id, create=create) / executable
+
+
+def managed_python_env_exists(conversation_id: str) -> bool:
+    """Return whether the managed Python environment is already provisioned."""
+    return managed_python_python_path(conversation_id, create=False).exists()
+
+
+def _create_managed_python_env_sync(conversation_id: str) -> pathlib.Path:
+    """Create the server-owned managed Python environment for one conversation."""
+    env_root = get_managed_python_env_path(conversation_id, create=True)
+    python_path = managed_python_python_path(conversation_id, create=False)
+    if python_path.exists():
+        return env_root
+    builder = venv.EnvBuilder(with_pip=True)
+    builder.create(str(env_root))
+    return env_root
+
+
+async def ensure_managed_python_env(conversation_id: str) -> pathlib.Path:
+    """Create the managed Python environment on demand."""
+    if managed_python_env_exists(conversation_id):
+        return get_managed_python_env_path(conversation_id, create=False)
+    return await asyncio.to_thread(_create_managed_python_env_sync, conversation_id)
+
+
 def get_voice_dir(kind: str, create: bool = True) -> pathlib.Path:
     """Return a server-owned directory for transient voice artifacts."""
     safe_kind = re.sub(r"[^A-Za-z0-9._-]+", "_", (kind or "misc").strip()) or "misc"
@@ -1002,7 +1056,30 @@ def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") ->
     return target
 
 
-def workspace_command_allows_argument(argument: str, workspace: pathlib.Path) -> bool:
+def path_is_within_root(path: pathlib.Path, root: pathlib.Path) -> bool:
+    """Return whether a path resolves inside an allowed root."""
+    try:
+        resolved_path = path.resolve(strict=False)
+        resolved_root = root.resolve(strict=False)
+    except Exception:
+        return False
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def workspace_rel_path_is_hidden(rel_path: str) -> bool:
+    """Return whether a workspace-relative path points at a dot-prefixed entry."""
+    raw = str(rel_path or "").strip().replace("\\", "/")
+    if not raw or raw == ".":
+        return False
+    parts = [part for part in pathlib.PurePosixPath(raw).parts if part not in {"", "."}]
+    return any(part.startswith(".") for part in parts)
+
+
+def workspace_command_allows_argument(
+    argument: str,
+    workspace: pathlib.Path,
+    extra_roots: Optional[List[pathlib.Path]] = None,
+) -> bool:
     """Reject command arguments that reference paths outside the workspace."""
     token = str(argument or "").strip()
     if not token or token == "-":
@@ -1013,12 +1090,13 @@ def workspace_command_allows_argument(argument: str, workspace: pathlib.Path) ->
         return True
 
     normalized = token.replace("\\", "/")
+    allowed_roots = [workspace, *[root for root in (extra_roots or []) if isinstance(root, pathlib.Path)]]
     if normalized.startswith("/"):
         try:
             resolved = pathlib.Path(normalized).resolve(strict=False)
         except Exception:
             return False
-        return resolved == workspace or workspace in resolved.parents
+        return any(path_is_within_root(resolved, root) for root in allowed_roots)
 
     path_like = "/" in normalized or normalized in {".", ".."} or normalized.startswith("./") or normalized.startswith("../")
     if not path_like:
@@ -1028,7 +1106,7 @@ def workspace_command_allows_argument(argument: str, workspace: pathlib.Path) ->
         resolved = (workspace / normalized).resolve(strict=False)
     except Exception:
         return False
-    return resolved == workspace or workspace in resolved.parents
+    return any(path_is_within_root(resolved, root) for root in allowed_roots)
 
 
 def normalize_allowed_command_key(value: str) -> str:
@@ -1068,7 +1146,6 @@ def parse_pip_install_command(command: List[str]) -> Optional[Dict[str, Any]]:
     return {
         "requested_args": requested_args,
         "packages_preview": compact_tool_text(" ".join(requested_args), limit=72) or "the requested Python packages",
-        "uses_workspace_venv": "/" in parts[0] or "\\" in parts[0],
     }
 
 
@@ -1123,13 +1200,17 @@ def command_permission_key(
         return f"exec:{pathlib.Path(normalized).name.lower()}"
 
     workspace = get_workspace_path(conversation_id)
+    managed_env_root = get_managed_python_env_path(conversation_id, create=False)
     resolved_exec = pathlib.Path(executable).expanduser()
     if not resolved_exec.is_absolute():
         resolved_exec = (cwd_path / resolved_exec).resolve(strict=False)
     else:
         resolved_exec = resolved_exec.resolve(strict=False)
 
-    if resolved_exec != workspace and workspace not in resolved_exec.parents:
+    if path_is_within_root(resolved_exec, managed_env_root):
+        return f"exec:{pathlib.Path(resolved_exec).name.lower()}"
+
+    if not path_is_within_root(resolved_exec, workspace):
         raise ValueError("Executable path must stay inside the workspace")
 
     return f"workspace:{format_workspace_path(resolved_exec, workspace).lower()}"
@@ -1212,6 +1293,7 @@ def validate_workspace_command(
         )
 
     workspace = get_workspace_path(conversation_id)
+    managed_env_root = get_managed_python_env_path(conversation_id, create=False)
     executable = command[0].strip()
 
     if "/" in executable:
@@ -1220,14 +1302,14 @@ def validate_workspace_command(
             resolved_exec = (cwd_path / resolved_exec).resolve(strict=False)
         else:
             resolved_exec = resolved_exec.resolve(strict=False)
-        if resolved_exec != workspace and workspace not in resolved_exec.parents:
+        if not path_is_within_root(resolved_exec, workspace) and not path_is_within_root(resolved_exec, managed_env_root):
             raise ValueError("Executable path must stay inside the workspace")
 
     if not STRICT_WORKSPACE_COMMAND_PATHS:
         return
 
     for index, part in enumerate(command[1:], start=1):
-        if not workspace_command_allows_argument(part, workspace):
+        if not workspace_command_allows_argument(part, workspace, extra_roots=[managed_env_root]):
             raise ValueError(f"command argument {index} references a path outside the workspace")
 
 
@@ -1239,6 +1321,35 @@ def delete_run_workspace(conversation_id: str):
     sandbox_path = pathlib.Path(run["sandbox_path"]).resolve()
     if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
         shutil.rmtree(sandbox_path.parent, ignore_errors=True)
+
+
+def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
+    """Build the subprocess environment for workspace commands."""
+    env = {**os.environ, "PYTHONPATH": "", "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
+    python_path = managed_python_python_path(conversation_id, create=False)
+    if python_path.exists():
+        env_root = get_managed_python_env_path(conversation_id, create=False)
+        bin_dir = python_path.parent
+        existing_path = env.get("PATH", "")
+        env["PATH"] = str(bin_dir) if not existing_path else f"{bin_dir}{os.pathsep}{existing_path}"
+        env["VIRTUAL_ENV"] = str(env_root)
+        env.pop("PYTHONHOME", None)
+    else:
+        env.pop("VIRTUAL_ENV", None)
+    return env
+
+
+async def normalize_command_for_managed_python(
+    conversation_id: str,
+    command: List[str],
+) -> List[str]:
+    """Rewrite Python package installs to the managed chat environment."""
+    pip_install = parse_pip_install_command(command)
+    if not pip_install:
+        return list(command)
+    await ensure_managed_python_env(conversation_id)
+    pip_path = managed_python_pip_path(conversation_id, create=False)
+    return [str(pip_path), "install", *list(pip_install.get("requested_args", []))]
 
 
 def reset_directory_contents(root: pathlib.Path) -> None:
@@ -2990,8 +3101,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.patch_file {"path":"src/app.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
-- workspace.run_command {"command":["python3","-m","venv",".venv"],"cwd":"."}
-- workspace.run_command {"command":[".venv/bin/pip","install","pandas"],"cwd":"."}
+- workspace.run_command {"command":["pip","install","pandas"],"cwd":"."}
 - workspace.render {"html":"<html><body><h1>Dashboard</h1></body></html>","title":"dashboard"}
 - spreadsheet.describe {"path":"model.xlsx","sheet":"Assumptions"}
 - conversation.search_history {"query":"retry logic","limit":5}
@@ -3001,17 +3111,20 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 
 Constraints:
 - Paths are always relative to the current conversation workspace.
+- workspace.list_files hides dot-prefixed files unless you explicitly target a hidden path.
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
-- For Python dependencies, prefer a workspace-local `.venv` and install with pip there instead of assuming a global environment.
+- For Python dependencies, use pip installs normally; the server will place them into a managed chat-scoped Python environment outside the workspace and make later Python commands use it when available.
 - When choosing Python packages or troubleshooting installs, use web.search or web.fetch_page to verify current package names, docs, and examples when helpful.
 - workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
 - web.search is for fresh or explicitly web-based questions, supports optional domain filters, and by default checks the general web plus Wikipedia and Reddit result sets.
 - web.fetch_page reads a web page after search and returns normalized domain/content metadata for citation-ready summaries.
-- Some tools may pause for inline user approval. If approval is denied, continue gracefully with the remaining tools or answer without that capability.
+- The context window is limited; use workspace files, artifacts, and task boards as durable memory when they help.
+- A single tool call can be enough if it creates durable progress, retrieval-ready context, or verification evidence.
+- Some tools may pause for inline user approval. If approval is denied, treat that capability as blocked for this turn and wait for the user to approve and resume.
 - Write reusable artifacts to the workspace and mention the path briefly.
 - Ask for another tool only when needed; otherwise answer."""
     return f"{base_system_prompt.strip()}\n\n{TOOL_USE_SYSTEM_PROMPT.strip()}\n\n{tool_schema}"
@@ -3084,6 +3197,8 @@ class ToolLoopOutcome:
     hit_limit: bool = False
     requested_phase_upgrade: str = ""
     requested_tool_name: str = ""
+    blocked_on_permission: bool = False
+    blocked_permission_key: str = ""
 
 
 @dataclass
@@ -3327,8 +3442,8 @@ class PermissionApprovalRequest:
     title: str
     content: str
     preview: str = ""
-    allow_label: str = "Allow"
-    deny_label: str = "Deny"
+    allow_label: str = "Approve and continue"
+    deny_label: str = "Pause task"
 
 
 def build_tool_permission_request(
@@ -3353,18 +3468,13 @@ def build_tool_permission_request(
         pip_install = parse_pip_install_command(command_list)
         if pip_install:
             preview = command_preview_text(command_list)
-            install_target = (
-                "this chat's workspace virtual environment"
-                if pip_install.get("uses_workspace_venv")
-                else "this chat's Python environment"
-            )
             return PermissionApprovalRequest(
                 key=key,
                 approval_target="command",
                 title="Allow pip install?",
                 content=(
                     f"The assistant wants to install {pip_install.get('packages_preview', 'the requested Python packages')} "
-                    f"into {install_target}."
+                    "into this chat's managed Python environment."
                 ),
                 preview=preview,
             )
@@ -3443,6 +3553,30 @@ def build_tool_permission_request(
         )
 
     return None
+
+
+def render_permission_blocked_message(request: PermissionApprovalRequest) -> str:
+    """Return the user-facing pause message after a required approval is not granted."""
+    approval_kind = "command" if request.approval_target == "command" else "tool"
+    title = str(request.title or "Approval required").strip().rstrip("?")
+    content = str(request.content or "").strip().rstrip(".")
+    lines = [
+        "I paused here because this task needs an approval before I can continue.",
+        "",
+        f"Needed {approval_kind} approval: {title}.",
+    ]
+    if content:
+        lines.append(content + ".")
+    if request.preview:
+        lines.extend([
+            "",
+            f"Request details: {request.preview}",
+        ])
+    lines.extend([
+        "",
+        "Approve it for this chat and then say continue to resume the task.",
+    ])
+    return "\n".join(lines)
 
 
 async def wait_for_permission_approval(
@@ -3542,7 +3676,7 @@ GENERIC_PLAN_PATTERNS = (
     "inspect relevant",
     "build or revise",
     "build the main deliverable",
-    "make the smallest useful",
+    "make the highest-leverage",
     "re-read the result",
     "run a focused check",
     "extract the exact task",
@@ -3792,7 +3926,7 @@ def build_heuristic_step_subplan(
     elif any(term in lowered for term in ("tighten", "polish", "docs", "wiring", "gap")):
         substeps = [
             f"Inspect the current output for missing wiring, docs, or sharp edges tied to: {step}",
-            f"Apply the smallest useful edits that close the most obvious gaps in: {step}",
+            f"Apply the highest-leverage edits that close the most obvious gaps in: {step}",
             f"Re-read the touched files and check that this step now feels cohesive: {step}",
         ]
     elif any(term in lowered for term in ("verify", "check", "test", "validate")):
@@ -4094,9 +4228,9 @@ def build_empty_workspace_steps(message: str) -> List[str]:
             "Tighten obvious gaps, wiring, and docs before verification.",
         ]
     return [
-        "Create the smallest useful workspace artifact first, preferably as a single file.",
-        "Add supporting files only if they materially improve usability or are required for the request to work.",
-        "Tighten obvious gaps and verify the artifact before finishing.",
+        "Create the first durable workspace artifact or code slice that best fits the request, even if it spans more than one file.",
+        "Add supporting files, notes, or structure wherever they materially improve usability or make the result work.",
+        "Tighten obvious gaps and verify the result before finishing.",
     ]
 
 
@@ -4104,14 +4238,14 @@ def build_empty_workspace_strategy(message: str) -> str:
     """Describe the execution approach for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "Scaffold the requested repo directly into the empty workspace, then implement the first useful slice and verify it."
-    return "Start with one main workspace artifact in the empty workspace, expand to supporting files only when they materially help, then verify the result."
+    return "Start by creating the most valuable durable artifact or code slice for the request in the empty workspace, expand as needed, then verify the result."
 
 
 def build_empty_workspace_deliverable(message: str) -> str:
     """Describe the expected deliverable for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "A usable starter repo scaffold written into the workspace and ready to inspect or download."
-    return "One main workspace artifact written into the empty workspace, with only the minimum supporting files needed for the request."
+    return "A useful workspace result written into the empty workspace, shaped to fit the request rather than forced into a single-file deliverable."
 
 
 def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> List[str]:
@@ -4170,11 +4304,11 @@ def build_heuristic_deep_plan(session: DeepSession) -> Dict[str, Any]:
     """Build a short deterministic plan for fast profiles and fallback cases."""
     if session.workspace_enabled:
         plan = {
-            "strategy": "Inspect the relevant files, make the smallest useful change, then verify it.",
+            "strategy": "Inspect the relevant files, make the highest-leverage change that fits the request, then verify it.",
             "deliverable": "A concise final answer grounded in the workspace and any verified file changes.",
             "builder_steps": [
                 "Inspect the files or artifacts most relevant to the request.",
-                "Make the smallest useful workspace change or create the needed artifact.",
+                "Make the workspace change or create the artifact that most advances the request.",
                 "Re-read the result and tighten obvious gaps before final verification.",
             ],
             "verifier_checks": [
@@ -4487,14 +4621,10 @@ def build_pending_execution_plan_payload(plan: Dict[str, Any]) -> Dict[str, Any]
 
 def render_deep_plan_preview(plan: Dict[str, Any]) -> str:
     """Render a short plan-preview answer for approval-first deep mode."""
-    lines = [
-        "I mapped out an execution plan for this request.",
-        "",
-        format_deep_plan_note(plan),
-        "",
-        "If this looks right, say yes and I'll run it in the workspace and verify the result. If not, tell me what to change. You can also press Enter from the prompt to start, or edit the build steps in the plan card first.",
-    ]
-    return "\n".join(lines)
+    return (
+        "I drafted the execution plan and put it in the approval panel below.\n\n"
+        "Review or edit the steps there, then press Approve And Run to authorize workspace execution for this request."
+    )
 
 
 def render_saved_plan_write_access_message(plan: Dict[str, Any]) -> str:
@@ -4502,7 +4632,7 @@ def render_saved_plan_write_access_message(plan: Dict[str, Any]) -> str:
     return (
         "I found the saved plan, but write access was not granted for this turn.\n\n"
         f"{format_deep_plan_note(plan)}\n\n"
-        "Approve workspace edits for the next turn, then say yes and I'll run the plan in the workspace. If you want to reshape the plan first, tell me what to change."
+        "Approve workspace edits for this chat, then say continue and I'll resume the saved plan in the workspace. If you want to reshape the plan first, tell me what to change."
     )
 
 
@@ -6521,15 +6651,14 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
     target_rel_path = format_workspace_path(target, workspace)
-    target_is_internal = target_rel_path == ".ai" or target_rel_path.startswith(".ai/")
+    target_is_hidden = workspace_rel_path_is_hidden(target_rel_path)
 
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
             stat = item.stat()
             item_rel_path = format_workspace_path(item, workspace)
-            item_is_internal = item_rel_path == ".ai" or item_rel_path.startswith(".ai/")
-            if item_is_internal and not target_is_internal:
+            if workspace_rel_path_is_hidden(item_rel_path) and not target_is_hidden:
                 continue
             items.append({
                 "name": item.name,
@@ -6860,14 +6989,13 @@ def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dic
         raise ValueError("Path is not a directory")
 
     target_rel_path = format_workspace_path(target, workspace)
-    target_is_internal = target_rel_path == ".ai" or target_rel_path.startswith(".ai/")
+    target_is_hidden = workspace_rel_path_is_hidden(target_rel_path)
 
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
             item_rel_path = format_workspace_path(item, workspace)
-            item_is_internal = item_rel_path == ".ai" or item_rel_path.startswith(".ai/")
-            if item_is_internal and not target_is_internal:
+            if workspace_rel_path_is_hidden(item_rel_path) and not target_is_hidden:
                 continue
             items.append({
                 "name": item.name,
@@ -7264,20 +7392,25 @@ async def workspace_run_command_result(
     if not cwd_path.is_dir():
         raise ValueError("cwd must be a directory")
 
-    validate_workspace_command(conversation_id, command, cwd_path, features)
+    try:
+        normalized_command = await normalize_command_for_managed_python(conversation_id, command)
+    except Exception as exc:
+        raise ValueError(f"Managed Python environment setup failed: {exc}") from exc
+
+    validate_workspace_command(conversation_id, normalized_command, cwd_path, features)
 
     try:
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *normalized_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd_path),
-            env={**os.environ, "PYTHONPATH": ""},
+            env=build_workspace_command_env(conversation_id),
         )
     except FileNotFoundError as exc:
-        raise ValueError(f"Command not found: {command[0]}") from exc
+        raise ValueError(f"Command not found: {normalized_command[0]}") from exc
 
-    timeout_seconds = command_runtime_timeout_seconds(command)
+    timeout_seconds = command_runtime_timeout_seconds(normalized_command)
     try:
         if timeout_seconds is None:
             stdout, stderr = await process.communicate()
@@ -8391,6 +8524,10 @@ async def run_resumable_tool_loop(
         )
         combined_results.extend(outcome.tool_results)
 
+        if outcome.blocked_on_permission:
+            outcome.tool_results = combined_results
+            return outcome
+
         if not outcome.hit_limit:
             outcome.tool_results = combined_results
             return outcome
@@ -8505,12 +8642,14 @@ def build_permission_denied_result(
     call: Dict[str, Any],
     request: PermissionApprovalRequest,
 ) -> Dict[str, Any]:
-    """Format a denied approval as a normal tool-result payload so the model can pivot."""
+    """Format a denied approval with a user-facing pause message."""
     label = "command" if request.approval_target == "command" else "tool"
     return {
         "id": call.get("id", ""),
         "ok": False,
+        "error_code": "permission_denied",
         "error": f"{label.capitalize()} permission '{request.key}' was denied for this chat",
+        "message_to_user": render_permission_blocked_message(request),
     }
 
 
@@ -8751,12 +8890,12 @@ async def run_tool_loop(
                 result=denied_result,
                 latency_ms=0,
             )
-            messages.append({"role": "assistant", "content": cleaned})
-            messages.append({
-                "role": "user",
-                "content": "<tool_result>\n" + json.dumps(denied_result, ensure_ascii=False) + "\n</tool_result>",
-            })
-            continue
+            return ToolLoopOutcome(
+                final_text=render_permission_blocked_message(permission_request),
+                tool_results=tool_results,
+                blocked_on_permission=True,
+                blocked_permission_key=permission_request.key,
+            )
 
         start_summary = tool_status_summary(call["name"], call.get("arguments", {}))
         await websocket.send_json({
@@ -9369,6 +9508,16 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
             activity_phase="inspect",
         ),
     )
+    if outcome.blocked_on_permission:
+        snapshot_facts = format_workspace_snapshot(session.workspace_snapshot)
+        session.workspace_facts = (
+            f"Grounded workspace snapshot:\n{snapshot_facts}"
+            if snapshot_facts else ""
+        )
+        session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
+        session.draft_response = outcome.final_text
+        await persist_task_state(session)
+        return session.workspace_facts
     facts = outcome.final_text.strip()
     snapshot_facts = format_workspace_snapshot(session.workspace_snapshot)
     session.workspace_facts = (
@@ -9621,6 +9770,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                     f"Build task:\n{agent_a.get('prompt', '')}\n\n"
                     "Focus on the current substep only. Treat any later substeps as future work inside this same top-level build step. "
                     "Use the task board as external memory instead of trying to carry the whole plan in-context. "
+                    "On each loop, either gather missing evidence, update a durable artifact, or verify the current substep. "
                     "Use tools to inspect, patch, and validate as needed for this substep. "
                     "When done, return a concise substep result covering what changed, any artifact paths, and caveats that matter for later verification."
                 ),
@@ -9686,6 +9836,39 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 "paths": list(substep_touched_paths),
                 "summary": substep_summary,
             }
+
+            if outcome.blocked_on_permission:
+                step_subplan["progress_note"] = ""
+                session.step_subplans[step_key] = normalize_step_subplan(step_subplan, step)
+                session.workspace_snapshot = capture_workspace_snapshot(session.conversation_id)
+                session.changed_files = changed_files
+                session.build_summary = "\n".join(session.build_step_summaries) or "(build paused awaiting approval)"
+                session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
+                await send_build_steps(
+                    session.websocket,
+                    steps,
+                    completed_count=idx,
+                    active_index=idx,
+                    step_details=build_step_details_payload(
+                        session,
+                        steps,
+                        completed_count=idx,
+                        active_index=idx,
+                        active_substep_index=sub_idx,
+                    ),
+                )
+                await persist_task_board(
+                    session,
+                    active_build_step=idx,
+                    active_substep_index=sub_idx,
+                )
+                await persist_task_state(session)
+                return DeepBuildResult(
+                    summary=outcome.final_text,
+                    needs_user_confirmation=True,
+                    build_complete=False,
+                    pause_reason=session.pause_reason,
+                )
 
             if outcome.hit_limit:
                 step_subplan["progress_note"] = substep_summary
@@ -9871,7 +10054,11 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     session.plan = apply_deep_plan_guardrails(session, session.plan)
     session.plan_preview_pending = bool(preview_only)
     session.pause_reason = PAUSE_REASON_USER_DECISION if preview_only else ""
-    await send_assistant_note(session.websocket, format_deep_plan_note(session.plan))
+    await send_assistant_note(
+        session.websocket,
+        "Plan draft ready in the approval panel."
+        if preview_only else format_deep_plan_note(session.plan),
+    )
     if not preview_only:
         await send_build_steps(
             session.websocket,
@@ -9951,6 +10138,11 @@ async def deep_answer_directly(session: DeepSession) -> str:
                 await deep_inspect_workspace(session)
             session.auto_execute = True
             return await run_deep_execution_flow(session, requires_existing_plan=False)
+        if outcome.blocked_on_permission:
+            session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
+            session.draft_response = outcome.final_text
+            await persist_task_state(session)
+            return session.draft_response
         return outcome.final_text
 
     messages = [{"role": "system", "content": f"{session.system_prompt}\n\n{DEEP_DIRECT_SYSTEM_PROMPT}"}]
@@ -10022,6 +10214,12 @@ async def deep_verify(session: DeepSession) -> str:
             activity_phase="verify",
         ),
     )
+    if outcome.blocked_on_permission:
+        session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
+        session.verification_summary = outcome.final_text
+        await persist_task_board(session, active_build_step=None)
+        await persist_task_state(session)
+        return session.verification_summary
     session.pause_reason = PAUSE_REASON_HARD_LIMIT if outcome.hit_limit else ""
     session.verification_summary = outcome.final_text
     session.scope_audit = build_scope_audit(session)
@@ -10077,6 +10275,11 @@ async def deep_review(session: DeepSession) -> str:
             activity_phase="synthesize",
         ),
     )
+    if outcome.blocked_on_permission:
+        session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
+        session.draft_response = outcome.final_text
+        await persist_task_state(session)
+        return session.draft_response
     session.pause_reason = PAUSE_REASON_HARD_LIMIT if outcome.hit_limit else ""
     session.draft_response = outcome.final_text
     await persist_task_state(session)
@@ -10141,7 +10344,7 @@ async def bootstrap_deep_session(
     session: DeepSession,
     *,
     resume_task_state_allowed: bool = True,
-) -> None:
+) -> bool:
     """Run the shared confirmation/resume/inspect bootstrap for deep sessions."""
     try:
         await deep_confirm_understanding(session)
@@ -10156,6 +10359,10 @@ async def bootstrap_deep_session(
 
     await apply_deep_session_plan_override(session)
     await deep_inspect_workspace(session)
+    return not (
+        session.pause_reason == PAUSE_REASON_COMMAND_APPROVAL
+        and bool(session.draft_response)
+    )
 
 
 async def run_deep_plan_preview_flow(session: DeepSession) -> str:
@@ -10325,7 +10532,9 @@ async def orchestrated_chat(
         ),
     )
 
-    await bootstrap_deep_session(session, resume_task_state_allowed=True)
+    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=True)
+    if not bootstrap_ready and session.draft_response:
+        return session.draft_response
 
     decision = decide_deep_route(
         DeepRouteRequest(
@@ -10399,6 +10608,8 @@ async def handle_direct_search_command(
         workflow_execution=workflow_execution,
     )
     if not search_result.get("ok"):
+        if search_result.get("error_code") == "permission_denied":
+            return str(search_result.get("message_to_user") or search_result.get("error") or "").strip()
         return f"Search failed: {search_result.get('error', 'unknown error')}"
 
     seeded_history = build_seeded_tool_history(
@@ -10462,6 +10673,8 @@ async def handle_direct_grep_command(
         workflow_execution=workflow_execution,
     )
     if not grep_result.get("ok"):
+        if grep_result.get("error_code") == "permission_denied":
+            return str(grep_result.get("message_to_user") or grep_result.get("error") or "").strip()
         return f"Grep failed: {grep_result.get('error', 'unknown error')}"
 
     seeded_history = build_seeded_tool_history(
@@ -10537,7 +10750,9 @@ async def handle_direct_plan_command(
             "Analyze",
             "Slash /plan is resuming the saved execution plan.",
         )
-        await bootstrap_deep_session(session, resume_task_state_allowed=True)
+        bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=True)
+        if not bootstrap_ready and session.draft_response:
+            return session.draft_response
         return await run_deep_execution_flow(
             session,
             requires_existing_plan=True,
@@ -10562,7 +10777,9 @@ async def handle_direct_plan_command(
         "Analyze",
         "Slash /plan selected the planning flow.",
     )
-    await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    if not bootstrap_ready and session.draft_response:
+        return session.draft_response
     return await run_deep_plan_preview_flow(session)
 
 
@@ -10600,23 +10817,18 @@ async def handle_direct_code_command(
         "Analyze",
         "Slash /code selected the direct code workflow.",
     )
-    await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    if not bootstrap_ready and session.draft_response:
+        return session.draft_response
     return await run_deep_execution_flow(
         session,
         requires_existing_plan=False,
         blocked_write_renderer=lambda current_session: (
             "I planned the code change, but write access was not granted for this turn.\n\n"
             f"{format_deep_plan_note(current_session.plan)}\n\n"
-            "Approve workspace edits and run the saved plan again, or edit the build steps in the plan card first."
+            "Approve workspace edits for this chat, then say continue to resume the saved plan, or edit the build steps in the plan card first."
         ),
     )
-
-
-def workspace_virtualenv_pip_path() -> str:
-    """Return the relative pip executable path inside the default workspace venv."""
-    if os.name == "nt":
-        return str(pathlib.Path(".venv") / "Scripts" / "pip.exe")
-    return str(pathlib.Path(".venv") / "bin" / "pip")
 
 
 async def handle_direct_pip_command(
@@ -10629,10 +10841,10 @@ async def handle_direct_pip_command(
     request_text: str,
     workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
-    """Create or reuse a workspace venv, then install requested Python packages with pip."""
+    """Install Python packages into the managed chat environment."""
     cleaned_request = str(request_text or "").strip()
     if not cleaned_request:
-        return "Use `/pip <package ...>` to create or reuse `.venv` and install Python packages there."
+        return "Use `/pip <package ...>` to install Python packages into the managed environment for this chat."
 
     try:
         pip_args = shlex.split(cleaned_request)
@@ -10642,35 +10854,13 @@ async def handle_direct_pip_command(
     if pip_args and pip_args[0].lower() == "install":
         pip_args = pip_args[1:]
     if not pip_args:
-        return "Use `/pip <package ...>` to install one or more Python packages into `.venv`."
+        return "Use `/pip <package ...>` to install one or more Python packages into the managed environment for this chat."
 
     command_features = replace(features, workspace_run_commands=True)
-    workspace = get_workspace_path(conversation_id)
-    pip_rel_path = workspace_virtualenv_pip_path()
-    pip_path = workspace / pathlib.Path(pip_rel_path)
-
-    if not pip_path.exists():
-        venv_call = {
-            "id": "direct_pip_venv",
-            "name": "workspace.run_command",
-            "arguments": {"command": ["python3", "-m", "venv", ".venv"], "cwd": "."},
-        }
-        venv_result = await emit_direct_tool_call(
-            websocket,
-            conversation_id,
-            venv_call,
-            features=command_features,
-            status_prefix="Slash /pip: ",
-            activity_phase="respond",
-            workflow_execution=workflow_execution,
-        )
-        if not venv_result.get("ok"):
-            return f"Virtual environment setup failed: {venv_result.get('error', 'unknown error')}"
-
     install_call = {
         "id": "direct_pip_install",
         "name": "workspace.run_command",
-        "arguments": {"command": [pip_rel_path, "install", *pip_args], "cwd": "."},
+        "arguments": {"command": ["pip", "install", *pip_args], "cwd": "."},
     }
     install_result = await emit_direct_tool_call(
         websocket,
@@ -10682,12 +10872,14 @@ async def handle_direct_pip_command(
         workflow_execution=workflow_execution,
     )
     if not install_result.get("ok"):
+        if install_result.get("error_code") == "permission_denied":
+            return str(install_result.get("message_to_user") or install_result.get("error") or "").strip()
         return f"Pip install failed: {install_result.get('error', 'unknown error')}"
 
     installed_preview = compact_tool_text(" ".join(pip_args), limit=96)
     return (
-        f"Installed {installed_preview or 'the requested Python packages'} into `.venv` for this chat workspace. "
-        "I can use that environment in follow-up commands."
+        f"Installed {installed_preview or 'the requested Python packages'} into the managed Python environment for this chat. "
+        "I can use that environment in follow-up commands without cluttering the workspace."
     )
 
 
