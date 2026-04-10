@@ -10,7 +10,10 @@
     <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/keymap/vim.min.js"></script>
@@ -299,16 +302,16 @@
                 </div>
             </div>
             <div class="ide-workspace" id="ideWorkspace">
-                <div class="workspace-view-switch" aria-label="Workspace view switcher">
-                    <button class="workspace-view-button" id="workspaceTreeViewButton" type="button" onclick="setWorkspaceViewMode('tree')">Files</button>
-                    <button class="workspace-view-button" id="workspaceReaderViewButton" type="button" onclick="setWorkspaceViewMode('reader')">Reader</button>
-                </div>
                 <div class="ide-top">
                     <aside class="workspace-panel" id="workspacePanel">
                         <div class="workspace-header">
+                            <button class="workspace-view-button workspace-header-view-toggle" id="workspaceTreeContentToggle" type="button" onclick="setWorkspaceViewMode('reader')">Content</button>
                             <div class="workspace-heading">
                                 <div class="workspace-title">Workspace</div>
                                 <div class="workspace-subtitle" id="workspacePath">Root</div>
+                            </div>
+                            <div class="workspace-actions">
+                                <button class="workspace-refresh workspace-mobile-close" id="workspacePanelCloseButton" type="button" onclick="closeWorkspacePanel()">Close workspace</button>
                             </div>
                         </div>
                         <div class="workspace-body">
@@ -345,6 +348,7 @@
                     </aside>
                     <section class="ide-viewer is-hidden" aria-label="Workspace file viewer">
                         <div class="ide-viewer-header">
+                            <button class="workspace-view-button workspace-header-view-toggle" id="inlineViewerTreeToggle" type="button" onclick="setWorkspaceViewMode('tree')">Files</button>
                             <div class="ide-viewer-heading">
                                 <div class="ide-viewer-title" id="inlineViewerTitle">File Viewer</div>
                                 <div class="ide-viewer-subtitle" id="inlineViewerSubtitle">Select a workspace file to read it here.</div>
@@ -359,6 +363,7 @@
                                 <button class="workspace-refresh ide-viewer-copy-button" id="inlineViewerCopyButton" onclick="copyInlineViewerContent()" hidden>Copy</button>
                                 <button class="workspace-refresh" id="inlineViewerUndoButton" onclick="undoInlineViewerChange()" disabled>Undo</button>
                                 <button class="workspace-refresh" id="inlineViewerSaveButton" onclick="saveInlineViewer()">Save</button>
+                                <button class="workspace-refresh workspace-mobile-close" id="inlineViewerWorkspaceCloseButton" type="button" onclick="closeWorkspacePanel()">Close workspace</button>
                                 <button class="workspace-refresh" id="inlineViewerCloseButton" onclick="closeInlineViewer()">Close</button>
                             </div>
                         </div>

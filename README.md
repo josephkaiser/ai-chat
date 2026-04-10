@@ -121,5 +121,6 @@ Notes:
 - [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services, where to edit prompts/themes
 - [API](docs/api.md) — REST and WebSocket payloads
 - [Architecture](docs/architecture.md) — Main modules and high-level data flow
+- [Capability Playbook](docs/capabilities.md) — How to add new agent capabilities with docs, approvals, installs, and workflow entry points
 - [Harness And Tools](docs/harness.md) — Tool loop, deep-mode orchestration, permissions, and workspace model
 - [UI Features](docs/ui.md) — Workspace panel, attachments, voice, and slash command behaviors

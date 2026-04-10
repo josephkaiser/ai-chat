@@ -66,6 +66,66 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(request.approval_target, "command")
         self.assertIn("git", request.title.lower())
 
+    def test_python_m_pip_install_permission_is_scoped_to_pip(self):
+        previous_root = app.WORKSPACE_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                app.WORKSPACE_ROOT = tempdir
+                app.get_workspace_path("conv-pip")
+                request = app.build_tool_permission_request(
+                    "conv-pip",
+                    {
+                        "id": "call-pip",
+                        "name": "workspace.run_command",
+                        "arguments": {"command": ["python3", "-m", "pip", "install", "pandas"], "cwd": "."},
+                    },
+                )
+        finally:
+            app.WORKSPACE_ROOT = previous_root
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "exec:pip.install")
+        self.assertEqual(request.approval_target, "command")
+        self.assertEqual(request.title, "Allow pip install?")
+        self.assertIn("pandas", request.content.lower())
+
+    def test_python_venv_setup_permission_is_scoped(self):
+        previous_root = app.WORKSPACE_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                app.WORKSPACE_ROOT = tempdir
+                app.get_workspace_path("conv-venv")
+                request = app.build_tool_permission_request(
+                    "conv-venv",
+                    {
+                        "id": "call-venv",
+                        "name": "workspace.run_command",
+                        "arguments": {"command": ["python3", "-m", "venv", ".venv"], "cwd": "."},
+                    },
+                )
+        finally:
+            app.WORKSPACE_ROOT = previous_root
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "exec:python.venv")
+        self.assertEqual(request.title, "Allow Python venv setup?")
+        self.assertIn(".venv", request.content)
+
+    def test_normalize_direct_slash_command_accepts_pip(self):
+        self.assertEqual(app.normalize_direct_slash_command("pip"), "pip")
+
+    def test_install_like_python_setup_commands_skip_short_timeout(self):
+        self.assertIsNone(
+            app.command_runtime_timeout_seconds(["python3", "-m", "pip", "install", "pandas"])
+        )
+        self.assertIsNone(
+            app.command_runtime_timeout_seconds(["python3", "-m", "venv", ".venv"])
+        )
+        self.assertEqual(
+            app.command_runtime_timeout_seconds(["git", "status"]),
+            app.COMMAND_TIMEOUT_SECONDS,
+        )
+
     def test_tool_permission_allowlist_round_trip(self):
         features = app.FeatureFlags()
 

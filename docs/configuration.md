@@ -53,9 +53,15 @@ Code defaults and useful tunables:
 - `thinking_stream.py` — thinking tag pairs, which must match `static/app.js`
 - `MAX_COMPLETION_TOKENS` — env-backed completion cap
 - `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — core runtime paths/settings
+- `COMMAND_TIMEOUT_SECONDS` — default timeout for ordinary workspace commands
 - `CURATED_SOURCE_FAILURE_THRESHOLD` and `CURATED_SOURCE_DISABLE_MINUTES` — web-search source fan-out behavior
 - `VOICE_STORAGE_LIMIT_BYTES` — cap retained server-owned voice artifacts
 - `STRICT_WORKSPACE_COMMAND_PATHS` — reject workspace command arguments that point outside the current conversation workspace
+
+Install/setup note:
+
+- Python capability setup commands such as `python -m venv` and `pip install` are exempt from `COMMAND_TIMEOUT_SECONDS` so package installs can finish naturally.
+- Those long-running commands are still stoppable from the UI via Stop / Interrupt.
 
 The Docker image copies `app.py`, `themes.py`, `prompts.py`, `thinking_stream.py`, `turn_strategy.py`, and `deep_flow.py`.
 

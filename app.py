@@ -13,6 +13,7 @@ Repo map (start here if you are new):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -1040,6 +1041,64 @@ def normalize_allowed_tool_permission_key(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def parse_pip_install_command(command: List[str]) -> Optional[Dict[str, Any]]:
+    """Return normalized metadata when argv represents a pip install command."""
+    if not isinstance(command, list) or not command:
+        return None
+
+    parts = [str(part).strip() for part in command if isinstance(part, str) and str(part).strip()]
+    if not parts:
+        return None
+
+    executable_name = pathlib.Path(parts[0]).name.lower()
+    lowered = [part.lower() for part in parts]
+    install_index: Optional[int] = None
+
+    if executable_name in {"pip", "pip3", "pip.exe", "pip3.exe"}:
+        if len(parts) >= 2 and lowered[1] == "install":
+            install_index = 1
+    elif executable_name in {"python", "python3", "python.exe", "python3.exe"}:
+        if len(parts) >= 4 and lowered[1] == "-m" and lowered[2] == "pip" and lowered[3] == "install":
+            install_index = 3
+
+    if install_index is None:
+        return None
+
+    requested_args = parts[install_index + 1:]
+    return {
+        "requested_args": requested_args,
+        "packages_preview": compact_tool_text(" ".join(requested_args), limit=72) or "the requested Python packages",
+        "uses_workspace_venv": "/" in parts[0] or "\\" in parts[0],
+    }
+
+
+def parse_python_venv_command(command: List[str]) -> Optional[Dict[str, Any]]:
+    """Return metadata when argv creates a Python virtual environment."""
+    if not isinstance(command, list) or not command:
+        return None
+
+    parts = [str(part).strip() for part in command if isinstance(part, str) and str(part).strip()]
+    if len(parts) < 4:
+        return None
+
+    executable_name = pathlib.Path(parts[0]).name.lower()
+    lowered = [part.lower() for part in parts]
+    if executable_name not in {"python", "python3", "python.exe", "python3.exe"}:
+        return None
+    if lowered[1] != "-m" or lowered[2] != "venv":
+        return None
+
+    target = next((part for part in parts[3:] if not part.startswith("-")), ".venv")
+    return {"target": target}
+
+
+def command_runtime_timeout_seconds(command: List[str]) -> Optional[float]:
+    """Choose the timeout for a workspace command, or None to wait until completion."""
+    if parse_pip_install_command(command) or parse_python_venv_command(command):
+        return None
+    return COMMAND_TIMEOUT_SECONDS
+
+
 def command_permission_key(
     conversation_id: str,
     command: List[str],
@@ -1052,6 +1111,12 @@ def command_permission_key(
     executable = str(command[0] or "").strip()
     if not executable:
         return ""
+
+    if parse_pip_install_command(command):
+        return "exec:pip.install"
+
+    if parse_python_venv_command(command):
+        return "exec:python.venv"
 
     normalized = executable.replace("\\", "/")
     if "/" not in normalized:
@@ -2925,6 +2990,8 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.patch_file {"path":"src/app.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
+- workspace.run_command {"command":["python3","-m","venv",".venv"],"cwd":"."}
+- workspace.run_command {"command":[".venv/bin/pip","install","pandas"],"cwd":"."}
 - workspace.render {"html":"<html><body><h1>Dashboard</h1></body></html>","title":"dashboard"}
 - spreadsheet.describe {"path":"model.xlsx","sheet":"Assumptions"}
 - conversation.search_history {"query":"retry logic","limit":5}
@@ -2937,6 +3004,8 @@ Constraints:
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
+- For Python dependencies, prefer a workspace-local `.venv` and install with pip there instead of assuming a global environment.
+- When choosing Python packages or troubleshooting installs, use web.search or web.fetch_page to verify current package names, docs, and examples when helpful.
 - workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
@@ -3188,6 +3257,7 @@ DIRECT_SLASH_COMMAND_ALIASES = {
     "plan": "plan",
     "code": "code",
     "edit": "code",
+    "pip": "pip",
 }
 
 
@@ -3280,6 +3350,35 @@ def build_tool_permission_request(
             key = command_permission_key(conversation_id, command_list, cwd_path)
         except Exception:
             return None
+        pip_install = parse_pip_install_command(command_list)
+        if pip_install:
+            preview = command_preview_text(command_list)
+            install_target = (
+                "this chat's workspace virtual environment"
+                if pip_install.get("uses_workspace_venv")
+                else "this chat's Python environment"
+            )
+            return PermissionApprovalRequest(
+                key=key,
+                approval_target="command",
+                title="Allow pip install?",
+                content=(
+                    f"The assistant wants to install {pip_install.get('packages_preview', 'the requested Python packages')} "
+                    f"into {install_target}."
+                ),
+                preview=preview,
+            )
+        python_venv = parse_python_venv_command(command_list)
+        if python_venv:
+            preview = command_preview_text(command_list)
+            venv_target = tool_path_preview(python_venv.get("target", ".venv"), ".venv")
+            return PermissionApprovalRequest(
+                key=key,
+                approval_target="command",
+                title="Allow Python venv setup?",
+                content=f"The assistant wants to create a Python virtual environment at {venv_target} for this chat.",
+                preview=preview,
+            )
         executable = pathlib.Path(str(command_list[0] or "command")).name or "command"
         preview = command_preview_text(command_list)
         return PermissionApprovalRequest(
@@ -7153,7 +7252,7 @@ async def workspace_run_command_result(
     cwd: str = ".",
     features: Optional[FeatureFlags] = None,
 ) -> Dict[str, Any]:
-    """Run a short-lived command inside the conversation workspace."""
+    """Run a command inside the conversation workspace."""
     if not isinstance(command, list) or not command:
         raise ValueError("command must be a non-empty array of strings")
     if not all(isinstance(part, str) and part.strip() for part in command):
@@ -7178,12 +7277,24 @@ async def workspace_run_command_result(
     except FileNotFoundError as exc:
         raise ValueError(f"Command not found: {command[0]}") from exc
 
+    timeout_seconds = command_runtime_timeout_seconds(command)
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=COMMAND_TIMEOUT_SECONDS)
+        if timeout_seconds is None:
+            stdout, stderr = await process.communicate()
+        else:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise ValueError(f"Command timed out after {COMMAND_TIMEOUT_SECONDS:g}s")
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.wait()
+        raise ValueError(f"Command timed out after {timeout_seconds:g}s")
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.wait()
+        raise
 
     workspace = get_workspace_path(conversation_id)
     return {
@@ -10501,6 +10612,85 @@ async def handle_direct_code_command(
     )
 
 
+def workspace_virtualenv_pip_path() -> str:
+    """Return the relative pip executable path inside the default workspace venv."""
+    if os.name == "nt":
+        return str(pathlib.Path(".venv") / "Scripts" / "pip.exe")
+    return str(pathlib.Path(".venv") / "bin" / "pip")
+
+
+async def handle_direct_pip_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: FeatureFlags,
+    request_text: str,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> str:
+    """Create or reuse a workspace venv, then install requested Python packages with pip."""
+    cleaned_request = str(request_text or "").strip()
+    if not cleaned_request:
+        return "Use `/pip <package ...>` to create or reuse `.venv` and install Python packages there."
+
+    try:
+        pip_args = shlex.split(cleaned_request)
+    except ValueError as exc:
+        return f"Pip arguments could not be parsed: {exc}"
+
+    if pip_args and pip_args[0].lower() == "install":
+        pip_args = pip_args[1:]
+    if not pip_args:
+        return "Use `/pip <package ...>` to install one or more Python packages into `.venv`."
+
+    command_features = replace(features, workspace_run_commands=True)
+    workspace = get_workspace_path(conversation_id)
+    pip_rel_path = workspace_virtualenv_pip_path()
+    pip_path = workspace / pathlib.Path(pip_rel_path)
+
+    if not pip_path.exists():
+        venv_call = {
+            "id": "direct_pip_venv",
+            "name": "workspace.run_command",
+            "arguments": {"command": ["python3", "-m", "venv", ".venv"], "cwd": "."},
+        }
+        venv_result = await emit_direct_tool_call(
+            websocket,
+            conversation_id,
+            venv_call,
+            features=command_features,
+            status_prefix="Slash /pip: ",
+            activity_phase="respond",
+            workflow_execution=workflow_execution,
+        )
+        if not venv_result.get("ok"):
+            return f"Virtual environment setup failed: {venv_result.get('error', 'unknown error')}"
+
+    install_call = {
+        "id": "direct_pip_install",
+        "name": "workspace.run_command",
+        "arguments": {"command": [pip_rel_path, "install", *pip_args], "cwd": "."},
+    }
+    install_result = await emit_direct_tool_call(
+        websocket,
+        conversation_id,
+        install_call,
+        features=command_features,
+        status_prefix="Slash /pip: ",
+        activity_phase="respond",
+        workflow_execution=workflow_execution,
+    )
+    if not install_result.get("ok"):
+        return f"Pip install failed: {install_result.get('error', 'unknown error')}"
+
+    installed_preview = compact_tool_text(" ".join(pip_args), limit=96)
+    return (
+        f"Installed {installed_preview or 'the requested Python packages'} into `.venv` for this chat workspace. "
+        "I can use that environment in follow-up commands."
+    )
+
+
 async def handle_direct_slash_command(
     websocket: WebSocket,
     conversation_id: str,
@@ -10528,6 +10718,10 @@ async def handle_direct_slash_command(
         )
     if name == "code":
         return await handle_direct_code_command(
+            websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
+        )
+    if name == "pip":
+        return await handle_direct_pip_command(
             websocket, conversation_id, history, system_prompt, max_tokens, features, args, workflow_execution
         )
     return f"Unsupported slash command: /{slash_command.get('raw_name') or name}"

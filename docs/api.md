@@ -14,7 +14,7 @@ Send JSON objects with fields such as:
 - `conversation_id` — Conversation UUID
 - `system_prompt` — Optional prompt override
 - `features` — Per-turn tool/permission flags inferred by the UI
-- `slash_command` — Optional structured slash intent for `/search`, `/grep`, `/plan`, or `/code`
+- `slash_command` — Optional structured slash intent for `/search`, `/grep`, `/plan`, `/code`, or `/pip`
 
 ### `/ws/chat` (server → client)
 
@@ -34,6 +34,11 @@ Common event types:
 - `final_replace` — Replace the in-progress draft with finalized text
 - `message_id` — Saved assistant message id
 - `canceled`, `done`, `error` — Terminal turn status
+
+Notes:
+
+- Command approvals now support scoped Python setup requests such as `pip install` and `python -m venv`.
+- Long-running install/setup commands are expected to keep running until completion unless the user sends `stop` or `interrupt`.
 
 Preferred `activity.phase` values:
 
