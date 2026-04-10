@@ -147,6 +147,9 @@ textarea {
     align-items: center;
     padding: 26px 26px 14px;
 }
+.chat.workspace-reader-open .messages {
+    align-items: flex-start;
+}
 .welcome {
     text-align: center;
     padding: 0 16px 10px;
@@ -179,6 +182,13 @@ textarea {
     margin: 0 auto;
     width: 100%;
     position: relative;
+}
+.chat.workspace-reader-open .input-area-stack,
+.chat.workspace-reader-open .composer-hint,
+.chat.workspace-reader-open .voice-note {
+    margin-left: 0;
+    margin-right: auto;
+    text-align: left;
 }
 .composer-hint {
     max-width: 520px;
@@ -3337,6 +3347,93 @@ textarea {
     overflow-wrap: inherit;
     word-break: inherit;
     padding-right: 56px;
+}
+.message-artifact-paragraph {
+    margin: 10px 0 6px;
+}
+.message-artifact-link {
+    width: min(100%, 420px);
+    display: inline-flex;
+    align-items: stretch;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
+    border-radius: 18px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 92%, transparent), color-mix(in srgb, var(--bg_primary) 94%, black 6%));
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.message-artifact-link:hover,
+.message-artifact-link:focus-visible {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--accent_primary) 38%, var(--dense-border));
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.14);
+    outline: none;
+}
+.message-artifact-link.is-standalone {
+    display: flex;
+}
+.message-artifact-link.is-previewable {
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 10%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
+}
+.message-artifact-icon {
+    width: 42px;
+    min-width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 16%, var(--dense-border));
+    background: color-mix(in srgb, var(--bg_primary) 62%, transparent);
+    color: var(--accent_hover);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+.message-artifact-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.message-artifact-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.message-artifact-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 18%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+    color: var(--accent_hover);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.message-artifact-title,
+.message-artifact-meta {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.message-artifact-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text_primary);
+}
+.message-artifact-meta {
+    font-size: 11px;
+    color: var(--text_secondary);
 }
 .message-content .katex-display,
 .file-modal-markdown .katex-display {

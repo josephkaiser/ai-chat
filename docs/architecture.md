@@ -38,6 +38,7 @@ ai-chat/
 - Frontend: Vanilla JS, Marked.js, highlight.js, CodeMirror
 - LLM runtime: vLLM via an OpenAI-compatible API
 - Database: SQLite for conversations, messages, summaries, per-conversation runs/workspaces, and assistant feedback
+- Recent corrective user replies can also be mined from SQLite as implicit failure signals during feedback-driven repo-improvement passes.
 - Streaming: WebSocket `/ws/chat`
 
 ## Persistence model
@@ -45,6 +46,7 @@ ai-chat/
 - Every conversation gets a stable run id plus a dedicated workspace directory on disk.
 - Python package installs use a separate managed chat-scoped environment outside the workspace tree, so the workspace stays focused on user-visible files and artifacts.
 - Assistant message feedback is stored in SQLite and reused during history ranking.
+- Corrective user follow-ups can automatically mark the previous assistant turn as negative feedback, and feedback-driven deep runs can persist a recent-feedback digest into the workspace task state.
 - Voice artifacts live under `VOICE_ROOT` and are cleaned up by pruning plus conversation/app reset flows.
 
 ## Additional guides

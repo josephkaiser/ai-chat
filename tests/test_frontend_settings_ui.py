@@ -84,6 +84,37 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image'].includes(backendKind)", js)
         self.assertIn(".workspace-image-preview", css)
 
+    def test_workspace_artifact_rail_no_longer_backfills_with_arbitrary_repo_files(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("No recent turn artifacts yet. Browse All Files below", js)
+        self.assertIn("currentAssistantTurnArtifactPaths.has(entry.path)", js)
+        self.assertNotIn("sortWorkspaceFilesByRecent(files).forEach(entry => addEntryPath(entry.path));", js)
+
+    def test_chat_artifact_references_promote_into_viewer_and_split_layout(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("const ARTIFACT_REFERENCE_PATTERN =", js)
+        self.assertIn("const ARTIFACT_HELPER_TEXT_PATTERNS =", js)
+        self.assertIn("function enhanceMessageArtifactReferences(msg, container, rawContent = '')", js)
+        self.assertIn("function maybeAutoOpenReferencedArtifact(msg, rawContent = '')", js)
+        self.assertIn("function shouldCollapseArtifactHelperParagraph(paragraph)", js)
+        self.assertIn("function isMostRecentAssistantMessage(msg)", js)
+        self.assertIn("openWorkspaceFile(resolvedPath);", js)
+        self.assertIn("if (typeof payload.open_path === 'string' && payload.open_path)", js)
+        self.assertIn("root.classList.toggle('workspace-reader-open', !mobileLayout && showReader);", js)
+        self.assertIn("extractArtifactReferences(rawContent).length === 1 && isMostRecentAssistantMessage(msg)", js)
+        self.assertIn(".message-artifact-link", css)
+        self.assertIn(".chat.workspace-reader-open .input-area-stack", css)
+        self.assertIn(".chat.workspace-reader-open .messages", css)
+
+    def test_html_preview_rewrites_local_asset_references_for_workspace_viewer(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function prepareHtmlPreviewContent(content, path)", js)
+        self.assertIn("function resolveWorkspaceAssetPath(basePath, assetRef)", js)
+        self.assertIn("workspaceFileInlineViewUrl(resolvedPath)", js)
+        self.assertIn("renderHtmlPreview('inlineViewerPreview', content, path);", js)
+        self.assertIn("iframe.srcdoc = prepareHtmlPreviewContent(content, path);", js)
+
 
 if __name__ == "__main__":
     unittest.main()

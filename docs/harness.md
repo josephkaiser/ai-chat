@@ -55,7 +55,7 @@ Deep mode uses a richer workflow in `orchestrated_chat(...)`.
 Typical flow:
 
 1. `evaluate` picks workspace-assisted or text-first deep mode.
-2. `inspect` gathers repo facts, attachments, and conversation context.
+2. `inspect` gathers repo facts, attachments, conversation context, and when the request is feedback-driven repo improvement, a recent corrective-feedback digest from `chat.db`.
 3. `plan` builds a normalized execution plan.
 4. `execute` carries out plan steps, usually with workspace tools enabled.
 5. `verify` checks results and can run focused validations.
@@ -66,6 +66,7 @@ Two user-facing behaviors matter here:
 
 - Some deep requests return a **plan preview** first via `plan_ready`, so the UI can offer approval-first execution without overwriting the user's composer draft.
 - Explicit or auto-executed workspace build requests can proceed through the full inspect/build/verify path and stream step-by-step activity while work is happening.
+- When a repo-improvement request explicitly mentions feedback, recent chats, `chat.db`, or the dev loop, deep mode can save a `.ai/recent-feedback.md` artifact and treat those corrective user replies as failure signals for the current pass.
 
 ## Tool surface
 

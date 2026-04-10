@@ -240,6 +240,17 @@ SERVER_REPO_BOOTSTRAP_EXCLUDE_NAMES = {
     "runs",
     "workspaces",
 }
+WORKSPACE_HIDDEN_RUNTIME_NAMES = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".ipynb_checkpoints",
+    ".venv",
+    "venv",
+    "python-env",
+    "python-envs",
+}
 CURRENT_REPO_REFERENCE_PHRASES = (
     "this repo",
     "this repository",
@@ -1152,6 +1163,17 @@ def finalize_workflow_execution(
     del execution, assistant_message_id, final_outcome, status, error_text
 
 
+def sync_workflow_feedback_for_message(message_id: int, feedback: str) -> None:
+    """Compatibility shim for feedback-aware workflow hooks."""
+    del feedback
+    message = get_message_by_id(message_id)
+    if not message:
+        return
+    conversation_id = str(message.get("conversation_id") or "").strip()
+    if conversation_id:
+        schedule_conversation_summary_refresh(conversation_id)
+
+
 def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") -> pathlib.Path:
     """Resolve a user/model path inside the conversation workspace."""
     workspace = get_workspace_path(conversation_id)
@@ -1177,7 +1199,7 @@ def workspace_rel_path_is_hidden(rel_path: str) -> bool:
     if not raw or raw == ".":
         return False
     parts = [part for part in pathlib.PurePosixPath(raw).parts if part not in {"", "."}]
-    return any(part.startswith(".") for part in parts)
+    return any(part.startswith(".") or part.lower() in WORKSPACE_HIDDEN_RUNTIME_NAMES for part in parts)
 
 
 def workspace_command_allows_argument(
@@ -3371,6 +3393,9 @@ class DeepSession:
     workspace_enabled: bool = False
     workspace_facts: str = ""
     workspace_snapshot: Dict[str, Any] = field(default_factory=dict)
+    recent_product_feedback_entries: List[Dict[str, Any]] = field(default_factory=list)
+    recent_product_feedback_summary: str = ""
+    recent_product_feedback_artifact_path: str = ".ai/recent-feedback.md"
     plan: Dict[str, Any] = field(default_factory=dict)
     plan_preview_pending: bool = False
     task_board_path: str = ".ai/task-board.md"
@@ -3944,8 +3969,58 @@ def plan_text_is_generic(text: str, request_terms: List[str]) -> bool:
     return any(pattern in lowered for pattern in GENERIC_PLAN_PATTERNS)
 
 
+def request_prefers_illustrative_output(message: str) -> bool:
+    """Return whether the request wants a visible proof artifact, not just a minimal scalar output."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    phrases = (
+        "keep going until the artifact is real",
+        "show the result",
+        "show the output",
+        "show me the result",
+        "show me the output",
+        "visible result",
+        "prove it works",
+        "proof it works",
+        "show the graph",
+        "show the chart",
+        "chart showing",
+        "graph showing",
+    )
+    if any(phrase in text for phrase in phrases):
+        return True
+
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    demo_terms = {"demo", "prove", "proof", "showcase"}
+    output_terms = {
+        "result", "results", "output", "artifact", "artifacts", "chart", "graph",
+        "plot", "sequence", "table", "viewer", "render", "preview", "visual",
+    }
+    display_terms = {"show", "display", "render", "preview", "graph", "chart", "plot"}
+    work_terms = {"run", "execute", "works", "working", "real", "actual"}
+
+    if words & demo_terms and words & output_terms:
+        return True
+    if words & {"chart", "graph", "plot", "sequence", "table"} and words & {"show", "display", "render", "artifact", "output", "result"}:
+        return True
+    if words & display_terms and words & {"result", "output", "artifact"} and words & work_terms:
+        return True
+    return False
+
+
 def build_request_specific_step(step_index: int, total_steps: int, request_focus: str) -> str:
     """Rewrite a generic build step so it stays anchored to the current request."""
+    if request_prefers_illustrative_output(request_focus):
+        if total_steps <= 1:
+            return f"Build, run, and surface the clearest proof artifact for: {request_focus}"
+        if step_index <= 0:
+            return f"Inspect the relevant surfaces and build the main demo slice for: {request_focus}"
+        if step_index == total_steps - 2:
+            return f"Run the demo and capture real output or a visible artifact for: {request_focus}"
+        if step_index >= total_steps - 1:
+            return f"Polish the output so the proof is clear and verify it for: {request_focus}"
+        return f"Implement the next concrete demo slice needed for: {request_focus}"
     if total_steps <= 1:
         return f"Implement the targeted change and verify it for: {request_focus}"
     if step_index <= 0:
@@ -4097,11 +4172,21 @@ def normalize_step_subplan(plan: Dict[str, Any], fallback_step: str) -> Dict[str
     substeps = normalized.get("substeps")
     if not isinstance(substeps, list):
         substeps = []
-    normalized_substeps = [
-        str(item).strip()
-        for item in substeps
-        if str(item).strip()
-    ][:4]
+    internal_only_markers = (
+        "__pycache__", ".pyc", ".ai/task-state", "task-state.json",
+        ".ai/task-board", "task board artifact", "task-state artifact",
+    )
+    normalized_substeps = []
+    for item in substeps:
+        cleaned = str(item).strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if any(marker in lowered for marker in internal_only_markers):
+            continue
+        normalized_substeps.append(cleaned)
+        if len(normalized_substeps) >= 4:
+            break
     if not normalized_substeps:
         normalized_substeps = [
             f"Inspect the files, artifacts, or gaps most relevant to: {fallback_step}",
@@ -4130,7 +4215,13 @@ def build_heuristic_step_subplan(
 ) -> Dict[str, Any]:
     """Build a deterministic nested subplan for a single top-level build step."""
     lowered = str(step or "").strip().lower()
-    if any(term in lowered for term in ("create", "scaffold", "structure", "top-level", "starter repo")):
+    if request_prefers_illustrative_output(step):
+        substeps = [
+            f"Inspect the current demo output or artifact gaps tied to: {step}",
+            f"Generate or improve a more illustrative output artifact or real command result for: {step}",
+            f"Re-run or re-open the result and confirm the surfaced output now proves: {step}",
+        ]
+    elif any(term in lowered for term in ("create", "scaffold", "structure", "top-level", "starter repo")):
         substeps = [
             f"Lay down the concrete files, folders, and wiring needed for: {step}",
             f"Fill in the first working implementation slice required by: {step}",
@@ -4353,14 +4444,16 @@ def capture_workspace_snapshot(conversation_id: str, max_entries: int = 40, max_
             total_files += 1
             rel_path = pathlib.Path(filename) if rel_root == pathlib.Path(".") else rel_root / filename
             rel_text = rel_path.as_posix()
-            if not rel_text.startswith(".ai/"):
+            if not workspace_rel_path_is_hidden(rel_text):
                 user_file_count += 1
-            if len(sample_paths) < max_entries:
+            if not workspace_rel_path_is_hidden(rel_text) and len(sample_paths) < max_entries:
                 sample_paths.append(rel_text)
 
     top_level: List[str] = []
     if workspace.exists():
         for item in sorted(workspace.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            if workspace_rel_path_is_hidden(item.name):
+                continue
             top_level.append(item.name + ("/" if item.is_dir() else ""))
 
     return {
@@ -4394,6 +4487,56 @@ def format_workspace_snapshot(snapshot: Dict[str, Any]) -> str:
 def workspace_is_effectively_empty(snapshot: Dict[str, Any]) -> bool:
     """Treat workspaces with only task-board state as empty for planning purposes."""
     return int(snapshot.get("user_file_count", 0) or 0) == 0
+
+
+INSPECT_CLARIFICATION_MARKERS = (
+    "would you like to proceed",
+    "different issue to address",
+    "need more context",
+    "need additional context",
+    "there is no existing repository to inspect or modify",
+    "there is no existing repo to inspect or modify",
+    "workspace currently contains no files or directories",
+    "workspace contains no files or directories",
+    "which file",
+    "which part",
+    "which issue",
+)
+
+
+def extract_context_clarification_from_workspace_facts(facts: str) -> str:
+    """Return a blocking clarification question when inspect explicitly says context is missing."""
+    cleaned = str(facts or "").strip()
+    if not cleaned:
+        return ""
+    primary = cleaned.split("\n\nGrounded workspace snapshot:", 1)[0].strip()
+    if not primary or "?" not in primary:
+        return ""
+    lowered = primary.lower()
+    if any(marker in lowered for marker in INSPECT_CLARIFICATION_MARKERS):
+        return primary
+    return ""
+
+
+def should_pause_for_workspace_clarification(
+    request_text: str,
+    workspace_facts: str,
+    workspace_snapshot: Dict[str, Any],
+    *,
+    has_plan: bool = False,
+    execution_requested: bool = False,
+) -> str:
+    """Return a clarification question when inspect found the workspace lacks enough grounding to proceed safely."""
+    if has_plan or execution_requested:
+        return ""
+    clarification = extract_context_clarification_from_workspace_facts(workspace_facts)
+    if not clarification:
+        return ""
+    if workspace_is_effectively_empty(workspace_snapshot):
+        return clarification
+    if request_targets_current_repo(request_text) and int(workspace_snapshot.get("user_file_count", 0) or 0) <= 1:
+        return clarification
+    return ""
 
 
 def request_targets_current_repo(message: str) -> bool:
@@ -4511,10 +4654,12 @@ def request_is_repo_scaffold(message: str) -> bool:
     )
     if any(phrase in text for phrase in explicit_repo_phrases):
         return True
+    if any(phrase in text for phrase in CURRENT_REPO_REFERENCE_PHRASES):
+        return False
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     repo_shape_terms = {
-        "repo", "repository", "codebase", "folders", "folder", "directories", "directory",
-        "tree", "layout", "structure", "scaffold", "boilerplate",
+        "folders", "folder", "directories", "directory",
+        "tree", "layout", "structure", "scaffold", "boilerplate", "template", "skeleton",
     }
     build_terms = {"build", "bootstrap", "create", "generate", "make", "scaffold", "seed", "starter", "template"}
     return bool(words & build_terms) and bool(words & repo_shape_terms)
@@ -4528,6 +4673,12 @@ def build_empty_workspace_steps(message: str) -> List[str]:
             "Implement the first useful working slice so the scaffold is immediately usable and reviewable.",
             "Tighten obvious gaps, wiring, and docs before verification.",
         ]
+    if request_prefers_illustrative_output(message):
+        return [
+            "Create the main demo artifact or code slice directly in the workspace.",
+            "Run it and capture real output or a surfaced artifact that proves it works.",
+            "Polish the output, add a richer visual or sequence when it helps, and verify the final result.",
+        ]
     return [
         "Create the first durable workspace artifact or code slice that best fits the request, even if it spans more than one file.",
         "Add supporting files, notes, or structure wherever they materially improve usability or make the result work.",
@@ -4539,6 +4690,8 @@ def build_empty_workspace_strategy(message: str) -> str:
     """Describe the execution approach for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "Scaffold the requested repo directly into the empty workspace, then implement the first useful slice and verify it."
+    if request_prefers_illustrative_output(message):
+        return "Build the requested demo directly in the workspace, run it, and refine the visible proof artifact until it clearly shows the result."
     return "Start by creating the most valuable durable artifact or code slice for the request in the empty workspace, expand as needed, then verify the result."
 
 
@@ -4546,6 +4699,8 @@ def build_empty_workspace_deliverable(message: str) -> str:
     """Describe the expected deliverable for empty-workspace build requests."""
     if request_is_repo_scaffold(message):
         return "A usable starter repo scaffold written into the workspace and ready to inspect or download."
+    if request_prefers_illustrative_output(message):
+        return "A runnable workspace demo plus a real output artifact or command result that clearly proves it works."
     return "A useful workspace result written into the empty workspace, shaped to fit the request rather than forced into a single-file deliverable."
 
 
@@ -4555,6 +4710,12 @@ def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> Lis
         return [
             "Confirm the workspace now contains the requested scaffold and key entry-point files.",
             "Run the narrowest useful startup, syntax, or smoke check for the created repo.",
+            audit_check,
+        ]
+    if request_prefers_illustrative_output(message):
+        return [
+            "Confirm the demo files or surfaced artifacts now exist and match the request.",
+            "Re-run or inspect the real output artifact to verify the visible result is genuine.",
             audit_check,
         ]
     return [
@@ -4567,6 +4728,7 @@ def build_empty_workspace_verifier_checks(message: str, audit_check: str) -> Lis
 def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Dict[str, Any]:
     """Ground deep-mode plans in the inspected workspace and required audits."""
     normalized = normalize_deep_plan(plan)
+    request_text = session.task_request or session.message
     if plan_looks_like_refusal(normalized, session.message):
         normalized["strategy"] = (
             "Use the inspected context to do the most useful work available, then call out any remaining blocker only if it materially limits the result."
@@ -4584,20 +4746,37 @@ def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Di
             "Call out any remaining blocker only if it is real, verified, and still affects the result.",
         ]
 
-    verifier_checks = list(normalized.get("verifier_checks", []))
+    if session.workspace_enabled and workspace_is_effectively_empty(session.workspace_snapshot):
+        intent = classify_workspace_intent(session.message)
+        if intent in {"focused_write", "broad_write"} or is_explicit_plan_execution_request(session.message):
+            normalized["strategy"] = build_empty_workspace_strategy(request_text)
+            normalized["deliverable"] = build_empty_workspace_deliverable(request_text)
+            normalized["builder_steps"] = build_empty_workspace_steps(request_text)
+            normalized["verifier_checks"] = build_empty_workspace_verifier_checks(request_text, "")
+    elif session.workspace_enabled and request_prefers_illustrative_output(request_text):
+        normalized["strategy"] = (
+            "Inspect the relevant workspace surfaces, build the requested demo or proof slice, "
+            "run it, and refine the visible output until it clearly demonstrates the result."
+        )
+        normalized["deliverable"] = (
+            "A real workspace result with runnable output or a surfaced artifact that convincingly proves the requested behavior."
+        )
+        normalized["builder_steps"] = [
+            "Inspect the relevant files or surfaces and build the main demo slice that best proves the request.",
+            "Run the demo and capture real output or a surfaced artifact that shows the result.",
+            "Polish the proof so the output is more illustrative and verify the final result against the request.",
+        ]
+        normalized["verifier_checks"] = [
+            "Confirm the main demo files or surfaced artifacts now exist and match the request.",
+            "Inspect or re-run the real output artifact to verify the claimed behavior.",
+        ]
+
+    verifier_checks = [str(step).strip() for step in normalized.get("verifier_checks", []) if str(step).strip()]
     audit_check = "Compare the requested deliverable against the files changed and verification evidence."
     if audit_check not in verifier_checks:
         verifier_checks.append(audit_check)
     normalized["verifier_checks"] = verifier_checks[:5]
-
-    if session.workspace_enabled and workspace_is_effectively_empty(session.workspace_snapshot):
-        intent = classify_workspace_intent(session.message)
-        if intent in {"focused_write", "broad_write"} or is_explicit_plan_execution_request(session.message):
-            normalized["strategy"] = build_empty_workspace_strategy(session.message)
-            normalized["deliverable"] = build_empty_workspace_deliverable(session.message)
-            normalized["builder_steps"] = build_empty_workspace_steps(session.message)
-            normalized["verifier_checks"] = build_empty_workspace_verifier_checks(session.message, audit_check)
-    normalized = apply_plan_request_specificity_guardrails(session.task_request or session.message, normalized)
+    normalized = apply_plan_request_specificity_guardrails(request_text, normalized)
     return normalize_deep_plan(normalized)
 
 
@@ -5031,9 +5210,19 @@ def format_task_board(
         "",
         "## Workspace Snapshot",
         format_workspace_snapshot(session.workspace_snapshot),
+    ]
+    if session.recent_product_feedback_summary:
+        lines.extend([
+            "",
+            "## Recent Product Feedback",
+            session.recent_product_feedback_summary,
+            "",
+            f"[[artifact:{session.recent_product_feedback_artifact_path}]]",
+        ])
+    lines.extend([
         "",
         "## Step Notes",
-    ]
+    ])
     if session.build_step_summaries:
         lines.extend(f"- {summary}" for summary in session.build_step_summaries)
     else:
@@ -5102,7 +5291,7 @@ async def persist_task_board(
         ),
     )
     if announce:
-        await send_assistant_note(session.websocket, f"Task board saved to `[[artifact:{path}]]`.")
+        await send_assistant_note(session.websocket, f"[[artifact:{path}]]")
     return path
 
 
@@ -5113,6 +5302,9 @@ def format_task_state_payload(session: DeepSession) -> Dict[str, Any]:
         "pause_reason": normalize_pause_reason(session.pause_reason),
         "workspace_facts": session.workspace_facts,
         "workspace_snapshot": session.workspace_snapshot,
+        "recent_product_feedback_entries": session.recent_product_feedback_entries,
+        "recent_product_feedback_summary": session.recent_product_feedback_summary,
+        "recent_product_feedback_artifact_path": session.recent_product_feedback_artifact_path,
         "plan": session.plan,
         "plan_preview_pending": session.plan_preview_pending,
         "task_board_path": session.task_board_path,
@@ -5206,6 +5398,106 @@ def task_state_has_pending_follow_up(payload: Dict[str, Any]) -> bool:
     ]
     verification_summary = str(payload.get("verification_summary", "")).strip()
     return bool(steps) and len(completed) >= len(steps) and not verification_summary
+
+
+def build_saved_progress_fallback_response(
+    conversation_id: str,
+    request_text: str = "",
+    *,
+    error_text: str = "",
+) -> str:
+    """Build a short, honest fallback reply when a workspace turn saved state but no clean final answer."""
+    payload = load_task_state(conversation_id) or {}
+    if not payload:
+        if error_text:
+            return (
+                "I hit an unexpected internal error before I could finish the reply. "
+                "Please say continue and I'll retry from the current workspace state."
+            )
+        return ""
+
+    request = str(payload.get("request", "")).strip() or str(request_text or "").strip()
+    snapshot = payload.get("workspace_snapshot") if isinstance(payload.get("workspace_snapshot"), dict) else {}
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    task_board_path = str(payload.get("task_board_path", "")).strip()
+    build_summaries = [
+        str(item).strip()
+        for item in payload.get("build_step_summaries", [])
+        if str(item).strip()
+    ]
+    changed_files = [
+        str(item).strip()
+        for item in payload.get("changed_files", [])
+        if str(item).strip()
+    ]
+    verification_summary = str(payload.get("verification_summary", "")).strip()
+    builder_steps = [
+        str(step).strip()
+        for step in plan.get("builder_steps", [])
+        if str(step).strip()
+    ]
+    completed_count = len(build_summaries)
+    pending_follow_up = task_state_has_pending_follow_up(payload)
+
+    lines: List[str] = []
+    if error_text:
+        lines.append("I hit an unexpected internal error before I could finish the chat reply, but I saved the current workspace state.")
+    else:
+        lines.append("I didn't finish a clean chat reply for this turn, but I did save the current workspace state.")
+
+    if request and request_targets_current_repo(request) and int(snapshot.get("user_file_count", 0) or 0) > 0 and not changed_files:
+        lines.append("The files in the workspace panel are the repo snapshot for context, not newly generated output from this turn.")
+
+    if builder_steps:
+        lines.append(f"Progress: completed {completed_count} of {len(builder_steps)} build steps.")
+        if completed_count < len(builder_steps):
+            lines.append(f"Next step: {builder_steps[completed_count]}")
+
+    if build_summaries:
+        lines.append("Latest saved note: " + truncate_output(build_summaries[-1], limit=280))
+
+    if changed_files:
+        preview = ", ".join(f"`{path}`" for path in changed_files[:5])
+        if len(changed_files) > 5:
+            preview += f", and {len(changed_files) - 5} more"
+        lines.append(f"Touched files: {preview}")
+
+    if verification_summary:
+        lines.append("Verification: " + truncate_output(verification_summary, limit=220))
+
+    if task_board_path:
+        lines.append(f"[[artifact:{task_board_path}]]")
+
+    if pending_follow_up:
+        lines.append("Say continue to resume from the saved workspace state.")
+
+    return "\n\n".join(line for line in lines if line).strip()
+
+
+def ensure_nonempty_turn_response(
+    response: str,
+    conversation_id: str,
+    request_text: str = "",
+    *,
+    error_text: str = "",
+) -> str:
+    """Guarantee that the user gets a visible reply even when the rich pipeline returns nothing."""
+    cleaned = str(response or "").strip()
+    if cleaned:
+        return cleaned
+    fallback = build_saved_progress_fallback_response(
+        conversation_id,
+        request_text,
+        error_text=error_text,
+    )
+    if fallback:
+        return fallback
+    if error_text:
+        return (
+            "I hit an unexpected internal error before I could finish the reply. "
+            "Please say continue and I'll retry from the current workspace state."
+        )
+    return "I finished the turn without producing a visible reply. Please say continue and I'll resume from the current workspace state."
 
 
 def render_step_checkpoint_message(session: DeepSession, step_index: int, step_summary: str) -> str:
@@ -5368,6 +5660,13 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
     workspace_snapshot = payload.get("workspace_snapshot")
     if isinstance(workspace_snapshot, dict):
         session.workspace_snapshot = workspace_snapshot
+    recent_feedback_entries = payload.get("recent_product_feedback_entries")
+    if isinstance(recent_feedback_entries, list):
+        session.recent_product_feedback_entries = [item for item in recent_feedback_entries if isinstance(item, dict)]
+    session.recent_product_feedback_summary = str(payload.get("recent_product_feedback_summary", "")).strip()
+    session.recent_product_feedback_artifact_path = str(
+        payload.get("recent_product_feedback_artifact_path") or session.recent_product_feedback_artifact_path
+    )
     if isinstance(plan, dict):
         session.plan = apply_deep_plan_guardrails(session, plan)
     session.plan_preview_pending = bool(payload.get("plan_preview_pending"))
@@ -5627,10 +5926,13 @@ async def stream_chat_response(
     messages: List[Dict[str, str]],
     max_tokens: int,
     temperature: float = 0.25,
+    *,
+    start_output: bool = True,
 ) -> str:
     """Stream a plain assistant response to the UI and return the final saved text."""
     splitter = ThinkingStreamSplitter()
-    await websocket.send_json({"type": "start"})
+    if start_output:
+        await websocket.send_json({"type": "start"})
     async for raw_token in vllm_chat_stream(messages, max_tokens=max_tokens, temperature=temperature):
         for event in splitter.feed(raw_token):
             await websocket.send_json(event)
@@ -6001,6 +6303,314 @@ def message_feedback_value(role: Optional[str], feedback: Optional[str]) -> str:
     """Return a normalized feedback label for assistant messages only."""
     return normalize_feedback_label(feedback) if str(role or "").strip().lower() == "assistant" else ""
 
+
+IMPLICIT_FEEDBACK_REPLY_PREFIXES = (
+    "this ",
+    "it ",
+    "that ",
+    "the ",
+    "also ",
+    "still ",
+    "i see ",
+    "you ",
+    "your ",
+    "we ",
+    "but ",
+)
+IMPLICIT_NEGATIVE_FEEDBACK_CATEGORY_PATTERNS: List[tuple[str, tuple[str, ...]]] = [
+    (
+        "artifact_visibility",
+        (
+            r"\b(?:plot|image|png|pdf|artifact|viewer)\b.*\b(?:doesn't show|didn't show|not show|not showing|won't show|broken|missing)\b",
+            r"\bi see\b.*\bbut not\b",
+        ),
+    ),
+    (
+        "missing_context",
+        (
+            r"\bnot enough context\b",
+            r"\bshould have asked\b",
+            r"\bshould've asked\b",
+            r"\bno context\b",
+            r"\bmissing context\b",
+        ),
+    ),
+    (
+        "non_interactive_artifact",
+        (
+            r"\bnot interactive\b",
+            r"\bcan't pick\b",
+            r"\bcannot pick\b",
+            r"\bnot a real artifact\b",
+        ),
+    ),
+    (
+        "silent_turn",
+        (
+            r"\bno chat response\b",
+            r"\bdidn't have enough context\b.*\bshould have asked\b",
+            r"\bgave files that i have no context for\b",
+        ),
+    ),
+    (
+        "approval_resume",
+        (
+            r"\bforgot\b.*\bapprov",
+            r"\bacted as if\b.*\bapprov",
+            r"\bdidn't\b.*\bapprov",
+            r"\bdid not\b.*\bapprov",
+        ),
+    ),
+    (
+        "workspace_clutter",
+        (
+            r"\boverwhelming\b",
+            r"\b\.venv\b",
+            r"\bdotfiles should be hidden\b",
+        ),
+    ),
+    (
+        "output_quality",
+        (
+            r"\bunsatisfying\b",
+            r"\bcould be much better\b",
+            r"\bnot based on the actual\b",
+            r"\bnot the actual\b",
+            r"\bthird check\b.*\bdoesn't get checked\b",
+            r"\bshould have\b",
+        ),
+    ),
+]
+IMPLICIT_NEGATIVE_FEEDBACK_GENERAL_CUES = (
+    "doesn't",
+    "didn't",
+    "isn't",
+    "doesnt",
+    "didnt",
+    "isnt",
+    "forgot",
+    "confusing",
+    "overwhelming",
+    "unsatisfying",
+    "broken",
+    "broke",
+    "missing",
+    "not interactive",
+    "not enough",
+    "should have",
+    "no chat response",
+    "not a real artifact",
+    "not based on",
+)
+
+
+def detect_implicit_failure_feedback(message: str) -> Dict[str, str]:
+    """Classify short corrective user replies that imply the previous assistant turn failed."""
+    raw = str(message or "").strip()
+    if not raw:
+        return {}
+    normalized = " ".join(raw.lower().split())
+    if not normalized:
+        return {}
+
+    category = ""
+    for name, patterns in IMPLICIT_NEGATIVE_FEEDBACK_CATEGORY_PATTERNS:
+        if any(re.search(pattern, normalized) for pattern in patterns):
+            category = name
+            break
+
+    if not category:
+        starts_like_feedback = normalized.startswith(IMPLICIT_FEEDBACK_REPLY_PREFIXES)
+        has_general_cue = any(cue in normalized for cue in IMPLICIT_NEGATIVE_FEEDBACK_GENERAL_CUES)
+        if not (starts_like_feedback and has_general_cue):
+            return {}
+        category = "general_failure"
+
+    return {
+        "label": "negative",
+        "category": category,
+        "excerpt": truncate_output(raw, limit=220),
+    }
+
+
+def apply_implicit_feedback_from_user_reply(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    user_message_id: int,
+    content: str,
+) -> Dict[str, str]:
+    """Interpret corrective user text as negative feedback on the immediately previous assistant message."""
+    signal = detect_implicit_failure_feedback(content)
+    if signal.get("label") != "negative":
+        return {}
+
+    cursor = conn.cursor()
+    cursor.execute(
+        '''SELECT id, content
+           FROM messages
+           WHERE conversation_id = ? AND role = 'assistant' AND id < ?
+           ORDER BY id DESC
+           LIMIT 1''',
+        (conversation_id, user_message_id),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return {}
+
+    assistant_message_id = int(row[0])
+    cursor.execute('UPDATE messages SET feedback = ? WHERE id = ?', ('negative', assistant_message_id))
+    logger.info(
+        "Implicit negative feedback detected for assistant message %s in conversation %s (%s)",
+        assistant_message_id,
+        conversation_id,
+        signal.get("category", "general_failure"),
+    )
+    return {
+        **signal,
+        "assistant_message_id": str(assistant_message_id),
+        "assistant_excerpt": truncate_output(str(row[1] or ""), limit=180),
+    }
+
+
+def collect_recent_product_feedback_entries(
+    limit: int = 6,
+    *,
+    per_conversation_limit: int = 2,
+) -> List[Dict[str, str]]:
+    """Collect recent corrective user replies that should inform repo-level product improvements."""
+    safe_limit = max(1, min(int(limit or 6), 12))
+    safe_per_conversation = max(1, min(int(per_conversation_limit or 2), 3))
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''SELECT m.id,
+                  m.conversation_id,
+                  m.content,
+                  m.timestamp,
+                  prev.id,
+                  prev.content,
+                  prev.feedback,
+                  c.title,
+                  c.updated_at
+           FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           JOIN messages prev ON prev.id = (
+               SELECT p.id
+               FROM messages p
+               WHERE p.conversation_id = m.conversation_id AND p.id < m.id
+               ORDER BY p.id DESC
+               LIMIT 1
+           )
+           WHERE m.role = 'user' AND prev.role = 'assistant'
+           ORDER BY c.updated_at DESC, m.id DESC
+           LIMIT ?''',
+        (max(safe_limit * 12, 48),),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    counts_by_conversation: Dict[str, int] = {}
+    entries: List[Dict[str, str]] = []
+    for row in rows:
+        signal = detect_implicit_failure_feedback(str(row[2] or ""))
+        previous_feedback = normalize_feedback_label(row[6])
+        if signal.get("label") != "negative" and previous_feedback != "negative":
+            continue
+        conversation_id = str(row[1] or "").strip()
+        if not conversation_id:
+            continue
+        if counts_by_conversation.get(conversation_id, 0) >= safe_per_conversation:
+            continue
+        counts_by_conversation[conversation_id] = counts_by_conversation.get(conversation_id, 0) + 1
+        entries.append({
+            "conversation_id": conversation_id,
+            "conversation_title": str(row[7] or "Untitled").strip() or "Untitled",
+            "updated_at": str(row[8] or row[3] or "").strip(),
+            "user_message_id": str(row[0]),
+            "assistant_message_id": str(row[4]),
+            "category": signal.get("category", "general_failure" if previous_feedback == "negative" else ""),
+            "user_feedback": truncate_output(str(row[2] or ""), limit=220),
+            "assistant_excerpt": truncate_output(str(row[5] or ""), limit=180),
+        })
+        if len(entries) >= safe_limit:
+            break
+    return entries
+
+
+def format_recent_product_feedback_summary(entries: List[Dict[str, str]]) -> str:
+    """Format recent product feedback as compact plain text for prompts and task boards."""
+    if not entries:
+        return ""
+    lines: List[str] = []
+    for idx, entry in enumerate(entries, start=1):
+        category = str(entry.get("category") or "general_failure").replace("_", " ")
+        lines.append(
+            f"{idx}. [{category}] User: {entry.get('user_feedback', '(none)')}"
+        )
+        lines.append(
+            f"   Prior assistant: {entry.get('assistant_excerpt', '(none)')}"
+        )
+    return "\n".join(lines)
+
+
+def format_recent_product_feedback_markdown(entries: List[Dict[str, str]]) -> str:
+    """Render recent corrective feedback into a durable workspace artifact."""
+    if not entries:
+        return "# Recent Product Feedback\n\nNo recent corrective feedback was captured."
+    lines = [
+        "# Recent Product Feedback",
+        "",
+        "Treat these as recent failure signals from corrective user replies or explicit negative feedback.",
+    ]
+    for idx, entry in enumerate(entries, start=1):
+        category = str(entry.get("category") or "general_failure").replace("_", " ").title()
+        lines.extend([
+            "",
+            f"## {idx}. {category}",
+            f"- Conversation: {entry.get('conversation_title', 'Untitled')} ({entry.get('conversation_id', '')})",
+            f"- Updated: {entry.get('updated_at', '(unknown)')}",
+            f"- User feedback: {entry.get('user_feedback', '(none)')}",
+            f"- Prior assistant: {entry.get('assistant_excerpt', '(none)')}",
+        ])
+    return "\n".join(lines)
+
+
+def request_wants_recent_product_feedback(message: str) -> bool:
+    """Return whether a repo-improvement request should be grounded in recent corrective chat feedback."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    repoish = (
+        request_targets_current_repo(message)
+        or "chat.db" in text
+        or "ai-chat" in text
+        or "developer of this ai-chat" in text
+    )
+    if not repoish:
+        return False
+    feedback_terms = (
+        "feedback",
+        "recent chats",
+        "last chat",
+        "last few messages",
+        "chat.db",
+        "dev loop",
+        "under-deliver",
+        "failure",
+    )
+    improvement_terms = (
+        "improve",
+        "fix",
+        "review",
+        "patch",
+        "developer",
+        "app",
+        "agent",
+        "software",
+        "prompt",
+    )
+    return any(term in text for term in feedback_terms) and any(term in text for term in improvement_terms)
+
 def calculate_message_relevance_score(msg: Dict, current_query: str, message_index: int, total_messages: int) -> float:
     """Calculate relevance and quality score for a message"""
     score = 0.0
@@ -6298,6 +6908,9 @@ def save_message(conv_id: str, role: str, content: str) -> int:
               (conv_id, role, content, datetime.now().isoformat(), stored_feedback))
 
     message_id = c.lastrowid
+
+    if role == 'user':
+        apply_implicit_feedback_from_user_reply(conn, conv_id, message_id, content)
 
     c.execute('UPDATE conversations SET updated_at = ? WHERE id = ?',
               (datetime.now().isoformat(), conv_id))
@@ -8899,11 +9512,14 @@ def tool_loop_continuation_limit_for_request(
         return 0
 
     intent = classify_workspace_intent(message)
+    wants_illustrative_output = request_prefers_illustrative_output(message)
     if activity_phase == "execute":
         return TOOL_LOOP_MAX_CONTINUATIONS
     if intent == "broad_write":
         return TOOL_LOOP_MAX_CONTINUATIONS
     if intent == "focused_write":
+        return min(2, TOOL_LOOP_MAX_CONTINUATIONS)
+    if wants_illustrative_output and any(name.startswith("workspace.") for name in allowed_tools):
         return min(2, TOOL_LOOP_MAX_CONTINUATIONS)
     if activity_phase in {"inspect", "verify", "synthesize"}:
         return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
@@ -8996,9 +9612,12 @@ async def run_resumable_tool_loop(
                 outcome.final_text = build_tool_loop_hard_limit_message(progress_summary)
             return outcome
 
-        await send_assistant_note(
+        await send_activity_event(
             websocket,
-            "The current tool batch is full. Continuing automatically from the saved workspace state.",
+            activity_phase,
+            "Continue",
+            "Continuing automatically from the saved workspace state.",
+            step_label=activity_step_label,
         )
 
     return ToolLoopOutcome(
@@ -9645,6 +10264,8 @@ def should_upgrade_to_workspace_execution(
 def tool_loop_step_limit_for_request(message: str, allowed_tools: List[str]) -> int:
     """Choose a small tool-loop budget based on request scope."""
     intent = classify_workspace_intent(message)
+    repo_scale = request_targets_current_repo(message)
+    wants_illustrative_output = request_prefers_illustrative_output(message)
     steps = TOOL_LOOP_MAX_STEPS
     if intent == "focused_read":
         steps = min(steps, 3)
@@ -9661,6 +10282,10 @@ def tool_loop_step_limit_for_request(message: str, allowed_tools: List[str]) -> 
             steps = min(steps, 4)
         else:
             steps = min(steps, 6 if intent == "broad_write" else 4)
+    if wants_illustrative_output and any(name.startswith("workspace.") for name in allowed_tools):
+        steps = max(steps, 7 if is_fast_profile_active() else 10)
+    if repo_scale and any(name.startswith("workspace.") for name in allowed_tools):
+        steps = max(steps, 10 if is_fast_profile_active() else 12)
     return max(1, steps)
 
 
@@ -9685,13 +10310,21 @@ def tool_loop_token_budget(max_tokens: int, message: str, allowed_tools: List[st
 def deep_execute_step_limit_for_request(message: str) -> int:
     """Give build-phase workspace work a bit more room before pausing."""
     intent = classify_workspace_intent(message)
+    wants_illustrative_output = request_prefers_illustrative_output(message)
     if is_fast_profile_active():
-        return 6 if intent == "broad_write" else 5
+        base = 6 if intent == "broad_write" else 5
+        if wants_illustrative_output:
+            base = max(base, 7)
+        return base
     if intent == "broad_write":
-        return 9
-    if intent == "focused_write":
-        return 8
-    return 6
+        base = 9
+    elif intent == "focused_write":
+        base = 8
+    else:
+        base = 6
+    if wants_illustrative_output:
+        base = max(base, 11)
+    return base
 
 
 def deep_execute_token_budget(max_tokens: int, message: str) -> int:
@@ -9886,6 +10519,8 @@ AGENT_EXECUTION_EXPECTATION_PHRASES = (
     "show me the actual output",
     "show me the rendered chart",
     "show me the chart artifact",
+    "keep going until the artifact is real",
+    "show the result without handing execution back to me",
     "render it in the viewer",
     "render the homepage in the viewer",
     "keep iterating until",
@@ -10006,6 +10641,8 @@ def request_demands_agent_execution(message: str) -> bool:
         return True
 
     words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if request_prefers_illustrative_output(text) and words & {"run", "execute", "show", "prove", "render"}:
+        return True
     if {"run", "execute"} & words and {"yourself", "actual", "real", "output"} & words:
         return True
     if {"render", "viewer", "preview"} & words and {"html", "homepage", "page", "chart", "artifact", "report"} & words:
@@ -10073,10 +10710,18 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         "Inspect",
         "Inspecting the workspace to ground planning in observed files and artifacts.",
     )
+    recent_feedback_block = ""
+    if session.recent_product_feedback_summary:
+        recent_feedback_block = (
+            "Recent product feedback to treat as failure signals for this pass:\n"
+            f"{session.recent_product_feedback_summary}\n\n"
+            f"Feedback digest artifact:\n[[artifact:{session.recent_product_feedback_artifact_path}]]\n\n"
+        )
     inspect_history = session.history_messages() + [{
         "role": "user",
         "content": (
             f"Conversation context:\n{session.context or '(none)'}\n\n"
+            f"{recent_feedback_block}"
             f"Deterministic workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
             f"User request:\n{session.task_request or session.message}\n\n"
             "Inspect the workspace and gather the most relevant facts before planning. "
@@ -10774,6 +11419,11 @@ async def deep_verify(session: DeepSession) -> str:
         "content": (
             f"User request:\n{session.task_request or session.message}\n\n"
             f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
+            + (
+                f"Recent product feedback to verify against:\n{session.recent_product_feedback_summary}\n\n"
+                if session.recent_product_feedback_summary else ""
+            )
+            +
             f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
             f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
             "Verifier checks:\n"
@@ -10833,12 +11483,19 @@ async def deep_review(session: DeepSession) -> str:
         "Preparing the final answer from verified artifacts.",
     )
     artifact_refs = [f"[[artifact:{session.task_board_path}]]"]
+    if session.recent_product_feedback_summary:
+        artifact_refs.append(f"[[artifact:{session.recent_product_feedback_artifact_path}]]")
     artifact_refs.extend(f"[[artifact:{path}]]" for path in session.changed_files[:8])
     synth_history = session.history_messages() + [{
         "role": "user",
         "content": (
             f"User's question:\n{session.task_request or session.message}\n\n"
             f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
+            + (
+                f"Recent product feedback:\n{session.recent_product_feedback_summary}\n\n"
+                if session.recent_product_feedback_summary else ""
+            )
+            +
             f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
             f"Artifacts to inspect:\n" + "\n".join(artifact_refs) + "\n\n"
             f"Build summary:\n{session.build_summary or '(none)'}\n\n"
@@ -10915,6 +11572,38 @@ def create_deep_session(
     )
 
 
+async def collect_recent_product_feedback_for_session(session: DeepSession) -> str:
+    """Hydrate a deep session with recent corrective product feedback when the request calls for it."""
+    request_text = session.task_request or session.message
+    if not request_wants_recent_product_feedback(request_text):
+        session.recent_product_feedback_entries = []
+        session.recent_product_feedback_summary = ""
+        return ""
+
+    entries = collect_recent_product_feedback_entries(limit=6)
+    if not entries:
+        session.recent_product_feedback_entries = []
+        session.recent_product_feedback_summary = ""
+        return ""
+
+    session.recent_product_feedback_entries = entries
+    session.recent_product_feedback_summary = format_recent_product_feedback_summary(entries)
+    if session.workspace_enabled:
+        write_workspace_text(
+            session.conversation_id,
+            session.recent_product_feedback_artifact_path,
+            format_recent_product_feedback_markdown(entries),
+        )
+    await send_activity_event(
+        session.websocket,
+        "inspect",
+        "Feedback",
+        f"Loaded {len(entries)} recent corrective feedback signal(s) from chat history for this repo-improvement pass.",
+    )
+    await persist_task_state(session)
+    return session.recent_product_feedback_summary
+
+
 async def apply_deep_session_plan_override(session: DeepSession) -> bool:
     """Apply any edited builder-step overrides onto a restored deep plan."""
     if not session.plan or not session.plan_override_builder_steps:
@@ -10950,6 +11639,11 @@ async def bootstrap_deep_session(
             await maybe_resume_task_state(session)
         except Exception as exc:
             logger.warning("Deep mode resume failed, continuing fresh: %s", exc)
+
+    try:
+        await collect_recent_product_feedback_for_session(session)
+    except Exception as exc:
+        logger.warning("Recent product feedback collection failed, continuing: %s", exc)
 
     await apply_deep_session_plan_override(session)
     await deep_inspect_workspace(session)
@@ -11129,6 +11823,18 @@ async def orchestrated_chat(
     bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=True)
     if not bootstrap_ready and session.draft_response:
         return session.draft_response
+
+    clarification = should_pause_for_workspace_clarification(
+        session.task_request or session.message,
+        session.workspace_facts,
+        session.workspace_snapshot,
+        has_plan=bool(session.plan),
+        execution_requested=session.execution_requested,
+    )
+    if clarification:
+        session.draft_response = clarification
+        await persist_task_state(session)
+        return clarification
 
     decision = decide_deep_route(
         DeepRouteRequest(
@@ -11679,6 +12385,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         return
 
     workflow_execution: Optional[WorkflowExecutionContext] = None
+    response_started = False
 
     try:
         if client_turn_id:
@@ -11733,6 +12440,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 workflow_execution=workflow_execution,
             )
             await websocket.send_json({'type': 'start'})
+            response_started = True
             await send_final_replacement(websocket, full_response)
             assistant_message_id = save_message(conv_id, 'assistant', full_response)
             finalize_workflow_execution(
@@ -11747,6 +12455,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
 
         if mode == 'deep' or prepared.auto_execute_workspace:
             try:
+                await websocket.send_json({'type': 'start'})
+                response_started = True
                 full_response = await orchestrated_chat(
                     websocket,
                     conv_id,
@@ -11759,6 +12469,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     plan_override_builder_steps=prepared.plan_override_builder_steps,
                     workflow_execution=workflow_execution,
                 )
+                full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
+                await send_final_replacement(websocket, full_response)
                 assistant_message_id = save_message(conv_id, 'assistant', full_response)
                 finalize_workflow_execution(
                     workflow_execution,
@@ -11771,6 +12483,15 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 deep_succeeded = True
             except Exception as e:
                 logger.warning("Deep/auto workspace mode failed, falling back: %s", e)
+                if response_started:
+                    await send_assistant_note(
+                        websocket,
+                        build_saved_progress_fallback_response(
+                            conv_id,
+                            effective_message,
+                            error_text=str(e),
+                        ),
+                    )
                 await websocket.send_json({
                     'type': 'status',
                     'content': 'Workspace execution path failed, using normal mode...',
@@ -11819,7 +12540,10 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     ),
                 )
                 full_response = tool_outcome.final_text
-                await websocket.send_json({'type': 'start'})
+                full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
+                if not response_started:
+                    await websocket.send_json({'type': 'start'})
+                    response_started = True
                 await send_final_replacement(websocket, full_response)
             else:
                 messages = [{'role': 'system', 'content': system_prompt}]
@@ -11829,7 +12553,9 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     websocket,
                     messages,
                     max_tokens,
+                    start_output=not response_started,
                 )
+                response_started = True
                 recovery_tools = direct_response_tool_recovery_candidates(
                     conv_id,
                     effective_message,
@@ -11876,6 +12602,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     )
                     full_response = format_leaked_tool_call_message(leaked_call, features)
                 full_response = strip_unverified_workspace_write_claims(full_response)
+                full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
             assistant_message_id = save_message(conv_id, 'assistant', full_response)
             finalize_workflow_execution(
@@ -11920,7 +12647,22 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             error_text=str(e),
         )
         logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
-        await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
+        fallback_response = ensure_nonempty_turn_response(
+            "",
+            conv_id,
+            message,
+            error_text=str(e),
+        )
+        if fallback_response:
+            if not response_started:
+                await websocket.send_json({'type': 'start'})
+            await send_final_replacement(websocket, fallback_response)
+            assistant_message_id = save_message(conv_id, 'assistant', fallback_response)
+            schedule_conversation_summary_refresh(conv_id)
+            await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
+            await websocket.send_json({'type': 'done'})
+        else:
+            await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
     finally:
         if client_turn_id and str(getattr(websocket, "active_client_turn_id", "") or "").strip() == client_turn_id:
             setattr(websocket, "active_client_turn_id", "")
