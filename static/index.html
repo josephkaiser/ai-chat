@@ -289,6 +289,16 @@
                                             <span class="composer-hover-text">Attach files, screenshots, audio, or workspace snippets to the next message.</span>
                                         </div>
                                     </div>
+                                    <div class="composer-action-item">
+                                        <button id="toolApprovalToggle" class="composer-control tool-approval-toggle" type="button" onclick="toggleToolApprovalMode()" aria-label="Automatic tool approvals are off for this chat" aria-pressed="false" title="Ask before tool and command use in this chat. Plans still ask first.">
+                                            <span class="tool-approval-toggle-label">Tools</span>
+                                            <span class="tool-approval-toggle-value" id="toolApprovalToggleValue">Ask</span>
+                                        </button>
+                                        <div class="composer-hover-card composer-hover-card-wide" aria-hidden="true">
+                                            <span class="composer-hover-title">Tool approvals</span>
+                                            <span class="composer-hover-text">Turn this on to auto-approve tool and command requests in this chat. Plan approval still always asks first.</span>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div class="composer-actions composer-actions-right">
                                     <button id="micButton" class="composer-control voice-toggle" onclick="toggleDictation()" title="Record audio" aria-label="Record audio">

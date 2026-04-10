@@ -64,6 +64,16 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('>Pause task</button>', html)
         self.assertNotIn("recentPermissionResponses", js)
 
+    def test_composer_exposes_per_chat_tool_auto_approve_toggle(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="toolApprovalToggle"', html)
+        self.assertIn('id="toolApprovalToggleValue"', html)
+        self.assertIn(">Tools</span>", html)
+        self.assertIn("function toggleToolApprovalMode()", js)
+        self.assertIn("function syncToolApprovalToggle()", js)
+        self.assertIn("auto_approve_tool_permissions", js)
+
 
 if __name__ == "__main__":
     unittest.main()

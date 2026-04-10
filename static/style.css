@@ -2926,6 +2926,49 @@ textarea {
     opacity: 0.45;
     cursor: not-allowed;
 }
+.tool-approval-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: auto;
+    min-width: 92px;
+    padding: 0 10px 0 11px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+.tool-approval-toggle-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text_tertiary);
+}
+.tool-approval-toggle-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg_secondary) 82%, var(--bg_primary));
+    color: var(--text_secondary);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+}
+.tool-approval-toggle.is-enabled {
+    color: var(--accent_primary);
+    border-color: color-mix(in srgb, var(--accent_primary) 32%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_primary));
+}
+.tool-approval-toggle.is-enabled .tool-approval-toggle-label {
+    color: color-mix(in srgb, var(--accent_primary) 68%, var(--text_primary));
+}
+.tool-approval-toggle.is-enabled .tool-approval-toggle-value {
+    background: color-mix(in srgb, var(--accent_primary) 18%, var(--bg_primary));
+    color: var(--accent_hover);
+}
 .composer-control-circle {
     width: 30px;
     min-width: 30px;
@@ -4015,6 +4058,20 @@ pre:hover .copy-btn { opacity: 1; }
     .composer-actions-right {
         margin-left: auto;
     }
+    .tool-approval-toggle {
+        min-width: 82px;
+        padding: 0 8px 0 9px;
+        gap: 6px;
+    }
+    .tool-approval-toggle-label {
+        font-size: 9px;
+    }
+    .tool-approval-toggle-value {
+        min-width: 30px;
+        height: 18px;
+        padding: 0 6px;
+        font-size: 10px;
+    }
     .composer-control,
     .composer-select,
     #send {
@@ -4022,6 +4079,11 @@ pre:hover .copy-btn { opacity: 1; }
         min-width: var(--mobile-control-size);
         height: var(--mobile-control-size);
         padding: 0;
+    }
+    .composer-control.tool-approval-toggle {
+        width: auto;
+        min-width: 82px;
+        padding: 0 8px 0 9px;
     }
     .attach-toggle,
     .voice-toggle {

@@ -21,9 +21,11 @@ class RuntimePermissionTests(unittest.TestCase):
     def test_parse_feature_flags_keeps_allowed_tool_permissions(self):
         features = app.parse_feature_flags({
             "allowed_tool_permissions": ["tool:web.search", " TOOL:workspace.write "],
+            "auto_approve_tool_permissions": True,
         })
 
         self.assertTrue(features.web_search)
+        self.assertTrue(features.auto_approve_tool_permissions)
         self.assertEqual(
             features.allowed_tool_permissions,
             ["tool:web.search", "tool:workspace.write"],
@@ -170,6 +172,27 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertFalse(app.is_tool_permission_allowlisted(features, "tool:web.search"))
         app.remember_approved_tool_permission(features, "tool:web.search")
         self.assertTrue(app.is_tool_permission_allowlisted(features, "tool:web.search"))
+
+    def test_auto_approve_tool_permissions_skips_runtime_prompt(self):
+        features = app.FeatureFlags(auto_approve_tool_permissions=True)
+
+        approved, request = asyncio.run(
+            app.ensure_tool_permission(
+                None,
+                "conv-auto-approve",
+                {
+                    "id": "call-auto",
+                    "name": "web.search",
+                    "arguments": {"query": "NVDA price"},
+                },
+                features,
+            )
+        )
+
+        self.assertTrue(approved)
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "tool:web.search")
+        self.assertIn("tool:web.search", features.allowed_tool_permissions)
 
     def test_permission_blocked_message_explains_pause_and_resume(self):
         request = app.PermissionApprovalRequest(

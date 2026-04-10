@@ -17,6 +17,7 @@ const BASE_REASONING_MODE = 'deep';
 let deepMode = true;
 let chatCommandAllowlists = loadStoredObject('chatCommandAllowlists', {});
 let chatToolPermissionAllowlists = loadStoredObject('chatToolPermissionAllowlists', {});
+let chatToolAutoApproveSettings = loadStoredObject('chatToolAutoApproveSettings', {});
 let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
 let websocketConnected = false;
 let currentTurnTransport = null;
@@ -998,6 +999,29 @@ function clearAllowedToolPermissionsForConversation(conversationId) {
     persistStoredObject('chatToolPermissionAllowlists', chatToolPermissionAllowlists);
 }
 
+function isToolAutoApproveEnabledForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    return Boolean(key && chatToolAutoApproveSettings[key]);
+}
+
+function setToolAutoApproveForConversation(conversationId, enabled) {
+    const key = String(conversationId || '').trim();
+    if (!key) return;
+    if (enabled) {
+        chatToolAutoApproveSettings[key] = true;
+    } else {
+        delete chatToolAutoApproveSettings[key];
+    }
+    persistStoredObject('chatToolAutoApproveSettings', chatToolAutoApproveSettings);
+}
+
+function clearToolAutoApproveForConversation(conversationId) {
+    const key = String(conversationId || '').trim();
+    if (!key) return;
+    delete chatToolAutoApproveSettings[key];
+    persistStoredObject('chatToolAutoApproveSettings', chatToolAutoApproveSettings);
+}
+
 function getRememberedTurnFeatures(conversationId) {
     const key = String(conversationId || '').trim();
     const stored = key ? conversationTurnFeatureMemory[key] : null;
@@ -1038,6 +1062,7 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
     const rememberedFeatures = getRememberedTurnFeatures(currentConvId);
     const allowedCommands = getAllowedCommandsForConversation(currentConvId);
     const allowedToolPermissions = getAllowedToolPermissionsForConversation(currentConvId);
+    const autoApproveToolPermissions = isToolAutoApproveEnabledForConversation(currentConvId);
     const slashName = slashCommand?.name || '';
     const slashWantsWrite = slashName === 'code';
     const slashWantsRun = slashName === 'code' || slashName === 'pip';
@@ -1061,6 +1086,7 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
         workspace_run_commands: workspaceRunCommands,
         allowed_commands: allowedCommands,
         allowed_tool_permissions: allowedToolPermissions,
+        auto_approve_tool_permissions: autoApproveToolPermissions,
     };
 }
 
@@ -1141,18 +1167,27 @@ function rememberApprovalForPendingRequest() {
     rememberAllowedToolPermission(currentConvId, permissionKey);
 }
 
-function respondToPendingPermission(approved) {
+function respondToPendingPermission(approved, options = {}) {
     if (!pendingPermissionRequest) return;
+    const rememberApproval = options.rememberApproval !== false;
+    const autoApproved = options.autoApproved === true;
     const permissionKey = String(pendingPermissionRequest.permissionKey || '').trim().toLowerCase();
     const approvalTarget = String(pendingPermissionRequest.approvalTarget || 'tool').trim().toLowerCase();
     const title = pendingPermissionRequest.title || 'Permission';
     const conversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
     const clientTurnId = String(pendingPermissionRequest.clientTurnId || activeClientTurnId || '').trim();
     if (approved) {
-        rememberApprovalForPendingRequest();
-        recordWorkspaceActivity('Approve', `${title} approved for this chat. Resuming the task.`);
+        if (rememberApproval) {
+            rememberApprovalForPendingRequest();
+        }
+        recordWorkspaceActivity(autoApproved ? 'Auto-Approve' : 'Approve', `${title} approved for this chat. Resuming the task.`);
         setLoadingText(`${title} approved. Resuming...`);
-        showTransientComposerHint('Approved. The assistant is resuming. Type to interrupt, or press Stop.', 7000);
+        showTransientComposerHint(
+            autoApproved
+                ? 'Tool approvals are automatic in this chat. The assistant is resuming.'
+                : 'Approved. The assistant is resuming. Type to interrupt, or press Stop.',
+            7000,
+        );
     } else {
         recordWorkspaceActivity('Blocked', `${title} was not approved for this chat. The task is pausing here.`);
         setLoadingText(`${title} not approved. Pausing this task...`);
@@ -1171,6 +1206,50 @@ function respondToPendingPermission(approved) {
     clearPendingPermissionRequest();
     syncSendButton();
     focusInputAtStart();
+}
+
+function syncToolApprovalToggle() {
+    const toggle = document.getElementById('toolApprovalToggle');
+    const value = document.getElementById('toolApprovalToggleValue');
+    if (!toggle) return;
+    const enabled = isToolAutoApproveEnabledForConversation(currentConvId);
+    toggle.classList.toggle('is-enabled', enabled);
+    toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    toggle.setAttribute(
+        'aria-label',
+        enabled
+            ? 'Automatic tool approvals are on for this chat'
+            : 'Automatic tool approvals are off for this chat',
+    );
+    toggle.title = enabled
+        ? 'Tool and command approvals auto-run in this chat. Plans still ask first.'
+        : 'Ask before tool and command use in this chat. Plans still ask first.';
+    if (value) value.textContent = enabled ? 'Auto' : 'Ask';
+}
+
+function toggleToolApprovalMode() {
+    const nextEnabled = !isToolAutoApproveEnabledForConversation(currentConvId);
+    setToolAutoApproveForConversation(currentConvId, nextEnabled);
+    syncToolApprovalToggle();
+    if (nextEnabled && pendingPermissionRequest) {
+        const requestConversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
+        if (!requestConversationId || requestConversationId === currentConvId) {
+            respondToPendingPermission(true, { rememberApproval: false, autoApproved: true });
+            return;
+        }
+    }
+    recordWorkspaceActivity(
+        'Tools',
+        nextEnabled
+            ? 'Tool approvals now auto-approve in this chat. Plans still require approval.'
+            : 'Tool approvals now ask first in this chat. Plans still require approval.',
+    );
+    showTransientComposerHint(
+        nextEnabled
+            ? 'Tool approvals are now automatic in this chat. Plans will still ask first.'
+            : 'Tool approvals will ask first again in this chat. Plans still ask first.',
+        5000,
+    );
 }
 
 function hasActiveTurnForConversation(conversationId = '') {
@@ -1678,6 +1757,29 @@ function handleChatEvent(data) {
             return;
         }
         const requestConversationId = permissionConversationId || currentConvId;
+        if (isToolAutoApproveEnabledForConversation(requestConversationId)) {
+            if (canUseWebsocketTransport()) {
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    conversation_id: requestConversationId,
+                    client_turn_id: clientTurnId,
+                    permission_key: permissionKey,
+                    approval_target: approvalTarget,
+                    approved: true,
+                }));
+            }
+            recordWorkspaceActivity(
+                'Auto-Approve',
+                `${data.title || 'Permission needed'} auto-approved for this chat.`,
+                {
+                    phase: 'active',
+                    stepLabel: data.step_label || '',
+                },
+            );
+            setLoadingText(`${data.title || 'Permission'} approved. Resuming...`);
+            showTransientComposerHint('Tool approvals are automatic in this chat. The assistant is resuming.', 5000);
+            return;
+        }
         if (!hasActiveTurnForConversation(requestConversationId) && !isGenerating) {
             if (canUseWebsocketTransport()) {
                 ws.send(JSON.stringify({
@@ -5719,6 +5821,7 @@ async function loadConversation(id, options = {}) {
     const preserveActivity = Boolean(options.preserveActivity);
     const preserveScroll = Boolean(options.preserveScroll);
     currentConvId = id;
+    syncToolApprovalToggle();
     currentRunId = null;
     currentAssistantTurnStartedAt = null;
     currentAssistantTurnArtifactPaths = new Set();
@@ -5764,6 +5867,7 @@ function newChat() {
     clearAllowedCommandsForConversation(currentConvId);
     clearAllowedToolPermissionsForConversation(currentConvId);
     currentConvId = generateId();
+    syncToolApprovalToggle();
     currentRunId = null;
     currentAssistantTurnStartedAt = null;
     currentAssistantTurnArtifactPaths = new Set();
@@ -5811,6 +5915,7 @@ async function deleteConv(id) {
     await fetch(`/api/conversation/${id}`, { method: 'DELETE' });
     clearAllowedCommandsForConversation(id);
     clearAllowedToolPermissionsForConversation(id);
+    clearToolAutoApproveForConversation(id);
     clearRememberedTurnFeatures(id);
     if (id === currentConvId) newChat(); else loadConversations();
 }
@@ -5970,6 +6075,7 @@ if (window.visualViewport) {
 syncReasoningSelector();
 renderWorkspaceActivity();
 renderPermissionPanel();
+syncToolApprovalToggle();
 applyViewerMetadata('inlineViewer', '');
 syncWorkspaceViewMode();
 syncMobileViewportState();
