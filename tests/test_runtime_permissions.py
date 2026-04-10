@@ -129,22 +129,17 @@ class RuntimePermissionTests(unittest.TestCase):
             (workspace / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
             (workspace / ".venv").mkdir(parents=True, exist_ok=True)
             (workspace / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
-            (workspace / "__pycache__").mkdir(parents=True, exist_ok=True)
-            (workspace / "__pycache__" / "app.cpython-311.pyc").write_bytes(b"pyc")
             original = app.get_workspace_path
             try:
                 app.get_workspace_path = lambda _conversation_id, create=True: workspace
                 root_listing = app.workspace_list_files_result("conv-hidden")
                 hidden_listing = app.workspace_list_files_result("conv-hidden", ".venv")
-                cache_listing = app.workspace_list_files_result("conv-hidden", "__pycache__")
             finally:
                 app.get_workspace_path = original
 
         self.assertEqual([item["name"] for item in root_listing["items"]], ["app.py"])
         self.assertEqual(hidden_listing["path"], ".venv")
         self.assertEqual([item["name"] for item in hidden_listing["items"]], ["pyvenv.cfg"])
-        self.assertEqual(cache_listing["path"], "__pycache__")
-        self.assertEqual([item["name"] for item in cache_listing["items"]], ["app.cpython-311.pyc"])
 
     def test_validate_workspace_command_allows_managed_python_env_paths(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -391,6 +386,53 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["path"], "plot.png")
         self.assertEqual(result["items"][0]["content_kind"], "image")
         self.assertEqual(result["items"][1]["path"], "notes.txt")
+
+    def test_request_targets_current_repo_detects_existing_repo_language(self):
+        self.assertTrue(app.request_targets_current_repo("Review this repo for the top 3 issues."))
+        self.assertTrue(app.request_targets_current_repo("Find the approval logic in this repository and patch it."))
+        self.assertFalse(app.request_targets_current_repo("Create a repo for this project from scratch."))
+
+    def test_bootstrap_workspace_from_current_repo_seeds_filtered_snapshot(self):
+        original_base_dir = app._base_dir
+        original_get_workspace_path = app.get_workspace_path
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                source_root = pathlib.Path(tempdir) / "repo"
+                workspace = pathlib.Path(tempdir) / "workspace"
+                source_root.mkdir(parents=True, exist_ok=True)
+                workspace.mkdir(parents=True, exist_ok=True)
+
+                (source_root / "app.py").write_text("print('repo')\n", encoding="utf-8")
+                (source_root / "README.md").write_text("# Repo\n", encoding="utf-8")
+                (source_root / "static").mkdir(parents=True, exist_ok=True)
+                (source_root / "static" / "app.js").write_text("console.log('ok');\n", encoding="utf-8")
+                (source_root / "runs").mkdir(parents=True, exist_ok=True)
+                (source_root / "runs" / "junk.txt").write_text("skip me\n", encoding="utf-8")
+                (source_root / "data").mkdir(parents=True, exist_ok=True)
+                (source_root / "data" / "chat.db").write_text("skip me\n", encoding="utf-8")
+                (source_root / "__pycache__").mkdir(parents=True, exist_ok=True)
+                (source_root / "__pycache__" / "app.pyc").write_bytes(b"pyc")
+                (source_root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+                app._base_dir = source_root
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+
+                result = app.maybe_bootstrap_workspace_from_current_repo(
+                    "conv-repo",
+                    "Review this repo and patch the approval flow.",
+                )
+
+                self.assertTrue(result)
+                self.assertTrue((workspace / "app.py").exists())
+                self.assertTrue((workspace / "README.md").exists())
+                self.assertTrue((workspace / "static" / "app.js").exists())
+                self.assertFalse((workspace / "runs").exists())
+                self.assertFalse((workspace / "data").exists())
+                self.assertFalse((workspace / "__pycache__").exists())
+                self.assertFalse((workspace / ".env").exists())
+        finally:
+            app._base_dir = original_base_dir
+            app.get_workspace_path = original_get_workspace_path
 
     def test_successful_workspace_write_paths_include_command_and_render_outputs(self):
         tool_results = [

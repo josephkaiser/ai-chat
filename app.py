@@ -225,6 +225,37 @@ WORKSPACE_TEMPLATE_TERMS = {
     "template", "starter", "scaffold", "boilerplate", "example", "sample",
     "saas", "mvp", "skeleton", "seed", "bootstrap", "generate",
 }
+SERVER_REPO_BOOTSTRAP_EXCLUDE_NAMES = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "data",
+    "feeds",
+    "logs",
+    "node_modules",
+    "python-envs",
+    "runs",
+    "workspaces",
+}
+CURRENT_REPO_REFERENCE_PHRASES = (
+    "this repo",
+    "this repository",
+    "this codebase",
+    "repo here",
+    "repository here",
+    "codebase here",
+    "current repo",
+    "current repository",
+    "current codebase",
+    "the repo here",
+    "the repository here",
+    "in this repo",
+    "in this repository",
+    "in this codebase",
+)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -1141,13 +1172,12 @@ def path_is_within_root(path: pathlib.Path, root: pathlib.Path) -> bool:
 
 
 def workspace_rel_path_is_hidden(rel_path: str) -> bool:
-    """Return whether a workspace-relative path points at hidden or low-signal internal clutter."""
+    """Return whether a workspace-relative path points at a dot-prefixed entry."""
     raw = str(rel_path or "").strip().replace("\\", "/")
     if not raw or raw == ".":
         return False
     parts = [part for part in pathlib.PurePosixPath(raw).parts if part not in {"", "."}]
-    internal_names = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints"}
-    return any(part.startswith(".") or part in internal_names for part in parts)
+    return any(part.startswith(".") for part in parts)
 
 
 def workspace_command_allows_argument(
@@ -1402,12 +1432,7 @@ def delete_run_workspace(conversation_id: str):
 
 def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
     """Build the subprocess environment for workspace commands."""
-    env = {
-        **os.environ,
-        "PYTHONPATH": "",
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
+    env = {**os.environ, "PYTHONPATH": "", "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
     python_path = managed_python_python_path(conversation_id, create=False)
     if python_path.exists():
         env_root = resolve_existing_managed_python_env_path(conversation_id)
@@ -3162,7 +3187,7 @@ def extract_workspace_path_references(message: str) -> List[str]:
 
 
 WORKSPACE_RESPONSE_TRUTHFULNESS_RULES = """Workspace and tool truthfulness rules:
-- Never claim a workspace file or artifact was created, saved, updated, rendered, or generated unless this turn actually completed a successful workspace write or artifact-producing tool call.
+- Never claim a workspace file was created, saved, or updated unless this turn actually completed a successful `workspace.patch_file` call.
 - If no workspace file was written, provide the result inline and optionally offer to save it.
 - Never claim you searched the web, looked something up, or added sourced citations unless this turn actually used the web tools.
 - If the prompt already includes extracted attachment context, treat that content as available instead of claiming you cannot read the attachment.
@@ -3186,53 +3211,25 @@ def normalize_workspace_reference_path(path_value: str) -> str:
     return str(path_value or "").strip().replace("\\", "/").strip("./").lower()
 
 
-def workspace_output_paths_from_tool_result(call: Dict[str, Any], result: Dict[str, Any]) -> List[str]:
-    """Collect workspace-relative output paths produced by one successful tool call."""
-    if not result.get("ok"):
-        return []
-    name = str(call.get("name", "")).strip()
-    payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-    if not isinstance(payload, dict):
-        return []
-
-    paths: List[str] = []
-
-    def add_path(candidate: Any) -> None:
-        path = str(candidate or "").strip()
-        if path and path not in paths:
-            paths.append(path)
-
-    if name in {"workspace.patch_file", "workspace.render"}:
-        add_path(payload.get("path"))
-        return paths
-
-    if name == "workspace.run_command":
-        add_path(payload.get("path"))
-        items = payload.get("items", [])
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict):
-                    add_path(item.get("path"))
-        return paths
-
-    return []
-
-
 def successful_workspace_write_paths(tool_results: List[Dict[str, Any]]) -> set[str]:
-    """Collect workspace paths that were actually produced during the current turn."""
+    """Collect workspace paths that were actually written during the current turn."""
     written_paths: set[str] = set()
     for entry in tool_results:
-        call = entry.get("call", {}) if isinstance(entry.get("call"), dict) else {}
-        result = entry.get("result", {}) if isinstance(entry.get("result"), dict) else {}
-        for path in workspace_output_paths_from_tool_result(call, result):
-            normalized = normalize_workspace_reference_path(path)
-            if normalized:
-                written_paths.add(normalized)
+        call = entry.get("call", {})
+        result = entry.get("result", {})
+        if call.get("name") != "workspace.patch_file" or not result.get("ok"):
+            continue
+        payload = result.get("result", {})
+        if not isinstance(payload, dict):
+            continue
+        normalized = normalize_workspace_reference_path(str(payload.get("path", "")))
+        if normalized:
+            written_paths.add(normalized)
     return written_paths
 
 
 def strip_unverified_workspace_write_claims(message: str, tool_results: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Remove workspace output claims that are not backed by a successful tool result."""
+    """Remove file-write claims that are not backed by a successful workspace write tool result."""
     cleaned = str(message or "").strip()
     if not cleaned:
         return ""
@@ -3576,6 +3573,8 @@ class PreparedTurnRequest:
     resume_saved_workspace: bool
     plan_override_builder_steps: List[str]
     promoted_to_planning: bool
+    repo_bootstrapped: bool
+    repo_bootstrap_summary: str
     assessment: TurnAssessment
 
 
@@ -4395,6 +4394,94 @@ def format_workspace_snapshot(snapshot: Dict[str, Any]) -> str:
 def workspace_is_effectively_empty(snapshot: Dict[str, Any]) -> bool:
     """Treat workspaces with only task-board state as empty for planning purposes."""
     return int(snapshot.get("user_file_count", 0) or 0) == 0
+
+
+def request_targets_current_repo(message: str) -> bool:
+    """Return whether the user is referring to the server's current repo rather than asking for a new scaffold."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text or request_is_repo_scaffold(message):
+        return False
+    if any(phrase in text for phrase in CURRENT_REPO_REFERENCE_PHRASES):
+        return True
+
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    repo_terms = {"repo", "repository", "codebase", "project", "app"}
+    reference_terms = {"this", "here", "current", "existing", "local"}
+    repo_task_terms = {
+        "review", "inspect", "analyze", "explain", "find", "grep", "search", "read",
+        "fix", "patch", "change", "update", "edit", "refactor", "improve", "debug",
+        "run", "test", "build",
+    }
+    return bool(words & repo_terms) and bool(words & reference_terms) and bool(words & repo_task_terms)
+
+
+def should_exclude_repo_bootstrap_name(name: str) -> bool:
+    """Return whether one repo entry should stay out of a seeded conversation workspace."""
+    lowered = str(name or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered in SERVER_REPO_BOOTSTRAP_EXCLUDE_NAMES:
+        return True
+    if lowered == ".ds_store":
+        return True
+    if lowered == ".env" or lowered.startswith(".env."):
+        return True
+    return False
+
+
+def repo_bootstrap_ignore(source_root: pathlib.Path, current_dir: str, names: List[str]) -> List[str]:
+    """Ignore runtime-heavy repo entries when snapshotting the current repo into a chat workspace."""
+    del source_root, current_dir
+    return [name for name in names if should_exclude_repo_bootstrap_name(name)]
+
+
+def bootstrap_workspace_from_current_repo(conversation_id: str) -> Dict[str, Any]:
+    """Seed an empty conversation workspace with a filtered snapshot of the current server repo."""
+    source_root = _base_dir.resolve()
+    workspace = get_workspace_path(conversation_id)
+    if not source_root.exists() or not source_root.is_dir():
+        return {}
+
+    copied_entries = 0
+    try:
+        for item in sorted(source_root.iterdir(), key=lambda path: path.name.lower()):
+            if should_exclude_repo_bootstrap_name(item.name):
+                continue
+            destination = workspace / item.name
+            if item.is_dir():
+                shutil.copytree(
+                    item,
+                    destination,
+                    ignore=lambda current_dir, names: repo_bootstrap_ignore(source_root, current_dir, list(names)),
+                    dirs_exist_ok=False,
+                )
+                copied_entries += 1
+            elif item.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+                copied_entries += 1
+    except Exception:
+        reset_directory_contents(workspace)
+        raise
+
+    snapshot = capture_workspace_snapshot(conversation_id)
+    return {
+        "source_root": str(source_root),
+        "copied_entries": copied_entries,
+        "snapshot": snapshot,
+    }
+
+
+def maybe_bootstrap_workspace_from_current_repo(conversation_id: str, message: str) -> Dict[str, Any]:
+    """Populate a fresh conversation workspace from the current repo when the user clearly asks about this repo."""
+    if not request_targets_current_repo(message):
+        return {}
+    snapshot = capture_workspace_snapshot(conversation_id)
+    if not workspace_is_effectively_empty(snapshot):
+        return {}
+    if not (_base_dir / "app.py").exists():
+        return {}
+    return bootstrap_workspace_from_current_repo(conversation_id)
 
 
 def request_is_repo_scaffold(message: str) -> bool:
@@ -10325,13 +10412,10 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                     substep_touched_paths.append(path)
                 if isinstance(path, str) and path and path not in touched_paths:
                     touched_paths.append(path)
-                for output_path in workspace_output_paths_from_tool_result(call, result):
-                    if output_path not in substep_touched_paths:
-                        substep_touched_paths.append(output_path)
-                    if output_path not in touched_paths:
-                        touched_paths.append(output_path)
-                    if output_path not in changed_files:
-                        changed_files.append(output_path)
+                if call.get("name") != "workspace.patch_file" or not result.get("ok"):
+                    continue
+                if isinstance(path, str) and path not in changed_files:
+                    changed_files.append(path)
 
             substep_summary = outcome.final_text.strip() or f"Completed substep {idx + 1}.{sub_idx + 1}."
             if substep_successful_tools == 0:
@@ -11476,6 +11560,17 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         user_message_id = save_message(conv_id, 'user', effective_message)
         history = get_conversation_history(conv_id, current_query=effective_message)
 
+    repo_bootstrap = maybe_bootstrap_workspace_from_current_repo(conv_id, effective_message)
+    repo_bootstrapped = bool(repo_bootstrap)
+    repo_bootstrap_summary = ""
+    if repo_bootstrapped:
+        snapshot = repo_bootstrap.get("snapshot", {}) if isinstance(repo_bootstrap.get("snapshot"), dict) else {}
+        repo_bootstrap_summary = (
+            "Loaded a snapshot of the current repo into this conversation workspace "
+            f"({int(snapshot.get('user_file_count', 0) or 0)} user-visible files, "
+            f"{int(snapshot.get('total_dirs', 0) or 0)} directories)."
+        )
+
     system_prompt = build_effective_system_prompt(
         custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
         effective_message,
@@ -11567,6 +11662,8 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         resume_saved_workspace=resume_saved_workspace,
         plan_override_builder_steps=normalize_plan_override_steps(data.get("plan_override_steps")),
         promoted_to_planning=promoted_to_planning,
+        repo_bootstrapped=repo_bootstrapped,
+        repo_bootstrap_summary=repo_bootstrap_summary,
         assessment=assessment,
     )
 
@@ -11602,6 +11699,14 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             "chat_turn",
             {"assessment": prepared.assessment.as_metadata()},
         )
+
+        if prepared.repo_bootstrapped and prepared.repo_bootstrap_summary:
+            await send_activity_event(
+                websocket,
+                "inspect",
+                "Repo Snapshot",
+                prepared.repo_bootstrap_summary,
+            )
 
         await send_activity_event(
             websocket,
