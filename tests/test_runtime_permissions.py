@@ -71,6 +71,32 @@ class RuntimePermissionTests(unittest.TestCase):
         app.remember_approved_tool_permission(features, "tool:web.search")
         self.assertTrue(app.is_tool_permission_allowlisted(features, "tool:web.search"))
 
+    def test_natural_python_build_request_auto_executes_workspace_flow(self):
+        message = "Start making a python model to keep track of AVGO daily and build a DCF tracker."
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+
+        self.assertEqual(app.classify_workspace_intent(message), "focused_write")
+        self.assertTrue(app.should_use_workspace_tools("conv-avgo", message, features))
+        self.assertTrue(app.should_auto_execute_workspace_task("conv-avgo", message, features))
+
+    def test_patch_request_can_upgrade_from_respond_phase_into_execution(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+
+        self.assertTrue(
+            app.should_upgrade_to_workspace_execution(
+                {"name": "workspace.patch_file"},
+                features,
+                "respond",
+            )
+        )
+        self.assertFalse(
+            app.should_upgrade_to_workspace_execution(
+                {"name": "workspace.patch_file"},
+                features,
+                "verify",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

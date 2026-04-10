@@ -63,6 +63,7 @@ let transientHintTimer = null;
 let currentRunId = null;
 let pendingExecutionPlan = null;
 let pendingPermissionRequest = null;
+let recentPermissionResponses = {};
 let dictationActive = false;
 let currentAudio = null;
 let speechQueue = [];
@@ -104,6 +105,7 @@ const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
 const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
+const RECENT_PERMISSION_RESPONSE_TTL_MS = 15000;
 const DISCOVERY_HINTS = Object.freeze([
     'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
     'I can help with logic, math, and careful reasoning from the information you give me.',
@@ -1006,6 +1008,48 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
     };
 }
 
+function buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget = 'tool') {
+    const conv = String(conversationId || currentConvId || '').trim().toLowerCase();
+    const key = String(permissionKey || '').trim().toLowerCase();
+    const target = String(approvalTarget || 'tool').trim().toLowerCase();
+    if (!conv || !key) return '';
+    return `${conv}::${target}::${key}`;
+}
+
+function pruneRecentPermissionResponses(now = Date.now()) {
+    Object.entries(recentPermissionResponses).forEach(([key, value]) => {
+        if (!value || typeof value !== 'object') {
+            delete recentPermissionResponses[key];
+            return;
+        }
+        if (now - Number(value.timestamp || 0) > RECENT_PERMISSION_RESPONSE_TTL_MS) {
+            delete recentPermissionResponses[key];
+        }
+    });
+}
+
+function rememberRecentPermissionResponse(conversationId, permissionKey, approvalTarget, approved) {
+    pruneRecentPermissionResponses();
+    const cacheKey = buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget);
+    if (!cacheKey) return;
+    recentPermissionResponses[cacheKey] = {
+        approved: Boolean(approved),
+        timestamp: Date.now(),
+    };
+}
+
+function getRecentPermissionResponse(conversationId, permissionKey, approvalTarget) {
+    pruneRecentPermissionResponses();
+    const cacheKey = buildPermissionResponseCacheKey(conversationId, permissionKey, approvalTarget);
+    if (!cacheKey) return null;
+    const value = recentPermissionResponses[cacheKey];
+    if (!value || typeof value !== 'object') return null;
+    return {
+        approved: Boolean(value.approved),
+        timestamp: Number(value.timestamp || 0),
+    };
+}
+
 function renderPermissionPanel() {
     const panel = document.getElementById('permissionPanel');
     const title = document.getElementById('permissionPanelTitle');
@@ -1017,6 +1061,14 @@ function renderPermissionPanel() {
 
     if (!pendingPermissionRequest) {
         panel.hidden = true;
+        syncMobileViewportState();
+        return;
+    }
+
+    const requestConversationId = String(pendingPermissionRequest.conversationId || '').trim();
+    if (requestConversationId && requestConversationId !== currentConvId) {
+        panel.hidden = true;
+        syncMobileViewportState();
         return;
     }
 
@@ -1039,6 +1091,7 @@ function renderPermissionPanel() {
             allowButton.focus({ preventScroll: true });
         });
     }
+    syncMobileViewportState();
 }
 
 function clearPendingPermissionRequest() {
@@ -1063,6 +1116,7 @@ function respondToPendingPermission(approved) {
     const approvalTarget = String(pendingPermissionRequest.approvalTarget || 'tool').trim().toLowerCase();
     const title = pendingPermissionRequest.title || 'Permission';
     const conversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
+    rememberRecentPermissionResponse(conversationId, permissionKey, approvalTarget, approved);
     if (approved) {
         rememberApprovalForPendingRequest();
         recordWorkspaceActivity('Approve', `${title} approved for this chat.`);
@@ -1099,6 +1153,11 @@ function hasActiveTurnForConversation(conversationId = '') {
             || currentConvId === target
         )
     );
+}
+
+function clearResolvedPermissionPrompt() {
+    if (!pendingPermissionRequest) return;
+    clearPendingPermissionRequest();
 }
 
 function updateVoiceSetting(name, enabled) {
@@ -1499,10 +1558,14 @@ function handleChatEvent(data) {
     } else if (data.type === 'think_end') {
         onAssistantThinkEnd();
     } else if (data.type === 'token') {
+        clearResolvedPermissionPrompt();
         appendAssistantAnswerToken(data.content);
     } else if (data.type === 'status') {
         setLoadingText(data.content);
     } else if (data.type === 'activity') {
+        if ((data.phase || '').toLowerCase() !== 'blocked') {
+            clearResolvedPermissionPrompt();
+        }
         if (data.content) setLoadingText(data.content);
         recordWorkspaceActivity(
             data.label || 'Activity',
@@ -1518,6 +1581,7 @@ function handleChatEvent(data) {
             stepLabel: data.step_label || currentBuildStepLabel(),
         });
     } else if (data.type === 'tool_start') {
+        clearResolvedPermissionPrompt();
         const toolText = data.content || `Using ${data.name || 'tool'}...`;
         setLoadingText(toolText);
         recordWorkspaceActivity('Tool', toolText, {
@@ -1530,6 +1594,7 @@ function handleChatEvent(data) {
             stepLabel: data.step_label || currentBuildStepLabel(),
         });
     } else if (data.type === 'tool_result') {
+        clearResolvedPermissionPrompt();
         const toolResultText = data.content || (data.ok === false ? 'Tool failed' : 'Tool finished');
         setLoadingText(toolResultText);
         recordWorkspaceActivity(data.ok === false ? 'Tool Error' : 'Tool Result', toolResultText, {
@@ -1548,6 +1613,7 @@ function handleChatEvent(data) {
         }
         scheduleWorkspaceRefresh();
     } else if (data.type === 'tool_error') {
+        clearResolvedPermissionPrompt();
         const toolErrorText = data.content || 'Tool error';
         setLoadingText(toolErrorText);
         recordWorkspaceActivity('Tool Error', toolErrorText, {
@@ -1562,22 +1628,51 @@ function handleChatEvent(data) {
         });
     } else if (data.type === 'permission_required') {
         const permissionConversationId = String(data.conversation_id || '').trim();
-        if (!hasActiveTurnForConversation(permissionConversationId)) {
+        const permissionKey = String(data.permission_key || '').trim().toLowerCase();
+        const approvalTarget = String(data.approval_target || 'tool').trim().toLowerCase();
+        if (permissionConversationId && permissionConversationId !== currentConvId) {
             if (canUseWebsocketTransport()) {
                 ws.send(JSON.stringify({
                     type: 'permission_response',
-                    conversation_id: permissionConversationId || currentConvId,
-                    permission_key: String(data.permission_key || '').trim().toLowerCase(),
-                    approval_target: String(data.approval_target || 'tool').trim().toLowerCase(),
+                    conversation_id: permissionConversationId,
+                    permission_key: permissionKey,
+                    approval_target: approvalTarget,
                     approved: false,
                 }));
             }
             return;
         }
+        if (!hasActiveTurnForConversation(permissionConversationId)) {
+            if (canUseWebsocketTransport()) {
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    conversation_id: permissionConversationId || currentConvId,
+                    permission_key: permissionKey,
+                    approval_target: approvalTarget,
+                    approved: false,
+                }));
+            }
+            return;
+        }
+        const recentDecision = getRecentPermissionResponse(
+            permissionConversationId || currentConvId,
+            permissionKey,
+            approvalTarget,
+        );
+        if (recentDecision && canUseWebsocketTransport()) {
+            ws.send(JSON.stringify({
+                type: 'permission_response',
+                conversation_id: permissionConversationId || currentConvId,
+                permission_key: permissionKey,
+                approval_target: approvalTarget,
+                approved: recentDecision.approved,
+            }));
+            return;
+        }
         pendingPermissionRequest = {
             conversationId: permissionConversationId || currentConvId,
-            permissionKey: String(data.permission_key || '').trim().toLowerCase(),
-            approvalTarget: String(data.approval_target || 'tool').trim().toLowerCase(),
+            permissionKey,
+            approvalTarget,
             title: data.title || 'Permission needed',
             content: data.content || 'The assistant needs your approval to continue.',
             preview: data.preview || '',
@@ -1591,9 +1686,11 @@ function handleChatEvent(data) {
         });
         setLoadingText(pendingPermissionRequest.content);
     } else if (data.type === 'final_replace') {
+        clearResolvedPermissionPrompt();
         replaceAssistantAnswer(data.content);
         recordWorkspaceActivity('Draft', 'Draft updated.');
     } else if (data.type === 'message_id') {
+        clearResolvedPermissionPrompt();
         const msg = currentStreamingAssistantMessage();
         if (msg && data.message_id !== undefined && data.message_id !== null) {
             msg.dataset.messageId = String(data.message_id);
@@ -1930,7 +2027,12 @@ function showTransientComposerHint(text, durationMs = 6000) {
 function isComposerCompact(textarea = document.getElementById('input')) {
     const area = document.getElementById('inputArea');
     if (!textarea || !area || area.classList.contains('welcome-mode')) return false;
-    return !textarea.value.trim();
+    const value = String(textarea.value || '');
+    const trimmed = value.trim();
+    if (!trimmed) return true;
+    if (value.includes('\n')) return false;
+    const compactThreshold = isMobileViewport() ? 48 : 64;
+    return trimmed.length <= compactThreshold;
 }
 
 function syncComposerDensity(textarea = document.getElementById('input')) {
@@ -4382,6 +4484,7 @@ function sendMessage() {
     const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
+    clearPendingPermissionRequest();
     clearPendingAttachments();
     autoResizeTextarea(input);
     showLoading();
@@ -4417,6 +4520,7 @@ function sendInterruptMessage(messageText) {
     const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
+    clearPendingPermissionRequest();
     addMessage(buildDisplayedMessageText(text, pendingAttachments) || outboundText, 'user', null, { forceScroll: true });
     clearPendingAttachments();
     document.querySelector('.welcome')?.remove();
@@ -4473,6 +4577,7 @@ function handlePrimaryAction() {
 
 function stopMessage() {
     if (!isGenerating) return;
+    clearPendingPermissionRequest();
     if (currentTurnTransport === 'http' && httpTurnAbortController) {
         httpTurnAbortController.abort();
         return;

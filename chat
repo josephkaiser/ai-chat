@@ -4,6 +4,7 @@ set -euo pipefail
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TAILSCALE_LAST_STATUS=""
+STACK_CONTAINERS=(vllm ai-chat-vllm)
 
 cd "$PROJECT_DIR"
 
@@ -19,13 +20,77 @@ docker_compose() {
         exit 1
     fi
 
-    "${compose_cmd[@]}" "$@" 2> >(
+    "${compose_cmd[@]}" -f "$COMPOSE_FILE" --project-directory "$PROJECT_DIR" "$@" 2> >(
         awk '
             /^channel [0-9]+: open failed: connect failed: Connection refused$/ { next }
             /^\[\+\] Pulling [0-9]+\/[0-9]+ failed: connect failed: Connection refused$/ { next }
             { print > "/dev/stderr" }
         '
     )
+}
+
+stack_container_exists() {
+    docker inspect "$1" >/dev/null 2>&1
+}
+
+list_existing_stack_containers() {
+    local container
+    for container in "${STACK_CONTAINERS[@]}"; do
+        if stack_container_exists "$container"; then
+            printf '%s\n' "$container"
+        fi
+    done
+}
+
+remove_existing_stack_containers() {
+    local container
+    for container in "${STACK_CONTAINERS[@]}"; do
+        if stack_container_exists "$container"; then
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            if ! stack_container_exists "$container"; then
+                printf '%s\n' "$container"
+            fi
+        fi
+    done
+}
+
+print_container_list() {
+    local containers="$1"
+    local container
+    while IFS= read -r container; do
+        [[ -n "$container" ]] || continue
+        echo "  - $container"
+    done <<< "$containers"
+}
+
+ensure_stack_stopped() {
+    local context="$1"
+    local compose_failed=0
+    local removed=""
+    local remaining=""
+
+    if ! docker_compose down --remove-orphans; then
+        compose_failed=1
+        echo "Compose reported an issue while ${context}; checking containers directly..."
+    fi
+
+    removed="$(remove_existing_stack_containers)"
+    if [[ -n "$removed" ]]; then
+        echo "Removed leftover containers directly:"
+        print_container_list "$removed"
+    fi
+
+    remaining="$(list_existing_stack_containers)"
+    if [[ -n "$remaining" ]]; then
+        echo "ERROR: These containers are still present:"
+        print_container_list "$remaining"
+        return 1
+    fi
+
+    if [[ "$compose_failed" -eq 1 && -z "$removed" ]]; then
+        echo "ERROR: Docker Compose reported a shutdown issue."
+        return 1
+    fi
 }
 
 # Get the LAN IP address of the host
@@ -241,7 +306,7 @@ do_start() {
     fi
 
     # Clean up any stopped/broken containers before starting
-    docker_compose down --remove-orphans 2>/dev/null || true
+    ensure_stack_stopped "cleaning up before start"
 
     echo "Starting services..."
     docker_compose up -d
@@ -258,7 +323,7 @@ do_start() {
 
 do_stop() {
     echo "Stopping services..."
-    docker_compose down --remove-orphans 2>/dev/null || true
+    ensure_stack_stopped "stopping services"
     disable_tailscale_https
     echo "Stopped."
 }
