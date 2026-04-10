@@ -63,6 +63,7 @@ let transientHintTimer = null;
 let currentRunId = null;
 let pendingExecutionPlan = null;
 let pendingPermissionRequest = null;
+let activeClientTurnId = '';
 let recentPermissionResponses = {};
 let dictationActive = false;
 let currentAudio = null;
@@ -78,6 +79,7 @@ let dictationStartedAt = 0;
 let mobileComposerResizeObserver = null;
 let mobileKeyboardInset = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
+const COMPACT_WORKSPACE_MEDIA_QUERY = '(max-width: 1180px)';
 const SEND_BUTTON_ICON = buildComposerIconMarkup('<path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>');
 const STOP_BUTTON_ICON = buildComposerIconMarkup('<rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.8"></rect>');
 const MIC_BUTTON_ICON = buildComposerIconMarkup('<rect x="9" y="4.5" width="6" height="10" rx="3"></rect><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0"></path><path d="M12 17v2.5"></path><path d="M9.5 19.5h5"></path>');
@@ -652,7 +654,8 @@ function applyWorkspacePanelState() {
 }
 
 function workspaceUsesMobileLayout() {
-    return window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches;
+    return window.matchMedia(MOBILE_WORKSPACE_MEDIA_QUERY).matches
+        || window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY).matches;
 }
 
 function effectiveWorkspaceViewMode() {
@@ -662,6 +665,7 @@ function effectiveWorkspaceViewMode() {
 }
 
 function syncWorkspaceViewMode() {
+    const root = document.getElementById('chatRoot');
     const panel = document.getElementById('workspacePanel');
     const viewer = document.querySelector('.ide-viewer');
     const treeButton = document.getElementById('workspaceTreeViewButton');
@@ -669,10 +673,12 @@ function syncWorkspaceViewMode() {
     const switcher = document.querySelector('.workspace-view-switch');
     const mobileLayout = workspaceUsesMobileLayout();
     const mode = effectiveWorkspaceViewMode();
+    const hasReader = Boolean(inlineViewerPath);
     const showTree = !mobileLayout || mode === 'tree';
-    const showReader = !mobileLayout || mode === 'reader';
+    const showReader = hasReader && (!mobileLayout || mode === 'reader');
 
-    workspaceViewMode = mobileLayout ? mode : 'split';
+    workspaceViewMode = mobileLayout ? mode : (hasReader ? 'split' : 'tree');
+    if (root) root.classList.toggle('workspace-reader-open', !mobileLayout && hasReader && workspacePanelOpen);
     if (panel) panel.classList.toggle('is-hidden', !showTree);
     if (viewer) viewer.classList.toggle('is-hidden', !showReader);
     if (switcher) switcher.hidden = !mobileLayout;
@@ -682,10 +688,9 @@ function syncWorkspaceViewMode() {
         treeButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'tree' ? 'true' : 'false') : (showTree ? 'true' : 'false'));
     }
     if (readerButton) {
-        const hasReader = Boolean(inlineViewerPath);
         readerButton.disabled = mobileLayout ? !hasReader : false;
-        readerButton.classList.toggle('active', mobileLayout ? mode === 'reader' : (showReader && hasReader));
-        readerButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'reader' ? 'true' : 'false') : (showReader && hasReader ? 'true' : 'false'));
+        readerButton.classList.toggle('active', mobileLayout ? mode === 'reader' : showReader);
+        readerButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'reader' ? 'true' : 'false') : (showReader ? 'true' : 'false'));
     }
 
     localStorage.setItem('workspaceViewMode', mobileLayout ? mode : (inlineViewerPath ? 'reader' : 'tree'));
@@ -1016,6 +1021,18 @@ function buildPermissionResponseCacheKey(conversationId, permissionKey, approval
     return `${conv}::${target}::${key}`;
 }
 
+function beginClientTurn() {
+    activeClientTurnId = generateId();
+    return activeClientTurnId;
+}
+
+function clearActiveClientTurn(turnId = '') {
+    const target = String(turnId || '').trim();
+    if (!target || activeClientTurnId === target) {
+        activeClientTurnId = '';
+    }
+}
+
 function pruneRecentPermissionResponses(now = Date.now()) {
     Object.entries(recentPermissionResponses).forEach(([key, value]) => {
         if (!value || typeof value !== 'object') {
@@ -1116,6 +1133,7 @@ function respondToPendingPermission(approved) {
     const approvalTarget = String(pendingPermissionRequest.approvalTarget || 'tool').trim().toLowerCase();
     const title = pendingPermissionRequest.title || 'Permission';
     const conversationId = String(pendingPermissionRequest.conversationId || currentConvId || '').trim();
+    const clientTurnId = String(pendingPermissionRequest.clientTurnId || activeClientTurnId || '').trim();
     rememberRecentPermissionResponse(conversationId, permissionKey, approvalTarget, approved);
     if (approved) {
         rememberApprovalForPendingRequest();
@@ -1131,6 +1149,7 @@ function respondToPendingPermission(approved) {
         ws.send(JSON.stringify({
             type: 'permission_response',
             conversation_id: conversationId,
+            client_turn_id: clientTurnId,
             permission_key: permissionKey,
             approval_target: approvalTarget,
             approved: Boolean(approved),
@@ -1519,6 +1538,7 @@ function startHealthPolling() {
 function handleChatEvent(data) {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'start') {
+        if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
         removeLoading();
         ensureStreamingAssistantMessage();
@@ -1628,13 +1648,28 @@ function handleChatEvent(data) {
         });
     } else if (data.type === 'permission_required') {
         const permissionConversationId = String(data.conversation_id || '').trim();
+        const clientTurnId = String(data.client_turn_id || '').trim();
         const permissionKey = String(data.permission_key || '').trim().toLowerCase();
         const approvalTarget = String(data.approval_target || 'tool').trim().toLowerCase();
+        if (!activeClientTurnId || !clientTurnId || clientTurnId !== activeClientTurnId) {
+            if (canUseWebsocketTransport()) {
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    conversation_id: permissionConversationId || currentConvId,
+                    client_turn_id: clientTurnId,
+                    permission_key: permissionKey,
+                    approval_target: approvalTarget,
+                    approved: false,
+                }));
+            }
+            return;
+        }
         if (permissionConversationId && permissionConversationId !== currentConvId) {
             if (canUseWebsocketTransport()) {
                 ws.send(JSON.stringify({
                     type: 'permission_response',
                     conversation_id: permissionConversationId,
+                    client_turn_id: clientTurnId,
                     permission_key: permissionKey,
                     approval_target: approvalTarget,
                     approved: false,
@@ -1647,6 +1682,7 @@ function handleChatEvent(data) {
                 ws.send(JSON.stringify({
                     type: 'permission_response',
                     conversation_id: permissionConversationId || currentConvId,
+                    client_turn_id: clientTurnId,
                     permission_key: permissionKey,
                     approval_target: approvalTarget,
                     approved: false,
@@ -1663,6 +1699,7 @@ function handleChatEvent(data) {
             ws.send(JSON.stringify({
                 type: 'permission_response',
                 conversation_id: permissionConversationId || currentConvId,
+                client_turn_id: clientTurnId,
                 permission_key: permissionKey,
                 approval_target: approvalTarget,
                 approved: recentDecision.approved,
@@ -1671,6 +1708,7 @@ function handleChatEvent(data) {
         }
         pendingPermissionRequest = {
             conversationId: permissionConversationId || currentConvId,
+            clientTurnId,
             permissionKey,
             approvalTarget,
             title: data.title || 'Permission needed',
@@ -1698,6 +1736,7 @@ function handleChatEvent(data) {
             syncAssistantMessageActions(msg);
         }
     } else if (data.type === 'done') {
+        clearActiveClientTurn();
         clearPendingPermissionRequest();
         isGenerating = false;
         currentTurnTransport = null;
@@ -1712,6 +1751,7 @@ function handleChatEvent(data) {
         activeStreamConversationId = null;
         streamingAssistantMessage = null;
     } else if (data.type === 'canceled') {
+        clearActiveClientTurn();
         clearPendingPermissionRequest();
         removeLoading();
         isGenerating = false;
@@ -1720,6 +1760,7 @@ function handleChatEvent(data) {
         syncSendButton();
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
     } else if (data.type === 'error') {
+        clearActiveClientTurn();
         clearPendingPermissionRequest();
         removeLoading();
         isGenerating = false;
@@ -1813,6 +1854,8 @@ function connectWS() {
 
     ws.onerror = () => {
         if (currentTurnTransport === 'ws') {
+            clearActiveClientTurn();
+            clearPendingPermissionRequest();
             removeLoading();
             isGenerating = false;
             currentTurnTransport = null;
@@ -1825,6 +1868,8 @@ function connectWS() {
     ws.onclose = () => {
         const activeWsTurn = currentTurnTransport === 'ws';
         if (activeWsTurn) {
+            clearActiveClientTurn();
+            clearPendingPermissionRequest();
             removeLoading();
             isGenerating = false;
             currentTurnTransport = null;
@@ -4496,10 +4541,12 @@ function sendMessage() {
     activeStreamConversationId = currentConvId;
     streamingAssistantMessage = null;
     syncSendButton();
+    const clientTurnId = beginClientTurn();
     dispatchChatPayload({
         message,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
+        client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,
@@ -4526,11 +4573,13 @@ function sendInterruptMessage(messageText) {
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
     recordWorkspaceActivity('Interrupt', outboundText);
+    const clientTurnId = beginClientTurn();
     ws.send(JSON.stringify({
         type: 'interrupt',
         message: outboundText,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
+        client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,

@@ -4,6 +4,7 @@
  */
 /* === Reset & Base === */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+[hidden] { display: none !important; }
 html {
     height: 100%;
     overflow: hidden;
@@ -84,11 +85,14 @@ textarea {
     --mobile-viewport-height: 100dvh;
     --chat-column-max: 660px;
     --menu-sidebar-width: clamp(236px, 19vw, 282px);
-    --workspace-sidebar-width: clamp(236px, 19vw, 288px);
+    --workspace-sidebar-width: clamp(260px, 30vw, 360px);
     --workspace-viewer-width: clamp(320px, 31vw, 520px);
-    --workspace-pane-width: max(var(--workspace-sidebar-width), var(--workspace-viewer-width));
+    --workspace-pane-gap: 10px;
+    --workspace-shell-width: var(--workspace-sidebar-width);
+    --workspace-shell-width-split: calc(var(--workspace-sidebar-width) + var(--workspace-viewer-width) + var(--workspace-pane-gap));
+    --workspace-shell-width-compact: clamp(320px, 38vw, 420px);
     --menu-toggle-open-left: calc(min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 20px);
-    --workspace-toggle-open-right: calc(min(var(--workspace-pane-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 12px);
+    --workspace-toggle-open-right: calc(min(var(--workspace-shell-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 12px);
     --panel-radius: 16px;
     --surface-radius: 12px;
     --dense-border: color-mix(in srgb, var(--bg_tertiary) 88%, transparent);
@@ -225,42 +229,58 @@ textarea {
     padding: 0;
 }
 .permission-panel {
-    display: flex;
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: calc(100% + 10px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    margin-bottom: 8px;
-    padding: 12px;
-    border: 1px solid color-mix(in srgb, var(--accent_primary) 20%, var(--dense-border));
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--bg_secondary) 95%, transparent);
+    gap: 10px 12px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 22%, var(--dense-border));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg_secondary) 86%, var(--bg_primary));
+    backdrop-filter: blur(16px) saturate(1.08);
+    box-shadow: 0 14px 30px rgba(15, 23, 42, 0.1);
+    z-index: 7;
+    animation: permission-panel-enter 160ms ease-out;
 }
 .permission-panel-copy {
     min-width: 0;
+    display: grid;
+    gap: 3px;
 }
 .permission-panel-title {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text_secondary);
 }
 .permission-panel-text {
-    margin-top: 3px;
     font-size: 12px;
-    line-height: 1.45;
+    line-height: 1.35;
     color: var(--text_primary);
 }
 .permission-panel-preview {
-    margin-top: 8px;
-    font: 12px/1.5 "IBM Plex Mono", "Courier New", monospace;
+    margin-top: 2px;
+    padding-top: 1px;
+    font: 11px/1.35 "IBM Plex Mono", "Courier New", monospace;
     color: var(--text_secondary);
     word-break: break-word;
+    opacity: 0.9;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 .permission-panel-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: flex-end;
+    gap: 7px;
     flex-shrink: 0;
 }
 .permission-panel-button {
@@ -268,10 +288,13 @@ textarea {
     border-radius: 999px;
     background: var(--bg_primary);
     color: var(--text_primary);
-    padding: 8px 12px;
-    font-size: 12px;
+    padding: 7px 12px;
+    min-width: 76px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.4) inset;
+    transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
 }
 .permission-panel-button-allow {
     color: var(--accent_primary);
@@ -279,6 +302,23 @@ textarea {
 }
 .permission-panel-button-deny {
     color: var(--text_secondary);
+}
+.permission-panel-button:hover {
+    transform: translateY(-1px);
+}
+.permission-panel-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent_primary) 24%, transparent);
+    outline-offset: 2px;
+}
+@keyframes permission-panel-enter {
+    from {
+        opacity: 0;
+        transform: translateY(6px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
 }
 .plan-approval-dismiss:hover {
     color: var(--text_primary);
@@ -789,7 +829,7 @@ textarea {
 
 .workspace-panel {
     width: 100%;
-    flex: 0 0 clamp(260px, 30vw, 360px);
+    flex: 0 0 var(--workspace-sidebar-width);
     min-width: 0;
     min-height: 0;
     height: 100%;
@@ -1251,7 +1291,7 @@ textarea {
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-pane-width));
+    width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -1260,9 +1300,12 @@ textarea {
     visibility: hidden;
     opacity: 0;
     pointer-events: none;
-    transform: translateX(calc(var(--workspace-pane-width) * 0.25));
+    transform: translateX(calc(var(--workspace-shell-width) * 0.25));
     transition: opacity 0.22s ease, transform 0.24s ease, visibility 0.24s step-end;
     z-index: 960;
+}
+.chat.workspace-reader-open {
+    --workspace-shell-width: var(--workspace-shell-width-split);
 }
 .chat-shell.ide-mode .ide-workspace {
     visibility: visible;
@@ -1280,7 +1323,7 @@ textarea {
     flex: 1;
     min-height: 0;
     display: flex;
-    gap: 10px;
+    gap: var(--workspace-pane-gap);
     justify-content: stretch;
     align-items: stretch;
 }
@@ -1317,7 +1360,7 @@ textarea {
 }
 .ide-viewer {
     order: 0;
-    flex: 1 1 auto;
+    flex: 1 1 var(--workspace-viewer-width);
     width: 100%;
     max-width: none;
     min-width: 0;
@@ -3404,6 +3447,37 @@ pre:hover .copy-btn { opacity: 1; }
     background-clip: padding-box;
 }
 
+@media (max-width: 1180px) {
+    .chat,
+    .chat.workspace-reader-open {
+        --workspace-shell-width: var(--workspace-shell-width-compact);
+    }
+    .workspace-view-switch {
+        display: flex;
+        padding: 10px 10px 0 50px;
+    }
+    .ide-workspace {
+        width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
+        max-width: calc(100vw - (var(--chrome-gutter) * 2));
+    }
+    .ide-top {
+        flex-direction: column;
+        gap: 0;
+        overflow: hidden;
+    }
+    .workspace-panel,
+    .ide-viewer {
+        order: 0;
+        flex: 1 1 auto;
+        width: 100%;
+        max-width: none;
+        min-width: 0;
+    }
+    .workspace-panel {
+        min-height: 0;
+    }
+}
+
 /* === Mobile === */
 @media (max-width: 600px) {
     .chat-shell {
@@ -3722,15 +3796,21 @@ pre:hover .copy-btn { opacity: 1; }
         padding: 0 10px;
     }
     .permission-panel {
-        flex-direction: column;
-        align-items: stretch;
+        left: 0;
+        right: 0;
+        bottom: calc(100% + 8px);
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 10px;
     }
     .permission-panel-actions {
         width: 100%;
+        justify-content: stretch;
     }
     .permission-panel-button {
         flex: 1 1 0;
         text-align: center;
+        min-width: 0;
     }
     .composer-hint {
         margin-top: 10px;

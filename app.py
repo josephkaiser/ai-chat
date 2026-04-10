@@ -3354,10 +3354,12 @@ async def wait_for_permission_approval(
     step_label: Optional[str] = None,
 ) -> bool:
     """Pause the active tool loop until the user approves or denies a gated tool."""
+    client_turn_id = str(getattr(websocket, "active_client_turn_id", "") or "").strip()
     if getattr(websocket, "supports_command_approval", True) is False:
         await websocket.send_json({
             "type": "permission_required",
             "conversation_id": conversation_id,
+            "client_turn_id": client_turn_id,
             "permission_key": request.key,
             "approval_target": request.approval_target,
             "title": request.title,
@@ -3381,11 +3383,14 @@ async def wait_for_permission_approval(
         "future": future,
         "permission_key": request.key,
         "approval_target": request.approval_target,
+        "client_turn_id": client_turn_id,
+        "websocket_id": id(websocket),
     }
     try:
         await websocket.send_json({
             "type": "permission_required",
             "conversation_id": conversation_id,
+            "client_turn_id": client_turn_id,
             "permission_key": request.key,
             "approval_target": request.approval_target,
             "title": request.title,
@@ -10663,6 +10668,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     """Process a single chat turn so the websocket loop can also handle stop requests."""
     message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
+    client_turn_id = str(data.get("client_turn_id", "") or "").strip()
 
     if not message:
         await websocket.send_json({'type': 'error', 'content': 'Empty message'})
@@ -10671,6 +10677,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     workflow_execution: Optional[WorkflowExecutionContext] = None
 
     try:
+        if client_turn_id:
+            setattr(websocket, "active_client_turn_id", client_turn_id)
         prepared = await prepare_turn_request(data)
         mode = prepared.resolved_mode
         slash_command = prepared.slash_command
@@ -10896,6 +10904,9 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         )
         logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
         await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
+    finally:
+        if client_turn_id and str(getattr(websocket, "active_client_turn_id", "") or "").strip() == client_turn_id:
+            setattr(websocket, "active_client_turn_id", "")
 
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
@@ -10936,6 +10947,7 @@ async def chat_websocket(websocket: WebSocket):
             if data.get('type') in {'command_approval', 'permission_response'}:
                 conversation_id = str(data.get("conversation_id", "")).strip()
                 approval_target = str(data.get("approval_target", "") or "").strip().lower()
+                client_turn_id = str(data.get("client_turn_id", "") or "").strip()
                 raw_permission_key = (
                     data.get("permission_key")
                     if data.get('type') == 'permission_response'
@@ -10957,12 +10969,16 @@ async def chat_websocket(websocket: WebSocket):
                     if expected_target == "command"
                     else normalize_allowed_tool_permission_key(str(waiter.get("permission_key", "")))
                 )
+                expected_client_turn_id = str(waiter.get("client_turn_id", "") or "").strip()
                 future = waiter.get("future")
                 if approval_target and expected_target and approval_target != expected_target:
                     await websocket.send_json({'type': 'error', 'content': 'Permission approval target did not match the pending request.'})
                     continue
                 if permission_key != expected_key:
                     await websocket.send_json({'type': 'error', 'content': 'Permission approval response did not match the pending request.'})
+                    continue
+                if expected_client_turn_id and client_turn_id != expected_client_turn_id:
+                    await websocket.send_json({'type': 'error', 'content': 'Permission approval response did not match the active turn.'})
                     continue
                 if isinstance(future, asyncio.Future) and not future.done():
                     future.set_result(approved)
@@ -10988,7 +11004,10 @@ async def chat_websocket(websocket: WebSocket):
             active_task = asyncio.create_task(process_chat_turn(websocket, data))
 
     except WebSocketDisconnect:
+        websocket_id = id(websocket)
         for conversation_id, waiter in list(PERMISSION_APPROVAL_WAITERS.items()):
+            if waiter.get("websocket_id") != websocket_id:
+                continue
             future = waiter.get("future")
             if isinstance(future, asyncio.Future) and not future.done():
                 future.set_result(False)
@@ -10997,6 +11016,13 @@ async def chat_websocket(websocket: WebSocket):
         keepalive_task.cancel()
         logger.info("WebSocket disconnected")
     except Exception as e:
+        websocket_id = id(websocket)
+        for conversation_id, waiter in list(PERMISSION_APPROVAL_WAITERS.items()):
+            if waiter.get("websocket_id") != websocket_id:
+                continue
+            future = waiter.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.set_result(False)
         keepalive_task.cancel()
         logger.error(f"WebSocket error: {e}")
 
