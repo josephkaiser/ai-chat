@@ -870,6 +870,11 @@ textarea {
 .workspace-toggle.active {
     color: var(--text_primary);
     border-color: var(--accent_primary);
+    right: calc(
+        var(--safe-right) + var(--chrome-gutter) +
+        min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width)) -
+        var(--sidebar-toggle-size) - 18px
+    );
 }
 .workspace-toggle-icon {
     width: 18px;
