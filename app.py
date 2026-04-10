@@ -1141,12 +1141,13 @@ def path_is_within_root(path: pathlib.Path, root: pathlib.Path) -> bool:
 
 
 def workspace_rel_path_is_hidden(rel_path: str) -> bool:
-    """Return whether a workspace-relative path points at a dot-prefixed entry."""
+    """Return whether a workspace-relative path points at hidden or low-signal internal clutter."""
     raw = str(rel_path or "").strip().replace("\\", "/")
     if not raw or raw == ".":
         return False
     parts = [part for part in pathlib.PurePosixPath(raw).parts if part not in {"", "."}]
-    return any(part.startswith(".") for part in parts)
+    internal_names = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints"}
+    return any(part.startswith(".") or part in internal_names for part in parts)
 
 
 def workspace_command_allows_argument(
@@ -1401,7 +1402,12 @@ def delete_run_workspace(conversation_id: str):
 
 def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
     """Build the subprocess environment for workspace commands."""
-    env = {**os.environ, "PYTHONPATH": "", "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
+    env = {
+        **os.environ,
+        "PYTHONPATH": "",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     python_path = managed_python_python_path(conversation_id, create=False)
     if python_path.exists():
         env_root = resolve_existing_managed_python_env_path(conversation_id)
@@ -3156,7 +3162,7 @@ def extract_workspace_path_references(message: str) -> List[str]:
 
 
 WORKSPACE_RESPONSE_TRUTHFULNESS_RULES = """Workspace and tool truthfulness rules:
-- Never claim a workspace file was created, saved, or updated unless this turn actually completed a successful `workspace.patch_file` call.
+- Never claim a workspace file or artifact was created, saved, updated, rendered, or generated unless this turn actually completed a successful workspace write or artifact-producing tool call.
 - If no workspace file was written, provide the result inline and optionally offer to save it.
 - Never claim you searched the web, looked something up, or added sourced citations unless this turn actually used the web tools.
 - If the prompt already includes extracted attachment context, treat that content as available instead of claiming you cannot read the attachment.
@@ -3180,25 +3186,53 @@ def normalize_workspace_reference_path(path_value: str) -> str:
     return str(path_value or "").strip().replace("\\", "/").strip("./").lower()
 
 
+def workspace_output_paths_from_tool_result(call: Dict[str, Any], result: Dict[str, Any]) -> List[str]:
+    """Collect workspace-relative output paths produced by one successful tool call."""
+    if not result.get("ok"):
+        return []
+    name = str(call.get("name", "")).strip()
+    payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    if not isinstance(payload, dict):
+        return []
+
+    paths: List[str] = []
+
+    def add_path(candidate: Any) -> None:
+        path = str(candidate or "").strip()
+        if path and path not in paths:
+            paths.append(path)
+
+    if name in {"workspace.patch_file", "workspace.render"}:
+        add_path(payload.get("path"))
+        return paths
+
+    if name == "workspace.run_command":
+        add_path(payload.get("path"))
+        items = payload.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    add_path(item.get("path"))
+        return paths
+
+    return []
+
+
 def successful_workspace_write_paths(tool_results: List[Dict[str, Any]]) -> set[str]:
-    """Collect workspace paths that were actually written during the current turn."""
+    """Collect workspace paths that were actually produced during the current turn."""
     written_paths: set[str] = set()
     for entry in tool_results:
-        call = entry.get("call", {})
-        result = entry.get("result", {})
-        if call.get("name") != "workspace.patch_file" or not result.get("ok"):
-            continue
-        payload = result.get("result", {})
-        if not isinstance(payload, dict):
-            continue
-        normalized = normalize_workspace_reference_path(str(payload.get("path", "")))
-        if normalized:
-            written_paths.add(normalized)
+        call = entry.get("call", {}) if isinstance(entry.get("call"), dict) else {}
+        result = entry.get("result", {}) if isinstance(entry.get("result"), dict) else {}
+        for path in workspace_output_paths_from_tool_result(call, result):
+            normalized = normalize_workspace_reference_path(path)
+            if normalized:
+                written_paths.add(normalized)
     return written_paths
 
 
 def strip_unverified_workspace_write_claims(message: str, tool_results: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Remove file-write claims that are not backed by a successful workspace write tool result."""
+    """Remove workspace output claims that are not backed by a successful tool result."""
     cleaned = str(message or "").strip()
     if not cleaned:
         return ""
@@ -10291,10 +10325,13 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                     substep_touched_paths.append(path)
                 if isinstance(path, str) and path and path not in touched_paths:
                     touched_paths.append(path)
-                if call.get("name") != "workspace.patch_file" or not result.get("ok"):
-                    continue
-                if isinstance(path, str) and path not in changed_files:
-                    changed_files.append(path)
+                for output_path in workspace_output_paths_from_tool_result(call, result):
+                    if output_path not in substep_touched_paths:
+                        substep_touched_paths.append(output_path)
+                    if output_path not in touched_paths:
+                        touched_paths.append(output_path)
+                    if output_path not in changed_files:
+                        changed_files.append(output_path)
 
             substep_summary = outcome.final_text.strip() or f"Completed substep {idx + 1}.{sub_idx + 1}."
             if substep_successful_tools == 0:
