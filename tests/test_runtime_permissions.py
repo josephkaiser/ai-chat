@@ -129,17 +129,22 @@ class RuntimePermissionTests(unittest.TestCase):
             (workspace / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
             (workspace / ".venv").mkdir(parents=True, exist_ok=True)
             (workspace / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            (workspace / "__pycache__").mkdir(parents=True, exist_ok=True)
+            (workspace / "__pycache__" / "app.cpython-311.pyc").write_bytes(b"pyc")
             original = app.get_workspace_path
             try:
                 app.get_workspace_path = lambda _conversation_id, create=True: workspace
                 root_listing = app.workspace_list_files_result("conv-hidden")
                 hidden_listing = app.workspace_list_files_result("conv-hidden", ".venv")
+                cache_listing = app.workspace_list_files_result("conv-hidden", "__pycache__")
             finally:
                 app.get_workspace_path = original
 
         self.assertEqual([item["name"] for item in root_listing["items"]], ["app.py"])
         self.assertEqual(hidden_listing["path"], ".venv")
         self.assertEqual([item["name"] for item in hidden_listing["items"]], ["pyvenv.cfg"])
+        self.assertEqual(cache_listing["path"], "__pycache__")
+        self.assertEqual([item["name"] for item in cache_listing["items"]], ["app.cpython-311.pyc"])
 
     def test_validate_workspace_command_allows_managed_python_env_paths(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -386,6 +391,51 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["path"], "plot.png")
         self.assertEqual(result["items"][0]["content_kind"], "image")
         self.assertEqual(result["items"][1]["path"], "notes.txt")
+
+    def test_successful_workspace_write_paths_include_command_and_render_outputs(self):
+        tool_results = [
+            {
+                "call": {"name": "workspace.run_command"},
+                "result": {
+                    "ok": True,
+                    "result": {
+                        "path": "reports/attention_report.pdf",
+                        "items": [
+                            {"path": "reports/attention_report.pdf"},
+                            {"path": "reports/attention_report.tex"},
+                        ],
+                    },
+                },
+            },
+            {
+                "call": {"name": "workspace.render"},
+                "result": {"ok": True, "result": {"path": "preview/dashboard.html"}},
+            },
+        ]
+
+        written = app.successful_workspace_write_paths(tool_results)
+
+        self.assertIn("reports/attention_report.pdf", written)
+        self.assertIn("reports/attention_report.tex", written)
+        self.assertIn("preview/dashboard.html", written)
+
+    def test_truthfulness_filter_allows_claims_backed_by_command_artifacts(self):
+        message = "Created `reports/attention_report.pdf` and saved it in the workspace."
+        tool_results = [
+            {
+                "call": {"name": "workspace.run_command"},
+                "result": {"ok": True, "result": {"path": "reports/attention_report.pdf", "items": []}},
+            }
+        ]
+
+        cleaned = app.strip_unverified_workspace_write_claims(message, tool_results)
+
+        self.assertEqual(cleaned, message)
+
+    def test_workspace_command_env_disables_python_bytecode_clutter(self):
+        env = app.build_workspace_command_env("conv-env-no-pyc")
+
+        self.assertEqual(env.get("PYTHONDONTWRITEBYTECODE"), "1")
 
 
 if __name__ == "__main__":
