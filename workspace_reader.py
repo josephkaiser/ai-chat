@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import mimetypes
 from typing import Any, Callable, Dict, Optional
 
 
@@ -8,6 +9,7 @@ MARKDOWN_EXTENSIONS = {".md", ".markdown", ".rst"}
 HTML_EXTENSIONS = {".htm", ".html"}
 DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
 BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 
 PAUSE_REASON_COMMAND_APPROVAL = "command_approval"
 PAUSE_REASON_WRITE_BLOCKED = "write_blocked"
@@ -46,6 +48,8 @@ def workspace_file_content_kind(path: str | pathlib.Path) -> str:
     suffix = pathlib.Path(path).suffix.lower()
     if is_pdf_path(path):
         return "pdf"
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
     if suffix in MARKDOWN_EXTENSIONS:
         return "markdown"
     if suffix in HTML_EXTENSIONS:
@@ -63,6 +67,8 @@ def workspace_file_live_reader_mode(path: str | pathlib.Path) -> str:
         return "document_preview"
     if kind == "spreadsheet":
         return "spreadsheet"
+    if kind == "image":
+        return "binary_preview"
     return "text"
 
 
@@ -93,6 +99,22 @@ def build_pdf_inline_preview_result(
         "page_count": None,
         "title": target.name,
         "metadata": metadata,
+        "truncated": False,
+    }
+
+
+def build_binary_preview_result(
+    target: pathlib.Path,
+    rel_path: str,
+) -> Dict[str, Any]:
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return {
+        "path": rel_path,
+        "content": "",
+        "size": target.stat().st_size,
+        "lines": 0,
+        "file_type": "binary",
+        "media_type": media_type,
         "truncated": False,
     }
 
@@ -157,6 +179,8 @@ def build_workspace_file_result(
                 resolved_rel_path,
                 error_message=str(exc),
             )
+    elif live_mode == "binary_preview":
+        payload = build_binary_preview_result(target, resolved_rel_path)
     else:
         payload = build_text_file_result(
             target,

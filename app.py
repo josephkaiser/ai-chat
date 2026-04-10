@@ -131,6 +131,7 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B-AWQ")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT", str(pathlib.Path("/app/workspaces")))
 RUNS_ROOT = os.getenv("RUNS_ROOT", str(pathlib.Path("/app/runs")))
+MANAGED_PYTHON_ENVS_ROOT = os.getenv("MANAGED_PYTHON_ENVS_ROOT", str(pathlib.Path("/app/python-envs")))
 VOICE_ROOT = os.getenv("VOICE_ROOT", str(pathlib.Path("/app/data/voice")))
 MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/app/data/model_state.json")
 MODEL_14B_NAME = os.getenv("MODEL_14B_NAME", MODEL_NAME)
@@ -156,8 +157,8 @@ CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
-TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "6"))
-TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "2")))
+TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "8"))
+TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "3")))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
 AUTO_VERIFY_MAX_RUNS = max(0, int(os.getenv("AUTO_VERIFY_MAX_RUNS", "2")))
 WORKSPACE_FILE_SIZE_LIMIT = 1024 * 1024
@@ -165,6 +166,7 @@ WORKSPACE_WRITE_SIZE_LIMIT = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = float(os.getenv("COMMAND_TIMEOUT_SECONDS", "8"))
 COMMAND_OUTPUT_LIMIT = int(os.getenv("COMMAND_OUTPUT_LIMIT", "12000"))
 TOOL_RESULT_TEXT_LIMIT = int(os.getenv("TOOL_RESULT_TEXT_LIMIT", "40000"))
+WORKSPACE_COMMAND_ARTIFACT_LIMIT = max(1, int(os.getenv("WORKSPACE_COMMAND_ARTIFACT_LIMIT", "8")))
 WEB_PAGE_TEXT_LIMIT = int(os.getenv("WEB_PAGE_TEXT_LIMIT", "16000"))
 WEB_FETCH_PAGE_MAX_PER_TURN = max(1, int(os.getenv("WEB_FETCH_PAGE_MAX_PER_TURN", "3")))
 CURATED_SOURCE_FAILURE_THRESHOLD = max(1, int(os.getenv("CURATED_SOURCE_FAILURE_THRESHOLD", "2")))
@@ -497,6 +499,8 @@ WORKSPACE_ROOT_PATH = pathlib.Path(WORKSPACE_ROOT).resolve()
 WORKSPACE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 RUNS_ROOT_PATH = pathlib.Path(RUNS_ROOT).resolve()
 RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+MANAGED_PYTHON_ENVS_ROOT_PATH = pathlib.Path(MANAGED_PYTHON_ENVS_ROOT).resolve()
+MANAGED_PYTHON_ENVS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 VOICE_ROOT_PATH = pathlib.Path(VOICE_ROOT).resolve()
 VOICE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 PIPER_DEFAULT_MODEL = pathlib.Path(
@@ -667,8 +671,8 @@ def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Pat
     return get_run_workspace_root(run["id"], create=create)
 
 
-def get_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
-    """Return the server-owned Python environment path for one conversation."""
+def get_legacy_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the historical per-run managed Python environment path for one conversation."""
     run = get_run_record(conversation_id)
     run_id = str(run.get("id", "")).strip() if isinstance(run, dict) else ""
     if not run_id:
@@ -679,9 +683,69 @@ def get_managed_python_env_path(conversation_id: str, create: bool = False) -> p
     return env_root
 
 
+def get_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
+    """Return the server-owned Python environment path for one conversation."""
+    env_root = (MANAGED_PYTHON_ENVS_ROOT_PATH / sanitize_conversation_id(conversation_id)).resolve()
+    if MANAGED_PYTHON_ENVS_ROOT_PATH not in env_root.parents and env_root != MANAGED_PYTHON_ENVS_ROOT_PATH:
+        raise ValueError("Managed Python environment path escaped root")
+    if create:
+        env_root.parent.mkdir(parents=True, exist_ok=True)
+    return env_root
+
+
+def resolve_existing_managed_python_env_path(conversation_id: str) -> pathlib.Path:
+    """Return the active managed environment path, falling back to the legacy run-local location."""
+    preferred = get_managed_python_env_path(conversation_id, create=False)
+    executable = "python.exe" if os.name == "nt" else "python"
+    preferred_python = preferred / ("Scripts" if os.name == "nt" else "bin") / executable
+    if preferred_python.exists():
+        return preferred
+    legacy = get_legacy_managed_python_env_path(conversation_id, create=False)
+    legacy_python = legacy / ("Scripts" if os.name == "nt" else "bin") / executable
+    if legacy_python.exists():
+        return legacy
+    if preferred.exists():
+        return preferred
+    if legacy.exists():
+        return legacy
+    return preferred
+
+
+def delete_managed_python_env(conversation_id: str) -> None:
+    """Delete any managed Python environment paths for a conversation."""
+    for env_root in (
+        get_managed_python_env_path(conversation_id, create=False),
+        get_legacy_managed_python_env_path(conversation_id, create=False),
+    ):
+        if env_root.exists():
+            shutil.rmtree(env_root, ignore_errors=True)
+
+
+def migrate_legacy_managed_python_env(conversation_id: str) -> pathlib.Path:
+    """Move a legacy run-local managed Python environment into the dedicated server-owned root."""
+    preferred = get_managed_python_env_path(conversation_id, create=False)
+    if preferred.exists():
+        return preferred
+
+    legacy = get_legacy_managed_python_env_path(conversation_id, create=False)
+    if not legacy.exists():
+        return preferred
+
+    preferred.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        legacy.rename(preferred)
+    except OSError:
+        shutil.copytree(legacy, preferred, dirs_exist_ok=False)
+        shutil.rmtree(legacy, ignore_errors=True)
+    return preferred
+
+
 def managed_python_bin_dir(conversation_id: str, create: bool = False) -> pathlib.Path:
     """Return the binary/scripts directory for the managed Python environment."""
-    env_root = get_managed_python_env_path(conversation_id, create=create)
+    if create:
+        env_root = get_managed_python_env_path(conversation_id, create=True)
+    else:
+        env_root = resolve_existing_managed_python_env_path(conversation_id)
     return env_root / ("Scripts" if os.name == "nt" else "bin")
 
 
@@ -704,6 +768,11 @@ def managed_python_env_exists(conversation_id: str) -> bool:
 
 def _create_managed_python_env_sync(conversation_id: str) -> pathlib.Path:
     """Create the server-owned managed Python environment for one conversation."""
+    existing = resolve_existing_managed_python_env_path(conversation_id)
+    existing_python = managed_python_python_path(conversation_id, create=False)
+    if existing.exists() and existing_python.exists():
+        return existing
+
     env_root = get_managed_python_env_path(conversation_id, create=True)
     python_path = managed_python_python_path(conversation_id, create=False)
     if python_path.exists():
@@ -716,7 +785,7 @@ def _create_managed_python_env_sync(conversation_id: str) -> pathlib.Path:
 async def ensure_managed_python_env(conversation_id: str) -> pathlib.Path:
     """Create the managed Python environment on demand."""
     if managed_python_env_exists(conversation_id):
-        return get_managed_python_env_path(conversation_id, create=False)
+        return migrate_legacy_managed_python_env(conversation_id)
     return await asyncio.to_thread(_create_managed_python_env_sync, conversation_id)
 
 
@@ -1033,6 +1102,11 @@ def record_workflow_step(
     path = str(payload.get("path", "")).strip()
     if result.get("ok") and path and path not in execution.artifact_paths:
         execution.artifact_paths.append(path)
+    if result.get("ok") and isinstance(payload.get("items"), list):
+        for item in payload.get("items", []):
+            item_path = str((item or {}).get("path", "")).strip() if isinstance(item, dict) else ""
+            if item_path and item_path not in execution.artifact_paths:
+                execution.artifact_paths.append(item_path)
 
 
 def finalize_workflow_execution(
@@ -1200,7 +1274,7 @@ def command_permission_key(
         return f"exec:{pathlib.Path(normalized).name.lower()}"
 
     workspace = get_workspace_path(conversation_id)
-    managed_env_root = get_managed_python_env_path(conversation_id, create=False)
+    managed_env_root = resolve_existing_managed_python_env_path(conversation_id)
     resolved_exec = pathlib.Path(executable).expanduser()
     if not resolved_exec.is_absolute():
         resolved_exec = (cwd_path / resolved_exec).resolve(strict=False)
@@ -1293,7 +1367,7 @@ def validate_workspace_command(
         )
 
     workspace = get_workspace_path(conversation_id)
-    managed_env_root = get_managed_python_env_path(conversation_id, create=False)
+    managed_env_root = resolve_existing_managed_python_env_path(conversation_id)
     executable = command[0].strip()
 
     if "/" in executable:
@@ -1317,10 +1391,12 @@ def delete_run_workspace(conversation_id: str):
     """Delete the run sandbox for a conversation if it exists."""
     run = get_run_record(conversation_id)
     if not run:
+        delete_managed_python_env(conversation_id)
         return
     sandbox_path = pathlib.Path(run["sandbox_path"]).resolve()
     if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
         shutil.rmtree(sandbox_path.parent, ignore_errors=True)
+    delete_managed_python_env(conversation_id)
 
 
 def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
@@ -1328,7 +1404,7 @@ def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
     env = {**os.environ, "PYTHONPATH": "", "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
     python_path = managed_python_python_path(conversation_id, create=False)
     if python_path.exists():
-        env_root = get_managed_python_env_path(conversation_id, create=False)
+        env_root = resolve_existing_managed_python_env_path(conversation_id)
         bin_dir = python_path.parent
         existing_path = env.get("PATH", "")
         env["PATH"] = str(bin_dir) if not existing_path else f"{bin_dir}{os.pathsep}{existing_path}"
@@ -1445,6 +1521,7 @@ async def reset_application_state() -> None:
             conn.close()
 
     reset_directory_contents(RUNS_ROOT_PATH)
+    reset_directory_contents(MANAGED_PYTHON_ENVS_ROOT_PATH)
     reset_directory_contents(WORKSPACE_ROOT_PATH)
     for kind in VOICE_EPHEMERAL_KINDS:
         reset_directory_contents(get_voice_dir(kind, create=True))
@@ -1468,9 +1545,107 @@ def classify_workspace_file_kind(path: str) -> str:
         return "spreadsheet"
     if is_pdf_path(path):
         return "pdf"
+    if workspace_file_content_kind(path) == "image":
+        return "image"
     if is_text_document_path(path):
         return "document"
     return "file"
+
+
+def build_workspace_listing_item(path: pathlib.Path, workspace: pathlib.Path) -> Dict[str, Any]:
+    """Return the shared workspace file metadata used by listings and artifact surfacing."""
+    stat = path.stat()
+    rel_path = format_workspace_path(path, workspace)
+    content_kind = workspace_file_content_kind(rel_path)
+    return {
+        "name": path.name,
+        "path": rel_path,
+        "type": "directory" if path.is_dir() else "file",
+        "size": stat.st_size if path.is_file() else None,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "content_kind": content_kind,
+        "kind": classify_workspace_file_kind(rel_path),
+    }
+
+
+def is_previewable_workspace_kind(kind: str) -> bool:
+    """Return whether the inline viewer can preview this workspace content kind."""
+    return str(kind or "").strip().lower() in {"image", "html", "markdown", "pdf", "csv", "spreadsheet"}
+
+
+def preview_priority_for_workspace_kind(kind: str) -> int:
+    """Prefer media and viewer-friendly files when choosing a primary artifact to surface."""
+    normalized = str(kind or "").strip().lower()
+    if normalized == "image":
+        return 0
+    if normalized == "html":
+        return 1
+    if normalized == "pdf":
+        return 2
+    if normalized == "markdown":
+        return 3
+    if normalized in {"csv", "spreadsheet"}:
+        return 4
+    if normalized == "document":
+        return 5
+    if normalized == "data":
+        return 6
+    if normalized == "code":
+        return 7
+    return 8
+
+
+def capture_workspace_file_snapshot(conversation_id: str) -> Dict[str, Dict[str, Any]]:
+    """Capture the current visible workspace files so command-created artifacts can be detected."""
+    workspace = get_workspace_path(conversation_id, create=False)
+    if not workspace.exists():
+        return {}
+
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for candidate in workspace.rglob("*"):
+        if not candidate.is_file():
+            continue
+        try:
+            item = build_workspace_listing_item(candidate, workspace)
+        except (OSError, PermissionError, ValueError):
+            continue
+        rel_path = str(item.get("path", "")).strip()
+        if not rel_path or workspace_rel_path_is_hidden(rel_path):
+            continue
+        snapshot[rel_path] = item
+    return snapshot
+
+
+def detect_workspace_artifact_changes(
+    before: Dict[str, Dict[str, Any]],
+    after: Dict[str, Dict[str, Any]],
+    *,
+    limit: int = WORKSPACE_COMMAND_ARTIFACT_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Return recently changed workspace files after a command run."""
+    changes: List[Dict[str, Any]] = []
+    for path, item in after.items():
+        previous = before.get(path)
+        if previous == item:
+            continue
+        changes.append(item)
+
+    changes.sort(
+        key=lambda item: (
+            preview_priority_for_workspace_kind(item.get("content_kind", "")),
+            -(datetime.fromisoformat(item.get("modified_at", "")).timestamp() if item.get("modified_at") else 0.0),
+            str(item.get("path", "")).lower(),
+        )
+    )
+    return changes[:max(1, int(limit or WORKSPACE_COMMAND_ARTIFACT_LIMIT))]
+
+
+def choose_primary_workspace_artifact(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Pick the most useful artifact to surface from a command run."""
+    cleaned = [item for item in items if isinstance(item, dict) and str(item.get("path", "")).strip()]
+    if not cleaned:
+        return None
+    return cleaned[0]
 
 
 def indexable_for_retrieval(path: str | pathlib.Path) -> bool:
@@ -2985,6 +3160,7 @@ WORKSPACE_RESPONSE_TRUTHFULNESS_RULES = """Workspace and tool truthfulness rules
 - If no workspace file was written, provide the result inline and optionally offer to save it.
 - Never claim you searched the web, looked something up, or added sourced citations unless this turn actually used the web tools.
 - If the prompt already includes extracted attachment context, treat that content as available instead of claiming you cannot read the attachment.
+- If command execution is available for this turn, do not claim you cannot execute code, install packages, convert files, or inspect command output here. Use `workspace.run_command`, or explain that approval was denied only when that actually happened.
 - If the user asks to render or preview HTML and a render tool is available, prefer using it over claiming you cannot display pages.
 - If the user asks about earlier chat context and conversation search is available, prefer using it over guessing from memory."""
 
@@ -3117,7 +3293,9 @@ Constraints:
 - workspace.run_command takes an argv array, never a shell string.
 - For Python dependencies, use pip installs normally; the server will place them into a managed chat-scoped Python environment outside the workspace and make later Python commands use it when available.
 - When choosing Python packages or troubleshooting installs, use web.search or web.fetch_page to verify current package names, docs, and examples when helpful.
+- If workspace.run_command is available for this turn, use it instead of claiming you cannot run code, install packages, convert files, or inspect real command output.
 - workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
+- When you generate a chart, plot, screenshot, PDF, or other visual result, save it as a workspace file such as PNG, SVG, HTML, or PDF so the UI can surface it as an artifact.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
 - web.search is for fresh or explicitly web-based questions, supports optional domain filters, and by default checks the general web plus Wikipedia and Reddit result sets.
@@ -3125,6 +3303,7 @@ Constraints:
 - The context window is limited; use workspace files, artifacts, and task boards as durable memory when they help.
 - A single tool call can be enough if it creates durable progress, retrieval-ready context, or verification evidence.
 - Some tools may pause for inline user approval. If approval is denied, treat that capability as blocked for this turn and wait for the user to approve and resume.
+- When the user asks for a concrete output shape such as a PDF, chart, rendered page, runnable app, mobile-ready fix, or real command output, keep going until that exact shape is delivered or a blocker is verified.
 - Write reusable artifacts to the workspace and mention the path briefly.
 - Ask for another tool only when needed; otherwise answer."""
     return f"{base_system_prompt.strip()}\n\n{TOOL_USE_SYSTEM_PROMPT.strip()}\n\n{tool_schema}"
@@ -6658,17 +6837,10 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
-            stat = item.stat()
             item_rel_path = format_workspace_path(item, workspace)
             if workspace_rel_path_is_hidden(item_rel_path) and not target_is_hidden:
                 continue
-            items.append({
-                "name": item.name,
-                "path": item_rel_path,
-                "type": "directory" if item.is_dir() else "file",
-                "size": stat.st_size if item.is_file() else None,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-            })
+            items.append(build_workspace_listing_item(item, workspace))
         except (OSError, PermissionError):
             continue
 
@@ -6999,12 +7171,7 @@ def workspace_list_files_result(conversation_id: str, rel_path: str = "") -> Dic
             item_rel_path = format_workspace_path(item, workspace)
             if workspace_rel_path_is_hidden(item_rel_path) and not target_is_hidden:
                 continue
-            items.append({
-                "name": item.name,
-                "path": item_rel_path,
-                "type": "directory" if item.is_dir() else "file",
-                "size": item.stat().st_size if item.is_file() else None,
-            })
+            items.append(build_workspace_listing_item(item, workspace))
         except (OSError, PermissionError):
             continue
 
@@ -7394,6 +7561,9 @@ async def workspace_run_command_result(
     if not cwd_path.is_dir():
         raise ValueError("cwd must be a directory")
 
+    workspace = get_workspace_path(conversation_id)
+    before_snapshot = capture_workspace_file_snapshot(conversation_id)
+
     try:
         normalized_command = await normalize_command_for_managed_python(conversation_id, command)
     except Exception as exc:
@@ -7431,12 +7601,21 @@ async def workspace_run_command_result(
             await process.wait()
         raise
 
-    workspace = get_workspace_path(conversation_id)
+    after_snapshot = capture_workspace_file_snapshot(conversation_id)
+    artifact_items = detect_workspace_artifact_changes(before_snapshot, after_snapshot)
+    primary_artifact = choose_primary_workspace_artifact(artifact_items)
+    primary_path = str((primary_artifact or {}).get("path", "")).strip()
+    primary_kind = str((primary_artifact or {}).get("content_kind", "")).strip().lower()
+    open_path = primary_path if primary_path and is_previewable_workspace_kind(primary_kind) else ""
     return {
         "stdout": truncate_output(stdout.decode("utf-8", errors="replace")),
         "stderr": truncate_output(stderr.decode("utf-8", errors="replace")),
         "returncode": process.returncode,
         "cwd": format_workspace_path(cwd_path, workspace),
+        "path": primary_path,
+        "open_path": open_path,
+        "items": artifact_items,
+        "artifacts_detected": len(artifact_items),
     }
 
 def conversation_search_history_result(
@@ -8333,9 +8512,27 @@ def tool_result_preview(
         returncode = int(payload.get("returncode", 0) or 0)
         cwd = tool_path_preview(payload.get("cwd", arguments.get("cwd", ".")), ".")
         command = command_preview_text(arguments.get("command", []))
+        artifact_items = [item for item in payload.get("items", []) if isinstance(item, dict)]
+        artifact_preview = ""
+        if artifact_items:
+            preview_paths = [
+                tool_path_preview(item.get("path", ""), "")
+                for item in artifact_items[:2]
+                if tool_path_preview(item.get("path", ""), "")
+            ]
+            if preview_paths:
+                if len(artifact_items) == 1:
+                    artifact_preview = f" and created {preview_paths[0]}"
+                elif len(artifact_items) == 2:
+                    artifact_preview = f" and created {preview_paths[0]} and {preview_paths[1]}"
+                else:
+                    artifact_preview = (
+                        f" and created {len(artifact_items)} artifacts "
+                        f"including {preview_paths[0]} and {preview_paths[1]}"
+                    )
         if returncode == 0:
-            return f"Ran {command} in {cwd}"
-        return f"Ran {command} in {cwd} (exit {returncode})"
+            return f"Ran {command} in {cwd}{artifact_preview}"
+        return f"Ran {command} in {cwd}{artifact_preview} (exit {returncode})"
 
     if name == "workspace.list_files" or "items" in payload:
         items = payload.get("items", [])
@@ -8459,6 +8656,118 @@ def build_tool_loop_resume_message(progress_summary: str, batch_index: int) -> s
     )
 
 
+def should_attempt_capability_recovery(
+    response: str,
+    *,
+    request_text: str = "",
+    allowed_tools: Optional[List[str]] = None,
+    blocked_on_permission: bool = False,
+) -> bool:
+    """Return whether a draft likely refused or handed off a capability that should trigger one more tool pass."""
+    if blocked_on_permission:
+        return False
+    text = " ".join(str(response or "").strip().split())
+    if not text:
+        return False
+    if any(marker in text.lower() for marker in CAPABILITY_RECOVERY_SKIP_MARKERS):
+        return False
+    if DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(text):
+        return True
+    allowed = {tool_name for tool_name in (allowed_tools or []) if isinstance(tool_name, str)}
+    if not allowed.intersection({"workspace.run_command", "workspace.render"}):
+        return False
+    return request_demands_agent_execution(request_text) and response_hands_execution_back_to_user(text)
+
+
+def build_capability_recovery_message(
+    draft_response: str,
+    allowed_tools: List[str],
+    progress_summary: str = "",
+) -> str:
+    """Prompt the model to continue instead of stopping at a false limitation or hand-off."""
+    lines = [
+        "Continue the same task from the current workspace state instead of refusing or handing off a capability that is available in this turn.",
+        "Available tools for this turn: " + ", ".join(allowed_tools),
+    ]
+    if progress_summary.strip():
+        lines.extend([
+            "",
+            "Progress so far:",
+            progress_summary.strip(),
+        ])
+    lines.extend([
+        "",
+        "Draft that needs correction:",
+        draft_response.strip() or "(empty draft)",
+        "",
+        "Use the available tools when they help. Do not claim a capability is unavailable unless approval was denied or a tool result in this conversation proved the blocker. "
+        "If the request asked for a concrete output shape such as a PDF, chart, rendered page, runnable app, mobile-ready fix, or real command output, keep going until that exact shape is delivered or a blocker is verified.",
+    ])
+    return "\n".join(lines)
+
+
+async def maybe_recover_tool_outcome_from_capability_refusal(
+    websocket: WebSocket,
+    conversation_id: str,
+    history: List[Dict[str, str]],
+    system_prompt: str,
+    max_tokens: int,
+    features: Optional[FeatureFlags],
+    allowed_tools: Optional[List[str]],
+    outcome: ToolLoopOutcome,
+    *,
+    status_prefix: str = "",
+    max_steps: Optional[int] = None,
+    activity_phase: str = "tool",
+    activity_step_label: Optional[str] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+    continuation_limit: int = 0,
+) -> Optional[ToolLoopOutcome]:
+    """Give a tool-enabled draft one recovery pass when it falsely refuses an available capability."""
+    request_text = str(history[-1].get("content", "")) if history else ""
+    if not allowed_tools or not should_attempt_capability_recovery(
+        outcome.final_text,
+        request_text=request_text,
+        allowed_tools=list(allowed_tools),
+        blocked_on_permission=outcome.blocked_on_permission,
+    ):
+        return None
+
+    progress_summary = summarize_tool_loop_progress(outcome.tool_results)
+    await send_activity_event(
+        websocket,
+        "evaluate",
+        "Recover",
+        "The draft either claimed a limitation or handed work back even though this turn still has relevant tools. Continuing from saved state.",
+        step_label=activity_step_label,
+    )
+    recovery_history = list(history)
+    recovery_history.append({
+        "role": "user",
+        "content": build_capability_recovery_message(
+            outcome.final_text,
+            list(allowed_tools),
+            progress_summary,
+        ),
+    })
+    return await run_resumable_tool_loop(
+        websocket,
+        conversation_id,
+        recovery_history,
+        system_prompt,
+        max_tokens,
+        features=features,
+        allowed_tools=allowed_tools,
+        status_prefix=status_prefix,
+        max_steps=max_steps,
+        activity_phase=activity_phase,
+        activity_step_label=activity_step_label,
+        workflow_execution=workflow_execution,
+        continuation_limit=max(0, int(continuation_limit or 0)),
+        allow_capability_recovery=False,
+    )
+
+
 def tool_loop_continuation_limit_for_request(
     message: str,
     allowed_tools: List[str],
@@ -8474,7 +8783,7 @@ def tool_loop_continuation_limit_for_request(
     if intent == "broad_write":
         return TOOL_LOOP_MAX_CONTINUATIONS
     if intent == "focused_write":
-        return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
+        return min(2, TOOL_LOOP_MAX_CONTINUATIONS)
     if activity_phase in {"inspect", "verify", "synthesize"}:
         return min(1, TOOL_LOOP_MAX_CONTINUATIONS)
     if any(name.startswith("workspace.") for name in allowed_tools):
@@ -8496,6 +8805,7 @@ async def run_resumable_tool_loop(
     activity_step_label: Optional[str] = None,
     workflow_execution: Optional[WorkflowExecutionContext] = None,
     continuation_limit: int = 0,
+    allow_capability_recovery: bool = True,
 ) -> ToolLoopOutcome:
     """Run the tool loop in a few resumable batches before asking the user to continue."""
     base_history = list(history)
@@ -8529,6 +8839,30 @@ async def run_resumable_tool_loop(
         if outcome.blocked_on_permission:
             outcome.tool_results = combined_results
             return outcome
+
+        if allow_capability_recovery and allowed_tools and not outcome.hit_limit:
+            recovery_outcome = await maybe_recover_tool_outcome_from_capability_refusal(
+                websocket,
+                conversation_id,
+                batch_history,
+                system_prompt,
+                max_tokens,
+                features,
+                allowed_tools,
+                outcome,
+                status_prefix=status_prefix,
+                max_steps=max_steps,
+                activity_phase=activity_phase,
+                activity_step_label=activity_step_label,
+                workflow_execution=workflow_execution,
+                continuation_limit=max(0, int(continuation_limit or 0)) - batch_index,
+            )
+            if recovery_outcome is not None:
+                combined_results.extend(recovery_outcome.tool_results)
+                outcome = recovery_outcome
+                if outcome.blocked_on_permission:
+                    outcome.tool_results = combined_results
+                    return outcome
 
         if not outcome.hit_limit:
             outcome.tool_results = combined_results
@@ -8800,6 +9134,27 @@ async def emit_direct_tool_call(
     return result
 
 
+def build_disallowed_phase_tool_result(
+    call: Dict[str, Any],
+    allowed_tools: Optional[List[str]],
+    activity_phase: str,
+) -> Dict[str, Any]:
+    """Tell the model a requested tool is out of scope for the current phase without leaking it to the user."""
+    allowed = [tool_name for tool_name in (allowed_tools or []) if isinstance(tool_name, str) and tool_name.strip()]
+    allowed_summary = ", ".join(allowed) if allowed else "(none)"
+    return {
+        "id": call.get("id", ""),
+        "ok": False,
+        "error_code": "tool_not_allowed_in_phase",
+        "error": (
+            f"Tool {call.get('name', '')} is not available during the {activity_phase or 'current'} phase. "
+            f"Allowed tools: {allowed_summary}"
+        ),
+        "allowed_tools": allowed,
+        "phase": activity_phase or "",
+    }
+
+
 async def run_tool_loop(
     websocket: WebSocket,
     conversation_id: str,
@@ -8855,13 +9210,30 @@ async def run_tool_loop(
                     requested_phase_upgrade="workspace_execution",
                     requested_tool_name=call["name"],
                 )
-            return ToolLoopOutcome(
-                final_text=(
-                    f"The requested tool {call['name']} is not allowed in this phase. "
-                    "Continue using only the permitted tools or provide the phase summary."
-                ),
-                tool_results=tool_results,
+            disallowed_result = build_disallowed_phase_tool_result(call, allowed_tools, activity_phase)
+            tool_results.append({
+                "call": call,
+                "result": disallowed_result,
+                "internal_only": True,
+            })
+            record_workflow_step(
+                workflow_execution,
+                step_name=activity_step_label or activity_phase or call.get("name", ""),
+                call=call,
+                result=disallowed_result,
+                latency_ms=0,
             )
+            messages.append({"role": "assistant", "content": cleaned})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "<tool_result>\n"
+                    + json.dumps(disallowed_result, ensure_ascii=False)
+                    + "\n</tool_result>\n"
+                    + "Use only the allowed tools for this phase, or answer directly if no more tools are needed."
+                ),
+            })
+            continue
 
         approved, permission_request = await ensure_tool_permission(
             websocket,
@@ -9153,14 +9525,21 @@ def tool_loop_step_limit_for_request(message: str, allowed_tools: List[str]) -> 
     """Choose a small tool-loop budget based on request scope."""
     intent = classify_workspace_intent(message)
     steps = TOOL_LOOP_MAX_STEPS
-    if intent in {"focused_read", "focused_write"}:
+    if intent == "focused_read":
         steps = min(steps, 3)
-    elif intent in {"broad_read", "broad_write"}:
+    elif intent == "focused_write":
+        steps = min(steps, 5)
+    elif intent == "broad_read":
+        steps = min(steps, 6)
+    elif intent == "broad_write":
         steps = min(steps, 8)
     else:
         steps = min(steps, 2 if allowed_tools else TOOL_LOOP_MAX_STEPS)
     if is_fast_profile_active():
-        steps = min(steps, 6 if intent == "broad_write" else 4)
+        if intent == "focused_write":
+            steps = min(steps, 4)
+        else:
+            steps = min(steps, 6 if intent == "broad_write" else 4)
     return max(1, steps)
 
 
@@ -9188,9 +9567,9 @@ def deep_execute_step_limit_for_request(message: str) -> int:
     if is_fast_profile_active():
         return 6 if intent == "broad_write" else 5
     if intent == "broad_write":
-        return 8
+        return 9
     if intent == "focused_write":
-        return 7
+        return 8
     return 6
 
 
@@ -9353,8 +9732,55 @@ HTML_SNIPPET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN = re.compile(
-    r"\b(can't|cannot|don't have|do not have|unable to|limited by|no built-in|not available|prevent me from|server-side restriction)\b",
+    r"\b("
+    r"can't|cannot|don't have|do not have|unable to|limited by|no built-in|"
+    r"not available|prevent me from|server-side restriction|don't support|do not support|"
+    r"not accessible|would require|toolset"
+    r")\b",
     re.IGNORECASE,
+)
+EXECUTION_HANDOFF_PATTERN = re.compile(
+    r"("
+    r"to run (?:the app|it) locally:"
+    r"|install dependencies:"
+    r"|visit `?http://localhost"
+    r"|start the server:"
+    r"|to play:"
+    r"|download the file to your local machine"
+    r"|run it with `python"
+    r"|run it with python"
+    r")",
+    re.IGNORECASE,
+)
+
+CAPABILITY_RECOVERY_SKIP_MARKERS = (
+    "approve it for this chat",
+    "permission was denied",
+    "approval was denied",
+    "paused here while waiting for approval",
+)
+AGENT_EXECUTION_EXPECTATION_PHRASES = (
+    "run it yourself",
+    "show me the real command output",
+    "show me the actual output",
+    "show me the rendered chart",
+    "show me the chart artifact",
+    "render it in the viewer",
+    "render the homepage in the viewer",
+    "keep iterating until",
+    "do not stop at just writing html",
+    "do not stop at html",
+    "convert it to pdf",
+    "give me the final artifact path",
+    "actually works on mobile",
+)
+LOCAL_INSTRUCTIONS_REQUEST_PHRASES = (
+    "how do i run",
+    "how to run",
+    "run locally",
+    "run this locally",
+    "tell me how to run",
+    "show me how to run",
 )
 
 
@@ -9448,6 +9874,38 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     return bool(words & WEB_SEARCH_HINTS)
 
 
+def request_demands_agent_execution(message: str) -> bool:
+    """Return whether the user asked the assistant to run, render, or verify the result itself."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    if any(phrase in text for phrase in LOCAL_INSTRUCTIONS_REQUEST_PHRASES):
+        return False
+    if any(phrase in text for phrase in AGENT_EXECUTION_EXPECTATION_PHRASES):
+        return True
+
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if {"run", "execute"} & words and {"yourself", "actual", "real", "output"} & words:
+        return True
+    if {"render", "viewer", "preview"} & words and {"html", "homepage", "page", "chart", "artifact", "report"} & words:
+        return True
+    if {"chart", "artifact", "output"} & words and {"show", "actual", "real"} & words:
+        return True
+    if "mobile" in words and {"work", "works", "working"} & words:
+        return True
+    if "pdf" in words and {"convert", "final", "artifact", "path"} & words:
+        return True
+    return False
+
+
+def response_hands_execution_back_to_user(response: str) -> bool:
+    """Return whether a draft shifts runnable work back onto the user."""
+    text = str(response or "").strip()
+    if not text:
+        return False
+    return bool(EXECUTION_HANDOFF_PATTERN.search(text))
+
+
 def direct_response_tool_recovery_candidates(
     conversation_id: str,
     message: str,
@@ -9456,7 +9914,13 @@ def direct_response_tool_recovery_candidates(
     features: FeatureFlags,
 ) -> List[str]:
     """Give direct-mode replies one recovery pass when they falsely refuse an available capability."""
-    if not DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(str(response or "")):
+    if (
+        not DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(str(response or ""))
+        and not (
+            request_demands_agent_execution(message)
+            and response_hands_execution_back_to_user(response)
+        )
+    ):
         return []
 
     allowed: List[str] = []
@@ -11236,12 +11700,17 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         websocket,
                         "evaluate",
                         "Recover",
-                        "The draft refused a capability that matches an available tool. Retrying with tools.",
+                        "The draft either refused a capability or handed the work back even though tools are available. Retrying with tools.",
                     )
+                    recovery_history = list(history)
+                    recovery_history.append({
+                        "role": "user",
+                        "content": build_capability_recovery_message(full_response, recovery_tools),
+                    })
                     tool_outcome = await run_resumable_tool_loop(
                         websocket,
                         conv_id,
-                        history,
+                        recovery_history,
                         system_prompt,
                         tool_loop_token_budget(max_tokens, effective_message, recovery_tools),
                         features=features,

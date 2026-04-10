@@ -74,6 +74,16 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("function syncToolApprovalToggle()", js)
         self.assertIn("auto_approve_tool_permissions", js)
 
+    def test_workspace_viewer_can_preview_and_auto_open_image_artifacts(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("function renderImagePreview(targetId, path)", js)
+        self.assertIn("function shouldAutoOpenArtifactPreview(path)", js)
+        self.assertIn("data.name === 'workspace.run_command' && data.ok !== false && shouldAutoOpenArtifactPreview(data.payload?.open_path)", js)
+        self.assertIn("renderImagePreview('inlineViewerPreview', path);", js)
+        self.assertIn("['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image'].includes(backendKind)", js)
+        self.assertIn(".workspace-image-preview", css)
+
 
 if __name__ == "__main__":
     unittest.main()

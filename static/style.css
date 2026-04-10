@@ -1787,6 +1787,20 @@ textarea {
     background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
     padding: 12px;
 }
+.workspace-image-preview {
+    display: block;
+    max-width: 100%;
+    max-height: calc(100vh - 240px);
+    width: auto;
+    height: auto;
+    margin: 0 auto;
+    border-radius: 16px;
+    background:
+        linear-gradient(135deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),
+        radial-gradient(circle at top left, rgba(255,255,255,0.08), transparent 55%);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.28);
+    object-fit: contain;
+}
 /* === Menu Button === */
 .menu-btn {
     position: fixed;

@@ -1,5 +1,7 @@
 # rsync procedures for dev -> prod and prod -> dev.
 
+Managed chat Python environments now live outside the repo by default, so new package installs should not bloat `runs/` syncs. The legacy `runs/*/python-env/` directories can still exist on older runs, so the prod -> dev sync below excludes them explicitly. Hidden dotfiles may still exist inside workspaces for internal state, but the browser now hides dot-prefixed paths unless explicitly targeted.
+
 ## dev -> prod
 excludes venv and node downloaded files
 
@@ -29,5 +31,6 @@ rsync -avz --progress \
     --exclude='.DS_Store' \
     --exclude='.pycache/' \
     --exclude='.pycache_compile/' \
+    --exclude='runs/*/python-env/' \
     joe@euler:~/prod/ai-chat/ ~/dev/ai-chat/
 ```

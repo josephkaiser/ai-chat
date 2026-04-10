@@ -15,6 +15,7 @@ For a new capability, try to wire all of these together:
 
 2. **Granular approvals**
    Add a focused approval request in `build_tool_permission_request(...)` so the user sees the real action being requested.
+   If the action is denied, the runtime should pause at that boundary and resume only after the user explicitly approves it.
 
    Good:
    - `Allow pip install?`
@@ -30,9 +31,11 @@ For a new capability, try to wire all of these together:
    Prefer reusable artifacts that live inside the conversation workspace.
    For Python work, the default pattern is:
    - create or reuse the managed chat Python environment
+   - keep that environment server-owned and outside `runs/` so syncs stay lean
    - install dependencies there with pip
    - write scripts into the workspace
    - verify with the same managed environment
+   - if the result is visual, save it as a previewable workspace artifact such as PNG, SVG, HTML, or PDF
 
 5. **Tool-loop behavior**
    The assistant should:
@@ -41,6 +44,8 @@ For a new capability, try to wire all of these together:
    - pause only when a gated tool is actually used
    - pause at the approval boundary if the user denies approval
    - keep long-running installs stoppable
+   - avoid handing execution back with “run this locally” instructions when the app can still run or render the result
+   - use workspace artifacts as durable memory when the context window is limited
 
 ## Python capability pattern
 
@@ -51,6 +56,7 @@ The current Python workflow is the reference example:
 3. Install packages with `/pip` or `workspace.run_command`.
 4. Write the Python script or artifact into the workspace.
 5. Run a focused verify command in the same environment.
+6. Save any plots or reports into the workspace so the UI can surface them automatically.
 
 Example sequence:
 

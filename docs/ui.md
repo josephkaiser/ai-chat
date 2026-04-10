@@ -9,10 +9,11 @@ The composer supports:
 - reasoning effort switching (`Low` / `High`)
 - attachments uploaded into the conversation workspace
 - browser-recorded audio attachments from the mic button
+- a per-chat **Tools** toggle for ask-first vs auto-approve tool and command use
 - slash commands for common coding tasks
 - send-or-interrupt behavior from the primary action button
 
-The client preserves a handful of browser preferences in `localStorage`, including speech playback settings and workspace panel visibility.
+The client preserves a handful of browser preferences in `localStorage`, including speech playback settings, theme choice, and per-chat tool approval preferences.
 
 ## Settings and About
 
@@ -23,17 +24,19 @@ The Settings panel exposes:
 - **Appearance** and **System Prompt** controls
 - **Reset App Data** danger zone
 
-The main menu also includes a separate **About** surface for the author note and project intent.
+Tool approvals are no longer managed from Settings. The main menu now keeps **About** separate for the author note and project intent, while plan approval and runtime permission approval happen inline near the composer when needed.
 
 ## Workspace panel
 
-When agent tools are enabled, the workspace panel shows:
+When agent tools are enabled, the workspace area shows:
 
 - an **Activity Log** with harness phases, tool calls, plan events, and finalization markers
-- a **Workspace Tree** for files created, uploaded, or edited during the conversation
+- a **Recent Artifacts** rail for files the assistant just created or touched
+- an **All Files** tree for files created, uploaded, or edited during the conversation
 - refresh and download actions for the current workspace
 
 The activity timeline is populated from `activity`, `tool_start`, `tool_result`, `assistant_note`, and `plan_ready` events.
+Dot-prefixed paths stay hidden in the browser view unless the user explicitly targets a hidden path.
 
 ## File viewer and editor
 
@@ -44,11 +47,13 @@ Current capabilities include:
 - editable text files
 - markdown preview
 - HTML preview
+- image preview for files such as PNG, JPG, GIF, SVG, and WebP
 - delimited file previews
 - spreadsheet summaries with sheet switching
+- PDF preview
 - save-back into the current conversation workspace
 
-When the assistant uses `workspace.render`, the UI automatically opens the generated HTML file.
+When the assistant uses `workspace.render`, the UI automatically opens the generated HTML file. Previewable artifacts detected after `workspace.run_command`, especially plots and other generated images, can also auto-open in the inline viewer so the user sees more of what happened during execution.
 
 ## Attachments and workspace artifacts
 
@@ -85,6 +90,8 @@ The UI surfaces:
 - structured build-step progress
 - plan previews with editable build steps
 - direct approval of an execution plan from the composer
+
+Plan approval is always explicit. Approving a plan does not inject a fake user `yes` into chat, and per-chat tool auto-approve does not bypass plan approval.
 
 ## Voice features
 

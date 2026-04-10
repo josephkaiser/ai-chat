@@ -1722,6 +1722,8 @@ function handleChatEvent(data) {
         if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
         if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
             openWorkspaceFile(data.payload.path);
+        } else if (data.name === 'workspace.run_command' && data.ok !== false && shouldAutoOpenArtifactPreview(data.payload?.open_path)) {
+            openWorkspaceFile(data.payload.open_path);
         }
         scheduleWorkspaceRefresh();
     } else if (data.type === 'tool_error') {
@@ -3001,15 +3003,19 @@ function insertArtifactReference(path) {
 }
 
 function isEditableTextPath(path) {
-    return !/\.(pdf|xlsx|xls|xlsm)$/i.test(path || '');
+    return !/\.(pdf|xlsx|xls|xlsm|png|jpg|jpeg|gif|svg|webp)$/i.test(path || '');
+}
+
+function isImagePath(path) {
+    return /\.(png|jpg|jpeg|gif|svg|webp)$/i.test(path || '');
 }
 
 function normalizeViewerMetadata(path, data = {}) {
     const backendKind = typeof data.content_kind === 'string' ? data.content_kind.toLowerCase() : '';
     const kind = (
-        ['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet'].includes(backendKind)
+        ['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image'].includes(backendKind)
             ? backendKind
-            : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path || '') ? 'csv' : 'text')))
+            : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path || '') ? 'csv' : 'text'))))
     );
     const backendEditable = typeof data.editable === 'boolean' ? data.editable : isEditableTextPath(path);
     const editable = LIVE_AREA_READ_ONLY ? false : backendEditable;
@@ -4319,6 +4325,18 @@ function renderPdfPreview(targetId, path) {
     previewEl.appendChild(iframe);
 }
 
+function renderImagePreview(targetId, path) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+    const img = document.createElement('img');
+    img.className = 'workspace-image-preview';
+    img.alt = basename(path) || 'Image preview';
+    img.src = workspaceFileInlineViewUrl(path);
+    previewEl.appendChild(img);
+}
+
 function renderMarkdownPreview(targetId, content) {
     const previewEl = document.getElementById(targetId);
     if (!previewEl) return;
@@ -4445,6 +4463,7 @@ function updateViewerPreview(prefix) {
     const content = getViewerContent(prefix);
     const previewId = `${prefix}Preview`;
     if (state.kind === 'pdf') renderPdfPreview(previewId, state.path);
+    else if (state.kind === 'image') renderImagePreview(previewId, state.path);
     else if (state.kind === 'html') renderHtmlPreview(previewId, content);
     else if (state.kind === 'markdown') renderMarkdownPreview(previewId, content);
     else if (state.kind === 'csv') renderDelimitedPreview(previewId, content, state.path);
@@ -4555,13 +4574,25 @@ function closeInlineViewer() {
     renderFileList();
 }
 
+function shouldAutoOpenArtifactPreview(path) {
+    if (!path) return false;
+    if (!/\.(png|jpg|jpeg|gif|svg|webp|pdf|html?|md|markdown|rst)$/i.test(path)) {
+        return false;
+    }
+    const state = getViewerState('inlineViewer');
+    if (state.editable && state.path && !compareWorkspacePaths(state.path, path)) {
+        return false;
+    }
+    return true;
+}
+
 async function openWorkspaceFile(path, options = {}) {
     if (!featureSettings.agent_tools || !path) return;
     const preserveSheet = Boolean(options.preserveSheet);
     const requestToken = ++inlineViewerRequestToken;
     const provisionalKind = /\.(xlsx|xls|xlsm)$/i.test(path)
         ? 'spreadsheet'
-        : (/\.pdf$/i.test(path) ? 'pdf' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'))));
+        : (/\.pdf$/i.test(path) ? 'pdf' : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text')))));
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
@@ -4614,6 +4645,9 @@ async function openWorkspaceFile(path, options = {}) {
 
         if (kind === 'pdf') {
             renderPdfPreview('inlineViewerPreview', path);
+        }
+        else if (kind === 'image') {
+            renderImagePreview('inlineViewerPreview', path);
         }
         else if (kind === 'html') {
             renderHtmlPreview('inlineViewerPreview', content);

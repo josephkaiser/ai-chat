@@ -92,6 +92,25 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(payload["default_view"], "preview")
         self.assertEqual(payload["metadata"].get("preview_error"), "pdftotext unavailable")
 
+    def test_image_files_open_as_non_editable_binary_previews(self):
+        target = self._write_bytes("plots/chart.png", b"\x89PNG\r\n\x1a\n")
+        payload = workspace_reader.build_workspace_file_result(
+            target,
+            rel_path="plots/chart.png",
+            max_bytes=1024 * 1024,
+            document_preview_builder=lambda *_args, **_kwargs: {},
+            text_limit=None,
+            truncate_output_func=lambda text, _limit: text,
+        )
+        self.assertEqual(payload["path"], "plots/chart.png")
+        self.assertEqual(payload["content"], "")
+        self.assertEqual(payload["content_kind"], "image")
+        self.assertEqual(payload["file_type"], "binary")
+        self.assertEqual(payload["media_type"], "image/png")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["default_view"], "preview")
+        self.assertFalse(payload["truncated"])
+
     def test_oversized_text_file_returns_clear_reader_error(self):
         target = self._write_text("big.txt", "a" * ((1024 * 1024) + 1))
         with self.assertRaises(ValueError) as exc_info:
@@ -123,8 +142,13 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("durable progress", combined)
         self.assertIn("highest-leverage next tool call", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("make measurable progress or finish", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("use it instead of claiming you cannot run code", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("instead of giving local setup or run instructions back to the user", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("specific output shape", DEEP_BUILD_SYSTEM_PROMPT)
+        self.assertIn("Do not hand execution back to the user", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("Match the scale of the change to the current step", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("managed chat-scoped Python environment", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("save it as a workspace file", TOOL_USE_SYSTEM_PROMPT)
         self.assertNotIn(".venv", TOOL_USE_SYSTEM_PROMPT)
 
 
