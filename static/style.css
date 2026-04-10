@@ -829,7 +829,7 @@ textarea {
 
 .workspace-panel {
     width: 100%;
-    flex: 0 0 var(--workspace-sidebar-width);
+    flex: 1 1 auto;
     min-width: 0;
     min-height: 0;
     height: 100%;
@@ -856,13 +856,14 @@ textarea {
 .workspace-header {
     display: flex;
     align-items: center;
-    justify-content: flex-start;
+    justify-content: space-between;
     gap: 10px;
     padding: 10px 10px 8px 50px;
     border-bottom: 1px solid var(--dense-border);
 }
 .workspace-heading {
     min-width: 0;
+    flex: 1 1 auto;
 }
 .workspace-title {
     font-size: 13px;
@@ -878,6 +879,14 @@ textarea {
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+    margin-left: auto;
+}
+.workspace-header-view-toggle {
+    min-width: 76px;
+}
+.workspace-mobile-close {
+    display: none;
+    white-space: nowrap;
 }
 .workspace-refresh {
     border: 1px solid transparent;
@@ -1343,12 +1352,6 @@ textarea {
     justify-content: stretch;
     align-items: stretch;
 }
-.workspace-view-switch {
-    display: none;
-    align-items: center;
-    gap: 6px;
-    padding: 10px 10px 0 50px;
-}
 .workspace-view-button {
     border: 1px solid var(--dense-border);
     background: color-mix(in srgb, var(--bg_secondary) 88%, transparent);
@@ -1394,7 +1397,7 @@ textarea {
     display: none;
 }
 .workspace-panel {
-    order: 1;
+    order: 0;
 }
 .ide-viewer-header {
     display: flex;
@@ -1406,6 +1409,7 @@ textarea {
 }
 .ide-viewer-heading {
     min-width: 0;
+    flex: 1 1 auto;
 }
 .ide-viewer-title {
     font-size: 13px;
@@ -1444,6 +1448,7 @@ textarea {
     align-items: center;
     gap: 6px;
     padding: 0 2px;
+    flex-wrap: wrap;
 }
 .ide-editor-mode,
 .ide-editor-status {
@@ -3048,6 +3053,17 @@ textarea {
     word-break: inherit;
     padding-right: 56px;
 }
+.message-content .katex-display,
+.file-modal-markdown .katex-display {
+    margin: 0.85em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.1em 0;
+}
+.message-content .katex,
+.file-modal-markdown .katex {
+    max-width: 100%;
+}
 .copy-btn {
     position: absolute;
     top: 8px;
@@ -3468,10 +3484,6 @@ pre:hover .copy-btn { opacity: 1; }
     .chat.workspace-reader-open {
         --workspace-shell-width: var(--workspace-shell-width-compact);
     }
-    .workspace-view-switch {
-        display: flex;
-        padding: 10px 10px 0 50px;
-    }
     .ide-workspace {
         width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
         max-width: calc(100vw - (var(--chrome-gutter) * 2));
@@ -3560,9 +3572,6 @@ pre:hover .copy-btn { opacity: 1; }
     }
     .chat-shell.ide-mode .ide-workspace {
         flex: 1;
-    }
-    .workspace-view-switch {
-        padding: 12px 12px 0 50px;
     }
     .ide-top {
         flex-direction: column;
@@ -3844,13 +3853,13 @@ pre:hover .copy-btn { opacity: 1; }
     }
     .ide-workspace {
         position: fixed;
-        inset: 0 0 0 auto;
-        width: min(var(--mobile-sheet-width), calc(100vw - 88px));
-        max-width: calc(100vw - 88px);
+        inset: 0;
+        width: 100vw;
+        max-width: none;
         min-width: 0;
         height: 100dvh;
         min-height: 100dvh;
-        padding: var(--safe-top) var(--safe-right) var(--safe-bottom) 0;
+        padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
         gap: 0;
         overflow: hidden;
         background:
@@ -3859,8 +3868,13 @@ pre:hover .copy-btn { opacity: 1; }
                 color-mix(in srgb, var(--accent_primary) 4%, var(--bg_secondary)),
                 color-mix(in srgb, var(--accent_primary) 3%, var(--bg_primary))
             );
-        box-shadow: -14px 0 30px rgba(15, 23, 42, 0.18);
+        box-shadow: none;
         z-index: 1080;
+    }
+    .chat.workspace-mobile-open .workspace-toggle,
+    .chat.workspace-mobile-open .menu-btn {
+        opacity: 0;
+        pointer-events: none;
     }
     .chat-shell.ide-mode .ide-workspace {
         display: flex;
@@ -3868,10 +3882,6 @@ pre:hover .copy-btn { opacity: 1; }
         opacity: 1;
         pointer-events: auto;
         transform: none;
-    }
-    .workspace-view-switch {
-        display: flex;
-        padding: 12px calc(var(--sidebar-toggle-size) + 20px) 0 12px;
     }
     .workspace-view-button {
         padding: 5px 9px;
@@ -3901,6 +3911,9 @@ pre:hover .copy-btn { opacity: 1; }
         align-items: center;
         flex-direction: row;
         padding: 12px 12px 10px;
+    }
+    .workspace-mobile-close {
+        display: inline-flex;
     }
     .workspace-actions {
         width: auto;

@@ -109,16 +109,16 @@ const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
 const RECENT_PERMISSION_RESPONSE_TTL_MS = 15000;
 const DISCOVERY_HINTS = Object.freeze([
-    'Ask for structured thinking: "Work through this step by step and show the conclusion clearly."',
-    'I can help with logic, math, and careful reasoning from the information you give me.',
-    'Try: "Compare these options and recommend one with tradeoffs."',
-    'Prompt idea: "Summarize this and pull out the key decisions or risks."',
+    'Try Python! Ask me to build a small script, explain it, and verify it.',
+    'Try Python! Say: "Make a quick script for this and keep it in the workspace."',
+    'Need a package? Try `/pip pandas matplotlib requests`.',
+    'Need fresh docs or package ideas? Ask me to search the web first.',
+    'Try: "Build this in Python and explain the tradeoffs as you go."',
     'I can analyze pasted text, notes, logs, screenshots, and attached files.',
+    'Prompt idea: "Summarize this and pull out the key decisions or risks."',
     'Try: "Turn this rough idea into a clear plan, checklist, or draft."',
     'Prompt idea: "Question my assumptions and point out what I may be missing."',
-    'I can help write, revise, explain, brainstorm, and organize complex information.',
-    'Ask for depth control directly: "Give me the short version" or "Go deep on this."',
-    'When useful, I can use tools to inspect files, run checks, or verify details in the workspace.',
+    'When useful, I can inspect files, run checks, install Python packages, and verify results in the workspace.',
 ]);
 
 // Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
@@ -158,6 +158,12 @@ const DIRECT_SLASH_COMMANDS = Object.freeze({
         aliases: ['code', 'edit'],
         label: '/code',
         template: '/code ',
+    }),
+    pip: Object.freeze({
+        canonical: 'pip',
+        aliases: ['pip'],
+        label: '/pip',
+        template: '/pip ',
     }),
 });
 
@@ -336,6 +342,26 @@ function initMarked() {
         renderMarkdown();
     } else {
         setTimeout(initMarked, 50);
+    }
+}
+
+function renderMathContent(container) {
+    if (!container || typeof renderMathInElement !== 'function') return;
+    try {
+        renderMathInElement(container, {
+            delimiters: [
+                { left: '$$', right: '$$', display: true },
+                { left: '\\[', right: '\\]', display: true },
+                { left: '$', right: '$', display: false },
+                { left: '\\(', right: '\\)', display: false },
+            ],
+            throwOnError: false,
+            strict: 'ignore',
+            trust: false,
+            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'option'],
+        });
+    } catch (e) {
+        console.warn('Failed to render math content', e);
     }
 }
 
@@ -646,6 +672,7 @@ function applyWorkspacePanelState() {
     if (shell) shell.classList.toggle('workspace-open', open);
     if (root) {
         root.classList.toggle('mobile-chat-mode', mobileViewport);
+        root.classList.toggle('workspace-mobile-open', mobileViewport && open);
     }
     localStorage.setItem('workspacePanelOpen', open ? 'true' : 'false');
     applyWorkspaceConsoleState();
@@ -659,50 +686,54 @@ function workspaceUsesMobileLayout() {
 }
 
 function effectiveWorkspaceViewMode() {
-    if (!workspaceUsesMobileLayout()) return 'split';
     if (workspaceViewMode === 'reader' && !inlineViewerPath) return 'tree';
     return workspaceViewMode === 'reader' ? 'reader' : 'tree';
+}
+
+function syncWorkspaceViewButtons(mode = effectiveWorkspaceViewMode(), hasReader = Boolean(inlineViewerPath)) {
+    const treeToggle = document.getElementById('workspaceTreeContentToggle');
+    const viewerToggle = document.getElementById('inlineViewerTreeToggle');
+
+    if (treeToggle) {
+        treeToggle.textContent = 'Content';
+        treeToggle.disabled = !hasReader;
+        treeToggle.title = hasReader ? 'Show the selected file' : 'Open a file to enable the content viewer';
+        treeToggle.setAttribute('aria-label', hasReader ? 'Show content viewer' : 'Open a file to enable the content viewer');
+    }
+
+    if (viewerToggle) {
+        viewerToggle.textContent = 'Files';
+        viewerToggle.disabled = false;
+        viewerToggle.title = 'Show the workspace tree';
+        viewerToggle.setAttribute('aria-label', 'Show workspace tree');
+    }
 }
 
 function syncWorkspaceViewMode() {
     const root = document.getElementById('chatRoot');
     const panel = document.getElementById('workspacePanel');
     const viewer = document.querySelector('.ide-viewer');
-    const treeButton = document.getElementById('workspaceTreeViewButton');
-    const readerButton = document.getElementById('workspaceReaderViewButton');
-    const switcher = document.querySelector('.workspace-view-switch');
+    const workspace = document.getElementById('ideWorkspace');
     const mobileLayout = workspaceUsesMobileLayout();
     const mode = effectiveWorkspaceViewMode();
     const hasReader = Boolean(inlineViewerPath);
-    const showTree = !mobileLayout || mode === 'tree';
-    const showReader = hasReader && (!mobileLayout || mode === 'reader');
+    const showTree = mode === 'tree';
+    const showReader = hasReader && mode === 'reader';
 
-    workspaceViewMode = mobileLayout ? mode : (hasReader ? 'split' : 'tree');
-    if (root) root.classList.toggle('workspace-reader-open', !mobileLayout && hasReader && workspacePanelOpen);
+    workspaceViewMode = mode;
+    if (root) root.classList.toggle('workspace-reader-open', !mobileLayout && workspacePanelOpen);
     if (panel) panel.classList.toggle('is-hidden', !showTree);
     if (viewer) viewer.classList.toggle('is-hidden', !showReader);
-    if (switcher) switcher.hidden = !mobileLayout;
-
-    if (treeButton) {
-        treeButton.classList.toggle('active', mobileLayout ? mode === 'tree' : showTree);
-        treeButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'tree' ? 'true' : 'false') : (showTree ? 'true' : 'false'));
+    if (workspace) {
+        workspace.classList.toggle('is-tree-mode', showTree);
+        workspace.classList.toggle('is-reader-mode', showReader);
     }
-    if (readerButton) {
-        readerButton.disabled = mobileLayout ? !hasReader : false;
-        readerButton.classList.toggle('active', mobileLayout ? mode === 'reader' : showReader);
-        readerButton.setAttribute('aria-pressed', mobileLayout ? (mode === 'reader' ? 'true' : 'false') : (showReader ? 'true' : 'false'));
-    }
+    syncWorkspaceViewButtons(mode, hasReader);
 
-    localStorage.setItem('workspaceViewMode', mobileLayout ? mode : (inlineViewerPath ? 'reader' : 'tree'));
+    localStorage.setItem('workspaceViewMode', mode);
 }
 
 function setWorkspaceViewMode(mode) {
-    if (!workspaceUsesMobileLayout()) {
-        workspaceViewMode = inlineViewerPath ? 'reader' : 'tree';
-        syncWorkspaceViewMode();
-        syncChatShellLayout();
-        return;
-    }
     const nextMode = mode === 'reader' ? 'reader' : 'tree';
     if (nextMode === 'reader' && !inlineViewerPath) return;
     workspaceViewMode = nextMode;
@@ -1017,7 +1048,7 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
     const allowedToolPermissions = getAllowedToolPermissionsForConversation(currentConvId);
     const slashName = slashCommand?.name || '';
     const slashWantsWrite = slashName === 'code';
-    const slashWantsRun = slashName === 'code';
+    const slashWantsRun = slashName === 'code' || slashName === 'pip';
     const carryForwardWrite = continuationRequest && rememberedFeatures.workspace_write && !permissions.wantsWrite && !slashWantsWrite;
     const workspaceWrite = carryForwardWrite || permissions.wantsWrite || slashWantsWrite || executionRequest;
     const workspaceRunCommands = (
@@ -2373,6 +2404,17 @@ function buildSlashCommands() {
             onSelect: () => {
                 if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
                 setSlashCommandDraft('code');
+            },
+        },
+        {
+            name: 'pip',
+            label: '/pip',
+            description: 'Create or reuse `.venv`, then install Python packages with pip.',
+            kind: 'tool',
+            keywords: ['python package', 'dependency', 'install library', 'pip'],
+            onSelect: () => {
+                if (!featureSettings.agent_tools) updateFeatureSetting('agent_tools', true);
+                setSlashCommandDraft('pip');
             },
         },
         {
@@ -4022,6 +4064,7 @@ function renderMarkdownPreview(targetId, content) {
         return;
     }
     previewEl.innerHTML = (content && content.trim()) ? marked.parse(content) : '<p class="workspace-empty">Nothing to preview.</p>';
+    renderMathContent(previewEl);
     if (typeof hljs !== 'undefined') {
         previewEl.querySelectorAll('pre code').forEach(block => {
             try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
@@ -5274,6 +5317,7 @@ function renderMarkdown() {
             try {
                 const html = (content && content.trim()) ? marked.parse(content) : '';
                 contentDiv.innerHTML = html;
+                renderMathContent(contentDiv);
                 msg.dataset.needsMarkdown = 'false';
                 msg.dataset.rendered = 'true';
 

@@ -72,6 +72,7 @@ The composer has a slash menu for common workflows:
 - `/grep`
 - `/plan`
 - `/code`
+- `/pip`
 
 These commands take a structured execution path instead of only inserting prompt text.
 
