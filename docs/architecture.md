@@ -43,6 +43,7 @@ ai-chat/
 ## Persistence model
 
 - Every conversation gets a stable run id plus a dedicated workspace directory on disk.
+- Python package installs use a separate managed chat-scoped environment outside the workspace tree, so the workspace stays focused on user-visible files and artifacts.
 - Assistant message feedback is stored in SQLite and reused during history ranking.
 - Voice artifacts live under `VOICE_ROOT` and are cleaned up by pruning plus conversation/app reset flows.
 

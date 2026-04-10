@@ -39,6 +39,8 @@ Notes:
 
 - Command approvals now support scoped Python setup requests such as `pip install` and `python -m venv`.
 - Long-running install/setup commands are expected to keep running until completion unless the user sends `stop` or `interrupt`.
+- `permission_required` is a blocking pause. If the user declines, the task stays paused until the capability is approved for that chat and resumed.
+- Tool auto-approve applies to tool and command requests only. Plan execution still requires explicit plan approval in the UI.
 
 Preferred `activity.phase` values:
 
@@ -80,6 +82,13 @@ Preferred `activity.phase` values:
 - `GET /api/workspace/{conversation_id}/file/download?path=...` — Download one workspace file
 - `GET /api/workspace/{conversation_id}/spreadsheet?path=...&sheet=...` — Spreadsheet preview/summary
 - `GET /api/workspace/{conversation_id}/download` — Download the full conversation workspace as a zip
+
+Workspace API notes:
+
+- Directory listings hide dot-prefixed paths unless the request explicitly targets a hidden path.
+- Directory listing items now include lightweight metadata such as `modified_at`, `content_kind`, and `kind` so the client can rank and preview artifacts.
+- File reads can return non-text preview metadata. For images, the payload uses `content_kind: "image"` with binary preview metadata instead of raw file bytes.
+- Tool results from `workspace.run_command` may include detected artifact metadata in `result.items`, plus `result.path` and `result.open_path` when there is a primary artifact worth surfacing in the viewer.
 
 ## Voice
 

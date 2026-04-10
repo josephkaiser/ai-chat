@@ -166,6 +166,72 @@ class RuntimePermissionTests(unittest.TestCase):
                 app.get_workspace_path = original_workspace
                 app.get_managed_python_env_path = original_env
 
+    def test_managed_python_env_prefers_server_root_and_can_migrate_legacy_run_env(self):
+        original_managed_root = app.MANAGED_PYTHON_ENVS_ROOT_PATH
+        original_runs_root = app.RUNS_ROOT_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                app.MANAGED_PYTHON_ENVS_ROOT_PATH = pathlib.Path(tempdir) / "managed-python-envs"
+                app.RUNS_ROOT_PATH = pathlib.Path(tempdir) / "runs"
+                app.MANAGED_PYTHON_ENVS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+                app.RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+
+                preferred = app.get_managed_python_env_path("conv-env")
+                legacy = app.get_legacy_managed_python_env_path("conv-env", create=True)
+                legacy.mkdir(parents=True, exist_ok=True)
+                (legacy / "marker.txt").write_text("legacy", encoding="utf-8")
+
+                self.assertNotIn(app.RUNS_ROOT_PATH, preferred.parents)
+                self.assertEqual(app.resolve_existing_managed_python_env_path("conv-env"), legacy)
+
+                migrated = app.migrate_legacy_managed_python_env("conv-env")
+
+                self.assertEqual(migrated, preferred)
+                self.assertTrue(preferred.exists())
+                self.assertFalse(legacy.exists())
+                self.assertEqual((preferred / "marker.txt").read_text(encoding="utf-8"), "legacy")
+        finally:
+            app.MANAGED_PYTHON_ENVS_ROOT_PATH = original_managed_root
+            app.RUNS_ROOT_PATH = original_runs_root
+
+    def test_capability_recovery_detects_false_tool_limitation_language(self):
+        self.assertTrue(
+            app.should_attempt_capability_recovery(
+                "The tools available in the workspace do not support direct PDF processing or generation."
+            )
+        )
+        self.assertFalse(
+            app.should_attempt_capability_recovery(
+                "The task is paused here while waiting for approval. Approve it for this chat and then say continue."
+            )
+        )
+
+    def test_capability_recovery_detects_execution_handoff_when_request_needed_real_output(self):
+        self.assertTrue(
+            app.should_attempt_capability_recovery(
+                "The FastAPI app is built and ready to run. To run the app locally:\n1. Install dependencies:\n2. Start the server:\nVisit http://localhost:8000",
+                request_text="Build a small FastAPI app in the workspace, install anything needed, run it, and render the homepage in the viewer.",
+                allowed_tools=["workspace.patch_file", "workspace.run_command", "workspace.render"],
+            )
+        )
+
+    def test_capability_recovery_ignores_legitimate_local_instructions_requests(self):
+        self.assertFalse(
+            app.should_attempt_capability_recovery(
+                "To run it locally:\npython3 main.py",
+                request_text="How do I run this locally?",
+                allowed_tools=["workspace.run_command"],
+            )
+        )
+
+    def test_tool_loop_step_limit_gives_focused_write_more_room(self):
+        steps = app.tool_loop_step_limit_for_request(
+            "Build a tiny terminal game in Python in the workspace and run it.",
+            ["workspace.patch_file", "workspace.run_command"],
+        )
+
+        self.assertGreaterEqual(steps, 5)
+
     def test_tool_permission_allowlist_round_trip(self):
         features = app.FeatureFlags()
 
@@ -286,6 +352,40 @@ class RuntimePermissionTests(unittest.TestCase):
                 app.get_workspace_path = original
 
         self.assertEqual(response.status_code, 204)
+
+    def test_workspace_run_command_result_surfaces_image_artifacts_for_preview(self):
+        python_cmd = "python.exe" if app.os.name == "nt" else "python3"
+        features = app.FeatureFlags(allowed_commands=[f"exec:{pathlib.Path(python_cmd).name.lower()}"])
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                result = asyncio.run(
+                    app.workspace_run_command_result(
+                        "conv-artifacts",
+                        [
+                            python_cmd,
+                            "-c",
+                            "from pathlib import Path; "
+                            "Path('notes.txt').write_text('ok\\n', encoding='utf-8'); "
+                            "Path('plot.png').write_bytes(b'\\x89PNG\\r\\n\\x1a\\n')",
+                        ],
+                        ".",
+                        features,
+                    )
+                )
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["path"], "plot.png")
+        self.assertEqual(result["open_path"], "plot.png")
+        self.assertGreaterEqual(result["artifacts_detected"], 2)
+        self.assertEqual(result["items"][0]["path"], "plot.png")
+        self.assertEqual(result["items"][0]["content_kind"], "image")
+        self.assertEqual(result["items"][1]["path"], "notes.txt")
 
 
 if __name__ == "__main__":

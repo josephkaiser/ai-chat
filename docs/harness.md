@@ -42,8 +42,10 @@ Important guardrails:
 - Python capability setup uses a server-managed chat environment outside the workspace, so installs do not flood the workspace tree or exports.
 - `workspace.patch_file` uses exact-match edits so changes stay narrow and predictable.
 - `workspace.render` is only exposed when the prompt strongly implies “render/preview/display this HTML”.
+- `workspace.run_command` now snapshots workspace files before and after execution so the harness can surface newly created artifacts such as plots, reports, and exports.
 - Final answer text is post-processed to strip unsupported claims that a file was created or updated when no successful workspace write happened.
 - Direct answers get one recovery pass if the model incorrectly claims an available tool capability is missing.
+- Direct answers also get a recovery pass when the model incorrectly hands execution back to the user with “run this locally” instructions even though command or render tools were available.
 - Broad “build me an app/project/repo” requests with approved workspace edits can bypass the lightweight loop and run through the full workspace execution path automatically.
 
 ## Deep-mode harness
@@ -101,6 +103,8 @@ How tools are exposed:
 - **Conversation search** stays available for recall-style prompts.
 - **Web search** stays available for freshness-sensitive prompts, then pauses behind an inline approval card the first time live web access is used.
 
+When a command creates or modifies visible files in the workspace, the tool result can now carry detected artifact metadata. Previewable outputs such as images, HTML, markdown, CSV, spreadsheets, and PDFs can be surfaced directly in the workspace viewer.
+
 `allowed_workspace_tools(...)` is the core permission gate for file and command tools.
 
 ### Python capability pattern
@@ -109,6 +113,7 @@ For Python-heavy turns, the intended flow is:
 
 1. Research packages or docs with `web.search` / `web.fetch_page` when package choice is uncertain.
 2. Create or reuse the managed Python environment for the conversation when package work is needed.
+   That environment is server-owned and stored outside `runs/` so workspace syncs stay lighter.
 3. Install packages with pip into that managed environment.
 4. Write scripts or artifacts into the workspace.
 5. Verify with a focused command from the same environment.
@@ -127,6 +132,9 @@ Current inline approval buckets are:
 - scoped Python setup actions such as `python -m venv` and `pip install`
 
 If the user denies one of those requests, the task pauses at that approval boundary and waits for the user to approve it and resume.
+That denial is treated as a real block, not as optional context for the model to work around. The current task should resume only after the user approves it for this chat and says `continue`.
+
+Plan approval is handled separately from per-tool approval. The composer’s tool auto-approve control can auto-approve tool and command requests for the current chat, but execution plans still require an explicit plan approval step in the UI.
 
 Install-like Python setup commands are exempt from the short command timeout. They run until completion unless they fail or the user presses Stop / Interrupt, in which case the server cancels the subprocess cleanly.
 
@@ -140,8 +148,9 @@ Each conversation gets its own workspace on the server. The harness uses that wo
 - command execution cwd
 - downloadable zip exports
 
-The browser can inspect the same workspace through the workspace panel and file modal, so tool output is visible outside the model transcript.
+The browser can inspect the same workspace through the activity rail, artifact list, file tree, and inline viewer, so tool output is visible outside the model transcript.
 Dot-prefixed entries stay hidden in the browser workspace view unless a hidden path is targeted explicitly.
+Previewable artifacts from `workspace.render` and from command-generated files can auto-open in the inline viewer to make execution feel more like live pair programming.
 
 ## Activity events
 
