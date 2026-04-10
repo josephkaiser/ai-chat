@@ -2,7 +2,7 @@ import pathlib
 import tempfile
 import unittest
 
-from prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT
+from prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
 import workspace_reader
 
 
@@ -145,6 +145,10 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("use it instead of claiming you cannot run code", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("instead of giving local setup or run instructions back to the user", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("specific output shape", DEEP_BUILD_SYSTEM_PROMPT)
+        self.assertIn("more illustrative output artifact", DEEP_BUILD_SYSTEM_PROMPT)
+        self.assertIn("short sequence, table, chart", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("short sequence or quick chart", DEEP_BUILD_SYSTEM_PROMPT)
+        self.assertIn("ask one short clarifying question", DEEP_INSPECT_SYSTEM_PROMPT)
         self.assertIn("Do not hand execution back to the user", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("Match the scale of the change to the current step", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("managed chat-scoped Python environment", TOOL_USE_SYSTEM_PROMPT)

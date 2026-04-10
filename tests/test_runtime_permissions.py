@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import pathlib
 import asyncio
+import sqlite3
 
 try:
     import app
@@ -224,6 +225,119 @@ class RuntimePermissionTests(unittest.TestCase):
             )
         )
 
+    def test_detect_implicit_failure_feedback_classifies_corrective_reply(self):
+        signal = app.detect_implicit_failure_feedback(
+            "the artifact isn't interactive and you can't pick one and it's not a real artifact"
+        )
+
+        self.assertEqual(signal.get("label"), "negative")
+        self.assertEqual(signal.get("category"), "non_interactive_artifact")
+
+    def test_save_message_marks_previous_assistant_negative_after_corrective_user_reply(self):
+        original_db_path = app.DB_PATH
+        original_runs_root = app.RUNS_ROOT_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                temp_root = pathlib.Path(tempdir)
+                db_path = temp_root / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.RUNS_ROOT_PATH = temp_root / "runs"
+                app.RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    '''CREATE TABLE conversations
+                       (id TEXT PRIMARY KEY, title TEXT, created_at TEXT, updated_at TEXT, run_id TEXT)'''
+                )
+                conn.execute(
+                    '''CREATE TABLE messages
+                       (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT, role TEXT, content TEXT, timestamp TEXT, feedback TEXT)'''
+                )
+                conn.execute(
+                    '''CREATE TABLE runs
+                       (id TEXT PRIMARY KEY, conversation_id TEXT UNIQUE NOT NULL, title TEXT, status TEXT NOT NULL DEFAULT 'active',
+                        sandbox_path TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, summary TEXT NOT NULL DEFAULT '',
+                        promoted_count INTEGER NOT NULL DEFAULT 0)'''
+                )
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at, run_id) VALUES (?, ?, ?, ?, ?)",
+                    ("conv-feedback", "Feedback", "2026-04-10T00:00:00", "2026-04-10T00:00:00", "run-conv-feedback"),
+                )
+                conn.execute(
+                    "INSERT INTO runs (id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("run-conv-feedback", "conv-feedback", "Feedback", "active", str(app.RUNS_ROOT_PATH / "run-conv-feedback"), "2026-04-10T00:00:00", None, "", 0),
+                )
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, feedback) VALUES (?, ?, ?, ?, ?)",
+                    ("conv-feedback", "assistant", "Here is the generated matplotlib plot from the sample data.", "2026-04-10T00:00:01", "neutral"),
+                )
+                conn.commit()
+                conn.close()
+
+                app.save_message("conv-feedback", "user", "the plot doesn't show!")
+                assistant = app.get_message_by_id(1)
+        finally:
+            app.DB_PATH = original_db_path
+            app.RUNS_ROOT_PATH = original_runs_root
+
+        self.assertIsNotNone(assistant)
+        self.assertEqual(assistant["feedback"], "negative")
+
+    def test_collect_recent_product_feedback_entries_returns_recent_corrective_replies(self):
+        original_db_path = app.DB_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    '''CREATE TABLE conversations
+                       (id TEXT PRIMARY KEY, title TEXT, created_at TEXT, updated_at TEXT, run_id TEXT)'''
+                )
+                conn.execute(
+                    '''CREATE TABLE messages
+                       (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT, role TEXT, content TEXT, timestamp TEXT, feedback TEXT)'''
+                )
+                conn.executemany(
+                    "INSERT INTO conversations (id, title, created_at, updated_at, run_id) VALUES (?, ?, ?, ?, ?)",
+                    [
+                        ("conv-a", "Plot", "2026-04-10T00:00:00", "2026-04-10T07:34:32", None),
+                        ("conv-b", "DoorDash", "2026-04-10T00:00:00", "2026-04-10T07:13:14", None),
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, feedback) VALUES (?, ?, ?, ?, ?)",
+                    [
+                        ("conv-a", "assistant", "Here is the generated matplotlib plot from the sample data.", "2026-04-10T07:34:31", "neutral"),
+                        ("conv-a", "user", "the plot doesn't show!", "2026-04-10T07:34:33", None),
+                        ("conv-b", "assistant", "I've created a door_dash_menu.json artifact with 10 options.", "2026-04-10T07:10:00", "neutral"),
+                        ("conv-b", "user", "the artifact isn't interactive and you can't pick one and it's not a real artifact :(", "2026-04-10T07:10:10", None),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                entries = app.collect_recent_product_feedback_entries(limit=4)
+        finally:
+            app.DB_PATH = original_db_path
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["category"], "artifact_visibility")
+        self.assertEqual(entries[1]["category"], "non_interactive_artifact")
+        self.assertIn("plot doesn't show", entries[0]["user_feedback"].lower())
+
+    def test_request_wants_recent_product_feedback_for_repo_improvement_prompts(self):
+        self.assertTrue(
+            app.request_wants_recent_product_feedback(
+                "This chat and some others in here contain feedback for the developer of this ai-chat software. Interpret the user's feedback as failure and improve the app overall."
+            )
+        )
+        self.assertFalse(
+            app.request_wants_recent_product_feedback(
+                "Review this repo for the top 3 bugs and patch the top 2."
+            )
+        )
+
     def test_tool_loop_step_limit_gives_focused_write_more_room(self):
         steps = app.tool_loop_step_limit_for_request(
             "Build a tiny terminal game in Python in the workspace and run it.",
@@ -231,6 +345,19 @@ class RuntimePermissionTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(steps, 5)
+
+    def test_tool_loop_step_limit_gives_repo_scale_requests_more_room(self):
+        generic_steps = app.tool_loop_step_limit_for_request(
+            "Improve the workspace UX and verify it.",
+            ["workspace.grep", "workspace.read_file", "workspace.patch_file", "workspace.run_command"],
+        )
+        repo_steps = app.tool_loop_step_limit_for_request(
+            "Inspect this repository and improve the workspace UX for pair programming.",
+            ["workspace.grep", "workspace.read_file", "workspace.patch_file", "workspace.run_command"],
+        )
+
+        self.assertGreaterEqual(repo_steps, generic_steps)
+        self.assertGreaterEqual(repo_steps, 10)
 
     def test_tool_permission_allowlist_round_trip(self):
         features = app.FeatureFlags()
@@ -391,6 +518,99 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertTrue(app.request_targets_current_repo("Review this repo for the top 3 issues."))
         self.assertTrue(app.request_targets_current_repo("Find the approval logic in this repository and patch it."))
         self.assertFalse(app.request_targets_current_repo("Create a repo for this project from scratch."))
+        self.assertTrue(app.request_targets_current_repo("Create a tiny demo app in this repo that proves it works."))
+
+    def test_request_is_repo_scaffold_does_not_capture_create_app_in_this_repo(self):
+        self.assertFalse(app.request_is_repo_scaffold("Create a tiny demo app in this repo that proves it works."))
+        self.assertTrue(app.request_is_repo_scaffold("Create a repo structure for this project from scratch."))
+
+    def test_request_prefers_illustrative_output_for_demo_and_chart_language(self):
+        self.assertTrue(
+            app.request_prefers_illustrative_output(
+                "Create a tiny demo app in this repo that proves it works and keep going until the artifact is real."
+            )
+        )
+        self.assertTrue(
+            app.request_prefers_illustrative_output(
+                "Show the graph or chart so the result is visible."
+            )
+        )
+        self.assertFalse(
+            app.request_prefers_illustrative_output(
+                "Patch the approval logic in this repo and run the narrowest useful tests."
+            )
+        )
+
+    def test_workspace_hidden_paths_include_runtime_cache_directories(self):
+        self.assertTrue(app.workspace_rel_path_is_hidden("__pycache__/app.cpython-311.pyc"))
+        self.assertTrue(app.workspace_rel_path_is_hidden(".venv/bin/python"))
+        self.assertFalse(app.workspace_rel_path_is_hidden("src/demo.py"))
+
+    def test_extract_context_clarification_from_workspace_facts_detects_blocking_question(self):
+        facts = (
+            "The workspace currently contains no files or directories. "
+            "There is no existing repository to inspect or modify. "
+            "Would you like to proceed with creating the necessary files, or is there a different issue to address?\n\n"
+            "Grounded workspace snapshot:\n- Workspace root: /tmp/workspace"
+        )
+        self.assertIn(
+            "Would you like to proceed",
+            app.extract_context_clarification_from_workspace_facts(facts),
+        )
+
+    def test_should_pause_for_workspace_clarification_only_when_workspace_is_still_missing_context(self):
+        facts = (
+            "The workspace currently contains no files or directories. "
+            "There is no existing repository to inspect or modify. "
+            "Would you like to proceed with creating the necessary files, or is there a different issue to address?"
+        )
+        self.assertIn(
+            "Would you like to proceed",
+            app.should_pause_for_workspace_clarification(
+                "Inspect this repository and improve the workspace UX.",
+                facts,
+                {"user_file_count": 0},
+            ),
+        )
+        self.assertEqual(
+            app.should_pause_for_workspace_clarification(
+                "Inspect this repository and improve the workspace UX.",
+                facts,
+                {"user_file_count": 12},
+            ),
+            "",
+        )
+
+    def test_saved_progress_fallback_response_explains_repo_snapshot_context(self):
+        original_load_task_state = app.load_task_state
+        try:
+            app.load_task_state = lambda _conversation_id, rel_path=".ai/task-state.json": {
+                "request": "Read this codebase and find one place where command-generated outputs are still treated as second-class compared with edited files.",
+                "workspace_snapshot": {"user_file_count": 13},
+                "plan": {"builder_steps": ["Inspect the codebase", "Patch the bug"]},
+                "build_step_summaries": [],
+                "changed_files": [],
+                "task_board_path": ".ai/task-board.md",
+                "pause_reason": "",
+                "verification_summary": "",
+            }
+            response = app.build_saved_progress_fallback_response("conv-repo")
+        finally:
+            app.load_task_state = original_load_task_state
+
+        self.assertIn("repo snapshot for context", response)
+        self.assertIn("[[artifact:.ai/task-board.md]]", response)
+        self.assertNotIn("Open `[[artifact:.ai/task-board.md]]`", response)
+
+    def test_ensure_nonempty_turn_response_prefers_saved_progress_summary(self):
+        original_builder = app.build_saved_progress_fallback_response
+        try:
+            app.build_saved_progress_fallback_response = lambda *args, **kwargs: "Saved progress summary."
+            response = app.ensure_nonempty_turn_response("", "conv-fallback", "Review this repo")
+        finally:
+            app.build_saved_progress_fallback_response = original_builder
+
+        self.assertEqual(response, "Saved progress summary.")
 
     def test_bootstrap_workspace_from_current_repo_seeds_filtered_snapshot(self):
         original_base_dir = app._base_dir

@@ -88,6 +88,11 @@ const MIC_ACTIVE_BUTTON_ICON = buildComposerIconMarkup('<circle cx="12" cy="12" 
 const MAX_PENDING_ATTACHMENTS = 8;
 const MIN_CHAT_SURFACE_WIDTH = 520;
 const CHAT_SURFACE_GAP_PX = 14;
+const ARTIFACT_REFERENCE_PATTERN = /\[\[artifact:([^[\]\r\n]+?)\]\]/g;
+const ARTIFACT_HELPER_TEXT_PATTERNS = [
+    /^\s*(?:you can )?(?:open|view|inspect|see|read|preview|find)\b[^.!?]*?(?:here|below)?[:.]?\s*$/i,
+    /^\s*(?:saved plan(?: and notes)?|saved progress|task board|feedback digest|full feedback digest|artifact|artifacts?)[:.]?\s*$/i,
+];
 let voiceRuntime = {
     tts_available: false,
     stt_available: false,
@@ -722,7 +727,7 @@ function syncWorkspaceViewMode() {
     const showReader = hasReader && mode === 'reader';
 
     workspaceViewMode = mode;
-    if (root) root.classList.toggle('workspace-reader-open', !mobileLayout && workspacePanelOpen);
+    if (root) root.classList.toggle('workspace-reader-open', !mobileLayout && showReader);
     if (panel) panel.classList.toggle('is-hidden', !showTree);
     if (viewer) viewer.classList.toggle('is-hidden', !showReader);
     if (workspace) {
@@ -2648,6 +2653,9 @@ function noteAssistantArtifactsFromToolResult(data) {
     if (typeof payload.path === 'string' && payload.path) {
         noteAssistantTurnArtifactPath(payload.path);
     }
+    if (typeof payload.open_path === 'string' && payload.open_path) {
+        noteAssistantTurnArtifactPath(payload.open_path);
+    }
     if (Array.isArray(payload.items)) {
         payload.items.forEach(item => {
             if (item && typeof item.path === 'string') noteAssistantTurnArtifactPath(item.path);
@@ -2698,6 +2706,201 @@ function compareWorkspacePaths(a, b) {
     return normalizeWorkspacePath(a) === normalizeWorkspacePath(b);
 }
 
+function findWorkspaceFileEntry(path) {
+    const normalized = normalizeWorkspacePath(path);
+    return Array.isArray(workspaceEntries)
+        ? workspaceEntries.find(entry => entry && entry.type === 'file' && compareWorkspacePaths(entry.path, normalized))
+        : null;
+}
+
+function normalizeArtifactReferencePath(path) {
+    return normalizeWorkspacePath(String(path || '').trim());
+}
+
+function resolveArtifactReferencePath(path) {
+    const normalized = normalizeArtifactReferencePath(path);
+    return findWorkspaceFileEntry(normalized)?.path || normalized;
+}
+
+function extractArtifactReferences(text) {
+    const references = [];
+    const seen = new Set();
+    const value = String(text || '');
+    for (const match of value.matchAll(ARTIFACT_REFERENCE_PATTERN)) {
+        const normalized = normalizeArtifactReferencePath(match[1]);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        references.push(normalized);
+    }
+    return references;
+}
+
+function assistantTurnIncludesArtifactPath(path) {
+    const normalized = normalizeWorkspacePath(path);
+    const sets = [currentAssistantTurnArtifactPaths, latestAssistantTurnArtifactPaths];
+    return sets.some(paths => Array.from(paths || []).some(candidate => compareWorkspacePaths(candidate, normalized)));
+}
+
+function buildArtifactReferenceButton(path) {
+    const resolvedPath = resolveArtifactReferencePath(path);
+    const entry = findWorkspaceFileEntry(resolvedPath);
+    const previewable = shouldAutoOpenArtifactPreview(resolvedPath);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `message-artifact-link${previewable ? ' is-previewable' : ''}`;
+    button.dataset.path = resolvedPath;
+    button.title = previewable
+        ? `Open ${basename(resolvedPath) || resolvedPath} in the viewer`
+        : `Open ${basename(resolvedPath) || resolvedPath} in the workspace`;
+    button.setAttribute(
+        'aria-label',
+        previewable
+            ? `Open ${basename(resolvedPath) || resolvedPath} in the viewer`
+            : `Open ${basename(resolvedPath) || resolvedPath} in the workspace`,
+    );
+    button.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openWorkspaceFile(resolvedPath);
+        focusInput();
+    };
+
+    const icon = document.createElement('span');
+    icon.className = 'message-artifact-icon';
+    icon.textContent = workspaceArtifactIconLabel(resolvedPath);
+    button.appendChild(icon);
+
+    const copy = document.createElement('span');
+    copy.className = 'message-artifact-copy';
+
+    const head = document.createElement('span');
+    head.className = 'message-artifact-head';
+    const badge = document.createElement('span');
+    badge.className = 'message-artifact-badge';
+    badge.textContent = previewable ? 'Viewer' : artifactBadgeForPath(resolvedPath);
+    head.appendChild(badge);
+    copy.appendChild(head);
+
+    const title = document.createElement('span');
+    title.className = 'message-artifact-title';
+    title.textContent = entry?.name || basename(resolvedPath) || resolvedPath;
+    copy.appendChild(title);
+
+    const meta = document.createElement('span');
+    meta.className = 'message-artifact-meta';
+    meta.textContent = resolvedPath;
+    copy.appendChild(meta);
+
+    button.appendChild(copy);
+    return button;
+}
+
+function replaceArtifactReferencesInTextNode(node) {
+    const text = node?.textContent || '';
+    if (!text || !text.includes('[[artifact:')) return false;
+    const fragment = document.createDocumentFragment();
+    let replaced = false;
+    let lastIndex = 0;
+
+    for (const match of text.matchAll(ARTIFACT_REFERENCE_PATTERN)) {
+        const fullMatch = match[0] || '';
+        const index = match.index || 0;
+        const before = text.slice(lastIndex, index);
+        if (before) fragment.appendChild(document.createTextNode(before));
+        fragment.appendChild(buildArtifactReferenceButton(match[1]));
+        lastIndex = index + fullMatch.length;
+        replaced = true;
+    }
+
+    if (!replaced) return false;
+
+    const after = text.slice(lastIndex);
+    if (after) fragment.appendChild(document.createTextNode(after));
+    node.parentNode?.replaceChild(fragment, node);
+    return true;
+}
+
+function paragraphArtifactButtons(paragraph) {
+    return Array.from(paragraph.children || []).filter(node => {
+        return node instanceof HTMLElement && node.classList.contains('message-artifact-link');
+    });
+}
+
+function artifactHelperParagraphText(paragraph) {
+    const parts = [];
+    paragraph.childNodes.forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            parts.push(node.textContent || '');
+            return;
+        }
+        if (!(node instanceof HTMLElement) || node.classList.contains('message-artifact-link')) return;
+        parts.push(node.textContent || '');
+    });
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function shouldCollapseArtifactHelperParagraph(paragraph) {
+    const buttons = paragraphArtifactButtons(paragraph);
+    if (buttons.length !== 1) return false;
+    const helperText = artifactHelperParagraphText(paragraph);
+    if (!helperText) return true;
+    return ARTIFACT_HELPER_TEXT_PATTERNS.some(pattern => pattern.test(helperText));
+}
+
+function markStandaloneArtifactReferences(container) {
+    if (!container) return;
+    container.querySelectorAll('p').forEach(paragraph => {
+        if (!shouldCollapseArtifactHelperParagraph(paragraph)) return;
+        const [onlyNode] = paragraphArtifactButtons(paragraph);
+        if (!(onlyNode instanceof HTMLElement)) return;
+        paragraph.innerHTML = '';
+        paragraph.appendChild(onlyNode);
+        paragraph.classList.add('message-artifact-paragraph');
+        onlyNode.classList.add('is-standalone');
+    });
+}
+
+function isMostRecentAssistantMessage(msg) {
+    if (!msg || !msg.classList.contains('assistant')) return false;
+    const assistantMessages = Array.from(document.querySelectorAll('#messages .message.assistant'));
+    return assistantMessages.length > 0 && assistantMessages[assistantMessages.length - 1] === msg;
+}
+
+function maybeAutoOpenReferencedArtifact(msg, rawContent = '') {
+    if (!msg || msg.dataset.artifactPreviewAutoOpened === 'true') return;
+    const previewPath = extractArtifactReferences(rawContent)
+        .map(path => resolveArtifactReferencePath(path))
+        .find(path => {
+            if (!shouldAutoOpenArtifactPreview(path) || !findWorkspaceFileEntry(path)) return false;
+            if (assistantTurnIncludesArtifactPath(path)) return true;
+            return extractArtifactReferences(rawContent).length === 1 && isMostRecentAssistantMessage(msg);
+        });
+    if (!previewPath) return;
+    msg.dataset.artifactPreviewAutoOpened = 'true';
+    openWorkspaceFile(previewPath);
+    requestAnimationFrame(() => focusInput());
+}
+
+function enhanceMessageArtifactReferences(msg, container, rawContent = '') {
+    if (!container) return;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            const text = node?.textContent || '';
+            if (!text.includes('[[artifact:')) return NodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            if (!parent || parent.closest('pre, code, a, button, textarea')) {
+                return NodeFilter.FILTER_REJECT;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+        },
+    });
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    textNodes.forEach(node => replaceArtifactReferencesInTextNode(node));
+    markStandaloneArtifactReferences(container);
+    maybeAutoOpenReferencedArtifact(msg, rawContent);
+}
+
 function getWorkspaceArtifactEntries(limit = WORKSPACE_ARTIFACT_LIMIT) {
     const files = Array.isArray(workspaceEntries)
         ? workspaceEntries.filter(entry => entry && entry.type === 'file')
@@ -2725,7 +2928,6 @@ function getWorkspaceArtifactEntries(limit = WORKSPACE_ARTIFACT_LIMIT) {
             return bModified - aModified;
         })
         .forEach(entry => addEntryPath(entry.path));
-    sortWorkspaceFilesByRecent(files).forEach(entry => addEntryPath(entry.path));
 
     return ordered.slice(0, limit);
 }
@@ -2741,13 +2943,16 @@ function renderWorkspaceArtifactList() {
     const artifacts = getWorkspaceArtifactEntries();
     const fileCount = files.length;
     countEl.textContent = fileCount
-        ? (artifacts.length < fileCount
-            ? `${artifacts.length} of ${fileCount}`
-            : `${fileCount} item${fileCount === 1 ? '' : 's'}`)
+        ? `${artifacts.length} recent${fileCount ? ` • ${fileCount} file${fileCount === 1 ? '' : 's'}` : ''}`
         : 'No files';
 
     if (!fileCount) {
         listEl.innerHTML = '<div class="workspace-empty">Waiting for the first artifact. Ask the assistant to create or edit a file and it will show up here.</div>';
+        return;
+    }
+
+    if (!artifacts.length) {
+        listEl.innerHTML = '<div class="workspace-empty">No recent turn artifacts yet. Browse All Files below or ask the assistant to create, edit, or run something.</div>';
         return;
     }
 
@@ -2811,10 +3016,8 @@ function renderWorkspaceArtifactList() {
 
 function isWorkspaceEntryRecentlyChanged(entry) {
     if (!entry || entry.type !== 'file') return false;
-    if (latestAssistantTurnArtifactPaths.has(entry.path)) return true;
-    if (!currentAssistantTurnStartedAt) return false;
-    const modified = new Date(entry.modified_at || 0).getTime() || 0;
-    return modified >= currentAssistantTurnStartedAt - 1500;
+    return latestAssistantTurnArtifactPaths.has(entry.path)
+        || currentAssistantTurnArtifactPaths.has(entry.path);
 }
 
 function flattenWorkspaceFiles(node, files = []) {
@@ -4301,7 +4504,77 @@ function renderCodePreview(targetId, content, path) {
     }
 }
 
-function renderHtmlPreview(targetId, content) {
+function workspacePathDirname(path) {
+    const normalized = normalizeWorkspacePath(path);
+    if (!normalized || normalized === '.') return '.';
+    const parts = normalized.split('/');
+    parts.pop();
+    return parts.length ? parts.join('/') : '.';
+}
+
+function isWorkspaceExternalUrl(value) {
+    const text = String(value || '').trim();
+    if (!text) return true;
+    return /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(text);
+}
+
+function resolveWorkspaceAssetPath(basePath, assetRef) {
+    const raw = String(assetRef || '').trim();
+    if (!raw || isWorkspaceExternalUrl(raw)) return '';
+    const match = raw.match(/^([^?#]*)([?#].*)?$/);
+    const pathPart = String(match?.[1] || '').trim();
+    if (!pathPart) return '';
+
+    const baseDir = workspacePathDirname(basePath);
+    const segments = pathPart.startsWith('/')
+        ? []
+        : (baseDir === '.' ? [] : baseDir.split('/'));
+
+    pathPart.split('/').forEach(part => {
+        if (!part || part === '.') return;
+        if (part === '..') {
+            if (segments.length) segments.pop();
+            return;
+        }
+        segments.push(part);
+    });
+
+    return segments.join('/') || '.';
+}
+
+function prepareHtmlPreviewContent(content, path) {
+    const html = String(content || '');
+    if (!html.trim() || typeof DOMParser === 'undefined') return html;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const selectors = [
+        ['img[src]', 'src'],
+        ['source[src]', 'src'],
+        ['video[src]', 'src'],
+        ['audio[src]', 'src'],
+        ['track[src]', 'src'],
+        ['embed[src]', 'src'],
+        ['iframe[src]', 'src'],
+        ['script[src]', 'src'],
+        ['object[data]', 'data'],
+        ['link[href]', 'href'],
+        ['a[href]', 'href'],
+    ];
+
+    selectors.forEach(([selector, attribute]) => {
+        doc.querySelectorAll(selector).forEach(node => {
+            const original = node.getAttribute(attribute);
+            const resolvedPath = resolveWorkspaceAssetPath(path, original);
+            if (!resolvedPath) return;
+            node.setAttribute(attribute, workspaceFileInlineViewUrl(resolvedPath));
+        });
+    });
+
+    return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+}
+
+function renderHtmlPreview(targetId, content, path) {
     const previewEl = document.getElementById(targetId);
     if (!previewEl) return;
     previewEl.classList.remove('file-modal-markdown');
@@ -4309,7 +4582,7 @@ function renderHtmlPreview(targetId, content) {
     const iframe = document.createElement('iframe');
     iframe.className = 'file-modal-html';
     iframe.setAttribute('sandbox', 'allow-same-origin');
-    iframe.srcdoc = content || '';
+    iframe.srcdoc = prepareHtmlPreviewContent(content, path);
     previewEl.appendChild(iframe);
 }
 
@@ -4347,6 +4620,7 @@ function renderMarkdownPreview(targetId, content) {
     }
     previewEl.innerHTML = (content && content.trim()) ? marked.parse(content) : '<p class="workspace-empty">Nothing to preview.</p>';
     renderMathContent(previewEl);
+    enhanceMessageArtifactReferences(null, previewEl, content);
     if (typeof hljs !== 'undefined') {
         previewEl.querySelectorAll('pre code').forEach(block => {
             try { if (block.textContent?.trim()) hljs.highlightElement(block); } catch (e) {}
@@ -4588,7 +4862,14 @@ function shouldAutoOpenArtifactPreview(path) {
 
 async function openWorkspaceFile(path, options = {}) {
     if (!featureSettings.agent_tools || !path) return;
+    const revealViewer = options.reveal !== false;
     const preserveSheet = Boolean(options.preserveSheet);
+    if (revealViewer && !workspacePanelOpen) {
+        dismissMobileKeyboard(true);
+        closeMenu();
+        workspacePanelOpen = true;
+        applyWorkspacePanelState();
+    }
     const requestToken = ++inlineViewerRequestToken;
     const provisionalKind = /\.(xlsx|xls|xlsm)$/i.test(path)
         ? 'spreadsheet'
@@ -4650,7 +4931,7 @@ async function openWorkspaceFile(path, options = {}) {
             renderImagePreview('inlineViewerPreview', path);
         }
         else if (kind === 'html') {
-            renderHtmlPreview('inlineViewerPreview', content);
+            renderHtmlPreview('inlineViewerPreview', content, path);
         }
         else if (kind === 'markdown') {
             renderMarkdownPreview('inlineViewerPreview', content);
@@ -5398,6 +5679,7 @@ function replaceAssistantAnswer(content) {
         stack.innerHTML = '';
         msg.dataset.originalContent = '';
         msg.dataset.autoSpoken = 'false';
+        delete msg.dataset.artifactPreviewAutoOpened;
         hydrateAssistantFromRaw(msg, content || '');
     });
 }
@@ -5613,6 +5895,7 @@ function renderMarkdown() {
                 const html = (content && content.trim()) ? marked.parse(content) : '';
                 contentDiv.innerHTML = html;
                 renderMathContent(contentDiv);
+                enhanceMessageArtifactReferences(msg, contentDiv, content);
                 msg.dataset.needsMarkdown = 'false';
                 msg.dataset.rendered = 'true';
 
