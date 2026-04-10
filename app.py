@@ -3338,6 +3338,7 @@ class FeatureFlags:
     workspace_run_commands: bool = False
     local_rag: bool = True
     web_search: bool = False
+    auto_approve_tool_permissions: bool = False
     allowed_commands: List[str] = field(default_factory=list)
     allowed_tool_permissions: List[str] = field(default_factory=list)
 
@@ -6112,6 +6113,7 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
         workspace_run_commands=flag("workspace_run_commands", False),
         local_rag=flag("local_rag", True),
         web_search=flag("web_search", True),
+        auto_approve_tool_permissions=flag("auto_approve_tool_permissions", False),
         allowed_commands=sorted(set(allowed_commands)),
         allowed_tool_permissions=sorted(set(allowed_tool_permissions)),
     )
@@ -8668,6 +8670,13 @@ async def ensure_tool_permission(
     request = build_tool_permission_request(conversation_id, call)
     if request is None:
         return True, None
+
+    if features.auto_approve_tool_permissions:
+        if request.approval_target == "command":
+            remember_approved_command(features, request.key)
+        else:
+            remember_approved_tool_permission(features, request.key)
+        return True, request
 
     if request.approval_target == "command":
         arguments = call.get("arguments", {}) if isinstance(call.get("arguments"), dict) else {}
