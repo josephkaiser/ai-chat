@@ -92,7 +92,6 @@ textarea {
     --workspace-shell-width-split: calc(var(--workspace-sidebar-width) + var(--workspace-viewer-width) + var(--workspace-pane-gap));
     --workspace-shell-width-compact: clamp(320px, 38vw, 420px);
     --menu-toggle-open-left: calc(min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 20px);
-    --workspace-toggle-open-right: calc(min(var(--workspace-shell-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 12px);
     --panel-radius: 22px;
     --surface-radius: 16px;
     --dense-border: color-mix(in srgb, var(--bg_tertiary) 94%, transparent);
@@ -871,7 +870,6 @@ textarea {
 .workspace-toggle.active {
     color: var(--text_primary);
     border-color: var(--accent_primary);
-    right: var(--workspace-toggle-open-right);
 }
 .workspace-toggle-icon {
     width: 18px;
@@ -2785,7 +2783,7 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--text_tertiary) 18%, var(--dense-border));
     box-shadow: 0 20px 36px rgba(0,0,0,0.2);
     transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-    padding: 12px 12px 10px;
+    padding: 15px 16px 13px;
     gap: 8px;
 }
 .input-container:focus-within {
@@ -2798,7 +2796,7 @@ textarea {
     outline: none;
     min-height: 74px;
     max-height: 220px;
-    padding: 6px 4px 2px;
+    padding: 10px 8px 4px;
     background: transparent;
     color: var(--text_primary);
     font-family: inherit;
@@ -2808,11 +2806,11 @@ textarea {
     overflow-y: auto;
 }
 .input-area.composer-compact .input-container {
-    padding: 7px 9px 6px;
+    padding: 10px 12px 9px;
     gap: 4px;
 }
 .input-area.composer-compact .input-container textarea {
-    padding: 2px 2px 0;
+    padding: 6px 6px 2px;
 }
 .input-container textarea::placeholder { color: var(--text_tertiary); }
 .composer-footer {
