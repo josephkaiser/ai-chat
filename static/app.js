@@ -800,9 +800,38 @@ function updateFeatureSetting(name, enabled) {
     if (name === 'agent_tools' || name === 'workspace_panel') refreshWorkspace(true);
 }
 
-function downloadWorkspaceZip() {
+async function downloadWorkspaceZip() {
     if (!currentConvId) return;
-    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/download`, '_blank', 'noopener');
+    try {
+        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/download`);
+        if (resp.status === 204) {
+            showTransientComposerHint('The workspace is empty, so there is nothing to download.', 5000);
+            recordWorkspaceActivity('Download', 'Skipped workspace download because the workspace is empty.');
+            return;
+        }
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            throw new Error(data.detail || data.error || `HTTP ${resp.status}`);
+        }
+        const blob = await resp.blob();
+        if (!blob.size) {
+            showTransientComposerHint('The workspace is empty, so there is nothing to download.', 5000);
+            recordWorkspaceActivity('Download', 'Skipped workspace download because the archive was empty.');
+            return;
+        }
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'workspace.zip';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+        recordWorkspaceActivity('Download', 'Downloaded workspace.zip.');
+    } catch (error) {
+        showTransientComposerHint(`Workspace download failed: ${error.message}`, 6000);
+        recordWorkspaceActivity('Download Error', `Workspace download failed: ${error.message}`, { error: true });
+    }
 }
 
 function downloadWorkspaceFile(path) {
