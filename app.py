@@ -207,11 +207,15 @@ WORKSPACE_SIGNAL_VERBS = {
     "inspect", "read", "open", "show", "list", "search", "find", "grep",
     "edit", "change", "update", "patch", "refactor", "create", "write", "add",
     "delete", "remove", "rename", "run", "execute", "test", "build", "compile",
-    "debug", "fix", "implement", "tweak", "adjust", "modify", "improve", "revise",
+    "debug", "fix", "implement", "make", "making", "start", "starting", "draft",
+    "wire", "wiring", "setup", "set", "tweak", "adjust", "modify", "improve", "revise",
 }
 WORKSPACE_SIGNAL_NOUNS = {
     "workspace", "repo", "repository", "codebase", "project", "folder", "directory",
     "file", "files", "code", "app", "application", "program", "module", "script", "source", "test", "tests",
+    "model", "models", "tracker", "trackers", "tracking", "workflow", "workflows",
+    "pipeline", "pipelines", "automation", "automations", "monitor", "monitors",
+    "job", "jobs", "dashboard", "dashboards",
 }
 WORKSPACE_TEMPLATE_TERMS = {
     "template", "starter", "scaffold", "boilerplate", "example", "sample",
@@ -3009,6 +3013,8 @@ class ToolLoopOutcome:
     final_text: str
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
     hit_limit: bool = False
+    requested_phase_upgrade: str = ""
+    requested_tool_name: str = ""
 
 
 @dataclass
@@ -4295,15 +4301,22 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
     return classify_workspace_intent(session.message) in {"focused_write", "broad_write"}
 
 
-def should_auto_execute_workspace_task(message: str, features: "FeatureFlags") -> bool:
-    """Auto-upgrade broad write requests into the full inspect/plan/build/verify workflow."""
+def should_auto_execute_workspace_task(
+    conversation_id: str,
+    message: str,
+    features: "FeatureFlags",
+) -> bool:
+    """Auto-upgrade concrete workspace build requests into the full inspect/plan/build/verify flow."""
     if not features.agent_tools or not features.workspace_write:
         return False
     if request_is_about_limitations(message):
         return False
     if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
         return False
-    return classify_workspace_intent(message) == "broad_write"
+    intent = classify_workspace_intent(message)
+    if intent not in {"focused_write", "broad_write"}:
+        return False
+    return should_use_workspace_tools(conversation_id, message, features)
 
 
 def should_resume_saved_workspace_task(
@@ -8557,6 +8570,16 @@ async def run_tool_loop(
             return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens, features)
 
         if allowed_tools and call["name"] not in allowed_tools:
+            if should_upgrade_to_workspace_execution(call, features, activity_phase):
+                return ToolLoopOutcome(
+                    final_text=(
+                        f"The next step needs workspace execution because it requested {call['name']}. "
+                        "Switch into the build flow and continue from the current task."
+                    ),
+                    tool_results=tool_results,
+                    requested_phase_upgrade="workspace_execution",
+                    requested_tool_name=call["name"],
+                )
             return ToolLoopOutcome(
                 final_text=(
                     f"The requested tool {call['name']} is not allowed in this phase. "
@@ -8815,7 +8838,9 @@ def classify_workspace_intent(message: str) -> str:
     write_verbs = {
         "edit", "change", "update", "patch", "refactor", "create", "write", "add",
         "delete", "remove", "rename", "run", "execute", "test", "build", "compile",
-        "debug", "fix", "implement", "generate", "scaffold", "tweak", "adjust", "modify", "improve", "revise",
+        "debug", "fix", "implement", "generate", "scaffold", "make", "making",
+        "start", "starting", "draft", "wire", "wiring", "setup", "set",
+        "tweak", "adjust", "modify", "improve", "revise",
     }
 
     path_refs = extract_workspace_path_references(message)
@@ -8830,6 +8855,23 @@ def classify_workspace_intent(message: str) -> str:
     if words & read_verbs or path_refs:
         return "broad_read" if broad_scope else "focused_read"
     return "none"
+
+
+def should_upgrade_to_workspace_execution(
+    call: Dict[str, Any],
+    features: Optional["FeatureFlags"],
+    activity_phase: str,
+) -> bool:
+    """Allow direct-answer turns to pivot into execution when the next step clearly needs it."""
+    if activity_phase != "respond" or not features or not features.agent_tools:
+        return False
+
+    name = str(call.get("name", "")).strip()
+    if name in {"workspace.patch_file", "workspace.render"}:
+        return bool(features.workspace_write)
+    if name == "workspace.run_command":
+        return bool(features.workspace_write and features.workspace_run_commands)
+    return False
 
 
 def tool_loop_step_limit_for_request(message: str, allowed_tools: List[str]) -> int:
@@ -8863,6 +8905,34 @@ def tool_loop_token_budget(max_tokens: int, message: str, allowed_tools: List[st
     if intent == "broad_write":
         return min(max_tokens, 3072)
     return min(max_tokens, 2048)
+
+
+def deep_execute_step_limit_for_request(message: str) -> int:
+    """Give build-phase workspace work a bit more room before pausing."""
+    intent = classify_workspace_intent(message)
+    if is_fast_profile_active():
+        return 6 if intent == "broad_write" else 5
+    if intent == "broad_write":
+        return 8
+    if intent == "focused_write":
+        return 7
+    return 6
+
+
+def deep_execute_token_budget(max_tokens: int, message: str) -> int:
+    """Reserve a slightly larger response window for inspect/patch/verify substeps."""
+    intent = classify_workspace_intent(message)
+    if is_fast_profile_active():
+        if intent == "broad_write":
+            return min(max_tokens, 1792)
+        if intent == "focused_write":
+            return min(max_tokens, 1536)
+        return min(max_tokens, 1280)
+    if intent == "broad_write":
+        return min(max_tokens, 2560)
+    if intent == "focused_write":
+        return min(max_tokens, 2048)
+    return min(max_tokens, 1536)
 
 
 def select_enabled_tools(
@@ -9433,11 +9503,11 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 session.conversation_id,
                 build_history,
                 f"{session.system_prompt}\n\n{DEEP_BUILD_SYSTEM_PROMPT}",
-                min(session.max_tokens, 1536),
+                deep_execute_token_budget(session.max_tokens, session.task_request or session.message),
                 features=session.features,
                 allowed_tools=build_tools,
                 status_prefix=f"Build {idx + 1}.{sub_idx + 1}: ",
-                max_steps=6,
+                max_steps=deep_execute_step_limit_for_request(session.task_request or session.message),
                 activity_phase="execute",
                 activity_step_label=substep_label,
                 workflow_execution=session.workflow_execution,
@@ -9742,6 +9812,18 @@ async def deep_answer_directly(session: DeepSession) -> str:
                 activity_phase="respond",
             ),
         )
+        if outcome.requested_phase_upgrade == "workspace_execution":
+            await send_activity_event(
+                session.websocket,
+                "evaluate",
+                "Escalate",
+                "Switching from answer mode into workspace execution because the next step needs file changes.",
+            )
+            if not session.workspace_enabled:
+                session.workspace_enabled = True
+                await deep_inspect_workspace(session)
+            session.auto_execute = True
+            return await run_deep_execution_flow(session, requires_existing_plan=False)
         return outcome.final_text
 
     messages = [{"role": "system", "content": f"{session.system_prompt}\n\n{DEEP_DIRECT_SYSTEM_PROMPT}"}]
@@ -10502,7 +10584,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     auto_execute_workspace = (
         not slash_command
         and (
-            should_auto_execute_workspace_task(effective_message, features)
+            should_auto_execute_workspace_task(conv_id, effective_message, features)
             or resume_saved_workspace
         )
     )
