@@ -5,11 +5,11 @@
 ```text
 ai-chat/
 ├── app.py               # FastAPI app: routes, WebSockets, SQLite, vLLM client
-├── themes.py            # Light/dark palettes → CSS custom properties
-├── prompts.py           # Default system prompt text
-├── thinking_stream.py   # Model stream → “thinking” vs visible answer
-├── turn_strategy.py     # Turn assessment and top-level routing decisions
-├── deep_flow.py         # Deep-mode routing decisions
+├── src/python/ai_chat/themes.py            # Light/dark palettes → CSS custom properties
+├── src/python/ai_chat/prompts.py           # Default system prompt text
+├── src/python/ai_chat/thinking_stream.py   # Model stream → “thinking” vs visible answer
+├── src/python/ai_chat/turn_strategy.py     # Turn assessment and top-level routing decisions
+├── src/python/ai_chat/deep_flow.py         # Deep-mode routing decisions
 ├── chat                 # CLI to start/stop the stack
 ├── static/
 │   ├── index.html       # Web UI template
@@ -25,12 +25,12 @@ ai-chat/
 ## How the pieces connect
 
 - `app.py` is the entrypoint. It mounts static files, renders `index.html`, and implements REST and WebSocket handlers. It owns the chat harness, workspace APIs, voice pipeline, tool execution loop, and per-conversation workspaces.
-- `turn_strategy.py` evaluates each user turn against the app’s main skill loop: local RAG, web search, file creation, coding mode, planning mode, execution mode, and verification needs.
-- `deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
-- `prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
-- `thinking_stream.py` parses model output into thinking and visible-answer streams. Its tag pairs must stay aligned with `THINK_TAG_PAIRS` in `static/app.js`.
-- `themes.py` defines named palettes that expand into the CSS variables expected by `static/style.css`.
-- `static/app.js` manages the client runtime: streaming chat events, slash commands, plan approval, workspace activity, file viewing/editing, attachments, and voice playback/recording.
+- `src/python/ai_chat/turn_strategy.py` evaluates each user turn against the app’s main skill loop: local RAG, web search, file creation, coding mode, planning mode, execution mode, and verification needs.
+- `src/python/ai_chat/deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
+- `src/python/ai_chat/prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
+- `src/python/ai_chat/thinking_stream.py` parses model output into thinking and visible-answer streams. Its tag pairs must stay aligned with `THINK_TAG_PAIRS` in `src/web/app.js`.
+- `src/python/ai_chat/themes.py` defines named palettes that expand into the CSS variables expected by `src/web/style.css`.
+- `src/web/app.js` manages the client runtime: streaming chat events, slash commands, plan approval, workspace activity, file viewing/editing, attachments, and voice playback/recording.
 
 ## Tech stack
 

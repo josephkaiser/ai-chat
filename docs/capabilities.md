@@ -76,7 +76,7 @@ A new capability is worth formalizing when it is:
 ## Files to update
 
 - [app.py](/Users/joe/dev/ai-chat/app.py) — tool prompt, approvals, direct workflows, runtime behavior
-- [static/app.js](/Users/joe/dev/ai-chat/static/app.js) — slash menu, turn feature inference, approval UX
+- [src/web/app.js](/Users/joe/dev/ai-chat/src/web/app.js) — slash menu, turn feature inference, approval UX
 - [docs/harness.md](/Users/joe/dev/ai-chat/docs/harness.md) — harness/tool-loop behavior
 - [docs/api.md](/Users/joe/dev/ai-chat/docs/api.md) — slash/API/event reference
 - [docs/ui.md](/Users/joe/dev/ai-chat/docs/ui.md) — user-facing workflow entry points

@@ -59,8 +59,8 @@ The front-end now recognizes helper boilerplate around artifact references, coll
 
 References:
 
-- [static/app.js#L92-L95](../static/app.js#L92-L95)
-- [static/app.js#L2842-L2901](../static/app.js#L2842-L2901)
+- [src/web/app.js#L92-L95](../src/web/app.js#L92-L95)
+- [src/web/app.js#L2842-L2901](../src/web/app.js#L2842-L2901)
 - [tests/test_frontend_settings_ui.py#L94-L116](../tests/test_frontend_settings_ui.py#L94-L116)
 
 Snippet:
@@ -98,8 +98,8 @@ The viewer now rewrites relative asset references inside HTML artifacts to the w
 
 References:
 
-- [static/app.js#L4545-L4585](../static/app.js#L4545-L4585)
-- [static/app.js#L4933-L4934](../static/app.js#L4933-L4934)
+- [src/web/app.js#L4545-L4585](../src/web/app.js#L4545-L4585)
+- [src/web/app.js#L4933-L4934](../src/web/app.js#L4933-L4934)
 - [tests/test_frontend_settings_ui.py#L110-L116](../tests/test_frontend_settings_ui.py#L110-L116)
 
 Snippet:
@@ -210,7 +210,7 @@ References:
 
 - [app.py#L5403-L5469](../app.py#L5403-L5469)
 - [app.py#L5293-L5294](../app.py#L5293-L5294)
-- [prompts.py#L18-L19](../prompts.py#L18-L19)
+- [src/python/ai_chat/prompts.py#L18-L19](../src/python/ai_chat/prompts.py#L18-L19)
 - [tests/test_runtime_permissions.py#L597-L603](../tests/test_runtime_permissions.py#L597-L603)
 
 Snippet:
@@ -272,9 +272,9 @@ The key shift is that the user's last reply is not just conversation. It is eval
 
 - Representative prompt/output failure: `data/chat.db`, conversation `343c7b07-ab29-4e2d-a707-4d94795d274a`
 - Baseline commit: `020e515`
-- Artifact surfacing logic: [static/app.js#L92-L95](../static/app.js#L92-L95), [static/app.js#L2842-L2901](../static/app.js#L2842-L2901)
-- HTML preview fix: [static/app.js#L4545-L4585](../static/app.js#L4545-L4585)
+- Artifact surfacing logic: [src/web/app.js#L92-L95](../src/web/app.js#L92-L95), [src/web/app.js#L2842-L2901](../src/web/app.js#L2842-L2901)
+- HTML preview fix: [src/web/app.js#L4545-L4585](../src/web/app.js#L4545-L4585)
 - Feedback ingestion: [app.py#L6407-L6578](../app.py#L6407-L6578)
 - Feedback hydration in deep mode: [app.py#L11575-L11603](../app.py#L11575-L11603)
 - Artifact-only task-board/saved-progress surfacing: [app.py#L5275-L5294](../app.py#L5275-L5294), [app.py#L5403-L5469](../app.py#L5403-L5469)
-- Prompt guidance for artifact and feedback handling: [prompts.py#L18-L19](../prompts.py#L18-L19), [prompts.py#L124-L132](../prompts.py#L124-L132)
+- Prompt guidance for artifact and feedback handling: [src/python/ai_chat/prompts.py#L18-L19](../src/python/ai_chat/prompts.py#L18-L19), [src/python/ai_chat/prompts.py#L124-L132](../src/python/ai_chat/prompts.py#L124-L132)

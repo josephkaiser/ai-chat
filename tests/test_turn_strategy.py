@@ -1,6 +1,6 @@
 import unittest
 
-from turn_strategy import build_turn_assessment, format_turn_assessment_summary, infer_explicit_planning_request
+from src.python.ai_chat.turn_strategy import build_turn_assessment, format_turn_assessment_summary, infer_explicit_planning_request
 
 
 class TurnStrategyTests(unittest.TestCase):

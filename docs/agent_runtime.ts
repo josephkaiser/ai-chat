@@ -369,7 +369,7 @@ export const bootstrapSaaSPlan: ExecutionPlan = {
       title: "Inspect workspace and align scope with current repo reality",
       status: "pending",
       dependsOn: [],
-      expectedOutputs: ["plan.md"],
+      expectedOutputs: ["docs/architecture.md"],
       executionActions: [
         "Summarize existing files and constraints.",
         "Rewrite the plan if the repo shape differs from assumptions.",

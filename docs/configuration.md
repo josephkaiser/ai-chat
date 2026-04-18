@@ -48,9 +48,9 @@ environment:
 
 Code defaults and useful tunables:
 
-- `prompts.py` — default system prompt and execution prompts
-- `themes.py` — light/dark UI palettes
-- `thinking_stream.py` — thinking tag pairs, which must match `static/app.js`
+- `src/python/ai_chat/prompts.py` — default system prompt and execution prompts
+- `src/python/ai_chat/themes.py` — light/dark UI palettes
+- `src/python/ai_chat/thinking_stream.py` — thinking tag pairs, which must match `src/web/app.js`
 - `MAX_COMPLETION_TOKENS` — env-backed completion cap
 - `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — core runtime paths/settings
 - `COMMAND_TIMEOUT_SECONDS` — default timeout for ordinary workspace commands
@@ -63,7 +63,7 @@ Install/setup note:
 - Python capability setup commands such as `python -m venv` and `pip install` are exempt from `COMMAND_TIMEOUT_SECONDS` so package installs can finish naturally.
 - Those long-running commands are still stoppable from the UI via Stop / Interrupt.
 
-The Docker image copies `app.py`, `themes.py`, `prompts.py`, `thinking_stream.py`, `turn_strategy.py`, and `deep_flow.py`.
+The Docker image copies `app.py`, `src/python/ai_chat/themes.py`, `src/python/ai_chat/prompts.py`, `src/python/ai_chat/thinking_stream.py`, `src/python/ai_chat/turn_strategy.py`, and `src/python/ai_chat/deep_flow.py`.
 
 ## Server voice pipeline
 

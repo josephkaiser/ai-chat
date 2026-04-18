@@ -16,9 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Voice: OpenAI Whisper (STT) and Piper (TTS)
 RUN pip install --no-cache-dir -r requirements-voice.txt
 
-# Copy all current top-level Python modules used by the app entrypoint and helpers.
-COPY *.py ./
-COPY static/ static/
+# Copy backend/frontend source layout plus compatibility entrypoint.
+COPY app.py ./
+COPY src/ src/
 
 # Create data directory
 RUN mkdir -p /app/data

@@ -2,8 +2,8 @@ import pathlib
 import tempfile
 import unittest
 
-from prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
-import workspace_reader
+from src.python.ai_chat.prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
+import src.python.ai_chat.workspace_reader as workspace_reader
 
 
 class AppBehaviorTests(unittest.TestCase):

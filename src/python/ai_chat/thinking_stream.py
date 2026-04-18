@@ -1,7 +1,7 @@
 """
 Split model output into "thinking" vs visible answer for the WebSocket UI.
 
-Must stay in sync with THINK_TAG_PAIRS in static/app.js (same open/close tags).
+Must stay in sync with THINK_TAG_PAIRS in src/web/app.js (same open/close tags).
 Qwen-style models may wrap reasoning in redacted_thinking or think tags; boundaries can span stream chunks.
 """
 

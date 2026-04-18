@@ -1,6 +1,6 @@
 /*
  * Layout and components. Colors come from CSS variables (--bg_primary, etc.).
- * Light/dark values are injected from themes.py when the page loads (see app.js applyTheme).
+ * Light/dark values are injected from src/python/ai_chat/themes.py when the page loads (see app.js applyTheme).
  */
 /* === Reset & Base === */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
