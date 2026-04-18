@@ -1989,6 +1989,80 @@ textarea {
 }
 .menu-actions button:hover { background: var(--bg_tertiary); }
 
+.menu-section {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--bg_tertiary);
+}
+.menu-section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text_secondary);
+}
+.menu-section-note {
+    font-size: var(--font-size-micro);
+    color: var(--text_tertiary);
+    text-transform: none;
+    letter-spacing: 0;
+}
+.workspace-catalog {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.workspace-catalog-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.workspace-catalog-item:hover,
+.workspace-catalog-item.active {
+    background: var(--bg_tertiary);
+}
+.workspace-catalog-copy {
+    min-width: 0;
+}
+.workspace-catalog-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text_primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.workspace-catalog-path {
+    margin-top: 2px;
+    font-size: var(--font-size-micro);
+    color: var(--text_tertiary);
+    word-break: break-all;
+}
+.workspace-catalog-actions {
+    display: none;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.workspace-catalog-item:hover .workspace-catalog-actions,
+.workspace-catalog-item.active .workspace-catalog-actions {
+    display: flex;
+}
+.workspace-catalog-empty {
+    padding: 10px 8px;
+    color: var(--text_secondary);
+    font-size: var(--font-size-meta);
+}
+
 .menu-search {
     padding: 8px 10px;
     border-bottom: 1px solid var(--bg_tertiary);
@@ -2029,6 +2103,14 @@ textarea {
     overflow: hidden;
     text-overflow: ellipsis;
     margin-bottom: 1px;
+}
+.conv-workspace {
+    font-size: var(--font-size-micro);
+    color: var(--accent_primary);
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .conv-preview {
     font-size: var(--font-size-meta);

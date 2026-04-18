@@ -39,7 +39,7 @@ Important guardrails:
 - Tool budgets are capped by `tool_loop_step_limit_for_request(...)`.
 - Token budgets are reduced for tool-oriented turns by `tool_loop_token_budget(...)`.
 - `workspace.run_command` takes an argv array, not a shell string.
-- Python capability setup uses a server-managed chat environment outside the workspace, so installs do not flood the workspace tree or exports.
+- Python capability setup uses a server-managed workspace environment outside the workspace, so installs do not flood the workspace tree or exports and can persist across fresh chats in the same workspace.
 - `workspace.patch_file` uses exact-match edits so changes stay narrow and predictable.
 - `workspace.render` is only exposed when the prompt strongly implies “render/preview/display this HTML”.
 - `workspace.run_command` now snapshots workspace files before and after execution so the harness can surface newly created artifacts such as plots, reports, and exports.
@@ -113,8 +113,8 @@ When a command creates or modifies visible files in the workspace, the tool resu
 For Python-heavy turns, the intended flow is:
 
 1. Research packages or docs with `web.search` / `web.fetch_page` when package choice is uncertain.
-2. Create or reuse the managed Python environment for the conversation when package work is needed.
-   That environment is server-owned and stored outside `runs/` so workspace syncs stay lighter.
+2. Create or reuse the managed Python environment for the workspace when package work is needed.
+   That environment is server-owned and stored outside the workspace root so workspace syncs stay lighter.
 3. Install packages with pip into that managed environment.
 4. Write scripts or artifacts into the workspace.
 5. Verify with a focused command from the same environment.
@@ -141,7 +141,7 @@ Install-like Python setup commands are exempt from the short command timeout. Th
 
 ## Workspace model
 
-Each conversation gets its own workspace on the server. The harness uses that workspace for:
+Workspaces are first-class catalog entries and conversations attach to them. The harness uses the attached workspace for:
 
 - uploaded attachments
 - generated artifacts
@@ -150,6 +150,7 @@ Each conversation gets its own workspace on the server. The harness uses that wo
 - downloadable zip exports
 
 The browser can inspect the same workspace through the activity rail, artifact list, file tree, and inline viewer, so tool output is visible outside the model transcript.
+Deleting a conversation no longer deletes the attached workspace by default.
 Dot-prefixed entries stay hidden in the browser workspace view unless a hidden path is targeted explicitly.
 Previewable artifacts from `workspace.render` and from command-generated files can auto-open in the inline viewer to make execution feel more like live pair programming.
 

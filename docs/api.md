@@ -12,6 +12,7 @@ Send JSON objects with fields such as:
 
 - `message` — User text
 - `conversation_id` — Conversation UUID
+- `workspace_id` — Active workspace UUID for new chats or workspace switches
 - `system_prompt` — Optional prompt override
 - `features` — Per-turn tool/permission flags inferred by the UI
 - `slash_command` — Optional structured slash intent for `/search`, `/grep`, `/plan`, `/code`, or `/pip`
@@ -59,9 +60,9 @@ Preferred `activity.phase` values:
 ## Conversations
 
 - `GET /api/conversations` — List conversations
-- `GET /api/conversation/{conversation_id}` — Get recent messages plus any saved pending plan preview
+- `GET /api/conversation/{conversation_id}` — Get recent messages, pending plan preview, and attached workspace metadata
 - `POST /api/conversation/{conversation_id}/rename` — Rename conversation
-- `DELETE /api/conversation/{conversation_id}` — Delete the conversation, workspace, and scoped voice artifacts
+- `DELETE /api/conversation/{conversation_id}` — Delete only the conversation transcript and scoped voice artifacts
 
 ## Messages
 
@@ -72,19 +73,27 @@ Preferred `activity.phase` values:
 
 - `GET /api/search?query=...` — Search chat history
 
-## Workspace
+## Workspaces
 
-- `GET /api/workspace/{conversation_id}` — Workspace metadata (`run_id`, absolute path, label)
-- `POST /api/workspace/{conversation_id}/upload` — Upload files into the conversation workspace
-- `GET /api/workspace/{conversation_id}/files?path=...` — List one workspace directory
-- `GET /api/workspace/{conversation_id}/file?path=...` — Read a workspace file or structured preview payload
-- `POST /api/workspace/{conversation_id}/file` — Save editor changes into a workspace file
-- `GET /api/workspace/{conversation_id}/file/download?path=...` — Download one workspace file
-- `GET /api/workspace/{conversation_id}/spreadsheet?path=...&sheet=...` — Spreadsheet preview/summary
-- `GET /api/workspace/{conversation_id}/download` — Download the full conversation workspace as a zip
+- `GET /api/workspaces` — List the shared workspace catalog and default selection
+- `POST /api/workspaces` — Create a catalog entry for a workspace root
+- `GET /api/workspaces/{workspace_id}` — Get workspace metadata
+- `POST /api/workspaces/{workspace_id}/rename` — Rename a workspace in the catalog
+- `DELETE /api/workspaces/{workspace_id}` — Remove a workspace from the catalog when no chats still reference it
+- `GET /api/workspaces/{workspace_id}/files?path=...` — List one workspace directory
+- `GET /api/workspaces/{workspace_id}/file?path=...` — Read a workspace file or structured preview payload
+- `POST /api/workspaces/{workspace_id}/file` — Save editor changes into a workspace file
+- `POST /api/workspaces/{workspace_id}/upload` — Upload files into the workspace
+- `GET /api/workspaces/{workspace_id}/file/download?path=...` — Download one workspace file
+- `GET /api/workspaces/{workspace_id}/spreadsheet?path=...&sheet=...` — Spreadsheet preview/summary
+- `GET /api/workspaces/{workspace_id}/download` — Download the full workspace as a zip
+
+Compatibility routes still exist under `/api/workspace/{conversation_id}/...`, but new clients should prefer the `workspace_id` routes above.
 
 Workspace API notes:
 
+- The workspace catalog is shared across the server deployment; there is no per-user isolation in this phase.
+- Workspace roots are keyed by canonical absolute path. Display names are editable labels only.
 - Directory listings hide dot-prefixed paths unless the request explicitly targets a hidden path.
 - Directory listing items now include lightweight metadata such as `modified_at`, `content_kind`, and `kind` so the client can rank and preview artifacts.
 - File reads can return non-text preview metadata. For images, the payload uses `content_kind: "image"` with binary preview metadata instead of raw file bytes.

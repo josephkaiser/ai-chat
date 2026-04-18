@@ -25,7 +25,7 @@ The checked-in Docker setup assumes a local host that can run GPU-backed vLLM:
 - Enough disk for Docker images, the Hugging Face cache, app data, and optional voice models
 - `bash` and `curl` for the `./chat` helper script
 
-Conversation workspaces are bind-mounted to the host under `./runs` so generated files remain visible outside the container.
+Workspace roots are now path-backed catalog entries. Managed workspace directories are typically bind-mounted under `./workspaces`, while legacy hosted runs may still exist under `./runs` after migration.
 
 ## Model profiles
 
@@ -56,7 +56,7 @@ Code defaults and useful tunables:
 - `COMMAND_TIMEOUT_SECONDS` — default timeout for ordinary workspace commands
 - `CURATED_SOURCE_FAILURE_THRESHOLD` and `CURATED_SOURCE_DISABLE_MINUTES` — web-search source fan-out behavior
 - `VOICE_STORAGE_LIMIT_BYTES` — cap retained server-owned voice artifacts
-- `STRICT_WORKSPACE_COMMAND_PATHS` — reject workspace command arguments that point outside the current conversation workspace
+- `STRICT_WORKSPACE_COMMAND_PATHS` — reject workspace command arguments that point outside the current workspace root
 
 Install/setup note:
 
@@ -114,7 +114,14 @@ The application runs two containers via `docker-compose.yml`:
 - `vllm` — OpenAI-compatible inference server
 - `chat-app` — FastAPI web application
 
-The compose file also mounts `./runs:/app/runs`, which is where per-conversation workspaces live.
+The compose file also mounts `./workspaces:/app/workspaces`, `./runs:/app/runs`, and `./python-envs:/app/python-envs` so path-backed workspaces, legacy hosted runs, and managed Python environments all persist across restarts.
+
+## Workspace migration notes
+
+- Existing conversations are backfilled into a new `workspaces` table on startup.
+- Each migrated conversation keeps its prior hosted workspace path as the workspace root.
+- New workspaces use direct root paths from the catalog instead of creating a fresh workspace per conversation.
+- Legacy `runs/` trees are not deleted automatically during migration.
 
 ### Restarting individual services
 

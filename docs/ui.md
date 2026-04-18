@@ -1,6 +1,6 @@
 # UI Features
 
-The UI is a compact workspace-oriented chat surface: chat, progress, files, attachments, plan approval, and voice controls all live in one place.
+The UI is a compact workspace-oriented chat surface: shared workspaces, chat, progress, files, attachments, plan approval, and voice controls all live in one place.
 
 ## Main surface
 
@@ -13,7 +13,16 @@ The composer supports:
 - slash commands for common coding tasks
 - send-or-interrupt behavior from the primary action button
 
-The client preserves a handful of browser preferences in `localStorage`, including speech playback settings, theme choice, and per-chat tool approval preferences.
+The client preserves a handful of browser preferences in `localStorage`, including speech playback settings, theme choice, the last active `workspace_id`, and per-chat tool approval preferences.
+
+## Workspace catalog
+
+The main menu now includes a shared workspace catalog.
+
+- users can create a managed workspace under the server workspace root
+- users can register an existing absolute folder path as a workspace
+- renaming a workspace only changes the display label, not the root path
+- selecting a different workspace starts a fresh chat so the existing transcript stays attached to its original workspace
 
 ## Settings and About
 
@@ -34,6 +43,7 @@ When agent tools are enabled, the workspace area shows:
 - a **Recent Artifacts** rail for files the assistant just created or touched
 - an **All Files** tree for files created, uploaded, or edited during the conversation
 - refresh and download actions for the current workspace
+- shared file access across conversations attached to the same workspace
 
 The activity timeline is populated from `activity`, `tool_start`, `tool_result`, `assistant_note`, and `plan_ready` events.
 Dot-prefixed paths stay hidden in the browser view unless the user explicitly targets a hidden path.
@@ -57,7 +67,7 @@ When the assistant uses `workspace.render`, the UI automatically opens the gener
 
 ## Attachments and workspace artifacts
 
-Files are uploaded before send and stored in the conversation workspace. The composer shows them as removable chips until the request is sent.
+Files are uploaded before send and stored in the active workspace. The composer shows them as removable chips until the request is sent.
 
 That means attachments are first-class workspace inputs:
 
