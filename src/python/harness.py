@@ -554,6 +554,12 @@ def sanitize_conversation_id(conversation_id: str) -> str:
     return cleaned[:120] or "default"
 
 
+def sanitize_workspace_slug(value: str) -> str:
+    """Normalize a display name into a filesystem-friendly slug."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", (value or "").strip().lower()).strip("._-")
+    return cleaned[:80] or "workspace"
+
+
 def sanitize_uploaded_filename(filename: str) -> str:
     """Normalize uploaded filenames while preserving an extension when possible."""
     raw_name = pathlib.Path((filename or "").strip()).name
@@ -606,6 +612,46 @@ def utcnow_iso() -> str:
     return datetime.now().isoformat()
 
 
+def workspace_display_name_from_path(path: pathlib.Path) -> str:
+    """Choose a stable user-facing name for one workspace root."""
+    name = str(path.name or "").strip()
+    if name:
+        return name
+    return str(path).strip() or "Workspace"
+
+
+def canonicalize_workspace_root_path(root_path: str, *, create: bool = False) -> pathlib.Path:
+    """Validate and normalize a workspace root path supplied by the user or DB."""
+    raw = str(root_path or "").strip()
+    if not raw:
+        raise ValueError("Workspace path is required")
+    candidate = pathlib.Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("Workspace path must be absolute")
+    resolved = candidate.resolve(strict=False)
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError("Workspace path must point to a directory")
+    if not create and not resolved.exists():
+        raise ValueError("Workspace path does not exist")
+    return resolved
+
+
+def allocate_managed_workspace_root(display_name: str) -> pathlib.Path:
+    """Allocate a new direct-root workspace under the configured workspace root."""
+    slug = sanitize_workspace_slug(display_name)
+    for index in range(1, 1000):
+        suffix = "" if index == 1 else f"-{index}"
+        candidate = (WORKSPACE_ROOT_PATH / f"{slug}{suffix}").resolve()
+        if WORKSPACE_ROOT_PATH not in candidate.parents and candidate != WORKSPACE_ROOT_PATH:
+            raise ValueError("Workspace path escaped workspace root")
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+    raise ValueError("Unable to allocate a workspace directory")
+
+
 def get_run_root(run_id: str, create: bool = True) -> pathlib.Path:
     """Return the root directory for a run."""
     run_root = (RUNS_ROOT_PATH / sanitize_conversation_id(run_id)).resolve()
@@ -629,68 +675,478 @@ def build_run_id(conversation_id: str) -> str:
     return f"run-{sanitize_conversation_id(conversation_id)}"
 
 
-def get_run_record(conversation_id: str) -> Optional[Dict[str, Any]]:
-    """Return the run metadata for a conversation, if any."""
+def build_workspace_run_id(workspace_id: str) -> str:
+    """Derive a stable run id from a workspace id."""
+    return f"workspace-{sanitize_conversation_id(workspace_id)}"
+
+
+def workspace_row_to_record(row: Optional[tuple[Any, ...]]) -> Optional[Dict[str, Any]]:
+    """Normalize a workspace row into a dict payload."""
+    if not row:
+        return None
+    return {
+        "id": str(row[0] or "").strip(),
+        "display_name": str(row[1] or "").strip() or "Workspace",
+        "root_path": str(row[2] or "").strip(),
+        "created_at": row[3],
+        "updated_at": row[4],
+    }
+
+
+def get_workspace_record(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Return one workspace catalog entry by id."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    if not safe_workspace_id:
+        return None
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        '''SELECT id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count
-           FROM runs
-           WHERE conversation_id = ?''',
-        (conversation_id,),
+    try:
+        c.execute(
+            '''SELECT id, display_name, root_path, created_at, updated_at
+               FROM workspaces
+               WHERE id = ?''',
+            (safe_workspace_id,),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return workspace_row_to_record(row)
+
+
+def get_workspace_record_by_path(root_path: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Return one workspace row for a canonical root path."""
+    resolved = canonicalize_workspace_root_path(str(root_path), create=False)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, display_name, root_path, created_at, updated_at
+               FROM workspaces
+               WHERE root_path = ?''',
+            (str(resolved),),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return workspace_row_to_record(row)
+
+
+def count_conversations_for_workspace(workspace_id: str) -> int:
+    """Return how many chats currently point at one workspace."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute('SELECT COUNT(*) FROM conversations WHERE workspace_id = ?', (workspace_id,))
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = (0,)
+    conn.close()
+    return int(row[0] or 0) if row else 0
+
+
+def list_conversation_ids_for_workspace(workspace_id: str) -> List[str]:
+    """Return every conversation currently attached to one workspace."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute('SELECT id FROM conversations WHERE workspace_id = ? ORDER BY updated_at DESC, created_at DESC', (workspace_id,))
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+
+
+def create_workspace_record(
+    *,
+    display_name: Optional[str] = None,
+    root_path: Optional[str] = None,
+    create_if_missing: bool = True,
+) -> Dict[str, Any]:
+    """Create and persist one workspace catalog entry."""
+    now = utcnow_iso()
+    resolved_path = (
+        canonicalize_workspace_root_path(root_path, create=create_if_missing)
+        if str(root_path or "").strip()
+        else allocate_managed_workspace_root(display_name or "Workspace")
     )
-    row = c.fetchone()
+    existing = get_workspace_record_by_path(resolved_path) if resolved_path.exists() else None
+    if existing:
+        raise ValueError("A workspace already exists for that path")
+
+    workspace_id = uuid.uuid4().hex
+    final_name = str(display_name or "").strip() or workspace_display_name_from_path(resolved_path)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        '''INSERT INTO workspaces (id, display_name, root_path, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)''',
+        (workspace_id, final_name, str(resolved_path), now, now),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "id": workspace_id,
+        "display_name": final_name,
+        "root_path": str(resolved_path),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def list_workspace_records(*, ensure_default: bool = False) -> List[Dict[str, Any]]:
+    """Return the shared workspace catalog."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, display_name, root_path, created_at, updated_at
+               FROM workspaces
+               ORDER BY LOWER(display_name), created_at'''
+        )
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    if not rows and ensure_default:
+        create_workspace_record(display_name="Workspace")
+        return list_workspace_records(ensure_default=False)
+    workspaces: List[Dict[str, Any]] = []
+    for row in rows:
+        record = workspace_row_to_record(row)
+        if record:
+            workspaces.append(record)
+    return workspaces
+
+
+def ensure_default_workspace() -> Dict[str, Any]:
+    """Return the fallback workspace used when the UI has not picked one yet."""
+    workspaces = list_workspace_records(ensure_default=True)
+    if not workspaces:
+        raise ValueError("Unable to create a default workspace")
+    return workspaces[0]
+
+
+def get_conversation_record(conversation_id: str) -> Optional[Dict[str, Any]]:
+    """Return one conversation row including workspace linkage."""
+    safe_conversation_id = str(conversation_id or "").strip()
+    if not safe_conversation_id:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, title, created_at, updated_at, run_id, workspace_id
+               FROM conversations
+               WHERE id = ?''',
+            (safe_conversation_id,),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        c.execute(
+            '''SELECT id, title, created_at, updated_at, run_id
+               FROM conversations
+               WHERE id = ?''',
+            (safe_conversation_id,),
+        )
+        legacy_row = c.fetchone()
+        row = (*legacy_row, "") if legacy_row else None
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": str(row[0] or "").strip(),
+        "title": str(row[1] or "").strip(),
+        "created_at": row[2],
+        "updated_at": row[3],
+        "run_id": str(row[4] or "").strip(),
+        "workspace_id": str(row[5] or "").strip(),
+    }
+
+
+def ensure_conversation_record(
+    conversation_id: str,
+    *,
+    title: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a conversation row if needed and make sure it points at one workspace."""
+    safe_conversation_id = str(conversation_id or "").strip()
+    if not safe_conversation_id:
+        raise ValueError("Conversation id is required")
+    existing = get_conversation_record(safe_conversation_id)
+    now = utcnow_iso()
+    resolved_workspace = get_workspace_record(workspace_id) if str(workspace_id or "").strip() else None
+    if not resolved_workspace:
+        if existing and existing.get("workspace_id"):
+            resolved_workspace = get_workspace_record(existing["workspace_id"])
+        if not resolved_workspace:
+            try:
+                resolved_workspace = ensure_default_workspace()
+            except Exception:
+                resolved_workspace = {
+                    "id": "",
+                    "display_name": "",
+                    "root_path": "",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if not existing:
+        try:
+            c.execute(
+                '''INSERT INTO conversations (id, title, created_at, updated_at, workspace_id)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (
+                    safe_conversation_id,
+                    str(title or "").strip(),
+                    now,
+                    now,
+                    resolved_workspace["id"],
+                ),
+            )
+        except sqlite3.OperationalError:
+            c.execute(
+                '''INSERT INTO conversations (id, title, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)''',
+                (
+                    safe_conversation_id,
+                    str(title or "").strip(),
+                    now,
+                    now,
+                ),
+            )
+    else:
+        updates = []
+        params: List[Any] = []
+        if resolved_workspace["id"] and existing.get("workspace_id") != resolved_workspace["id"]:
+            updates.append("workspace_id = ?")
+            params.append(resolved_workspace["id"])
+        if str(title or "").strip() and not str(existing.get("title") or "").strip():
+            updates.append("title = ?")
+            params.append(str(title or "").strip())
+        if updates:
+            updates.append("updated_at = ?")
+            params.append(now)
+            params.append(safe_conversation_id)
+            try:
+                c.execute(f'''UPDATE conversations SET {", ".join(updates)} WHERE id = ?''', params)
+            except sqlite3.OperationalError:
+                fallback_updates = []
+                fallback_params: List[Any] = []
+                if str(title or "").strip() and not str(existing.get("title") or "").strip():
+                    fallback_updates.append("title = ?")
+                    fallback_params.append(str(title or "").strip())
+                if fallback_updates:
+                    fallback_updates.append("updated_at = ?")
+                    fallback_params.append(now)
+                    fallback_params.append(safe_conversation_id)
+                    c.execute(f'''UPDATE conversations SET {", ".join(fallback_updates)} WHERE id = ?''', fallback_params)
+    conn.commit()
+    conn.close()
+    return get_conversation_record(safe_conversation_id) or {
+        "id": safe_conversation_id,
+        "title": str(title or "").strip(),
+        "created_at": now,
+        "updated_at": now,
+        "run_id": "",
+        "workspace_id": resolved_workspace["id"],
+    }
+
+
+def get_workspace_record_for_conversation(
+    conversation_id: str,
+    *,
+    create: bool = True,
+    requested_workspace_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the workspace row for one conversation."""
+    conversation = get_conversation_record(conversation_id)
+    workspace_id = str(conversation.get("workspace_id") or "").strip() if conversation else ""
+    if not workspace_id and str(requested_workspace_id or "").strip():
+        workspace_id = str(requested_workspace_id or "").strip()
+    workspace = get_workspace_record(workspace_id) if workspace_id else None
+    if workspace:
+        return workspace
+    if not create:
+        return None
+    ensure_conversation_record(conversation_id, workspace_id=requested_workspace_id)
+    conversation = get_conversation_record(conversation_id)
+    workspace_id = str(conversation.get("workspace_id") or "").strip() if conversation else ""
+    return get_workspace_record(workspace_id) if workspace_id else None
+
+
+def get_workspace_id_for_conversation(
+    conversation_id: str,
+    *,
+    create: bool = True,
+    requested_workspace_id: Optional[str] = None,
+) -> str:
+    """Resolve the stable workspace id for one conversation."""
+    workspace = get_workspace_record_for_conversation(
+        conversation_id,
+        create=create,
+        requested_workspace_id=requested_workspace_id,
+    )
+    return str(workspace.get("id") or "").strip() if workspace else ""
+
+
+def get_run_record_by_workspace_id(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Return the run metadata for a workspace, if any."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    if not safe_workspace_id:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count
+               FROM runs
+               WHERE workspace_id = ?''',
+            (safe_workspace_id,),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = None
     conn.close()
     if not row:
         return None
     return {
         "id": row[0],
         "conversation_id": row[1],
-        "title": row[2] or "",
-        "status": row[3] or "active",
-        "sandbox_path": row[4],
-        "started_at": row[5],
-        "ended_at": row[6],
-        "summary": row[7] or "",
-        "promoted_count": int(row[8] or 0),
+        "workspace_id": row[2],
+        "title": row[3] or "",
+        "status": row[4] or "active",
+        "sandbox_path": row[5],
+        "started_at": row[6],
+        "ended_at": row[7],
+        "summary": row[8] or "",
+        "promoted_count": int(row[9] or 0),
     }
 
 
-def ensure_run_for_conversation(conversation_id: str, title: Optional[str] = None) -> Dict[str, Any]:
-    """Create or fetch the run record that owns a conversation's workspace."""
-    existing = get_run_record(conversation_id)
+def get_run_record(conversation_id: str) -> Optional[Dict[str, Any]]:
+    """Return the run metadata for a conversation, if any."""
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
+    if workspace_id:
+        workspace_run = get_run_record_by_workspace_id(workspace_id)
+        if workspace_run:
+            return workspace_run
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count
+               FROM runs
+               WHERE conversation_id = ?''',
+            (conversation_id,),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        c.execute(
+            '''SELECT id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count
+               FROM runs
+               WHERE conversation_id = ?''',
+            (conversation_id,),
+        )
+        legacy_row = c.fetchone()
+        row = (legacy_row[0], legacy_row[1], "", *legacy_row[2:]) if legacy_row else None
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "conversation_id": row[1],
+        "workspace_id": row[2],
+        "title": row[3] or "",
+        "status": row[4] or "active",
+        "sandbox_path": row[5],
+        "started_at": row[6],
+        "ended_at": row[7],
+        "summary": row[8] or "",
+        "promoted_count": int(row[9] or 0),
+    }
+
+
+def ensure_run_for_workspace(
+    workspace_id: str,
+    *,
+    conversation_id: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or fetch the run record that owns one workspace."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise ValueError("Workspace not found")
+
+    existing = get_run_record_by_workspace_id(workspace_id)
+    workspace_path = canonicalize_workspace_root_path(workspace["root_path"], create=True)
     if existing:
-        workspace = get_run_workspace_root(existing["id"], create=True)
-        if existing["sandbox_path"] != str(workspace):
+        if existing["sandbox_path"] != str(workspace_path):
             conn = sqlite3.connect(DB_PATH)
-            conn.execute('UPDATE runs SET sandbox_path = ? WHERE id = ?', (str(workspace), existing["id"]))
+            conn.execute('UPDATE runs SET sandbox_path = ? WHERE id = ?', (str(workspace_path), existing["id"]))
             conn.commit()
             conn.close()
-            existing["sandbox_path"] = str(workspace)
+            existing["sandbox_path"] = str(workspace_path)
         return existing
 
-    run_id = build_run_id(conversation_id)
-    workspace = get_run_workspace_root(run_id, create=True)
+    run_id = build_workspace_run_id(workspace_id)
     now = utcnow_iso()
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        '''INSERT OR REPLACE INTO runs
-           (id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (run_id, conversation_id, title or "", "active", str(workspace), now, None, "", 0),
-    )
     try:
-        conn.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (run_id, conversation_id))
+        conn.execute(
+            '''INSERT OR REPLACE INTO runs
+               (id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                run_id,
+                str(conversation_id or "").strip() or None,
+                workspace_id,
+                title or workspace.get("display_name") or "",
+                "active",
+                str(workspace_path),
+                now,
+                None,
+                "",
+                0,
+            ),
+        )
     except sqlite3.OperationalError:
-        pass
+        conn.execute(
+            '''INSERT OR REPLACE INTO runs
+               (id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                run_id,
+                str(conversation_id or "").strip() or "",
+                title or workspace.get("display_name") or "",
+                "active",
+                str(workspace_path),
+                now,
+                None,
+                "",
+                0,
+            ),
+        )
+    if str(conversation_id or "").strip():
+        try:
+            conn.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (run_id, conversation_id))
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
-    return get_run_record(conversation_id) or {
+    return get_run_record_by_workspace_id(workspace_id) or {
         "id": run_id,
-        "conversation_id": conversation_id,
-        "title": title or "",
+        "conversation_id": str(conversation_id or "").strip(),
+        "workspace_id": workspace_id,
+        "title": title or workspace.get("display_name") or "",
         "status": "active",
-        "sandbox_path": str(workspace),
+        "sandbox_path": str(workspace_path),
         "started_at": now,
         "ended_at": None,
         "summary": "",
@@ -698,17 +1154,88 @@ def ensure_run_for_conversation(conversation_id: str, title: Optional[str] = Non
     }
 
 
+def ensure_run_for_conversation(
+    conversation_id: str,
+    title: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or fetch the run record that owns a conversation's workspace."""
+    conversation = ensure_conversation_record(conversation_id, title=title, workspace_id=workspace_id)
+    resolved_workspace_id = str(conversation.get("workspace_id") or "").strip()
+    if not resolved_workspace_id:
+        existing = get_run_record(conversation_id)
+        if existing:
+            workspace = get_run_workspace_root(existing["id"], create=True)
+            if existing["sandbox_path"] != str(workspace):
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute('UPDATE runs SET sandbox_path = ? WHERE id = ?', (str(workspace), existing["id"]))
+                conn.commit()
+                conn.close()
+                existing["sandbox_path"] = str(workspace)
+            return existing
+
+        run_id = build_run_id(conversation_id)
+        workspace = get_run_workspace_root(run_id, create=True)
+        now = utcnow_iso()
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            '''INSERT OR REPLACE INTO runs
+               (id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (run_id, conversation_id, title or "", "active", str(workspace), now, None, "", 0),
+        )
+        try:
+            conn.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (run_id, conversation_id))
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+        conn.close()
+        return get_run_record(conversation_id) or {
+            "id": run_id,
+            "conversation_id": conversation_id,
+            "workspace_id": "",
+            "title": title or "",
+            "status": "active",
+            "sandbox_path": str(workspace),
+            "started_at": now,
+            "ended_at": None,
+            "summary": "",
+            "promoted_count": 0,
+        }
+    run = ensure_run_for_workspace(resolved_workspace_id, conversation_id=conversation_id, title=title)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (run["id"], conversation_id))
+        conn.commit()
+        conn.close()
+    except sqlite3.OperationalError:
+        pass
+    return run
+
+
+def get_workspace_path_for_workspace_id(workspace_id: str, create: bool = True) -> pathlib.Path:
+    """Return the persistent root path for a workspace id."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise ValueError("Workspace not found")
+    return canonicalize_workspace_root_path(workspace["root_path"], create=create)
+
+
 def get_workspace_path(conversation_id: str, create: bool = True) -> pathlib.Path:
-    """Return the persistent workspace path for a conversation's run."""
-    run = get_run_record(conversation_id)
-    if not run:
-        if not create:
-            workspace = (RUNS_ROOT_PATH / sanitize_conversation_id(build_run_id(conversation_id)) / "workspace").resolve()
-            if RUNS_ROOT_PATH not in workspace.parents:
-                raise ValueError("Workspace path escaped runs root")
-            return workspace
-        run = ensure_run_for_conversation(conversation_id)
-    return get_run_workspace_root(run["id"], create=create)
+    """Return the persistent workspace path for a conversation."""
+    workspace = get_workspace_record_for_conversation(conversation_id, create=create)
+    if workspace:
+        return canonicalize_workspace_root_path(workspace["root_path"], create=create)
+    if not create:
+        legacy = (RUNS_ROOT_PATH / sanitize_conversation_id(build_run_id(conversation_id)) / "workspace").resolve()
+        if RUNS_ROOT_PATH not in legacy.parents:
+            raise ValueError("Workspace path escaped runs root")
+        return legacy
+    ensure_run_for_conversation(conversation_id)
+    workspace = get_workspace_record_for_conversation(conversation_id, create=False)
+    if not workspace:
+        raise ValueError("Workspace not found")
+    return canonicalize_workspace_root_path(workspace["root_path"], create=True)
 
 
 def get_legacy_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
@@ -723,8 +1250,21 @@ def get_legacy_managed_python_env_path(conversation_id: str, create: bool = Fals
     return env_root
 
 
+def get_managed_python_env_path_for_workspace(workspace_id: str, create: bool = False) -> pathlib.Path:
+    """Return the server-owned Python environment path for one workspace."""
+    env_root = (MANAGED_PYTHON_ENVS_ROOT_PATH / sanitize_conversation_id(workspace_id)).resolve()
+    if MANAGED_PYTHON_ENVS_ROOT_PATH not in env_root.parents and env_root != MANAGED_PYTHON_ENVS_ROOT_PATH:
+        raise ValueError("Managed Python environment path escaped root")
+    if create:
+        env_root.parent.mkdir(parents=True, exist_ok=True)
+    return env_root
+
+
 def get_managed_python_env_path(conversation_id: str, create: bool = False) -> pathlib.Path:
-    """Return the server-owned Python environment path for one conversation."""
+    """Return the server-owned Python environment path for one conversation's workspace."""
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=create)
+    if workspace_id:
+        return get_managed_python_env_path_for_workspace(workspace_id, create=create)
     env_root = (MANAGED_PYTHON_ENVS_ROOT_PATH / sanitize_conversation_id(conversation_id)).resolve()
     if MANAGED_PYTHON_ENVS_ROOT_PATH not in env_root.parents and env_root != MANAGED_PYTHON_ENVS_ROOT_PATH:
         raise ValueError("Managed Python environment path escaped root")
@@ -751,14 +1291,32 @@ def resolve_existing_managed_python_env_path(conversation_id: str) -> pathlib.Pa
     return preferred
 
 
-def delete_managed_python_env(conversation_id: str) -> None:
-    """Delete any managed Python environment paths for a conversation."""
-    for env_root in (
-        get_managed_python_env_path(conversation_id, create=False),
-        get_legacy_managed_python_env_path(conversation_id, create=False),
-    ):
+def delete_managed_python_env_for_workspace(workspace_id: str) -> None:
+    """Delete the managed environment for a workspace plus any legacy per-chat fallbacks."""
+    candidate_paths = [get_managed_python_env_path_for_workspace(workspace_id, create=False)]
+    candidate_paths.extend(
+        get_legacy_managed_python_env_path(conversation_id, create=False)
+        for conversation_id in list_conversation_ids_for_workspace(workspace_id)
+    )
+    seen: set[str] = set()
+    for env_root in candidate_paths:
+        env_key = str(env_root)
+        if env_key in seen:
+            continue
+        seen.add(env_key)
         if env_root.exists():
             shutil.rmtree(env_root, ignore_errors=True)
+
+
+def delete_managed_python_env(conversation_id: str) -> None:
+    """Delete any managed Python environment paths for a conversation's workspace."""
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
+    if workspace_id:
+        delete_managed_python_env_for_workspace(workspace_id)
+        return
+    legacy = get_legacy_managed_python_env_path(conversation_id, create=False)
+    if legacy.exists():
+        shutil.rmtree(legacy, ignore_errors=True)
 
 
 def migrate_legacy_managed_python_env(conversation_id: str) -> pathlib.Path:
@@ -790,13 +1348,13 @@ def managed_python_bin_dir(conversation_id: str, create: bool = False) -> pathli
 
 
 def managed_python_python_path(conversation_id: str, create: bool = False) -> pathlib.Path:
-    """Return the Python executable inside the managed chat environment."""
+    """Return the Python executable inside the managed workspace environment."""
     executable = "python.exe" if os.name == "nt" else "python"
     return managed_python_bin_dir(conversation_id, create=create) / executable
 
 
 def managed_python_pip_path(conversation_id: str, create: bool = False) -> pathlib.Path:
-    """Return the pip executable inside the managed chat environment."""
+    """Return the pip executable inside the managed workspace environment."""
     executable = "pip.exe" if os.name == "nt" else "pip"
     return managed_python_bin_dir(conversation_id, create=create) / executable
 
@@ -1175,6 +1733,12 @@ def sync_workflow_feedback_for_message(message_id: int, feedback: str) -> None:
 def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") -> pathlib.Path:
     """Resolve a user/model path inside the conversation workspace."""
     workspace = get_workspace_path(conversation_id)
+    target = resolve_workspace_relative_path_from_root(workspace, rel_path)
+    return target
+
+
+def resolve_workspace_relative_path_from_root(workspace: pathlib.Path, rel_path: str = "") -> pathlib.Path:
+    """Resolve a user/model path inside a specific workspace root."""
     target = (workspace / (rel_path or "")).resolve()
     if target != workspace and workspace not in target.parents:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -1439,15 +2003,20 @@ def validate_workspace_command(
 
 
 def delete_run_workspace(conversation_id: str):
-    """Delete the run sandbox for a conversation if it exists."""
+    """Delete hosted run artifacts and the managed env for a conversation's workspace."""
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
     run = get_run_record(conversation_id)
-    if not run:
-        delete_managed_python_env(conversation_id)
+    if run:
+        sandbox_path = pathlib.Path(run["sandbox_path"]).resolve()
+        if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
+            hosted_root = sandbox_path.parent if sandbox_path.name == "workspace" else sandbox_path
+            shutil.rmtree(hosted_root, ignore_errors=True)
+    if workspace_id:
+        delete_managed_python_env_for_workspace(workspace_id)
         return
-    sandbox_path = pathlib.Path(run["sandbox_path"]).resolve()
-    if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
-        shutil.rmtree(sandbox_path.parent, ignore_errors=True)
-    delete_managed_python_env(conversation_id)
+    legacy = get_legacy_managed_python_env_path(conversation_id, create=False)
+    if legacy.exists():
+        shutil.rmtree(legacy, ignore_errors=True)
 
 
 def build_workspace_command_env(conversation_id: str) -> Dict[str, str]:
@@ -4582,6 +5151,8 @@ def bootstrap_workspace_from_current_repo(conversation_id: str) -> Dict[str, Any
     workspace = get_workspace_path(conversation_id)
     if not source_root.exists() or not source_root.is_dir():
         return {}
+    if not path_is_within_root(workspace, WORKSPACE_ROOT_PATH):
+        return {}
 
     copied_entries = 0
     try:
@@ -6130,11 +6701,19 @@ def init_db():
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
+        c.execute('''CREATE TABLE IF NOT EXISTS workspaces
+                     (id TEXT PRIMARY KEY,
+                      display_name TEXT NOT NULL,
+                      root_path TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL)''')
+
         c.execute('''CREATE TABLE IF NOT EXISTS conversations
                      (id TEXT PRIMARY KEY,
                       title TEXT,
                       created_at TEXT,
-                      updated_at TEXT)''')
+                      updated_at TEXT,
+                      workspace_id TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS messages
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6158,6 +6737,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS runs
                      (id TEXT PRIMARY KEY,
                       conversation_id TEXT UNIQUE NOT NULL,
+                      workspace_id TEXT,
                       title TEXT,
                       status TEXT NOT NULL DEFAULT 'active',
                       sandbox_path TEXT NOT NULL,
@@ -6191,28 +6771,123 @@ def init_db():
             pass
 
         try:
+            c.execute('ALTER TABLE conversations ADD COLUMN workspace_id TEXT')
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            c.execute('ALTER TABLE runs ADD COLUMN workspace_id TEXT')
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conversation_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_messages_conv_timestamp ON messages(conversation_id, timestamp)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_conversation_id ON runs(conversation_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_conversations_workspace_id ON conversations(workspace_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_runs_workspace_id ON runs(workspace_id)')
         except sqlite3.OperationalError:
             pass
 
-        c.execute('SELECT id, title, created_at FROM conversations')
-        for conv_id, title, created_at in c.fetchall():
-            run_id = build_run_id(conv_id)
-            sandbox_path = str(get_run_workspace_root(run_id, create=True))
-            started_at = created_at or utcnow_iso()
+        c.execute('SELECT id, display_name, root_path, created_at, updated_at FROM workspaces')
+        workspace_by_path: Dict[str, Dict[str, Any]] = {}
+        for row in c.fetchall():
+            record = workspace_row_to_record(row)
+            if record:
+                workspace_by_path[record["root_path"]] = record
+
+        c.execute('''SELECT id, conversation_id, workspace_id, sandbox_path, started_at, title
+                     FROM runs''')
+        run_rows = c.fetchall()
+        runs_by_conversation: Dict[str, Dict[str, Any]] = {}
+        for run_id, conversation_id, workspace_id, sandbox_path, started_at, title in run_rows:
+            safe_conversation_id = str(conversation_id or "").strip()
+            if safe_conversation_id:
+                runs_by_conversation[safe_conversation_id] = {
+                    "id": str(run_id or "").strip(),
+                    "workspace_id": str(workspace_id or "").strip(),
+                    "sandbox_path": str(sandbox_path or "").strip(),
+                    "started_at": started_at,
+                    "title": str(title or "").strip(),
+                }
+
+        c.execute('SELECT id, title, created_at, updated_at, workspace_id FROM conversations')
+        for conv_id, title, created_at, updated_at, workspace_id in c.fetchall():
+            existing_run = runs_by_conversation.get(conv_id) or {}
+            sandbox_path_value = str(existing_run.get("sandbox_path") or "").strip()
+            if sandbox_path_value:
+                sandbox_path = pathlib.Path(sandbox_path_value).expanduser().resolve(strict=False)
+                sandbox_path.mkdir(parents=True, exist_ok=True)
+            else:
+                run_id = build_run_id(conv_id)
+                sandbox_path = get_run_workspace_root(run_id, create=True)
+            root_path = str(sandbox_path)
+
+            workspace_record = workspace_by_path.get(root_path)
+            resolved_workspace_id = str(workspace_id or "").strip()
+            if resolved_workspace_id and not workspace_record:
+                workspace_record = get_workspace_record(resolved_workspace_id)
+            if not workspace_record:
+                resolved_workspace_id = uuid.uuid4().hex
+                workspace_record = {
+                    "id": resolved_workspace_id,
+                    "display_name": str(title or "").strip() or workspace_display_name_from_path(sandbox_path),
+                    "root_path": root_path,
+                    "created_at": created_at or utcnow_iso(),
+                    "updated_at": updated_at or created_at or utcnow_iso(),
+                }
+                c.execute(
+                    '''INSERT OR IGNORE INTO workspaces (id, display_name, root_path, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)''',
+                    (
+                        workspace_record["id"],
+                        workspace_record["display_name"],
+                        workspace_record["root_path"],
+                        workspace_record["created_at"],
+                        workspace_record["updated_at"],
+                    ),
+                )
+                workspace_by_path[root_path] = workspace_record
+
+            resolved_workspace_id = workspace_record["id"]
+            c.execute('UPDATE conversations SET workspace_id = ? WHERE id = ?', (resolved_workspace_id, conv_id))
+
+            run_id = str(existing_run.get("id") or "").strip() or build_workspace_run_id(resolved_workspace_id)
+            started_at = existing_run.get("started_at") or created_at or utcnow_iso()
+            run_title = str(existing_run.get("title") or "").strip() or str(title or "").strip()
             c.execute(
                 '''INSERT OR IGNORE INTO runs
-                   (id, conversation_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (run_id, conv_id, title or "", "active", sandbox_path, started_at, None, "", 0),
+                   (id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    run_id,
+                    conv_id,
+                    resolved_workspace_id,
+                    run_title,
+                    "active",
+                    root_path,
+                    started_at,
+                    None,
+                    "",
+                    0,
+                ),
+            )
+            c.execute(
+                '''UPDATE runs
+                   SET workspace_id = ?, sandbox_path = ?, title = COALESCE(NULLIF(title, ''), ?)
+                   WHERE id = ?''',
+                (resolved_workspace_id, root_path, run_title, run_id),
             )
             try:
                 c.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (run_id, conv_id))
             except sqlite3.OperationalError:
                 pass
+
+        try:
+            c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_root_path ON workspaces(root_path)')
+        except sqlite3.OperationalError:
+            pass
 
         try:
             if sqlite_has_fts(conn):
@@ -6244,9 +6919,16 @@ class RenameRequest(BaseModel):
     title: str
 
 
+class WorkspaceCreateRequest(BaseModel):
+    display_name: Optional[str] = None
+    root_path: Optional[str] = None
+    create_if_missing: bool = True
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: str
+    workspace_id: Optional[str] = None
     attachments: List[str] = Field(default_factory=list)
     system_prompt: Optional[str] = None
     mode: str = "deep"
@@ -6882,21 +7564,19 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
     conn.close()
     return results
 
-def save_message(conv_id: str, role: str, content: str) -> int:
+def save_message(conv_id: str, role: str, content: str, workspace_id: Optional[str] = None) -> int:
     """Save message to database and return message ID"""
-    ensure_run_for_conversation(conv_id, title=content[:50] + "..." if len(content) > 50 else content)
+    title = content[:50] + "..." if len(content) > 50 else content
+    ensure_run_for_conversation(conv_id, title=title, workspace_id=workspace_id)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     c.execute('SELECT id FROM conversations WHERE id = ?', (conv_id,))
     if not c.fetchone():
-        title = content[:50] + "..." if len(content) > 50 else content
-        c.execute('''INSERT INTO conversations (id, title, created_at, updated_at)
-                     VALUES (?, ?, ?, ?)''',
-                  (conv_id, title, datetime.now().isoformat(), datetime.now().isoformat()))
+        created = ensure_conversation_record(conv_id, title=title, workspace_id=workspace_id)
         try:
-            c.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (build_run_id(conv_id), conv_id))
+            c.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (created.get("run_id", ""), conv_id))
         except sqlite3.OperationalError:
             pass
 
@@ -7276,14 +7956,134 @@ async def get_voice_file(filename: str):
         pass
     return FileResponse(target, media_type=guess_audio_media_type(target), filename=target.name)
 
+
+def build_workspace_catalog_payload(workspace: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialize one workspace row for the shared catalog UI."""
+    workspace_id = str(workspace.get("id") or "").strip()
+    root_path = str(workspace.get("root_path") or "").strip()
+    run = get_run_record_by_workspace_id(workspace_id) if workspace_id else None
+    return {
+        "id": workspace_id,
+        "display_name": str(workspace.get("display_name") or "").strip() or "Workspace",
+        "root_path": root_path,
+        "created_at": workspace.get("created_at"),
+        "updated_at": workspace.get("updated_at"),
+        "conversation_count": count_conversations_for_workspace(workspace_id) if workspace_id else 0,
+        "run_id": run["id"] if run else None,
+        "root_exists": pathlib.Path(root_path).exists() if root_path else False,
+    }
+
+
+def get_workspace_route_target(workspace_id: str, *, create: bool = False) -> tuple[Dict[str, Any], pathlib.Path, Optional[Dict[str, Any]]]:
+    """Resolve one workspace id into its record, path, and run metadata."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        workspace_path = get_workspace_path_for_workspace_id(workspace_id, create=create)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    run = get_run_record_by_workspace_id(workspace_id)
+    return workspace, workspace_path, run
+
+
+@app.get("/api/workspaces")
+async def get_workspaces():
+    try:
+        workspaces = [build_workspace_catalog_payload(item) for item in list_workspace_records(ensure_default=True)]
+        default_workspace = workspaces[0]["id"] if workspaces else None
+        return {"workspaces": workspaces, "default_workspace_id": default_workspace}
+    except Exception as e:
+        logger.error("Error getting workspaces: %s", e)
+        return {"workspaces": [], "default_workspace_id": None}
+
+
+@app.post("/api/workspaces")
+async def create_workspace(request: WorkspaceCreateRequest):
+    try:
+        workspace = create_workspace_record(
+            display_name=request.display_name,
+            root_path=request.root_path,
+            create_if_missing=bool(request.create_if_missing),
+        )
+        return build_workspace_catalog_payload(workspace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A workspace already exists for that path") from exc
+
+
+@app.get("/api/workspaces/{workspace_id}")
+async def get_workspace_catalog_entry(workspace_id: str):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return build_workspace_catalog_payload(workspace)
+
+
+@app.post("/api/workspaces/{workspace_id}/rename")
+async def rename_workspace(workspace_id: str, request: RenameRequest):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    title = str(request.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Workspace name is required")
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE workspaces SET display_name = ?, updated_at = ? WHERE id = ?',
+        (title, utcnow_iso(), workspace_id),
+    )
+    conn.commit()
+    conn.close()
+    updated = get_workspace_record(workspace_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return build_workspace_catalog_payload(updated)
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str, delete_files: bool = False):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    conversation_count = count_conversations_for_workspace(workspace_id)
+    if conversation_count:
+        raise HTTPException(status_code=409, detail="Delete or relink chats in this workspace before removing it")
+
+    workspace_path = pathlib.Path(workspace["root_path"]).expanduser().resolve(strict=False)
+    run = get_run_record_by_workspace_id(workspace_id)
+    if run:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute('DELETE FROM runs WHERE id = ?', (run["id"],))
+        conn.commit()
+        conn.close()
+        sandbox_path = pathlib.Path(run["sandbox_path"]).resolve(strict=False)
+        if sandbox_path.exists() and (RUNS_ROOT_PATH == sandbox_path or RUNS_ROOT_PATH in sandbox_path.parents):
+            hosted_root = sandbox_path.parent if sandbox_path.name == "workspace" else sandbox_path
+            shutil.rmtree(hosted_root, ignore_errors=True)
+    delete_managed_python_env_for_workspace(workspace_id)
+
+    if delete_files and workspace_path.exists():
+        shutil.rmtree(workspace_path, ignore_errors=True)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('DELETE FROM workspaces WHERE id = ?', (workspace_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "workspace_id": workspace_id, "deleted_files": bool(delete_files)}
+
+
 @app.get("/api/conversations")
 async def get_conversations():
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''SELECT c.id, c.title, c.created_at, c.updated_at,
+                     c.workspace_id, w.display_name, w.root_path,
                      m.content, m.timestamp
                      FROM conversations c
+                     LEFT JOIN workspaces w ON w.id = c.workspace_id
                      LEFT JOIN (
                          SELECT conversation_id, content, timestamp,
                                 ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY timestamp DESC) as rn
@@ -7296,8 +8096,11 @@ async def get_conversations():
             conversations.append({
                 'id': row[0], 'title': row[1], 'created_at': row[2],
                 'updated_at': row[3],
-                'last_message': row[4] if row[4] else '',
-                'last_message_timestamp': row[5] if row[5] else row[3]
+                'workspace_id': str(row[4] or '').strip(),
+                'workspace_display_name': str(row[5] or '').strip(),
+                'workspace_root_path': str(row[6] or '').strip(),
+                'last_message': row[7] if row[7] else '',
+                'last_message_timestamp': row[8] if row[8] else row[3]
             })
 
         conn.close()
@@ -7377,13 +8180,18 @@ async def chat_http(request: ChatRequest):
 @app.get("/api/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
     try:
+        conversation = get_conversation_record(conversation_id)
+        workspace_id = str(conversation.get("workspace_id") or "").strip() if conversation else ""
+        workspace = get_workspace_record(workspace_id) if workspace_id else None
         history = get_conversation_messages_for_ui(conversation_id, limit=100)
         return {
             'messages': history,
             'pending_plan': load_pending_execution_plan(conversation_id),
+            'workspace_id': workspace_id,
+            'workspace': build_workspace_catalog_payload(workspace) if workspace else None,
         }
     except Exception as e:
-        return {'messages': [], 'pending_plan': None}
+        return {'messages': [], 'pending_plan': None, 'workspace_id': '', 'workspace': None}
 
 @app.post("/api/conversation/{conversation_id}/rename")
 async def rename_conversation(conversation_id: str, request: RenameRequest):
@@ -7401,13 +8209,11 @@ async def rename_conversation(conversation_id: str, request: RenameRequest):
 @app.delete("/api/conversation/{conversation_id}")
 async def delete_conversation(conversation_id: str):
     try:
-        delete_run_workspace(conversation_id)
         delete_voice_artifacts_for_conversation(conversation_id)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         c.execute('DELETE FROM conversation_summaries WHERE conversation_id = ?', (conversation_id,))
-        c.execute('DELETE FROM runs WHERE conversation_id = ?', (conversation_id,))
         c.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
         conn.commit()
         conn.close()
@@ -7477,26 +8283,36 @@ async def read_file_content(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/workspace/{conversation_id}")
-async def get_workspace_info(conversation_id: str):
-    run = get_run_record(conversation_id)
-    workspace = get_workspace_path(conversation_id, create=False)
-    return {
-        "conversation_id": conversation_id,
+def build_workspace_info_payload(
+    workspace_id: str,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return shared workspace metadata for either route shape."""
+    workspace, workspace_path, run = get_workspace_route_target(workspace_id, create=False)
+    payload = {
+        "workspace_id": workspace_id,
         "run_id": run["id"] if run else None,
-        "workspace_path": str(workspace),
-        "workspace_label": workspace.name,
+        "workspace_path": str(workspace_path),
+        "workspace_label": workspace.get("display_name") or workspace_path.name,
+        "display_name": workspace.get("display_name") or workspace_path.name,
+        "root_path": str(workspace_path),
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
 
 
-@app.post("/api/workspace/{conversation_id}/upload")
-async def upload_workspace_files(
-    conversation_id: str,
-    files: List[UploadFile] = File(...),
-    target_path: str = Form("."),
-):
-    workspace = get_workspace_path(conversation_id)
-    target_dir = resolve_workspace_relative_path(conversation_id, target_path or ".")
+async def upload_workspace_files_for_workspace(
+    workspace_id: str,
+    files: List[UploadFile],
+    target_path: str = ".",
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Upload files into a workspace addressed directly by workspace id."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target_dir = resolve_workspace_relative_path_from_root(workspace, target_path or ".")
 
     if target_dir.exists() and not target_dir.is_dir():
         raise HTTPException(status_code=400, detail="target_path must be a directory")
@@ -7537,28 +8353,39 @@ async def upload_workspace_files(
             "kind": classify_workspace_file_kind(destination.name),
         })
 
-    return {
-        "conversation_id": conversation_id,
+    payload = {
+        "workspace_id": workspace_id,
+        "workspace_path": str(workspace),
         "target_path": format_workspace_path(target_dir, workspace),
         "files": saved_files,
         "count": len(saved_files),
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
 
 
-@app.get("/api/workspace/{conversation_id}/files")
-async def list_workspace_files(conversation_id: str, path: str = ""):
-    run = get_run_record(conversation_id)
-    workspace = get_workspace_path(conversation_id, create=False)
-    if not run or not workspace.exists():
-        return {
-            "conversation_id": conversation_id,
+def list_workspace_files_for_workspace(
+    workspace_id: str,
+    path: str = "",
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List files in a workspace addressed directly by workspace id."""
+    _workspace_record, workspace, run = get_workspace_route_target(workspace_id, create=False)
+    if not workspace.exists():
+        payload = {
+            "workspace_id": workspace_id,
             "run_id": run["id"] if run else None,
             "workspace_path": str(workspace),
             "path": ".",
             "items": [],
         }
-    target = resolve_workspace_relative_path(conversation_id, path)
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return payload
 
+    target = resolve_workspace_relative_path_from_root(workspace, path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Path not found")
     if not target.is_dir():
@@ -7566,7 +8393,6 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
 
     target_rel_path = format_workspace_path(target, workspace)
     target_is_hidden = workspace_rel_path_is_hidden(target_rel_path)
-
     items = []
     for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
         try:
@@ -7577,20 +8403,27 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
         except (OSError, PermissionError):
             continue
 
-    return {
-        "conversation_id": conversation_id,
+    payload = {
+        "workspace_id": workspace_id,
         "run_id": run["id"] if run else None,
         "workspace_path": str(workspace),
         "path": format_workspace_path(target, workspace),
         "items": items,
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
 
 
-@app.get("/api/workspace/{conversation_id}/file")
-async def read_workspace_file(conversation_id: str, path: str):
-    workspace = get_workspace_path(conversation_id)
-    target = resolve_workspace_relative_path(conversation_id, path)
-
+def read_workspace_file_for_workspace(
+    workspace_id: str,
+    path: str,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read one file from a workspace addressed directly by workspace id."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     rel_path = format_workspace_path(target, workspace)
@@ -7602,40 +8435,31 @@ async def read_workspace_file(conversation_id: str, path: str):
             text_limit=None,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {
-        "conversation_id": conversation_id,
+    payload = {
+        "workspace_id": workspace_id,
         "workspace_path": str(workspace),
         **preview,
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
 
 
-@app.get("/api/workspace/{conversation_id}/file/view")
-async def view_workspace_file(conversation_id: str, path: str):
-    target = resolve_workspace_relative_path(conversation_id, path)
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-    return FileResponse(target, media_type=media_type)
-
-
-@app.get("/api/workspace/{conversation_id}/file/download")
-async def download_workspace_file(conversation_id: str, path: str):
-    target = resolve_workspace_relative_path(conversation_id, path)
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(target, filename=target.name)
-
-
-@app.post("/api/workspace/{conversation_id}/file")
-async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdateRequest):
-    workspace = get_workspace_path(conversation_id)
+def write_workspace_file_for_workspace(
+    workspace_id: str,
+    request: WorkspaceFileUpdateRequest,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write one text file into a workspace addressed directly by workspace id."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
     rel_path = (request.path or "").strip()
     if not rel_path:
         raise HTTPException(status_code=400, detail="Path is required")
 
-    target = resolve_workspace_relative_path(conversation_id, rel_path)
+    target = resolve_workspace_relative_path_from_root(workspace, rel_path)
     if target.exists() and not target.is_file():
         raise HTTPException(status_code=400, detail="Path must point to a file")
 
@@ -7646,29 +8470,36 @@ async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdat
     try:
         validation = validate_workspace_text_content(target, request.content)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as f:
         f.write(request.content)
 
-    result = {
-        "conversation_id": conversation_id,
+    payload = {
+        "workspace_id": workspace_id,
         "workspace_path": str(workspace),
         "path": format_workspace_path(target, workspace),
         "bytes_written": len(encoded),
         "lines": request.content.count("\n") + 1,
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
     if validation:
-        result["validation"] = validation
-    return result
+        payload["validation"] = validation
+    return payload
 
 
-@app.get("/api/workspace/{conversation_id}/spreadsheet")
-async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Optional[str] = None):
-    workspace = get_workspace_path(conversation_id)
-    target = resolve_workspace_relative_path(conversation_id, path)
-
+def read_workspace_spreadsheet_for_workspace(
+    workspace_id: str,
+    path: str,
+    sheet: Optional[str] = None,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read spreadsheet summary data from a workspace addressed directly by workspace id."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -7677,17 +8508,20 @@ async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Opt
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {
-        "conversation_id": conversation_id,
+    payload = {
+        "workspace_id": workspace_id,
         "workspace_path": str(workspace),
         "path": format_workspace_path(target, workspace),
         **summary,
     }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
 
 
-@app.get("/api/workspace/{conversation_id}/download")
-async def download_workspace(conversation_id: str):
-    workspace = get_workspace_path(conversation_id)
+def build_workspace_archive_response(workspace_id: str) -> Response:
+    """Return a zip archive response for one workspace."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
     archive_entries: List[tuple[pathlib.Path, str]] = []
     for file_path in workspace.rglob("*"):
         if not file_path.is_file():
@@ -7701,15 +8535,135 @@ async def download_workspace(conversation_id: str):
         return Response(status_code=204)
 
     archive = io.BytesIO()
-
     with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_path, rel_path in archive_entries:
             zf.write(file_path, arcname=rel_path)
 
-    headers = {
-        "Content-Disposition": 'attachment; filename="workspace.zip"'
-    }
+    headers = {"Content-Disposition": 'attachment; filename="workspace.zip"'}
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
+
+
+@app.get("/api/workspaces/{workspace_id}/files")
+async def list_workspace_files_by_workspace(workspace_id: str, path: str = ""):
+    return list_workspace_files_for_workspace(workspace_id, path)
+
+
+@app.get("/api/workspaces/{workspace_id}/file")
+async def read_workspace_file_by_workspace(workspace_id: str, path: str):
+    return read_workspace_file_for_workspace(workspace_id, path)
+
+
+@app.get("/api/workspaces/{workspace_id}/file/view")
+async def view_workspace_file_by_workspace(workspace_id: str, path: str):
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type)
+
+
+@app.get("/api/workspaces/{workspace_id}/file/download")
+async def download_workspace_file_by_workspace(workspace_id: str, path: str):
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, filename=target.name)
+
+
+@app.post("/api/workspaces/{workspace_id}/file")
+async def write_workspace_file_by_workspace(workspace_id: str, request: WorkspaceFileUpdateRequest):
+    return write_workspace_file_for_workspace(workspace_id, request)
+
+
+@app.get("/api/workspaces/{workspace_id}/spreadsheet")
+async def read_workspace_spreadsheet_by_workspace(workspace_id: str, path: str, sheet: Optional[str] = None):
+    return read_workspace_spreadsheet_for_workspace(workspace_id, path, sheet=sheet)
+
+
+@app.post("/api/workspaces/{workspace_id}/upload")
+async def upload_workspace_files_by_workspace(
+    workspace_id: str,
+    files: List[UploadFile] = File(...),
+    target_path: str = Form("."),
+):
+    return await upload_workspace_files_for_workspace(workspace_id, files, target_path)
+
+
+@app.get("/api/workspaces/{workspace_id}/download")
+async def download_workspace_by_workspace(workspace_id: str):
+    return build_workspace_archive_response(workspace_id)
+
+
+@app.get("/api/workspace/{conversation_id}")
+async def get_workspace_info(conversation_id: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
+    if not workspace_id:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return build_workspace_info_payload(workspace_id, conversation_id=conversation_id)
+
+
+@app.post("/api/workspace/{conversation_id}/upload")
+async def upload_workspace_files(
+    conversation_id: str,
+    files: List[UploadFile] = File(...),
+    target_path: str = Form("."),
+):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return await upload_workspace_files_for_workspace(workspace_id, files, target_path, conversation_id=conversation_id)
+
+
+@app.get("/api/workspace/{conversation_id}/files")
+async def list_workspace_files(conversation_id: str, path: str = ""):
+    workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
+    if not workspace_id:
+        workspace = get_workspace_path(conversation_id, create=False)
+        return {
+            "conversation_id": conversation_id,
+            "workspace_id": "",
+            "run_id": None,
+            "workspace_path": str(workspace),
+            "path": ".",
+            "items": [],
+        }
+    return list_workspace_files_for_workspace(workspace_id, path, conversation_id=conversation_id)
+
+
+@app.get("/api/workspace/{conversation_id}/file")
+async def read_workspace_file(conversation_id: str, path: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return read_workspace_file_for_workspace(workspace_id, path, conversation_id=conversation_id)
+
+
+@app.get("/api/workspace/{conversation_id}/file/view")
+async def view_workspace_file(conversation_id: str, path: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return await view_workspace_file_by_workspace(workspace_id, path)
+
+
+@app.get("/api/workspace/{conversation_id}/file/download")
+async def download_workspace_file(conversation_id: str, path: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return await download_workspace_file_by_workspace(workspace_id, path)
+
+
+@app.post("/api/workspace/{conversation_id}/file")
+async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdateRequest):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return write_workspace_file_for_workspace(workspace_id, request, conversation_id=conversation_id)
+
+
+@app.get("/api/workspace/{conversation_id}/spreadsheet")
+async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Optional[str] = None):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return read_workspace_spreadsheet_for_workspace(workspace_id, path, sheet=sheet, conversation_id=conversation_id)
+
+
+@app.get("/api/workspace/{conversation_id}/download")
+async def download_workspace(conversation_id: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return build_workspace_archive_response(workspace_id)
 
 
 def _validate_tool_call_payload(payload: Any) -> Dict[str, Any]:
@@ -12235,6 +13189,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
+    requested_workspace_id = str(data.get("workspace_id") or "").strip()
     attachments_raw = data.get('attachments', [])
     attachments = [
         str(item).strip()
@@ -12249,6 +13204,9 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         or infer_direct_slash_command_from_message(message)
     )
 
+    conversation_title = message[:50] + "..." if len(message) > 50 else message
+    ensure_conversation_record(conv_id, title=conversation_title, workspace_id=requested_workspace_id or None)
+
     attachment_context = await build_attachment_context(conv_id, attachments, message)
     saved_user_message = f"{message}\n\n{attachment_context}" if attachment_context else message
     if slash_command:
@@ -12258,11 +13216,11 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
             str(slash_command.get("args", "")).strip()
         )
         history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
-        user_message_id = save_message(conv_id, 'user', saved_user_message)
+        user_message_id = save_message(conv_id, 'user', saved_user_message, workspace_id=requested_workspace_id or None)
         effective_message = slash_request or saved_user_message
     else:
         effective_message = saved_user_message
-        user_message_id = save_message(conv_id, 'user', effective_message)
+        user_message_id = save_message(conv_id, 'user', effective_message, workspace_id=requested_workspace_id or None)
         history = get_conversation_history(conv_id, current_query=effective_message)
 
     repo_bootstrap = maybe_bootstrap_workspace_from_current_repo(conv_id, effective_message)

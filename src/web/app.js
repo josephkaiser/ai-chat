@@ -4,6 +4,9 @@
 
 let ws = null;
 let currentConvId = generateId();
+let currentWorkspaceId = localStorage.getItem('lastWorkspaceId') || '';
+let workspaceCatalog = [];
+let currentWorkspaceMeta = null;
 let isGenerating = false;
 let activeStreamConversationId = null;
 let streamingAssistantMessage = null;
@@ -81,6 +84,7 @@ let mobileKeyboardInset = 0;
 const MOBILE_WORKSPACE_MEDIA_QUERY = '(max-width: 768px)';
 const COMPACT_WORKSPACE_MEDIA_QUERY = '(max-width: 1180px)';
 const DEFAULT_THEME = 'dark';
+const DEFAULT_WORKSPACE_NAME = 'Workspace';
 const SEND_BUTTON_ICON = buildComposerIconMarkup('<path d="M4.5 19.5 19.5 12 4.5 4.5l2.75 6.25L14 12l-6.75 1.25L4.5 19.5Z"></path>');
 const STOP_BUTTON_ICON = buildComposerIconMarkup('<rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.8"></rect>');
 const MIC_BUTTON_ICON = buildComposerIconMarkup('<rect x="9" y="4.5" width="6" height="10" rx="3"></rect><path d="M6.5 11.5a5.5 5.5 0 0 0 11 0"></path><path d="M12 17v2.5"></path><path d="M9.5 19.5h5"></path>');
@@ -830,9 +834,9 @@ function updateFeatureSetting(name, enabled) {
 }
 
 async function downloadWorkspaceZip() {
-    if (!currentConvId) return;
+    if (!currentWorkspaceId) return;
     try {
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/download`);
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/download`);
         if (resp.status === 204) {
             showTransientComposerHint('The workspace is empty, so there is nothing to download.', 5000);
             recordWorkspaceActivity('Download', 'Skipped workspace download because the workspace is empty.');
@@ -864,15 +868,15 @@ async function downloadWorkspaceZip() {
 }
 
 function downloadWorkspaceFile(path) {
-    if (!currentConvId || !path) return;
+    if (!currentWorkspaceId || !path) return;
     const params = new URLSearchParams({ path });
-    window.open(`/api/workspace/${encodeURIComponent(currentConvId)}/file/download?${params.toString()}`, '_blank', 'noopener');
+    window.open(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file/download?${params.toString()}`, '_blank', 'noopener');
 }
 
 function workspaceFileInlineViewUrl(path) {
-    if (!currentConvId || !path) return '';
+    if (!currentWorkspaceId || !path) return '';
     const params = new URLSearchParams({ path });
-    return `/api/workspace/${encodeURIComponent(currentConvId)}/file/view?${params.toString()}`;
+    return `/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file/view?${params.toString()}`;
 }
 
 function inferTurnPermissions(message, attachmentPaths = []) {
@@ -3715,6 +3719,7 @@ function approveExecutionPlan() {
         message: APPROVED_PLAN_EXECUTION_MESSAGE,
         attachments: [],
         conversation_id: currentConvId,
+        workspace_id: currentWorkspaceId || null,
         client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
@@ -4759,7 +4764,7 @@ async function saveViewer(prefix, options = {}) {
     saveButton.disabled = true;
     setInlineViewerSaveState('saving', options.autosave ? 'Autosaving...' : 'Saving...');
     try {
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file`, {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: state.path, content }),
@@ -4893,7 +4898,7 @@ async function openWorkspaceFile(path, options = {}) {
             setViewerState('inlineViewer', { kind: 'spreadsheet', editable: false, path, view: 'preview' });
             const params = new URLSearchParams({ path });
             if (selectedSpreadsheetSheet) params.set('sheet', selectedSpreadsheetSheet);
-            const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?${params.toString()}`);
+            const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/spreadsheet?${params.toString()}`);
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
             if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
@@ -4908,7 +4913,7 @@ async function openWorkspaceFile(path, options = {}) {
             return;
         }
 
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/file?path=${encodeURIComponent(path)}`);
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
         if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
@@ -4937,7 +4942,7 @@ async function openWorkspaceFile(path, options = {}) {
             renderMarkdownPreview('inlineViewerPreview', content);
         }
         else if (kind === 'csv') {
-            const summaryResp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/spreadsheet?path=${encodeURIComponent(path)}`);
+            const summaryResp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/spreadsheet?path=${encodeURIComponent(path)}`);
             const summaryData = await summaryResp.json();
             if (requestToken !== inlineViewerRequestToken || !compareWorkspacePaths(path, inlineViewerPath)) return;
             if (summaryResp.ok) {
@@ -5078,7 +5083,7 @@ async function uploadPendingFiles(fileEntries, options = {}) {
     if (attachButton) attachButton.disabled = true;
 
     try {
-        const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/upload`, {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/upload`, {
             method: 'POST',
             body: formData,
         });
@@ -5197,6 +5202,7 @@ function sendMessage() {
         message,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
+        workspace_id: currentWorkspaceId || null,
         client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
@@ -5230,6 +5236,7 @@ function sendInterruptMessage(messageText) {
         message: outboundText,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
+        workspace_id: currentWorkspaceId || null,
         client_turn_id: clientTurnId,
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
@@ -5966,7 +5973,8 @@ function scheduleWorkspaceRefresh() {
 }
 
 async function fetchWorkspaceDirectory(path = '.') {
-    const resp = await fetch(`/api/workspace/${encodeURIComponent(currentConvId)}/files?path=${encodeURIComponent(path)}`);
+    if (!currentWorkspaceId) throw new Error('No workspace selected');
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/files?path=${encodeURIComponent(path)}`);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
     return data;
@@ -6012,7 +6020,24 @@ async function refreshWorkspace(force = false) {
         return;
     }
 
-    if (force) pathEl.textContent = 'Refreshing workspace...';
+    if (!currentWorkspaceId) {
+        workspaceEntries = [];
+        workspaceTree = null;
+        workspaceStats = { files: 0, directories: 0 };
+        currentRunId = null;
+        selectedWorkspaceFile = '';
+        selectedSpreadsheetSheet = '';
+        closeInlineViewer();
+        pathEl.textContent = 'No workspace selected';
+        listEl.innerHTML = '<div class="workspace-empty">Choose a workspace to browse its files here.</div>';
+        renderWorkspaceArtifactList();
+        return;
+    }
+
+    if (force) {
+        const label = currentWorkspaceMeta?.display_name || currentWorkspaceMeta?.root_path || 'Refreshing workspace...';
+        pathEl.textContent = label;
+    }
 
     try {
         const tree = await buildWorkspaceTree('.');
@@ -6020,6 +6045,7 @@ async function refreshWorkspace(force = false) {
         workspaceEntries = flattenWorkspaceFiles(tree, []);
         workspaceStats = collectWorkspaceStats(tree);
         currentRunId = tree.run_id || null;
+        pathEl.textContent = currentWorkspaceMeta?.root_path || tree.workspace_path || currentWorkspaceMeta?.display_name || 'Workspace';
         const hasSelectedFile = workspaceEntries.some(item => item.path === selectedWorkspaceFile);
         if (!hasSelectedFile) selectedWorkspaceFile = '';
         if (inlineViewerPath && !workspaceEntries.some(item => item.path === inlineViewerPath)) closeInlineViewer();
@@ -6034,9 +6060,149 @@ async function refreshWorkspace(force = false) {
         workspaceTree = null;
         workspaceEntries = [];
         workspaceStats = { files: 0, directories: 0 };
-        pathEl.textContent = 'Workspace unavailable';
+        pathEl.textContent = currentWorkspaceMeta?.root_path || 'Workspace unavailable';
         listEl.innerHTML = `<div class="workspace-empty">Workspace is unavailable: ${escapeHtml(e.message)}</div>`;
         renderWorkspaceArtifactList();
+    }
+}
+
+function setCurrentWorkspaceSelection(workspaceId) {
+    const nextId = String(workspaceId || '').trim();
+    currentWorkspaceId = nextId;
+    currentWorkspaceMeta = workspaceCatalog.find(item => item.id === nextId) || null;
+    if (nextId) localStorage.setItem('lastWorkspaceId', nextId);
+    else localStorage.removeItem('lastWorkspaceId');
+}
+
+function hasConversationMessages() {
+    return Boolean(document.querySelector('#messages .message'));
+}
+
+function renderWorkspaceCatalog() {
+    const container = document.getElementById('workspaceCatalog');
+    if (!container) return;
+    if (!workspaceCatalog.length) {
+        container.innerHTML = '<div class="workspace-catalog-empty">No workspaces yet.</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    workspaceCatalog.forEach(workspace => {
+        const item = document.createElement('div');
+        item.className = `workspace-catalog-item${workspace.id === currentWorkspaceId ? ' active' : ''}`;
+        item.innerHTML = `
+            <div class="workspace-catalog-copy">
+                <div class="workspace-catalog-name">${escapeHtml(workspace.display_name || DEFAULT_WORKSPACE_NAME)}</div>
+                <div class="workspace-catalog-path">${escapeHtml(workspace.root_path || '')}</div>
+            </div>
+            <div class="workspace-catalog-actions">
+                <button class="conv-btn" onclick="event.stopPropagation(); renameWorkspace('${workspace.id}', '${(workspace.display_name || '').replace(/'/g, "\\'")}')" title="Rename workspace">&#9998;</button>
+                <button class="conv-btn delete" onclick="event.stopPropagation(); removeWorkspace('${workspace.id}')" title="Remove workspace">&#128465;</button>
+            </div>
+        `;
+        item.onclick = () => { selectWorkspace(workspace.id); };
+        container.appendChild(item);
+    });
+}
+
+async function loadWorkspaceCatalog(options = {}) {
+    try {
+        const resp = await fetch('/api/workspaces');
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        workspaceCatalog = Array.isArray(data.workspaces) ? data.workspaces : [];
+
+        let nextWorkspaceId = String(options.workspaceId || '').trim() || currentWorkspaceId;
+        if (!workspaceCatalog.some(item => item.id === nextWorkspaceId)) {
+            nextWorkspaceId = String(data.default_workspace_id || workspaceCatalog[0]?.id || '').trim();
+        }
+        setCurrentWorkspaceSelection(nextWorkspaceId);
+        renderWorkspaceCatalog();
+        return workspaceCatalog;
+    } catch (error) {
+        workspaceCatalog = [];
+        currentWorkspaceMeta = null;
+        renderWorkspaceCatalog();
+        throw error;
+    }
+}
+
+async function selectWorkspace(workspaceId, options = {}) {
+    const nextWorkspaceId = String(workspaceId || '').trim();
+    if (!nextWorkspaceId || nextWorkspaceId === currentWorkspaceId) return;
+
+    const switchingLoadedConversation = hasConversationMessages() && currentWorkspaceId && currentWorkspaceId !== nextWorkspaceId;
+    if (switchingLoadedConversation && options.skipConfirm !== true) {
+        const confirmed = confirm('Switching workspaces starts a new chat so the current transcript stays attached to its existing workspace. Continue?');
+        if (!confirmed) return;
+    }
+
+    setCurrentWorkspaceSelection(nextWorkspaceId);
+    renderWorkspaceCatalog();
+    if (switchingLoadedConversation) {
+        newChat({ preserveWorkspaceSelection: true });
+    } else {
+        currentRunId = null;
+        refreshWorkspace(true);
+    }
+}
+
+async function promptCreateWorkspace() {
+    const displayName = String(prompt('Workspace name', DEFAULT_WORKSPACE_NAME) || '').trim();
+    if (!displayName) return;
+    const rootInput = prompt('Absolute folder path to use. Leave blank to create a folder under the server workspace root.', '') || '';
+    const requestedPath = String(rootInput).trim();
+    const createIfMissing = requestedPath ? confirm('Create the folder if it does not already exist?') : true;
+
+    const resp = await fetch('/api/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            display_name: displayName,
+            root_path: requestedPath || null,
+            create_if_missing: createIfMissing,
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        alert(data.detail || `Workspace create failed (HTTP ${resp.status})`);
+        return;
+    }
+    await loadWorkspaceCatalog({ workspaceId: data.id || '' });
+    await selectWorkspace(data.id || '', { skipConfirm: true });
+}
+
+async function renameWorkspace(workspaceId, currentTitle) {
+    const title = String(prompt('Rename workspace', currentTitle || '') || '').trim();
+    if (!title) return;
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        alert(data.detail || `Workspace rename failed (HTTP ${resp.status})`);
+        return;
+    }
+    await loadWorkspaceCatalog({ workspaceId });
+}
+
+async function removeWorkspace(workspaceId) {
+    if (!confirm('Remove this workspace from the catalog? Existing chats must be moved or deleted first.')) return;
+    const removedActiveWorkspace = workspaceId === currentWorkspaceId;
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        alert(data.detail || `Workspace delete failed (HTTP ${resp.status})`);
+        return;
+    }
+    await loadWorkspaceCatalog();
+    if (removedActiveWorkspace) {
+        setCurrentWorkspaceSelection(workspaceCatalog[0]?.id || '');
+        newChat({ preserveWorkspaceSelection: true });
+    } else {
+        renderWorkspaceCatalog();
     }
 }
 
@@ -6116,9 +6282,11 @@ async function loadConversations() {
             if (preview.length > 80) preview = preview.substring(0, 80) + '...';
 
             const ts = formatTimestamp(conv.last_message_timestamp || conv.updated_at);
+            const workspaceLabel = String(conv.workspace_display_name || '').trim();
 
             item.innerHTML = `
                 <div class="conv-title">${conv.title}</div>
+                ${workspaceLabel ? `<div class="conv-workspace">${escapeHtml(workspaceLabel)}</div>` : ''}
                 <div class="conv-preview">${preview || 'No messages yet'}</div>
                 <div class="conv-timestamp">${ts}</div>
                 <div class="conv-actions">
@@ -6153,6 +6321,14 @@ async function loadConversation(id, options = {}) {
     clearPendingAttachments();
     const resp = await fetch(`/api/conversation/${id}`);
     const data = await resp.json();
+    if (data.workspace_id) {
+        setCurrentWorkspaceSelection(data.workspace_id);
+    }
+    try {
+        await loadWorkspaceCatalog({ workspaceId: currentWorkspaceId || data.workspace_id || '' });
+    } catch (error) {
+        console.error('Failed to refresh workspaces while loading conversation:', error);
+    }
     const messages = document.getElementById('messages');
     stopSpeaking();
     messages.innerHTML = '';
@@ -6178,7 +6354,8 @@ async function loadConversation(id, options = {}) {
     refreshWorkspace(true);
 }
 
-function newChat() {
+function newChat(options = {}) {
+    const preserveWorkspaceSelection = options.preserveWorkspaceSelection !== false;
     dismissMobileKeyboard(true);
     stopSpeaking();
     clearAllowedCommandsForConversation(currentConvId);
@@ -6199,6 +6376,10 @@ function newChat() {
     clearPendingAttachments();
     document.getElementById('messages').innerHTML = buildWelcomeMarkup();
     enterWelcomeMode();
+    if (!preserveWorkspaceSelection) {
+        setCurrentWorkspaceSelection(workspaceCatalog[0]?.id || '');
+    }
+    renderWorkspaceCatalog();
     loadConversations();
     refreshWorkspace(true);
 }
@@ -6234,7 +6415,7 @@ async function deleteConv(id) {
     clearAllowedToolPermissionsForConversation(id);
     clearToolAutoApproveForConversation(id);
     clearRememberedTurnFeatures(id);
-    if (id === currentConvId) newChat(); else loadConversations();
+    if (id === currentConvId) newChat({ preserveWorkspaceSelection: true }); else loadConversations();
 }
 
 // System Prompt
@@ -6300,11 +6481,17 @@ document.addEventListener('click', (event) => {
 
 updateStatus('loading');
 connectWS();
-loadConversations();
 applyFeatureSettingsToUI();
 syncMobileReasoningBadge();
 refreshVoiceRuntime();
-refreshWorkspace(true);
+loadWorkspaceCatalog()
+    .catch(error => {
+        console.error('Failed to load workspaces:', error);
+    })
+    .finally(() => {
+        loadConversations();
+        refreshWorkspace(true);
+    });
 startWelcomeHintRotation();
 
 setTimeout(() => {

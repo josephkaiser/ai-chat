@@ -51,8 +51,18 @@
             </div>
             <div class="menu-actions">
                 <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
+                <button onclick="promptCreateWorkspace()"><span>+ Workspace</span><kbd class="shortcut-hint"></kbd></button>
                 <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
                 <button onclick="closeMenu(); showAbout()"><span>About</span><kbd class="shortcut-hint"></kbd></button>
+            </div>
+            <div class="menu-section">
+                <div class="menu-section-header">
+                    <span>Workspaces</span>
+                    <span class="menu-section-note">Shared folders</span>
+                </div>
+                <div class="workspace-catalog" id="workspaceCatalog">
+                    <div class="workspace-catalog-empty">Loading workspaces...</div>
+                </div>
             </div>
             <div class="menu-search">
                 <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
