@@ -121,7 +121,7 @@ For Python-heavy turns, the intended flow is:
 
 ## Runtime approvals
 
-Tool enablement is no longer buried in settings. `resolveTurnFeatures(...)` in `static/app.js` now sends the server the relevant tool surface plus any remembered per-chat approvals, and the harness pauses only when a gated capability is actually used.
+Tool enablement is no longer buried in settings. `resolveTurnFeatures(...)` in `src/web/app.js` now sends the server the relevant tool surface plus any remembered per-chat approvals, and the harness pauses only when a gated capability is actually used.
 
 Current inline approval buckets are:
 
@@ -183,6 +183,6 @@ Those events drive the workspace activity timeline, build-step checklist, and lo
 ## Related files
 
 - `app.py` — orchestration, tool execution, workspace APIs, and voice APIs
-- `prompts.py` — base prompts plus tool-use instructions
-- `static/app.js` — feature toggles, per-turn approvals, activity rendering, workspace UI
+- `src/python/ai_chat/prompts.py` — base prompts plus tool-use instructions
+- `src/web/app.js` — feature toggles, per-turn approvals, activity rendering, workspace UI
 - `docs/api.md` — endpoint and WebSocket payload reference

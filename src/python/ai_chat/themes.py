@@ -1,7 +1,7 @@
 """
 Web UI colors for light/dark mode.
 
-static/style.css expects many --variables (e.g. --bg_primary). Those names stay fixed so you
+src/web/style.css expects many --variables (e.g. --bg_primary). Those names stay fixed so you
 do not touch CSS when reskinning — only the small palettes below.
 
 Flow: index.html is rendered with themes_json; app.js sets document.documentElement styles.

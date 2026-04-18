@@ -126,7 +126,7 @@ const DISCOVERY_HINTS = Object.freeze([
     'When useful, I can inspect files, run checks, install Python packages, and verify results in the workspace.',
 ]);
 
-// Must match thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
+// Must match src/python/ai_chat/thinking_stream.py THINK_TAG_PAIRS (redacted_thinking + think)
 const THINK_TAG_PAIRS = Object.freeze([
     ['<' + 'redacted_thinking' + '>', '</' + 'redacted_thinking' + '>'],
     ['<' + 'think' + '>', '</' + 'think' + '>'],

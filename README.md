@@ -2,6 +2,13 @@
 
 A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small FastAPI + vanilla JS front end.
 
+## Source Layout
+
+- `src/python/harness.py` — main backend harness (FastAPI + WS + tool loop)
+- `src/python/ai_chat/` — backend helper modules (prompts, routing, themes, readers)
+- `src/web/` — frontend web app (`index.html`, `app.js`, `style.css`, `assets/`)
+- `app.py` — compatibility entrypoint used by Docker and `./chat`
+
 ## Features
 
 - **Streaming Responses** — Real-time token streaming via WebSocket (including optional “thinking” regions for supported models)

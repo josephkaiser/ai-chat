@@ -104,7 +104,7 @@ When auto-speak is enabled, fresh assistant replies are spoken in order so one r
 
 ## Related files
 
-- `static/index.html` — UI structure
-- `static/app.js` — client runtime, activity rendering, workspace tools, slash commands, and voice
-- `static/style.css` — layout and component styling
+- `src/web/index.html` — UI structure
+- `src/web/app.js` — client runtime, activity rendering, workspace tools, slash commands, and voice
+- `src/web/style.css` — layout and component styling
 - `app.py` — chat, workspace, and voice APIs

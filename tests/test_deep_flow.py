@@ -1,6 +1,6 @@
 import unittest
 
-from deep_flow import DeepRouteRequest, decide_deep_route
+from src.python.ai_chat.deep_flow import DeepRouteRequest, decide_deep_route
 
 
 class DeepFlowTests(unittest.TestCase):

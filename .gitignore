@@ -30,6 +30,7 @@ node_modules/
 # Data
 data/
 runs/
+workspace/
 workspaces/
 *.db
 *.sqlite
