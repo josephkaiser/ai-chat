@@ -404,6 +404,9 @@ def _read_selected_model_state() -> tuple[str, Optional[str], Dict[str, Any], Di
 ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME, MODEL_LOAD_HISTORY, MODEL_LOADING_STATUS = _read_selected_model_state()
 ACTIVE_MODEL_LOCK: asyncio.Lock | None = None
 FILE_SESSION_BACKGROUND_WORKER_TASK: asyncio.Task | None = None
+FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK: asyncio.Task | None = None
+FILE_SESSION_BACKGROUND_ACTIVE_WORKSPACE_ID = ""
+FILE_SESSION_BACKGROUND_ACTIVE_PATH = ""
 PERMISSION_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
 CURATED_SOURCE_HEALTH: Dict[str, Dict[str, Any]] = {}
 
@@ -700,6 +703,9 @@ def workspace_row_to_record(row: Optional[tuple[Any, ...]]) -> Optional[Dict[str
         "root_path": str(row[2] or "").strip(),
         "created_at": row[3],
         "updated_at": row[4],
+        "background_focus_path": normalize_file_session_path(str(row[5] or "")) if len(row) > 5 and str(row[5] or "").strip() else "",
+        "background_focus_enabled": bool(int(row[6] or 0)) if len(row) > 6 else False,
+        "background_focus_updated_at": row[7] if len(row) > 7 else None,
     }
 
 
@@ -712,7 +718,8 @@ def get_workspace_record(workspace_id: str) -> Optional[Dict[str, Any]]:
     c = conn.cursor()
     try:
         c.execute(
-            '''SELECT id, display_name, root_path, created_at, updated_at
+            '''SELECT id, display_name, root_path, created_at, updated_at,
+                      background_focus_path, background_focus_enabled, background_focus_updated_at
                FROM workspaces
                WHERE id = ?''',
             (safe_workspace_id,),
@@ -731,7 +738,8 @@ def get_workspace_record_by_path(root_path: pathlib.Path) -> Optional[Dict[str, 
     c = conn.cursor()
     try:
         c.execute(
-            '''SELECT id, display_name, root_path, created_at, updated_at
+            '''SELECT id, display_name, root_path, created_at, updated_at,
+                      background_focus_path, background_focus_enabled, background_focus_updated_at
                FROM workspaces
                WHERE root_path = ?''',
             (str(resolved),),
@@ -769,6 +777,147 @@ def list_conversation_ids_for_workspace(workspace_id: str) -> List[str]:
     return [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
 
 
+def background_focus_matches(workspace_id: str, path: str) -> bool:
+    """Return whether one file currently owns the global background-polish loop."""
+    workspace = get_workspace_record(workspace_id) or {}
+    focus_path = normalize_file_session_path(str(workspace.get("background_focus_path") or ""))
+    enabled = bool(workspace.get("background_focus_enabled"))
+    return enabled and bool(focus_path) and focus_path == normalize_file_session_path(path)
+
+
+def cancel_active_background_job_if_needed(*, focused_workspace_id: str = "", focused_path: str = "") -> None:
+    """Cancel the running background optimize task when firepower moved elsewhere."""
+    global FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK
+    safe_workspace_id = str(focused_workspace_id or "").strip()
+    safe_path = normalize_file_session_path(focused_path) if str(focused_path or "").strip() else ""
+    active_task = FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK
+    active_workspace_id = str(FILE_SESSION_BACKGROUND_ACTIVE_WORKSPACE_ID or "").strip()
+    active_path = normalize_file_session_path(FILE_SESSION_BACKGROUND_ACTIVE_PATH) if str(FILE_SESSION_BACKGROUND_ACTIVE_PATH or "").strip() else ""
+    if not active_task or active_task.done() or not active_workspace_id or not active_path:
+        return
+    if safe_workspace_id and safe_path and active_workspace_id == safe_workspace_id and active_path == safe_path:
+        return
+    active_task.cancel()
+
+
+def supersede_background_jobs_for_nonfocused_files(
+    *,
+    focused_workspace_id: str = "",
+    focused_path: str = "",
+    reason: str,
+) -> None:
+    """Stop queued/running background jobs that no longer own the user's firepower."""
+    safe_workspace_id = str(focused_workspace_id or "").strip()
+    safe_focused_path = normalize_file_session_path(focused_path) if str(focused_path or "").strip() else ""
+    now = utcnow_iso()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT j.id, j.workspace_id, fs.path
+               FROM file_session_jobs j
+               JOIN file_sessions fs ON fs.id = j.file_session_id
+               WHERE j.lane = 'background' AND j.status IN ('queued', 'running')'''
+        )
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
+    affected_sessions: set[tuple[str, str]] = set()
+    affected_jobs: List[str] = []
+    for job_id, workspace_id, path in rows:
+        job_workspace_id = str(workspace_id or "").strip()
+        job_path = normalize_file_session_path(str(path or ""))
+        keep = (
+            safe_workspace_id
+            and safe_focused_path
+            and job_workspace_id == safe_workspace_id
+            and job_path == safe_focused_path
+        )
+        if keep:
+            continue
+        affected_jobs.append(str(job_id or "").strip())
+        try:
+            c.execute(
+                '''UPDATE file_session_jobs
+                   SET status = 'superseded', updated_at = ?, finished_at = COALESCE(finished_at, ?), error_text = ?
+                   WHERE id = ?''',
+                (now, now, reason, str(job_id or "").strip()),
+            )
+        except sqlite3.OperationalError:
+            continue
+        if job_workspace_id and job_path:
+            session = get_file_session_record(job_workspace_id, job_path) or {}
+            session_id = str(session.get("id") or "").strip()
+            if session_id:
+                affected_sessions.add((job_workspace_id, session_id))
+    conn.commit()
+    conn.close()
+    for workspace_id, session_id in affected_sessions:
+        publish_file_session_job_summary(workspace_id, session_id)
+
+
+def activate_background_focus_for_file(workspace_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """Give one file the background-polish loop and revoke it elsewhere."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        return None
+    safe_path = normalize_file_session_path(path)
+    now = utcnow_iso()
+    supersede_background_jobs_for_nonfocused_files(
+        focused_workspace_id=workspace["id"],
+        focused_path=safe_path,
+        reason="Background focus moved to another file.",
+    )
+    cancel_active_background_job_if_needed(
+        focused_workspace_id=workspace["id"],
+        focused_path=safe_path,
+    )
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            '''UPDATE workspaces
+               SET background_focus_path = ?, background_focus_enabled = 1, background_focus_updated_at = ?, updated_at = ?
+               WHERE id = ?''',
+            (safe_path, now, now, workspace["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_workspace_record(workspace["id"])
+
+
+def disable_background_focus(
+    workspace_id: str,
+    *,
+    path: str = "",
+    reason: str = "Background agent work stopped.",
+) -> Optional[Dict[str, Any]]:
+    """Disable background polishing for the current focus, optionally scoped to one path."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        return None
+    current_focus_path = normalize_file_session_path(str(workspace.get("background_focus_path") or ""))
+    scoped_path = normalize_file_session_path(path) if str(path or "").strip() else ""
+    if scoped_path and current_focus_path and scoped_path != current_focus_path:
+        return workspace
+    now = utcnow_iso()
+    supersede_background_jobs_for_nonfocused_files(reason=reason)
+    cancel_active_background_job_if_needed()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            '''UPDATE workspaces
+               SET background_focus_enabled = 0, background_focus_updated_at = ?, updated_at = ?
+               WHERE id = ?''',
+            (now, now, workspace["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_workspace_record(workspace["id"])
+
+
 def create_workspace_record(
     *,
     display_name: Optional[str] = None,
@@ -791,9 +940,10 @@ def create_workspace_record(
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        '''INSERT INTO workspaces (id, display_name, root_path, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)''',
-        (workspace_id, final_name, str(resolved_path), now, now),
+        '''INSERT INTO workspaces
+           (id, display_name, root_path, created_at, updated_at, background_focus_path, background_focus_enabled, background_focus_updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        (workspace_id, final_name, str(resolved_path), now, now, "", 0, None),
     )
     conn.commit()
     conn.close()
@@ -803,6 +953,9 @@ def create_workspace_record(
         "root_path": str(resolved_path),
         "created_at": now,
         "updated_at": now,
+        "background_focus_path": "",
+        "background_focus_enabled": False,
+        "background_focus_updated_at": None,
     }
 
 
@@ -812,7 +965,8 @@ def list_workspace_records(*, ensure_default: bool = False) -> List[Dict[str, An
     c = conn.cursor()
     try:
         c.execute(
-            '''SELECT id, display_name, root_path, created_at, updated_at
+            '''SELECT id, display_name, root_path, created_at, updated_at,
+                      background_focus_path, background_focus_enabled, background_focus_updated_at
                FROM workspaces
                ORDER BY LOWER(display_name), created_at'''
         )
@@ -1113,12 +1267,20 @@ def summarize_file_session_artifact_state(workspace_id: str, path: str) -> Dict[
 
 def enrich_file_session_records(workspace_id: str, sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Attach backend-managed job summaries so the client can stay lazy."""
+    workspace = get_workspace_record(workspace_id) or {}
+    focused_path = normalize_file_session_path(str(workspace.get("background_focus_path") or "")) if str(workspace.get("background_focus_path") or "").strip() else ""
+    focus_enabled = bool(workspace.get("background_focus_enabled"))
     enriched: List[Dict[str, Any]] = []
     for session in sessions:
         record = dict(session)
         record["job_summary"] = normalize_file_session_job_summary(record.get("job_summary"))
         record["latest_job"] = derive_file_session_latest_job(record.get("job_summary"))
         record["active_job"] = derive_file_session_active_job(record.get("job_summary"))
+        record["background_focus_active"] = bool(
+            focus_enabled
+            and focused_path
+            and focused_path == normalize_file_session_path(str(record.get("path") or ""))
+        )
         record["artifact_state"] = summarize_file_session_artifact_state(workspace_id, str(record.get("path") or ""))
         enriched.append(record)
     return enriched
@@ -1348,6 +1510,7 @@ FILE_SESSION_JOB_ACTIVE_STATUSES = {"queued", "running"}
 FILE_SESSION_JOB_TERMINAL_STATUSES = {"completed", "failed", "canceled", "superseded"}
 FILE_SESSION_BACKGROUND_POLL_SECONDS = max(1.0, float(os.getenv("FILE_SESSION_BACKGROUND_POLL_SECONDS", "2.5")))
 FILE_SESSION_BACKGROUND_MAX_TOKENS = max(256, int(os.getenv("FILE_SESSION_BACKGROUND_MAX_TOKENS", "1400")))
+FILE_SESSION_BACKGROUND_MAX_PASSES = max(1, int(os.getenv("FILE_SESSION_BACKGROUND_MAX_PASSES", "3")))
 
 
 def normalize_file_session_job_lane(lane: str) -> str:
@@ -7773,7 +7936,10 @@ def init_db():
                       display_name TEXT NOT NULL,
                       root_path TEXT NOT NULL,
                       created_at TEXT NOT NULL,
-                      updated_at TEXT NOT NULL)''')
+                      updated_at TEXT NOT NULL,
+                      background_focus_path TEXT NOT NULL DEFAULT '',
+                      background_focus_enabled INTEGER NOT NULL DEFAULT 0,
+                      background_focus_updated_at TEXT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS conversations
                      (id TEXT PRIMARY KEY,
@@ -7867,6 +8033,21 @@ def init_db():
             pass
 
         try:
+            c.execute("ALTER TABLE workspaces ADD COLUMN background_focus_path TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            c.execute("ALTER TABLE workspaces ADD COLUMN background_focus_enabled INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            c.execute("ALTER TABLE workspaces ADD COLUMN background_focus_updated_at TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             c.execute("ALTER TABLE file_sessions ADD COLUMN job_summary_json TEXT NOT NULL DEFAULT '{}'")
         except sqlite3.OperationalError:
             pass
@@ -7896,7 +8077,11 @@ def init_db():
 
         backfill_file_session_job_summaries(conn)
 
-        c.execute('SELECT id, display_name, root_path, created_at, updated_at FROM workspaces')
+        c.execute(
+            '''SELECT id, display_name, root_path, created_at, updated_at,
+                      background_focus_path, background_focus_enabled, background_focus_updated_at
+               FROM workspaces'''
+        )
         workspace_by_path: Dict[str, Dict[str, Any]] = {}
         for row in c.fetchall():
             record = workspace_row_to_record(row)
@@ -8056,6 +8241,11 @@ class WorkspaceFileUpdateRequest(BaseModel):
 class FileSessionEnsureRequest(BaseModel):
     path: str
     preferred_conversation_id: Optional[str] = None
+
+
+class FileSessionFocusRequest(BaseModel):
+    path: str
+    enabled: bool = True
 
 
 class FileSessionJobCreateRequest(BaseModel):
@@ -9564,6 +9754,30 @@ def current_file_session_target_digests(workspace_id: str, path: str) -> Dict[st
     }
 
 
+def file_session_quality_hint_for_path(path: str) -> str:
+    """Return extension-aware quality guidance for hidden file-session generation passes."""
+    suffix = pathlib.PurePosixPath(normalize_file_session_path(path)).suffix.lower()
+    if suffix in HTML_EXTENSIONS:
+        return (
+            "For HTML outputs, prefer a production-feeling single-page experience over a toy template. "
+            "Use semantic HTML, expressive typography, layered backgrounds, polished spacing, and real interaction. "
+            "If the draft implies a splash or hero CTA that reveals the main content, implement that behavior with CSS and JavaScript instead of leaving static placeholder markup."
+        )
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        return (
+            "For app code, favor complete working behavior over stub functions or placeholder comments. "
+            "Implement the requested flow end-to-end when it fits in one file."
+        )
+    if suffix in {".md", ".markdown", ".rst"}:
+        return (
+            "For documents, prefer fully-developed sections, specific wording, and polished structure over terse bullets or outline fragments."
+        )
+    return (
+        "Favor a complete, polished deliverable over placeholder structure. "
+        "If the current output feels generic or underdeveloped, replace it with something materially stronger."
+    )
+
+
 def build_background_optimize_payload(workspace_id: str, path: str) -> Dict[str, Any]:
     """Build one durable optimize-job payload from the current file session state."""
     safe_path = normalize_file_session_path(path)
@@ -9581,6 +9795,7 @@ def build_background_optimize_payload(workspace_id: str, path: str) -> Dict[str,
             "requires_matching_target_digest": digests["output_digest"],
             "replace_visible_output_only_if_improved": True,
         },
+        "attempt": 1,
     }
 
 
@@ -9590,10 +9805,12 @@ def queue_background_optimize_job_for_file_session(
     *,
     source_conversation_id: Optional[str] = None,
     trigger: str = "server_turn_complete",
+    attempt: int = 1,
 ) -> Dict[str, Any]:
     """Queue one background optimize job for a file session."""
     payload = build_background_optimize_payload(workspace_id, path)
     payload["trigger"] = str(trigger or "").strip() or "server_turn_complete"
+    payload["attempt"] = max(1, int(attempt or 1))
     return create_file_session_job_record(
         workspace_id,
         path,
@@ -9609,27 +9826,38 @@ def queue_background_optimize_job_for_file_session(
 
 def build_background_optimize_prompt(payload: Dict[str, Any]) -> str:
     """Build the hidden optimize prompt for one file-session job."""
+    attempt = max(1, int(payload.get("attempt") or 1))
+    target_path = payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)
     return "\n".join([
-        f"Optimize the generated file `{payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)}`.",
+        f"Optimize the generated file `{target_path}`.",
         "",
         f"Read the draft spec at `{payload.get('spec_path', '')}` and the current output at `{payload.get('current_output_path', '')}`.",
         f"Write an improved candidate to `{payload.get('candidate_output_path', '')}`.",
+        f"This is optimization pass {attempt} of up to {FILE_SESSION_BACKGROUND_MAX_PASSES}.",
         "Do not modify the visible target file yet.",
         "Use the draft as the authoritative source of structure and intent.",
         "You may use workspace tools, search, commands, tests, and git if they help improve the result.",
         "The candidate should be materially better than the current visible output, not merely different.",
+        "Raise the quality bar: remove placeholder content, generic filler, and underpowered structure.",
+        "Prefer a result that feels intentionally designed, complete, and satisfying to use.",
+        "If the current output only partially implements the draft, close those gaps directly in the candidate.",
+        file_session_quality_hint_for_path(str(target_path or "")),
     ])
 
 
 def build_background_evaluation_prompt(payload: Dict[str, Any]) -> str:
     """Build the hidden evaluation prompt for one file-session job."""
+    target_path = payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)
     return "\n".join([
-        f"Evaluate whether the candidate output for `{payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)}` should replace the visible output.",
+        f"Evaluate whether the candidate output for `{target_path}` should replace the visible output.",
         "",
         f"Read the draft spec at `{payload.get('spec_path', '')}`, the current output at `{payload.get('current_output_path', '')}`, and the candidate at `{payload.get('candidate_output_path', '')}`.",
-        f"Write strict JSON to `{payload.get('evaluation_output_path', '')}` with keys: decision, summary, current_score, candidate_score, should_promote.",
+        f"Write strict JSON to `{payload.get('evaluation_output_path', '')}` with keys: decision, summary, current_score, candidate_score, should_promote, follow_up_needed.",
         "Decision must be either `promote` or `keep_current`.",
-        "Only choose `promote` if the candidate is materially better for the latest draft intent and is safe to replace the visible output.",
+        "Score both versions from 0 to 10 for how well they satisfy the latest draft intent.",
+        "Only choose `keep_current` when the candidate is not materially better. If the candidate is clearly more complete, polished, interactive, or aligned with the draft, choose `promote`.",
+        "Set `follow_up_needed` to true when the promoted result still feels obviously incomplete, generic, or capable of another meaningful polish pass.",
+        file_session_quality_hint_for_path(str(target_path or "")),
         "Do not modify the visible target file or the draft spec during evaluation.",
     ])
 
@@ -9674,7 +9902,16 @@ async def process_background_file_session_job(job: Dict[str, Any]) -> None:
     file_path = normalize_file_session_path(job.get("path") or "")
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
     source_conversation_id = str(job.get("source_conversation_id") or "").strip()
+    attempt = max(1, int(payload.get("attempt") or 1))
     if not job_id or not workspace_id or not file_path:
+        return
+    if not background_focus_matches(workspace_id, file_path):
+        update_file_session_job_record(
+            workspace_id,
+            job_id,
+            status="superseded",
+            error_text="Background focus moved to another file or agent work stopped.",
+        )
         return
 
     current = current_file_session_target_digests(workspace_id, file_path)
@@ -9769,6 +10006,12 @@ async def process_background_file_session_job(job: Dict[str, Any]) -> None:
 
     decision = str(evaluation.get("decision") or "").strip().lower()
     should_promote = evaluation.get("should_promote")
+    follow_up_needed = bool(evaluation.get("follow_up_needed"))
+    candidate_score_raw = evaluation.get("candidate_score")
+    try:
+        candidate_score = float(candidate_score_raw)
+    except (TypeError, ValueError):
+        candidate_score = None
     if decision == "promote" and should_promote is not False:
         current_output = read_workspace_text_for_session(workspace_id, file_path)
         if current_output and current_output != candidate_content:
@@ -9780,6 +10023,27 @@ async def process_background_file_session_job(job: Dict[str, Any]) -> None:
         if candidate_content != current_output:
             write_workspace_text_for_session(workspace_id, file_path, candidate_content)
         update_file_session_job_record(workspace_id, job_id, status="completed")
+        if background_focus_matches(workspace_id, file_path) and attempt < FILE_SESSION_BACKGROUND_MAX_PASSES and (
+            follow_up_needed
+            or candidate_score is None
+            or candidate_score < 9.0
+        ):
+            try:
+                queue_background_optimize_job_for_file_session(
+                    workspace_id,
+                    file_path,
+                    source_conversation_id=conversation_id,
+                    trigger=f"follow_up_pass_{attempt + 1}",
+                    attempt=attempt + 1,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to queue follow-up optimization pass %s for %s:%s: %s",
+                    attempt + 1,
+                    workspace_id,
+                    file_path,
+                    exc,
+                )
         return
 
     update_file_session_job_record(
@@ -9792,6 +10056,7 @@ async def process_background_file_session_job(job: Dict[str, Any]) -> None:
 
 async def file_session_background_worker() -> None:
     """Continuously consume queued background file-session jobs on the server."""
+    global FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK, FILE_SESSION_BACKGROUND_ACTIVE_WORKSPACE_ID, FILE_SESSION_BACKGROUND_ACTIVE_PATH
     while True:
         try:
             if not await vllm_health_check():
@@ -9801,7 +10066,17 @@ async def file_session_background_worker() -> None:
             if not job:
                 await asyncio.sleep(FILE_SESSION_BACKGROUND_POLL_SECONDS)
                 continue
-            await process_background_file_session_job(job)
+            FILE_SESSION_BACKGROUND_ACTIVE_WORKSPACE_ID = str(job.get("workspace_id") or "").strip()
+            FILE_SESSION_BACKGROUND_ACTIVE_PATH = normalize_file_session_path(str(job.get("path") or ""))
+            FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK = asyncio.create_task(process_background_file_session_job(job))
+            try:
+                await FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK
+            except asyncio.CancelledError:
+                pass
+            finally:
+                FILE_SESSION_BACKGROUND_ACTIVE_JOB_TASK = None
+                FILE_SESSION_BACKGROUND_ACTIVE_WORKSPACE_ID = ""
+                FILE_SESSION_BACKGROUND_ACTIVE_PATH = ""
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -9844,6 +10119,34 @@ async def ensure_file_session(workspace_id: str, request: FileSessionEnsureReque
         return enrich_file_session_records(workspace_id, [session])[0]
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/workspaces/{workspace_id}/file-sessions/focus")
+async def set_file_session_focus_for_workspace(workspace_id: str, request: FileSessionFocusRequest):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    safe_path = normalize_file_session_path(request.path)
+    ensure_file_session_record(workspace["id"], safe_path)
+    updated_workspace = (
+        activate_background_focus_for_file(workspace["id"], safe_path)
+        if request.enabled
+        else disable_background_focus(
+            workspace["id"],
+            path=safe_path,
+            reason="Background focus moved to another file or agent work stopped.",
+        )
+    ) or get_workspace_record(workspace["id"])
+    session = ensure_file_session_record(workspace["id"], safe_path)
+    enriched_session = enrich_file_session_records(workspace["id"], [session])[0]
+    return {
+        "workspace_id": workspace["id"],
+        "path": safe_path,
+        "enabled": bool((updated_workspace or {}).get("background_focus_enabled")) and (
+            normalize_file_session_path(str((updated_workspace or {}).get("background_focus_path") or "")) == safe_path
+        ),
+        "session": enriched_session,
+    }
 
 
 @app.get("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}")
@@ -15305,6 +15608,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         effective_message = prepared.effective_message
         deep_succeeded = False
         if prepared.active_file_path and not background_job_id:
+            conversation = get_conversation_record(conv_id) or {}
+            focused_workspace_id = str(conversation.get("workspace_id") or "").strip()
+            if focused_workspace_id:
+                activate_background_focus_for_file(focused_workspace_id, prepared.active_file_path)
+                setattr(websocket, "active_file_session_workspace_id", focused_workspace_id)
+                setattr(websocket, "active_file_session_path", prepared.active_file_path)
             foreground_job_workspace_id, foreground_job_record = resolve_foreground_file_session_job_for_turn(
                 conv_id,
                 prepared.active_file_path,
@@ -15644,6 +15953,9 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     finally:
         if client_turn_id and str(getattr(websocket, "active_client_turn_id", "") or "").strip() == client_turn_id:
             setattr(websocket, "active_client_turn_id", "")
+        if not background_job_id:
+            setattr(websocket, "active_file_session_workspace_id", "")
+            setattr(websocket, "active_file_session_path", "")
 
 @app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
@@ -15668,6 +15980,14 @@ async def chat_websocket(websocket: WebSocket):
             if data.get('type') == 'pong':
                 continue
             if data.get('type') == 'stop':
+                active_workspace_id = str(getattr(websocket, "active_file_session_workspace_id", "") or "").strip()
+                active_file_path = str(getattr(websocket, "active_file_session_path", "") or "").strip()
+                if active_workspace_id and active_file_path:
+                    disable_background_focus(
+                        active_workspace_id,
+                        path=active_file_path,
+                        reason="Background agent work stopped.",
+                    )
                 if active_task and not active_task.done():
                     active_task.cancel()
                     try:

@@ -4428,6 +4428,23 @@ async function ensureDraftFileSession(path, preferredConversationId = '') {
     return data;
 }
 
+async function setDraftAgentFocus(path = activeDraftPath, enabled = true) {
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    if (!currentWorkspaceId || !normalizedPath) return null;
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-sessions/focus`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            path: normalizedPath,
+            enabled: Boolean(enabled),
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
+    return data;
+}
+
 function getDraftHistoryForWorkspace(workspaceId = currentWorkspaceId) {
     const safeWorkspaceId = String(workspaceId || '').trim();
     if (!safeWorkspaceId) return [];
@@ -4696,7 +4713,7 @@ async function refreshDraftOutputPane() {
     if (!currentWorkspaceId || !previewPath) {
         pathEl.textContent = targetPath && targetPath !== DEFAULT_DRAFT_FILENAME ? (basename(targetPath) || targetPath) : '';
         stateEl.textContent = '';
-        previewEl.innerHTML = '<div class="workspace-empty">The generated file will appear here as the agent works.</div>';
+        previewEl.innerHTML = '<div class="workspace-empty">Waiting.</div>';
         return;
     }
 
@@ -4709,7 +4726,7 @@ async function refreshDraftOutputPane() {
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 404) {
         stateEl.textContent = '';
-        previewEl.innerHTML = '<div class="workspace-empty">No generated file yet. Keep drafting and the agent will build it here.</div>';
+        previewEl.innerHTML = '<div class="workspace-empty">Nothing here yet.</div>';
         return;
     }
     if (!resp.ok) {
@@ -4767,6 +4784,9 @@ async function switchToDraftFile(path, options = {}) {
     const changingFiles = !compareWorkspacePaths(nextPath, activeDraftPath || '');
     const preferredConversationId = changingFiles && hasConversationMessages() ? '' : currentConvId;
     const session = await ensureDraftFileSession(nextPath, preferredConversationId);
+    setDraftAgentFocus(nextPath, true).catch(error => {
+        console.error('Failed to move draft agent focus:', error);
+    });
     const nextSessionId = String(session?.conversation_id || '').trim();
 
     if (nextSessionId && nextSessionId !== currentConvId) {
@@ -5064,6 +5084,9 @@ async function loadDraftDocument(path, options = {}) {
         refreshDraftOutputPane().catch(() => {});
         return;
     }
+    setDraftAgentFocus(draftPath, true).catch(error => {
+        console.error('Failed to sync draft agent focus:', error);
+    });
     try {
         const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(specPath)}`);
         const data = await resp.json().catch(() => ({}));
@@ -5157,14 +5180,16 @@ function buildDraftRealizationPrompt() {
         'Treat the visible draft as a wish list, outline, and intent document rather than finished code.',
         'Translate the natural-language draft into a proper file of the same type as the target filename.',
         'Create or update the target file directly in the workspace, but do not overwrite the spec file.',
-        'Preserve any good existing structure in the target file and make the smallest useful revision that keeps the file coherent.',
+        'Aim for a polished, fully-realized result that actually fulfills the draft, not a placeholder or toy first pass.',
+        'Preserve any good existing structure in the target file, but feel free to make substantial improvements when the current output is shallow, generic, or obviously incomplete.',
+        'Implement requested interactions, structure, styling, and content directly in the file instead of describing what should be added later.',
         'Use web search when it would materially improve the result, especially for factual content, examples, references, or content expansion.',
     ].join('\n');
 }
 
 function draftAgentHintForProfile(profileKey) {
     if (profileKey === 'html') {
-        return 'The visible draft is a natural-language outline for an HTML file. Read the spec, then generate semantic HTML in the target file.';
+        return 'The visible draft is a natural-language outline for an HTML file. Generate a polished, fun, responsive page with strong typography, deliberate layout, meaningful motion, and JavaScript interactions when the spec asks for them. If the draft implies a splash screen, CTA flow, hidden main content, or playful dev-site features, implement those behaviors in the file instead of leaving them as future work.';
     }
     if (profileKey === 'markdown') {
         return 'The visible draft is a natural-language outline for a Markdown file. Turn it into readable, well-structured Markdown in the target file.';
@@ -5240,6 +5265,10 @@ async function requestDraftRealization(options = {}) {
     await ensureDraftReadyForTurn();
     const prompt = `${buildDraftRealizationPrompt()}${buildActiveDraftContextForTurn()}`;
     const specPath = draftSpecPathForTargetPath(activeDraftPath);
+    await setDraftAgentFocus(activeDraftPath, true).catch(error => {
+        console.error('Failed to activate draft agent focus:', error);
+        return null;
+    });
     const queuedJob = await createDraftFileJob({
         path: activeDraftPath,
         lane: 'foreground',
@@ -6578,6 +6607,9 @@ function handlePrimaryAction() {
 function stopMessage() {
     if (!isGenerating) return;
     clearPendingPermissionRequest();
+    setDraftAgentFocus(activeDraftPath, false).catch(error => {
+        console.error('Failed to stop background agent focus:', error);
+    });
     if (currentTurnTransport === 'http' && httpTurnAbortController) {
         httpTurnAbortController.abort();
         return;
