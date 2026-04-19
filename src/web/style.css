@@ -2487,6 +2487,10 @@ textarea {
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
+.conv-file-badge-empty {
+    background: color-mix(in srgb, var(--text_tertiary) 12%, var(--bg_secondary));
+    color: var(--text_secondary);
+}
 .conv-title {
     font-size: 12px;
     font-weight: 500;
@@ -2523,7 +2527,8 @@ textarea {
     display: none;
     gap: 2px;
 }
-.conv-item:hover .conv-actions { display: flex; }
+.conv-item:hover .conv-actions,
+.conv-item.active .conv-actions { display: flex; }
 .conv-btn {
     background: none;
     border: none;
