@@ -73,7 +73,7 @@ textarea {
     --scrollbar_track: #201d19;
     --scrollbar_thumb: #4d463d;
     --scrollbar_thumb_hover: #695f54;
-    --chrome-gutter: clamp(10px, 1.4vw, 16px);
+    --chrome-gutter: clamp(12px, 1.3vw, 18px);
     --chrome-top-lane: clamp(44px, 6vh, 58px);
     --sidebar-toggle-size: 38px;
     --safe-top: env(safe-area-inset-top, 0px);
@@ -86,12 +86,13 @@ textarea {
     --chat-column-max: 760px;
     --menu-sidebar-width: clamp(252px, 19vw, 300px);
     --file-explorer-width: clamp(252px, 19vw, 320px);
-    --workspace-sidebar-width: clamp(318px, 24vw, 392px);
-    --workspace-viewer-width: clamp(420px, 32vw, 640px);
+    --workspace-sidebar-width: clamp(288px, 18vw, 348px);
+    --workspace-viewer-width: clamp(460px, 29vw, 700px);
     --workspace-pane-gap: 12px;
     --workspace-shell-width: var(--workspace-sidebar-width);
     --workspace-shell-width-split: calc(var(--workspace-sidebar-width) + var(--workspace-viewer-width) + var(--workspace-pane-gap));
-    --workspace-shell-width-compact: clamp(320px, 38vw, 420px);
+    --workspace-shell-width-compact: clamp(320px, 34vw, 400px);
+    --desktop-main-max-width: 1680px;
     --menu-toggle-open-left: calc(min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 20px);
     --panel-radius: 22px;
     --surface-radius: 16px;
@@ -116,6 +117,7 @@ textarea {
     --chat-main-inset-right: 0px;
     flex: 1;
     display: flex;
+    justify-content: center;
     min-height: 0;
     position: relative;
     padding: calc(var(--safe-top) + 18px) var(--chrome-gutter) var(--chrome-gutter);
@@ -128,6 +130,8 @@ textarea {
     gap: 0;
     min-width: 0;
     min-height: 0;
+    width: min(100%, var(--desktop-main-max-width));
+    max-width: min(var(--desktop-main-max-width), calc(100vw - (var(--chrome-gutter) * 2)));
     overflow: hidden;
     position: relative;
     margin-left: var(--chat-main-inset-left);
@@ -157,20 +161,20 @@ textarea {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 14px 14px 12px;
+    gap: 16px;
+    padding: 18px 18px 16px;
     border: 1px solid color-mix(in srgb, var(--dense-border) 42%, transparent);
-    border-radius: 26px;
+    border-radius: 30px;
     background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 99%, transparent), color-mix(in srgb, var(--bg_primary) 98%, transparent));
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.14);
     overflow: hidden;
 }
 .draft-shell-header {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    min-height: 24px;
+    gap: 16px;
+    min-height: 34px;
     transition: opacity 180ms ease;
 }
 .draft-shell-header.is-quiet {
@@ -277,8 +281,8 @@ textarea {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-    gap: 12px;
+    grid-template-columns: minmax(460px, 0.96fr) minmax(560px, 1.14fr);
+    gap: 18px;
 }
 .draft-shell-pane {
     flex: 1;
@@ -286,7 +290,7 @@ textarea {
 }
 .draft-shell-pane-editor {
     border: 1px solid color-mix(in srgb, var(--dense-border) 34%, transparent);
-    border-radius: 20px;
+    border-radius: 24px;
     background: color-mix(in srgb, var(--bg_primary) 92%, transparent);
     overflow: hidden;
 }
@@ -340,7 +344,7 @@ textarea {
     flex: 1;
     min-height: 0;
     border: 1px solid color-mix(in srgb, var(--dense-border) 30%, transparent);
-    border-radius: 20px;
+    border-radius: 24px;
     background: color-mix(in srgb, var(--bg_primary) 94%, transparent);
     overflow: hidden;
 }
@@ -348,7 +352,7 @@ textarea {
     height: 100%;
     min-height: 0;
     overflow: auto;
-    padding: 12px;
+    padding: 18px;
 }
 .draft-output-preview pre {
     margin: 0;
@@ -1173,7 +1177,7 @@ textarea {
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 6%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     border: 1px solid var(--dense-border);
-    border-radius: var(--panel-radius);
+    border-radius: 24px;
     overflow: hidden;
     box-shadow: 0 20px 46px rgba(0, 0, 0, 0.22);
     transform: translateX(100%);
@@ -1786,9 +1790,9 @@ textarea {
 
 .ide-workspace {
     position: fixed;
-    top: calc(var(--safe-top) + var(--chrome-gutter));
+    top: calc(var(--safe-top) + 12px);
     right: calc(var(--safe-right) + var(--chrome-gutter));
-    bottom: calc(var(--safe-bottom) + var(--chrome-gutter));
+    bottom: calc(var(--safe-bottom) + 12px);
     width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
     min-width: 0;
     display: flex;
@@ -1801,9 +1805,9 @@ textarea {
     transform: translateX(calc(var(--workspace-shell-width) * 0.25));
     transition: opacity 0.22s ease, transform 0.24s ease, visibility 0.24s step-end;
     z-index: 960;
-    padding: 12px;
+    padding: 14px;
     border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
-    border-radius: 26px;
+    border-radius: 30px;
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 7%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     box-shadow: 0 24px 52px rgba(0, 0, 0, 0.28);
@@ -1870,7 +1874,7 @@ textarea {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--dense-border);
-    border-radius: var(--panel-radius);
+    border-radius: 24px;
     background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 94%, transparent), color-mix(in srgb, var(--bg_primary) 88%, black 12%));
     overflow: hidden;
     box-shadow: 0 20px 46px rgba(0, 0, 0, 0.2);
@@ -4411,6 +4415,10 @@ pre:hover .copy-btn { opacity: 1; }
     .ide-workspace {
         width: min(calc(100vw - (var(--chrome-gutter) * 2)), var(--workspace-shell-width));
         max-width: calc(100vw - (var(--chrome-gutter) * 2));
+    }
+    .chat-main {
+        width: 100%;
+        max-width: none;
     }
     .ide-top {
         flex-direction: column;
