@@ -403,6 +403,7 @@ def _read_selected_model_state() -> tuple[str, Optional[str], Dict[str, Any], Di
 
 ACTIVE_MODEL_PROFILE, ACTIVE_CUSTOM_MODEL_NAME, MODEL_LOAD_HISTORY, MODEL_LOADING_STATUS = _read_selected_model_state()
 ACTIVE_MODEL_LOCK: asyncio.Lock | None = None
+FILE_SESSION_BACKGROUND_WORKER_TASK: asyncio.Task | None = None
 PERMISSION_APPROVAL_WAITERS: Dict[str, Dict[str, Any]] = {}
 CURATED_SOURCE_HEALTH: Dict[str, Dict[str, Any]] = {}
 
@@ -867,6 +868,52 @@ def file_session_spec_path(path: str) -> str:
     return f".ai-chat/drafts/{file_session_storage_slug(path)}.draft.md"
 
 
+def file_session_candidate_dir_path(path: str) -> str:
+    """Return the hidden candidate directory for one target file."""
+    return f".ai-chat/candidates/{file_session_storage_slug(path)}"
+
+
+def file_session_candidate_path(path: str, timestamp: Optional[datetime] = None) -> str:
+    """Return one timestamped hidden candidate path for a target file."""
+    safe_path = normalize_file_session_path(path)
+    ext = pathlib.PurePosixPath(safe_path).suffix or ".txt"
+    instant = timestamp or datetime.now()
+    stamp = instant.isoformat().replace(":", "-").replace(".", "-")
+    return f"{file_session_candidate_dir_path(safe_path)}/{stamp}{ext}"
+
+
+def file_session_evaluation_dir_path(path: str) -> str:
+    """Return the hidden evaluation directory for one target file."""
+    return f".ai-chat/evaluations/{file_session_storage_slug(path)}"
+
+
+def file_session_evaluation_path(path: str, timestamp: Optional[datetime] = None) -> str:
+    """Return one timestamped hidden evaluation path for a target file."""
+    safe_path = normalize_file_session_path(path)
+    instant = timestamp or datetime.now()
+    stamp = instant.isoformat().replace(":", "-").replace(".", "-")
+    return f"{file_session_evaluation_dir_path(safe_path)}/{stamp}.json"
+
+
+def file_session_version_dir_path(path: str) -> str:
+    """Return the hidden version directory for one target file."""
+    return f".ai-chat/versions/{file_session_storage_slug(path)}"
+
+
+def file_session_version_path(path: str, timestamp: Optional[datetime] = None) -> str:
+    """Return one timestamped hidden version snapshot path for a target file."""
+    safe_path = normalize_file_session_path(path)
+    ext = pathlib.PurePosixPath(safe_path).suffix or ".txt"
+    instant = timestamp or datetime.now()
+    stamp = instant.isoformat().replace(":", "-").replace(".", "-")
+    return f"{file_session_version_dir_path(safe_path)}/{stamp}{ext}"
+
+
+def stable_text_digest(text: str) -> str:
+    """Return a stable digest for draft/output comparisons."""
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+
 def file_session_row_to_record(row: Optional[tuple]) -> Optional[Dict[str, Any]]:
     """Convert one file-session row into a JSON-safe payload."""
     if not row:
@@ -945,6 +992,36 @@ def list_file_session_records(workspace_id: str) -> List[Dict[str, Any]]:
     return records
 
 
+def summarize_file_session_jobs(workspace_id: str, file_session_id: str) -> Dict[str, Any]:
+    """Return lightweight latest and active job summaries for one file session."""
+    jobs = list_file_session_job_records(workspace_id, file_session_id, limit=8)
+    latest_job = jobs[0] if jobs else None
+    active_job = next(
+        (
+            job
+            for job in jobs
+            if normalize_file_session_job_status(str(job.get("status") or "")) in {"queued", "running"}
+        ),
+        None,
+    )
+    return {
+        "latest_job": latest_job,
+        "active_job": active_job,
+    }
+
+
+def enrich_file_session_records(workspace_id: str, sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach backend-managed job summaries so the client can stay lazy."""
+    enriched: List[Dict[str, Any]] = []
+    for session in sessions:
+        record = dict(session)
+        summary = summarize_file_session_jobs(workspace_id, str(record.get("id") or ""))
+        record["latest_job"] = summary.get("latest_job")
+        record["active_job"] = summary.get("active_job")
+        enriched.append(record)
+    return enriched
+
+
 def ensure_file_session_record(
     workspace_id: str,
     path: str,
@@ -1017,6 +1094,289 @@ def ensure_file_session_record(
         "updated_at": now,
         "title": safe_path,
     }
+
+
+FILE_SESSION_JOB_LANES = {"foreground", "background"}
+FILE_SESSION_JOB_STATUSES = {"queued", "running", "completed", "failed", "canceled", "superseded"}
+FILE_SESSION_BACKGROUND_POLL_SECONDS = max(1.0, float(os.getenv("FILE_SESSION_BACKGROUND_POLL_SECONDS", "2.5")))
+FILE_SESSION_BACKGROUND_MAX_TOKENS = max(256, int(os.getenv("FILE_SESSION_BACKGROUND_MAX_TOKENS", "1400")))
+
+
+def normalize_file_session_job_lane(lane: str) -> str:
+    """Normalize one file-session job lane into a supported value."""
+    safe_lane = str(lane or "").strip().lower()
+    return safe_lane if safe_lane in FILE_SESSION_JOB_LANES else "foreground"
+
+
+def normalize_file_session_job_status(status: str) -> str:
+    """Normalize one file-session job status into a supported value."""
+    safe_status = str(status or "").strip().lower()
+    return safe_status if safe_status in FILE_SESSION_JOB_STATUSES else "queued"
+
+
+def file_session_job_row_to_record(row: Optional[tuple]) -> Optional[Dict[str, Any]]:
+    """Convert one file-session job row into a JSON-safe payload."""
+    if not row:
+        return None
+    payload: Dict[str, Any] = {}
+    raw_payload = str(row[7] or "").strip()
+    if raw_payload:
+        try:
+            parsed = json.loads(raw_payload)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = {"raw": raw_payload}
+    return {
+        "id": str(row[0] or "").strip(),
+        "workspace_id": str(row[1] or "").strip(),
+        "file_session_id": str(row[2] or "").strip(),
+        "path": normalize_file_session_path(str(row[3] or "")),
+        "lane": normalize_file_session_job_lane(str(row[4] or "")),
+        "job_kind": str(row[5] or "").strip(),
+        "status": normalize_file_session_job_status(str(row[6] or "")),
+        "payload": payload,
+        "title": str(row[8] or "").strip(),
+        "source_conversation_id": str(row[9] or "").strip(),
+        "created_at": row[10],
+        "updated_at": row[11],
+        "started_at": row[12],
+        "finished_at": row[13],
+        "error_text": str(row[14] or "").strip(),
+    }
+
+
+def list_file_session_job_records(
+    workspace_id: str,
+    file_session_id: str,
+    *,
+    lane: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Return recent durable jobs for one file session."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    safe_session_id = str(file_session_id or "").strip()
+    safe_limit = max(1, min(int(limit or 50), 200))
+    if not safe_workspace_id or not safe_session_id:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        if lane:
+            c.execute(
+                '''SELECT j.id, j.workspace_id, j.file_session_id, fs.path, j.lane, j.job_kind, j.status,
+                          j.payload_json, j.title, j.source_conversation_id, j.created_at, j.updated_at,
+                          j.started_at, j.finished_at, j.error_text
+                   FROM file_session_jobs j
+                   JOIN file_sessions fs ON fs.id = j.file_session_id
+                   WHERE j.workspace_id = ? AND j.file_session_id = ? AND j.lane = ?
+                   ORDER BY j.updated_at DESC, j.created_at DESC
+                   LIMIT ?''',
+                (safe_workspace_id, safe_session_id, normalize_file_session_job_lane(lane), safe_limit),
+            )
+        else:
+            c.execute(
+                '''SELECT j.id, j.workspace_id, j.file_session_id, fs.path, j.lane, j.job_kind, j.status,
+                          j.payload_json, j.title, j.source_conversation_id, j.created_at, j.updated_at,
+                          j.started_at, j.finished_at, j.error_text
+                   FROM file_session_jobs j
+                   JOIN file_sessions fs ON fs.id = j.file_session_id
+                   WHERE j.workspace_id = ? AND j.file_session_id = ?
+                   ORDER BY j.updated_at DESC, j.created_at DESC
+                   LIMIT ?''',
+                (safe_workspace_id, safe_session_id, safe_limit),
+            )
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [record for row in rows if (record := file_session_job_row_to_record(row))]
+
+
+def create_file_session_job_record(
+    workspace_id: str,
+    path: str,
+    *,
+    lane: str,
+    job_kind: str,
+    title: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    source_conversation_id: Optional[str] = None,
+    status: str = "queued",
+    supersede_matching_kind: bool = False,
+) -> Dict[str, Any]:
+    """Create one durable file-session job and return the stored record."""
+    session = ensure_file_session_record(
+        workspace_id,
+        path,
+        preferred_conversation_id=source_conversation_id,
+    )
+    safe_workspace_id = str(session.get("workspace_id") or workspace_id or "").strip()
+    safe_session_id = str(session.get("id") or "").strip()
+    safe_path = normalize_file_session_path(session.get("path") or path)
+    safe_lane = normalize_file_session_job_lane(lane)
+    safe_status = normalize_file_session_job_status(status)
+    safe_job_kind = str(job_kind or "").strip() or "task"
+    safe_title = str(title or "").strip() or safe_job_kind.replace("_", " ").strip().title()
+    safe_source_conversation_id = str(source_conversation_id or session.get("conversation_id") or "").strip()
+    now = utcnow_iso()
+    payload_json = json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)
+    job_id = uuid.uuid4().hex
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if safe_lane == "foreground":
+        c.execute(
+            '''UPDATE file_session_jobs
+               SET status = 'superseded', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+               WHERE workspace_id = ? AND file_session_id = ? AND lane = 'foreground'
+                 AND status IN ('queued', 'running')''',
+            (now, now, safe_workspace_id, safe_session_id),
+        )
+    elif supersede_matching_kind:
+        c.execute(
+            '''UPDATE file_session_jobs
+               SET status = 'superseded', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+               WHERE workspace_id = ? AND file_session_id = ? AND lane = ? AND job_kind = ?
+                 AND status IN ('queued', 'running')''',
+            (now, now, safe_workspace_id, safe_session_id, safe_lane, safe_job_kind),
+        )
+    c.execute(
+        '''INSERT INTO file_session_jobs
+           (id, workspace_id, file_session_id, lane, job_kind, status, payload_json, title,
+            source_conversation_id, created_at, updated_at, started_at, finished_at, error_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            job_id,
+            safe_workspace_id,
+            safe_session_id,
+            safe_lane,
+            safe_job_kind,
+            safe_status,
+            payload_json,
+            safe_title,
+            safe_source_conversation_id,
+            now,
+            now,
+            now if safe_status == "running" else None,
+            now if safe_status in {"completed", "failed", "canceled", "superseded"} else None,
+            "",
+        ),
+    )
+    c.execute(
+        '''UPDATE file_sessions
+           SET updated_at = ?, title = ?
+           WHERE id = ?''',
+        (now, safe_path, safe_session_id),
+    )
+    conn.commit()
+    c.execute(
+        '''SELECT j.id, j.workspace_id, j.file_session_id, fs.path, j.lane, j.job_kind, j.status,
+                  j.payload_json, j.title, j.source_conversation_id, j.created_at, j.updated_at,
+                  j.started_at, j.finished_at, j.error_text
+           FROM file_session_jobs j
+           JOIN file_sessions fs ON fs.id = j.file_session_id
+           WHERE j.id = ?''',
+        (job_id,),
+    )
+    row = c.fetchone()
+    conn.close()
+    return file_session_job_row_to_record(row) or {}
+
+
+def update_file_session_job_record(
+    workspace_id: str,
+    job_id: str,
+    *,
+    status: str,
+    error_text: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Update one durable file-session job status."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    safe_job_id = str(job_id or "").strip()
+    if not safe_workspace_id or not safe_job_id:
+        return None
+    safe_status = normalize_file_session_job_status(status)
+    now = utcnow_iso()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        '''UPDATE file_session_jobs
+           SET status = ?, updated_at = ?, started_at = CASE
+                   WHEN ? = 'running' AND started_at IS NULL THEN ?
+                   ELSE started_at
+               END,
+               finished_at = CASE
+                   WHEN ? IN ('completed', 'failed', 'canceled', 'superseded') THEN ?
+                   ELSE finished_at
+               END,
+               error_text = ?
+           WHERE id = ? AND workspace_id = ?''',
+        (
+            safe_status,
+            now,
+            safe_status,
+            now,
+            safe_status,
+            now,
+            str(error_text or "").strip(),
+            safe_job_id,
+            safe_workspace_id,
+        ),
+    )
+    c.execute(
+        '''SELECT j.id, j.workspace_id, j.file_session_id, fs.path, j.lane, j.job_kind, j.status,
+                  j.payload_json, j.title, j.source_conversation_id, j.created_at, j.updated_at,
+                  j.started_at, j.finished_at, j.error_text
+           FROM file_session_jobs j
+           JOIN file_sessions fs ON fs.id = j.file_session_id
+           WHERE j.id = ? AND j.workspace_id = ?''',
+        (safe_job_id, safe_workspace_id),
+    )
+    row = c.fetchone()
+    conn.commit()
+    conn.close()
+    return file_session_job_row_to_record(row)
+
+
+def reset_background_file_session_jobs() -> None:
+    """Reset in-flight background jobs after a server restart."""
+    now = utcnow_iso()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''UPDATE file_session_jobs
+               SET status = 'queued', updated_at = ?, started_at = NULL, finished_at = NULL, error_text = ''
+               WHERE lane = 'background' AND status = 'running' ''',
+            (now,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def next_background_file_session_job_record() -> Optional[Dict[str, Any]]:
+    """Return the next queued background file-session job."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT j.id, j.workspace_id, j.file_session_id, fs.path, j.lane, j.job_kind, j.status,
+                      j.payload_json, j.title, j.source_conversation_id, j.created_at, j.updated_at,
+                      j.started_at, j.finished_at, j.error_text
+               FROM file_session_jobs j
+               JOIN file_sessions fs ON fs.id = j.file_session_id
+               WHERE j.lane = 'background' AND j.status = 'queued'
+               ORDER BY j.updated_at ASC, j.created_at ASC
+               LIMIT 1'''
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.close()
+    return file_session_job_row_to_record(row)
 
 
 def get_conversation_record(conversation_id: str) -> Optional[Dict[str, Any]]:
@@ -2301,6 +2661,7 @@ async def reset_application_state() -> None:
         c.execute('DELETE FROM messages')
         c.execute('DELETE FROM document_chunks')
         c.execute('DELETE FROM document_sources')
+        c.execute('DELETE FROM file_session_jobs')
         c.execute('DELETE FROM file_sessions')
         c.execute('DELETE FROM conversations')
         c.execute('DELETE FROM runs')
@@ -6607,6 +6968,8 @@ async def complete_successful_turn(
     *,
     workflow_execution: Optional[WorkflowExecutionContext] = None,
     final_outcome: str = "completed_direct",
+    active_file_path: str = "",
+    queue_background_optimize: bool = False,
 ) -> Optional[int]:
     """Persist assistant output best-effort, then close the turn without surfacing bookkeeping errors."""
     assistant_message_id: Optional[int] = None
@@ -6628,6 +6991,20 @@ async def complete_successful_turn(
         schedule_conversation_summary_refresh(conversation_id)
     except Exception as exc:
         logger.warning("Failed to schedule conversation summary refresh for %s: %s", conversation_id, exc)
+
+    if queue_background_optimize and active_file_path:
+        try:
+            conversation = get_conversation_record(conversation_id) or {}
+            workspace_id = str(conversation.get("workspace_id") or "").strip()
+            if workspace_id:
+                queue_background_optimize_job_for_file_session(
+                    workspace_id,
+                    active_file_path,
+                    source_conversation_id=conversation_id,
+                    trigger="server_turn_complete",
+                )
+        except Exception as exc:
+            logger.warning("Failed to queue background optimize job for %s:%s: %s", conversation_id, active_file_path, exc)
 
     if assistant_message_id is not None:
         await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
@@ -6984,6 +7361,23 @@ def init_db():
                       title TEXT NOT NULL DEFAULT '',
                       UNIQUE(workspace_id, path))''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS file_session_jobs
+                     (id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      file_session_id TEXT NOT NULL,
+                      lane TEXT NOT NULL,
+                      job_kind TEXT NOT NULL,
+                      status TEXT NOT NULL DEFAULT 'queued',
+                      payload_json TEXT NOT NULL DEFAULT '{}',
+                      title TEXT NOT NULL DEFAULT '',
+                      source_conversation_id TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      started_at TEXT,
+                      finished_at TEXT,
+                      error_text TEXT NOT NULL DEFAULT '',
+                      FOREIGN KEY(file_session_id) REFERENCES file_sessions(id))''')
+
         try:
             c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
         except sqlite3.OperationalError:
@@ -7026,6 +7420,8 @@ def init_db():
             c.execute('CREATE INDEX IF NOT EXISTS idx_conversations_workspace_id ON conversations(workspace_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_workspace_id ON runs(workspace_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_file_sessions_workspace_id ON file_sessions(workspace_id, updated_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_file_session_jobs_session_id ON file_session_jobs(file_session_id, updated_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_file_session_jobs_workspace_lane ON file_session_jobs(workspace_id, lane, status, updated_at)')
         except sqlite3.OperationalError:
             pass
 
@@ -7189,6 +7585,22 @@ class WorkspaceFileUpdateRequest(BaseModel):
 class FileSessionEnsureRequest(BaseModel):
     path: str
     preferred_conversation_id: Optional[str] = None
+
+
+class FileSessionJobCreateRequest(BaseModel):
+    path: str
+    lane: str = "foreground"
+    job_kind: str
+    title: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source_conversation_id: Optional[str] = None
+    status: str = "queued"
+    supersede_matching_kind: bool = False
+
+
+class FileSessionJobStatusRequest(BaseModel):
+    status: str
+    error_text: Optional[str] = None
 
 
 class VoiceSynthesisRequest(BaseModel):
@@ -8648,6 +9060,284 @@ def build_workspace_archive_response(workspace_id: str) -> Response:
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
 
 
+def read_workspace_text_for_session(workspace_id: str, path: str) -> str:
+    """Read one workspace text file for hidden file-session processing."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
+    if not target.is_file():
+        return ""
+    try:
+        return target.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def write_workspace_text_for_session(workspace_id: str, path: str, content: str) -> str:
+    """Write one workspace text file for hidden file-session processing."""
+    payload = write_workspace_file_for_workspace(
+        workspace_id,
+        WorkspaceFileUpdateRequest(path=path, content=content),
+    )
+    return str(payload.get("path") or "").strip() or normalize_file_session_path(path)
+
+
+def current_file_session_target_digests(workspace_id: str, path: str) -> Dict[str, str]:
+    """Compute the current draft/output digests for a file session target."""
+    safe_path = normalize_file_session_path(path)
+    spec_path = file_session_spec_path(safe_path)
+    spec_content = read_workspace_text_for_session(workspace_id, spec_path)
+    output_content = read_workspace_text_for_session(workspace_id, safe_path)
+    return {
+        "spec_digest": stable_text_digest(spec_content),
+        "output_digest": stable_text_digest(output_content),
+    }
+
+
+def build_background_optimize_payload(workspace_id: str, path: str) -> Dict[str, Any]:
+    """Build one durable optimize-job payload from the current file session state."""
+    safe_path = normalize_file_session_path(path)
+    digests = current_file_session_target_digests(workspace_id, safe_path)
+    return {
+        "target_path": safe_path,
+        "spec_path": file_session_spec_path(safe_path),
+        "current_output_path": safe_path,
+        "candidate_output_path": file_session_candidate_path(safe_path),
+        "evaluation_output_path": file_session_evaluation_path(safe_path),
+        "spec_digest": digests["spec_digest"],
+        "output_digest": digests["output_digest"],
+        "promotion_policy": {
+            "requires_matching_spec_digest": digests["spec_digest"],
+            "requires_matching_target_digest": digests["output_digest"],
+            "replace_visible_output_only_if_improved": True,
+        },
+    }
+
+
+def queue_background_optimize_job_for_file_session(
+    workspace_id: str,
+    path: str,
+    *,
+    source_conversation_id: Optional[str] = None,
+    trigger: str = "server_turn_complete",
+) -> Dict[str, Any]:
+    """Queue one background optimize job for a file session."""
+    payload = build_background_optimize_payload(workspace_id, path)
+    payload["trigger"] = str(trigger or "").strip() or "server_turn_complete"
+    return create_file_session_job_record(
+        workspace_id,
+        path,
+        lane="background",
+        job_kind="optimize_output",
+        title=f"Optimize {pathlib.PurePosixPath(normalize_file_session_path(path)).name or normalize_file_session_path(path)}",
+        payload=payload,
+        source_conversation_id=source_conversation_id,
+        status="queued",
+        supersede_matching_kind=True,
+    )
+
+
+def build_background_optimize_prompt(payload: Dict[str, Any]) -> str:
+    """Build the hidden optimize prompt for one file-session job."""
+    return "\n".join([
+        f"Optimize the generated file `{payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)}`.",
+        "",
+        f"Read the draft spec at `{payload.get('spec_path', '')}` and the current output at `{payload.get('current_output_path', '')}`.",
+        f"Write an improved candidate to `{payload.get('candidate_output_path', '')}`.",
+        "Do not modify the visible target file yet.",
+        "Use the draft as the authoritative source of structure and intent.",
+        "You may use workspace tools, search, commands, tests, and git if they help improve the result.",
+        "The candidate should be materially better than the current visible output, not merely different.",
+    ])
+
+
+def build_background_evaluation_prompt(payload: Dict[str, Any]) -> str:
+    """Build the hidden evaluation prompt for one file-session job."""
+    return "\n".join([
+        f"Evaluate whether the candidate output for `{payload.get('target_path', DRAFT_DEFAULT_TARGET_PATH)}` should replace the visible output.",
+        "",
+        f"Read the draft spec at `{payload.get('spec_path', '')}`, the current output at `{payload.get('current_output_path', '')}`, and the candidate at `{payload.get('candidate_output_path', '')}`.",
+        f"Write strict JSON to `{payload.get('evaluation_output_path', '')}` with keys: decision, summary, current_score, candidate_score, should_promote.",
+        "Decision must be either `promote` or `keep_current`.",
+        "Only choose `promote` if the candidate is materially better for the latest draft intent and is safe to replace the visible output.",
+        "Do not modify the visible target file or the draft spec during evaluation.",
+    ])
+
+
+async def run_hidden_file_session_turn(
+    workspace_id: str,
+    conversation_id: str,
+    file_path: str,
+    prompt: str,
+    *,
+    web_search: bool,
+    background_job_id: str,
+) -> List[Dict[str, Any]]:
+    """Run one hidden backend chat turn for a file-session job."""
+    transport = BufferedChatTransport()
+    await process_chat_turn(transport, {
+        "message": prompt,
+        "conversation_id": conversation_id,
+        "workspace_id": workspace_id,
+        "file_path": normalize_file_session_path(file_path),
+        "attachments": [],
+        "mode": "deep",
+        "features": {
+            "agent_tools": True,
+            "workspace_write": True,
+            "workspace_run_commands": True,
+            "web_search": bool(web_search),
+            "auto_approve_tool_permissions": True,
+            "allowed_commands": [],
+            "allowed_tool_permissions": [],
+        },
+        "slash_command": None,
+        "background_job_id": str(background_job_id or "").strip(),
+    })
+    return transport.events
+
+
+async def process_background_file_session_job(job: Dict[str, Any]) -> None:
+    """Run one queued background optimize/evaluate/promote cycle entirely on the backend."""
+    job_id = str(job.get("id") or "").strip()
+    workspace_id = str(job.get("workspace_id") or "").strip()
+    file_path = normalize_file_session_path(job.get("path") or "")
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    source_conversation_id = str(job.get("source_conversation_id") or "").strip()
+    if not job_id or not workspace_id or not file_path:
+        return
+
+    current = current_file_session_target_digests(workspace_id, file_path)
+    if (
+        current["spec_digest"] != str(payload.get("spec_digest") or "")
+        or current["output_digest"] != str(payload.get("output_digest") or "")
+    ):
+        update_file_session_job_record(
+            workspace_id,
+            job_id,
+            status="superseded",
+            error_text="The draft or visible output changed before background optimization began.",
+        )
+        return
+
+    update_file_session_job_record(workspace_id, job_id, status="running")
+
+    conversation_id = source_conversation_id or str(
+        ensure_file_session_record(workspace_id, file_path).get("conversation_id") or ""
+    ).strip()
+    if not conversation_id:
+        update_file_session_job_record(workspace_id, job_id, status="failed", error_text="No file-session conversation available.")
+        return
+
+    try:
+        await run_hidden_file_session_turn(
+            workspace_id,
+            conversation_id,
+            file_path,
+            build_background_optimize_prompt(payload),
+            web_search=True,
+            background_job_id=job_id,
+        )
+    except Exception as exc:
+        update_file_session_job_record(workspace_id, job_id, status="failed", error_text=f"Optimize stage failed: {exc}")
+        return
+
+    candidate_path = str(payload.get("candidate_output_path") or "").strip()
+    candidate_content = read_workspace_text_for_session(workspace_id, candidate_path)
+    if not candidate_content.strip():
+        update_file_session_job_record(workspace_id, job_id, status="failed", error_text="Optimize stage did not write a candidate file.")
+        return
+
+    current = current_file_session_target_digests(workspace_id, file_path)
+    if (
+        current["spec_digest"] != str(payload.get("spec_digest") or "")
+        or current["output_digest"] != str(payload.get("output_digest") or "")
+    ):
+        update_file_session_job_record(
+            workspace_id,
+            job_id,
+            status="superseded",
+            error_text="The draft or visible output changed during background optimization.",
+        )
+        return
+
+    try:
+        await run_hidden_file_session_turn(
+            workspace_id,
+            conversation_id,
+            file_path,
+            build_background_evaluation_prompt(payload),
+            web_search=False,
+            background_job_id=job_id,
+        )
+    except Exception as exc:
+        update_file_session_job_record(workspace_id, job_id, status="failed", error_text=f"Evaluation stage failed: {exc}")
+        return
+
+    evaluation_path = str(payload.get("evaluation_output_path") or "").strip()
+    evaluation_raw = read_workspace_text_for_session(workspace_id, evaluation_path)
+    try:
+        evaluation = json.loads(evaluation_raw) if evaluation_raw.strip() else {}
+    except json.JSONDecodeError:
+        evaluation = {}
+    if not isinstance(evaluation, dict) or not evaluation:
+        update_file_session_job_record(workspace_id, job_id, status="failed", error_text="Evaluation stage did not write a valid decision file.")
+        return
+
+    current = current_file_session_target_digests(workspace_id, file_path)
+    if (
+        current["spec_digest"] != str(payload.get("promotion_policy", {}).get("requires_matching_spec_digest") or "")
+        or current["output_digest"] != str(payload.get("promotion_policy", {}).get("requires_matching_target_digest") or "")
+    ):
+        update_file_session_job_record(
+            workspace_id,
+            job_id,
+            status="superseded",
+            error_text="The draft or visible output changed before promotion.",
+        )
+        return
+
+    decision = str(evaluation.get("decision") or "").strip().lower()
+    should_promote = evaluation.get("should_promote")
+    if decision == "promote" and should_promote is not False:
+        current_output = read_workspace_text_for_session(workspace_id, file_path)
+        if current_output and current_output != candidate_content:
+            write_workspace_text_for_session(
+                workspace_id,
+                file_session_version_path(file_path),
+                current_output,
+            )
+        if candidate_content != current_output:
+            write_workspace_text_for_session(workspace_id, file_path, candidate_content)
+        update_file_session_job_record(workspace_id, job_id, status="completed")
+        return
+
+    update_file_session_job_record(
+        workspace_id,
+        job_id,
+        status="completed",
+        error_text=str(evaluation.get("summary") or "Kept the current visible output.").strip(),
+    )
+
+
+async def file_session_background_worker() -> None:
+    """Continuously consume queued background file-session jobs on the server."""
+    while True:
+        try:
+            if not await vllm_health_check():
+                await asyncio.sleep(FILE_SESSION_BACKGROUND_POLL_SECONDS)
+                continue
+            job = next_background_file_session_job_record()
+            if not job:
+                await asyncio.sleep(FILE_SESSION_BACKGROUND_POLL_SECONDS)
+                continue
+            await process_background_file_session_job(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Background file-session worker iteration failed: %s", exc)
+            await asyncio.sleep(FILE_SESSION_BACKGROUND_POLL_SECONDS)
+
+
 @app.get("/api/workspaces/{workspace_id}/files")
 async def list_workspace_files_by_workspace(workspace_id: str, path: str = ""):
     return list_workspace_files_for_workspace(workspace_id, path)
@@ -8663,7 +9353,7 @@ async def list_file_sessions(workspace_id: str):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    sessions = list_file_session_records(workspace["id"])
+    sessions = enrich_file_session_records(workspace["id"], list_file_session_records(workspace["id"]))
     default_path = sessions[0]["path"] if sessions else DRAFT_DEFAULT_TARGET_PATH
     return {
         "workspace_id": workspace["id"],
@@ -8680,9 +9370,78 @@ async def ensure_file_session(workspace_id: str, request: FileSessionEnsureReque
             request.path,
             preferred_conversation_id=request.preferred_conversation_id,
         )
-        return session
+        return enrich_file_session_records(workspace_id, [session])[0]
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}/jobs")
+async def list_file_session_jobs_for_workspace(
+    workspace_id: str,
+    file_session_id: str,
+    lane: Optional[str] = None,
+    limit: int = 50,
+):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    jobs = list_file_session_job_records(workspace["id"], file_session_id, lane=lane, limit=limit)
+    return {
+        "workspace_id": workspace["id"],
+        "file_session_id": file_session_id,
+        "jobs": jobs,
+    }
+
+
+@app.post("/api/workspaces/{workspace_id}/file-session-jobs")
+async def create_file_session_job_for_workspace(workspace_id: str, request: FileSessionJobCreateRequest):
+    try:
+        job = create_file_session_job_record(
+            workspace_id,
+            request.path,
+            lane=request.lane,
+            job_kind=request.job_kind,
+            title=request.title or "",
+            payload=request.payload,
+            source_conversation_id=request.source_conversation_id,
+            status=request.status,
+            supersede_matching_kind=request.supersede_matching_kind,
+        )
+        session = ensure_file_session_record(
+            workspace_id,
+            request.path,
+            preferred_conversation_id=request.source_conversation_id,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "session": session,
+            "job": job,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/workspaces/{workspace_id}/file-session-jobs/{job_id}/status")
+async def update_file_session_job_for_workspace(
+    workspace_id: str,
+    job_id: str,
+    request: FileSessionJobStatusRequest,
+):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    record = update_file_session_job_record(
+        workspace["id"],
+        job_id,
+        status=request.status,
+        error_text=request.error_text or "",
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="File session job not found")
+    return {
+        "workspace_id": workspace["id"],
+        "job": record,
+    }
 
 
 @app.get("/api/workspaces/{workspace_id}/file/view")
@@ -13980,6 +14739,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
     client_turn_id = str(data.get("client_turn_id", "") or "").strip()
+    background_job_id = str(data.get("background_job_id", "") or "").strip()
 
     if not message:
         await websocket.send_json({'type': 'error', 'content': 'Empty message'})
@@ -14056,6 +14816,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 full_response,
                 workflow_execution=workflow_execution,
                 final_outcome="completed_slash",
+                active_file_path=prepared.active_file_path,
+                queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
             )
             return
 
@@ -14083,6 +14845,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     full_response,
                     workflow_execution=workflow_execution,
                     final_outcome="completed_deep",
+                    active_file_path=prepared.active_file_path,
+                    queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 )
                 deep_succeeded = True
             except Exception as e:
@@ -14131,6 +14895,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                             if structured_task.status == "done"
                             else "completed_structured_blocked"
                         ),
+                        active_file_path=prepared.active_file_path,
+                        queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                     )
                     return
 
@@ -14258,6 +15024,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     if workflow_execution and workflow_execution.tool_count > 0
                     else "completed_direct"
                 ),
+                active_file_path=prepared.active_file_path,
+                queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
             )
 
     except asyncio.CancelledError:
@@ -14305,6 +15073,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 fallback_response,
                 workflow_execution=workflow_execution,
                 final_outcome="exception_fallback",
+                active_file_path="",
+                queue_background_optimize=False,
             )
         else:
             await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
@@ -14612,7 +15382,7 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
 
 @app.on_event("startup")
 async def startup_event():
-    global ACTIVE_MODEL_LOCK
+    global ACTIVE_MODEL_LOCK, FILE_SESSION_BACKGROUND_WORKER_TASK
     ACTIVE_MODEL_LOCK = asyncio.Lock()
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
@@ -14637,6 +15407,14 @@ async def startup_event():
         logger.warning("Model did not become available within 10 minutes")
 
     asyncio.create_task(wait_for_model())
+
+    try:
+        reset_background_file_session_jobs()
+    except Exception as exc:
+        logger.warning("Failed to reset in-flight background file-session jobs on startup: %s", exc)
+
+    if FILE_SESSION_BACKGROUND_WORKER_TASK is None or FILE_SESSION_BACKGROUND_WORKER_TASK.done():
+        FILE_SESSION_BACKGROUND_WORKER_TASK = asyncio.create_task(file_session_background_worker())
 
 
 def build_uvicorn_run_kwargs() -> Dict[str, Any]:
