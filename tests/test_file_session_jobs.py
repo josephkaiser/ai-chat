@@ -242,6 +242,33 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         self.assertIn("draft_bootstrap", event_types)
         self.assertLess(event_types.index("draft_bootstrap"), event_types.index("start"))
 
+    def test_delete_file_session_removes_hidden_artifacts_and_empty_conversation(self):
+        path = "drafts/cleanup.md"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        spec_path = app.file_session_spec_path(path)
+        version_path = app.file_session_version_path(path)
+        candidate_path = app.file_session_candidate_path(path)
+        evaluation_path = app.file_session_evaluation_path(path)
+
+        app.write_workspace_text_for_session(self.workspace["id"], spec_path, "temporary draft spec")
+        app.write_workspace_text_for_session(self.workspace["id"], version_path, "old snapshot")
+        app.write_workspace_text_for_session(self.workspace["id"], candidate_path, "candidate")
+        app.write_workspace_text_for_session(self.workspace["id"], evaluation_path, '{"decision":"keep_current"}')
+
+        result = app.delete_file_session_record(self.workspace["id"], session["id"])
+        spec_file = self.workspace_root / spec_path
+        version_file = self.workspace_root / version_path
+        candidate_file = self.workspace_root / candidate_path
+        evaluation_file = self.workspace_root / evaluation_path
+
+        self.assertTrue(result["deleted"])
+        self.assertIsNone(app.get_file_session_record(self.workspace["id"], path))
+        self.assertFalse(spec_file.exists())
+        self.assertFalse(version_file.exists())
+        self.assertFalse(candidate_file.exists())
+        self.assertFalse(evaluation_file.exists())
+        self.assertIsNone(app.get_conversation_record(session["conversation_id"]))
+
     def test_background_job_queues_follow_up_pass_after_promoting_incomplete_candidate(self):
         path = "drafts/site.html"
         session = app.ensure_file_session_record(self.workspace["id"], path)

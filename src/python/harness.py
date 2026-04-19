@@ -1504,6 +1504,79 @@ def ensure_file_session_record(
     }
 
 
+def remove_workspace_path_if_present(workspace: pathlib.Path, rel_path: str) -> None:
+    """Delete one workspace-relative file or directory when it exists."""
+    safe_rel_path = normalize_file_session_path(rel_path)
+    target = resolve_workspace_relative_path_from_root(workspace, safe_rel_path)
+    try:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def delete_file_session_record(workspace_id: str, file_session_id: str) -> Dict[str, Any]:
+    """Delete one durable file-session record plus its hidden draft artifacts."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    safe_session_id = str(file_session_id or "").strip()
+    if not safe_workspace_id or not safe_session_id:
+        raise ValueError("Workspace and file session are required")
+
+    session = next(
+        (
+            item
+            for item in list_file_session_records(safe_workspace_id)
+            if str(item.get("id") or "").strip() == safe_session_id
+        ),
+        None,
+    )
+    if not session:
+        raise ValueError("File session not found")
+
+    safe_path = normalize_file_session_path(str(session.get("path") or ""))
+    conversation_id = str(session.get("conversation_id") or "").strip()
+    workspace = get_workspace_record(safe_workspace_id)
+    if not workspace:
+        raise ValueError("Workspace not found")
+
+    disable_background_focus(
+        safe_workspace_id,
+        path=safe_path,
+        reason="Draft session deleted.",
+    )
+
+    _workspace_record, workspace_root, _run = get_workspace_route_target(safe_workspace_id, create=True)
+    remove_workspace_path_if_present(workspace_root, file_session_spec_path(safe_path))
+    remove_workspace_path_if_present(workspace_root, file_session_candidate_dir_path(safe_path))
+    remove_workspace_path_if_present(workspace_root, file_session_evaluation_dir_path(safe_path))
+    remove_workspace_path_if_present(workspace_root, file_session_version_dir_path(safe_path))
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM file_session_jobs WHERE workspace_id = ? AND file_session_id = ?', (safe_workspace_id, safe_session_id))
+    c.execute('DELETE FROM file_sessions WHERE workspace_id = ? AND id = ?', (safe_workspace_id, safe_session_id))
+    if conversation_id:
+        c.execute('SELECT COUNT(*) FROM file_sessions WHERE conversation_id = ?', (conversation_id,))
+        remaining_session_refs = int((c.fetchone() or [0])[0] or 0)
+        c.execute('SELECT COUNT(*) FROM messages WHERE conversation_id = ?', (conversation_id,))
+        message_count = int((c.fetchone() or [0])[0] or 0)
+        if remaining_session_refs == 0 and message_count == 0:
+            c.execute('DELETE FROM conversation_summaries WHERE conversation_id = ?', (conversation_id,))
+            c.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
+    conn.commit()
+    conn.close()
+
+    return {
+        "workspace_id": safe_workspace_id,
+        "file_session_id": safe_session_id,
+        "path": safe_path,
+        "conversation_id": conversation_id,
+        "deleted": True,
+    }
+
+
 FILE_SESSION_JOB_LANES = {"foreground", "background"}
 FILE_SESSION_JOB_STATUSES = {"queued", "running", "completed", "failed", "canceled", "superseded"}
 FILE_SESSION_JOB_ACTIVE_STATUSES = {"queued", "running"}
@@ -10545,6 +10618,17 @@ async def set_file_session_focus_for_workspace(workspace_id: str, request: FileS
         ),
         "session": enriched_session,
     }
+
+
+@app.delete("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}")
+async def delete_file_session_for_workspace(workspace_id: str, file_session_id: str):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        return delete_file_session_record(workspace["id"], file_session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}")

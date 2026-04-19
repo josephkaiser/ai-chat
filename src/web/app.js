@@ -73,6 +73,7 @@ let draftPendingAgentSync = false;
 let draftLastAgentSpecContent = '';
 let activeDraftGeneratedContent = '';
 let activeDraftForegroundJobId = '';
+let draftRestartRequested = false;
 let draftLiveOutputActive = false;
 let draftLiveOutputBuffer = '';
 let draftLiveOutputContent = '';
@@ -1885,6 +1886,7 @@ function handleChatEvent(data) {
     } else if (data.type === 'draft_bootstrap') {
         handleDraftBootstrapEvent(data);
     } else if (data.type === 'start') {
+        draftRestartRequested = false;
         draftLiveOutputBuffer = '';
         if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
@@ -2113,6 +2115,7 @@ function handleChatEvent(data) {
             syncAssistantMessageActions(msg);
         }
     } else if (data.type === 'done') {
+        draftRestartRequested = false;
         clearActiveClientTurn();
         clearPendingPermissionRequest();
         isGenerating = false;
@@ -2153,6 +2156,7 @@ function handleChatEvent(data) {
         activeStreamConversationId = null;
         streamingAssistantMessage = null;
     } else if (data.type === 'canceled') {
+        draftRestartRequested = false;
         clearActiveClientTurn();
         clearPendingPermissionRequest();
         removeLoading();
@@ -2163,12 +2167,17 @@ function handleChatEvent(data) {
         if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
             clearDraftLiveOutput();
+            if (draftPendingAgentSync) {
+                draftPendingAgentSync = false;
+                scheduleDraftAgentSync({ immediate: true });
+            }
             refreshDraftOutputPane().catch(error => {
                 console.error('Failed to refresh generated output preview after cancel:', error);
             });
         }
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
     } else if (data.type === 'error') {
+        draftRestartRequested = false;
         clearActiveClientTurn();
         clearPendingPermissionRequest();
         removeLoading();
@@ -2179,6 +2188,10 @@ function handleChatEvent(data) {
         if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
             clearDraftLiveOutput();
+            if (draftPendingAgentSync) {
+                draftPendingAgentSync = false;
+                scheduleDraftAgentSync({ immediate: true });
+            }
             refreshDraftOutputPane().catch(error => {
                 console.error('Failed to refresh generated output preview after error:', error);
             });
@@ -4486,6 +4499,25 @@ function getDraftHistoryForWorkspace(workspaceId = currentWorkspaceId) {
         .filter(Boolean);
 }
 
+function getDraftSessionsForWorkspace(workspaceId = currentWorkspaceId) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    if (!safeWorkspaceId) return [];
+    return draftFileSessions.filter(item => String(item?.workspace_id || '').trim() === safeWorkspaceId);
+}
+
+function isDraftSessionEmpty(session) {
+    const artifactState = session?.artifact_state || {};
+    const target = artifactState?.target || {};
+    const spec = artifactState?.spec || {};
+    const activeJob = session?.active_job || {};
+    return Boolean(
+        !target.exists
+        && !spec.exists
+        && Number(session?.message_count || 0) === 0
+        && !activeJob.id
+    );
+}
+
 function persistDraftHistoryEntry(workspaceId, path) {
     void workspaceId;
     void path;
@@ -4589,24 +4621,34 @@ async function syncCurrentConversationTitleToDraft(path = activeDraftPath) {
 function renderDraftFileExplorer() {
     const listEl = document.getElementById('draftFileExplorerList');
     if (!listEl) return;
-    const history = getDraftHistoryForWorkspace();
+    const sessions = getDraftSessionsForWorkspace();
     if (!currentWorkspaceId) {
         listEl.innerHTML = '<div class="workspace-catalog-empty">Choose a workspace first.</div>';
         return;
     }
-    if (!history.length) {
+    if (!sessions.length) {
         listEl.innerHTML = '<div class="workspace-catalog-empty">No files yet.</div>';
         return;
     }
     listEl.innerHTML = '';
-    history.forEach(path => {
+    sessions.forEach(session => {
+        const path = normalizeDraftFilename(session?.path || DEFAULT_DRAFT_FILENAME);
+        const fileSessionId = String(session?.id || '').trim();
         const item = document.createElement('div');
         const isActive = compareWorkspacePaths(path, activeDraftPath || '');
         const hasSession = Boolean(getDraftSessionConversationId(currentWorkspaceId, path));
+        const emptySession = isDraftSessionEmpty(session);
+        const badges = [
+            hasSession ? '<span class="conv-file-badge">Session</span>' : '',
+            emptySession ? '<span class="conv-file-badge conv-file-badge-empty">Empty</span>' : '',
+        ].filter(Boolean).join('');
         item.className = `conv-item is-file${isActive ? ' active' : ''}`;
         item.innerHTML = `
-            <div class="conv-title">${escapeHtml(basename(path) || path)}${hasSession ? '<span class="conv-file-badge">Session</span>' : ''}</div>
+            <div class="conv-title">${escapeHtml(basename(path) || path)}${badges}</div>
             <div class="conv-preview">${escapeHtml(path)}</div>
+            <div class="conv-actions">
+                <button class="conv-btn delete" type="button" title="Delete session" aria-label="Delete session for ${escapeHtml(path)}">&#128465;</button>
+            </div>
         `;
         item.onclick = () => {
             switchToDraftFile(path).catch(error => {
@@ -4614,8 +4656,51 @@ function renderDraftFileExplorer() {
             });
             closeFileExplorer();
         };
+        const deleteButton = item.querySelector('.conv-btn.delete');
+        if (deleteButton && fileSessionId) {
+            deleteButton.addEventListener('click', event => {
+                event.stopPropagation();
+                deleteDraftSession(fileSessionId, path).catch(error => {
+                    alert(`Couldn't delete that session: ${error.message}`);
+                });
+            });
+        }
         listEl.appendChild(item);
     });
+}
+
+async function deleteDraftSession(fileSessionId, path) {
+    const safeSessionId = String(fileSessionId || '').trim();
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    if (!currentWorkspaceId || !safeSessionId) return;
+    const session = getDraftSessionRecord(currentWorkspaceId, normalizedPath);
+    const emptySession = isDraftSessionEmpty(session);
+    const confirmed = window.confirm(
+        emptySession
+            ? `Delete the empty draft session for ${normalizedPath}?`
+            : `Delete the draft session for ${normalizedPath}?\n\nThis removes the saved session and hidden draft artifacts, but it does not delete the visible file itself.`
+    );
+    if (!confirmed) return;
+
+    const wasActive = compareWorkspacePaths(normalizedPath, activeDraftPath || '');
+    const deletingCurrentConversation = String(session?.conversation_id || '').trim() === String(currentConvId || '').trim();
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-sessions/${encodeURIComponent(safeSessionId)}`, {
+        method: 'DELETE',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
+    renderDraftFileExplorer();
+
+    if (wasActive) {
+        const remainingSessions = getDraftSessionsForWorkspace(currentWorkspaceId);
+        const nextPath = remainingSessions[0]?.path || DEFAULT_DRAFT_FILENAME;
+        if (deletingCurrentConversation) currentConvId = generateId();
+        await loadDraftDocument(nextPath, { preserveAgentState: false }).catch(error => {
+            console.error('Failed to load a replacement draft after deleting the active session:', error);
+        });
+    }
 }
 
 async function listDraftVersionRows(targetPath = activeDraftPath) {
@@ -5360,6 +5445,26 @@ function setDraftSaveState(state, text = '') {
     el.textContent = '';
 }
 
+function shouldRestartActiveDraftTurn() {
+    if (!DOCUMENT_CENTERED_MODE || !isGenerating || draftRestartRequested) return false;
+    const safeConversationId = String(currentConvId || '').trim();
+    const safeActiveConversationId = String(activeStreamConversationId || '').trim();
+    return Boolean(
+        activeDraftPath
+        && safeConversationId
+        && safeActiveConversationId
+        && safeConversationId === safeActiveConversationId
+    );
+}
+
+function requestDraftRestartForLatestEdits() {
+    if (!shouldRestartActiveDraftTurn()) return false;
+    draftRestartRequested = true;
+    recordWorkspaceActivity('Draft Sync', 'Restarting the current pass with your latest edits.');
+    stopMessage({ preserveDraftFocus: true });
+    return true;
+}
+
 function refreshWelcomeMarkupIfNeeded() {
     const messages = document.getElementById('messages');
     if (!messages || hasConversationMessages()) return;
@@ -5772,7 +5877,8 @@ async function requestDraftRealization(options = {}) {
     if (!options.force && specContent === draftLastAgentSpecContent) return;
     if (isGenerating) {
         draftPendingAgentSync = true;
-        setDraftSaveState('saving', 'Queued');
+        const restarting = requestDraftRestartForLatestEdits();
+        setDraftSaveState('saving', restarting ? 'Restarting' : 'Queued');
         return;
     }
     await ensureDraftReadyForTurn();
@@ -7131,12 +7237,14 @@ function handlePrimaryAction() {
     sendMessage();
 }
 
-function stopMessage() {
+function stopMessage(options = {}) {
     if (!isGenerating) return;
     clearPendingPermissionRequest();
-    setDraftAgentFocus(activeDraftPath, false).catch(error => {
-        console.error('Failed to stop background agent focus:', error);
-    });
+    if (!options.preserveDraftFocus) {
+        setDraftAgentFocus(activeDraftPath, false).catch(error => {
+            console.error('Failed to stop background agent focus:', error);
+        });
+    }
     if (currentTurnTransport === 'http' && httpTurnAbortController) {
         httpTurnAbortController.abort();
         return;
