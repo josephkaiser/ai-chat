@@ -113,6 +113,8 @@ const MIC_BUTTON_ICON = buildComposerIconMarkup('<rect x="9" y="4.5" width="6" h
 const MIC_ACTIVE_BUTTON_ICON = buildComposerIconMarkup('<circle cx="12" cy="12" r="7.5"></circle><rect x="9.2" y="9.2" width="5.6" height="5.6" rx="1.2"></rect>');
 const MAX_PENDING_ATTACHMENTS = 8;
 const MIN_CHAT_SURFACE_WIDTH = 520;
+const DESKTOP_MIN_CHAT_SURFACE_WIDTH = 920;
+const DESKTOP_WORKSPACE_MAIN_INSET_MAX_PX = 360;
 const CHAT_SURFACE_GAP_PX = 14;
 const ARTIFACT_REFERENCE_PATTERN = /\[\[artifact:([^[\]\r\n]+?)\]\]/g;
 const ARTIFACT_HELPER_TEXT_PATTERNS = [
@@ -140,8 +142,8 @@ const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
 const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
-const DRAFT_AUTOSAVE_DELAY_MS = 900;
-const DRAFT_AGENT_SYNC_DELAY_MS = 1400;
+const DRAFT_AUTOSAVE_DELAY_MS = 500;
+const DRAFT_AGENT_SYNC_DELAY_MS = 700;
 const DEFAULT_DRAFT_FILENAME = 'untitled';
 const DOCUMENT_CENTERED_MODE = true;
 const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
@@ -737,11 +739,15 @@ function syncChatShellLayout() {
         if (visibleWorkspaceRects.length) {
             const chromeLeftEdge = Math.min(...visibleWorkspaceRects.map(rect => rect.left));
             desiredRight = Math.max(0, shellRect.right - chromeLeftEdge + CHAT_SURFACE_GAP_PX);
+            desiredRight = Math.min(desiredRight, DESKTOP_WORKSPACE_MAIN_INSET_MAX_PX);
         }
     }
 
     const totalDesiredInset = desiredLeft + desiredRight;
-    const maxInset = Math.max(0, shellRect.width - MIN_CHAT_SURFACE_WIDTH);
+    const minSurfaceWidth = workspaceOpen
+        ? Math.max(MIN_CHAT_SURFACE_WIDTH, DESKTOP_MIN_CHAT_SURFACE_WIDTH)
+        : MIN_CHAT_SURFACE_WIDTH;
+    const maxInset = Math.max(0, shellRect.width - minSurfaceWidth);
     if (totalDesiredInset > maxInset && totalDesiredInset > 0) {
         const scale = maxInset / totalDesiredInset;
         desiredLeft *= scale;
@@ -5490,6 +5496,9 @@ function renderDraftPreview() {
 
 function handleDraftEditorInput() {
     renderDraftPreview();
+    if (DOCUMENT_CENTERED_MODE && activeDraftPath) {
+        primeDraftLiveOutputFromSpec(getDraftContent(), activeDraftPath, activeDraftProfileKey);
+    }
     scheduleDraftAutosave();
 }
 
@@ -5537,6 +5546,12 @@ async function saveDraftDocument(options = {}) {
         persistDraftHistoryEntry(currentWorkspaceId, draftPath);
         renderDraftFileExplorer();
         setDraftSaveState('saved');
+        if (DOCUMENT_CENTERED_MODE) {
+            primeDraftLiveOutputFromSpec(content, draftPath, activeDraftProfileKey);
+            refreshDraftOutputPane().catch(error => {
+                console.error('Failed to refresh generated output preview after draft save:', error);
+            });
+        }
         if (options.autosave) scheduleWorkspaceRefresh();
         else await refreshWorkspace(false);
         if (!options.skipAgentSync) scheduleDraftAgentSync();
@@ -5757,6 +5772,7 @@ async function requestDraftRealization(options = {}) {
     if (!options.force && specContent === draftLastAgentSpecContent) return;
     if (isGenerating) {
         draftPendingAgentSync = true;
+        setDraftSaveState('saving', 'Queued');
         return;
     }
     await ensureDraftReadyForTurn();
@@ -5793,7 +5809,6 @@ async function requestDraftRealization(options = {}) {
     rememberTurnFeatures(currentConvId, turnFeatures);
     persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
     syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
-    draftLastAgentSpecContent = specContent;
     primeDraftLiveOutputFromSpec(specContent, activeDraftPath, activeDraftProfileKey);
     clearPendingPermissionRequest();
     dismissExecutionPlan();
@@ -5803,20 +5818,34 @@ async function requestDraftRealization(options = {}) {
     setDraftSaveState('saving', 'Agent');
     syncSendButton();
     const clientTurnId = beginClientTurn();
-    dispatchChatPayload({
-        message: prompt,
-        attachments: [],
-        conversation_id: currentConvId,
-        workspace_id: currentWorkspaceId || null,
-        client_turn_id: clientTurnId,
-        system_prompt: localStorage.getItem('customSystemPrompt') || null,
-        mode: BASE_REASONING_MODE,
-        features: turnFeatures,
-        slash_command: null,
-    }, {
-        fallbackStatusText: 'Generating the file from the active draft...',
-        fallbackActivityText: 'Running a hidden draft-to-file generation turn.',
-    });
+    try {
+        await dispatchChatPayload({
+            message: prompt,
+            attachments: [],
+            conversation_id: currentConvId,
+            workspace_id: currentWorkspaceId || null,
+            client_turn_id: clientTurnId,
+            system_prompt: localStorage.getItem('customSystemPrompt') || null,
+            mode: BASE_REASONING_MODE,
+            features: turnFeatures,
+            slash_command: null,
+        }, {
+            fallbackStatusText: 'Generating the file from the active draft...',
+            fallbackActivityText: 'Running a hidden draft-to-file generation turn.',
+        });
+        draftLastAgentSpecContent = specContent;
+    } catch (error) {
+        draftPendingAgentSync = true;
+        isGenerating = false;
+        activeStreamConversationId = null;
+        streamingAssistantMessage = null;
+        currentTurnTransport = null;
+        httpTurnAbortController = null;
+        activeDraftForegroundJobId = '';
+        syncSendButton();
+        setDraftSaveState('error', 'Agent');
+        throw error;
+    }
 }
 
 function normalizeIndentLevel(indent) {
