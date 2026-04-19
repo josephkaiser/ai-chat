@@ -138,7 +138,7 @@ const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
 const DRAFT_AUTOSAVE_DELAY_MS = 900;
 const DRAFT_AGENT_SYNC_DELAY_MS = 1400;
-const DEFAULT_DRAFT_FILENAME = 'index.html';
+const DEFAULT_DRAFT_FILENAME = 'untitled';
 const DOCUMENT_CENTERED_MODE = true;
 const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
     html: Object.freeze({
@@ -147,20 +147,7 @@ const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
         kind: 'html',
         lineWrapping: true,
         defaultView: 'edit',
-        starter: filename => `Build the file \`${basename(filename || 'index.html') || 'index.html'}\`.
-
-Goal:
-- Describe what this page should do.
-
-Content:
-- List the main sections and what each one should say.
-
-Style:
-- Describe the mood, layout, typography, and colors you want.
-
-Notes:
-- Add any semantic HTML, responsiveness, or interaction wishes here.
-`,
+        starter: () => '',
     }),
     markdown: Object.freeze({
         label: 'Markdown',
@@ -168,7 +155,7 @@ Notes:
         kind: 'markdown',
         lineWrapping: true,
         defaultView: 'edit',
-        starter: filename => `Write the file \`${basename(filename || 'notes.md') || 'notes.md'}\`.\n\nGoal:\n- Describe what this document should communicate.\n\nStructure:\n- List the headings or sections you want.\n\nTone:\n- Describe the writing style and level of detail.\n`,
+        starter: () => '',
     }),
     python: Object.freeze({
         label: 'Python',
@@ -176,7 +163,7 @@ Notes:
         kind: 'text',
         lineWrapping: false,
         defaultView: 'edit',
-        starter: filename => `Build the Python file \`${basename(filename || 'app.py') || 'app.py'}\`.\n\nPurpose:\n- Describe what the script or module should do.\n\nInputs and outputs:\n- Describe the important functions, classes, or CLI behavior.\n\nConstraints:\n- Mention libraries, style preferences, or edge cases to handle.\n`,
+        starter: () => '',
     }),
     json: Object.freeze({
         label: 'JSON',
@@ -184,7 +171,7 @@ Notes:
         kind: 'text',
         lineWrapping: false,
         defaultView: 'edit',
-        starter: filename => `Build the JSON file \`${basename(filename || 'data.json') || 'data.json'}\`.\n\nSchema ideas:\n- Describe the keys and nested structure you want.\n\nRules:\n- Mention any required values, formats, or constraints.\n`,
+        starter: () => '',
     }),
     text: Object.freeze({
         label: 'Text',
@@ -192,7 +179,7 @@ Notes:
         kind: 'text',
         lineWrapping: true,
         defaultView: 'edit',
-        starter: filename => `Create the file \`${basename(filename || 'notes.txt') || 'notes.txt'}\`.\n\nUse this draft as a wish list, outline, or rough brief for what the generated file should become.\n`,
+        starter: () => '',
     }),
 });
 const DISCOVERY_HINTS = Object.freeze([
@@ -1886,11 +1873,6 @@ function handleChatEvent(data) {
             renderDraftFileExplorer();
         }
     } else if (data.type === 'start') {
-        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
-            updateDraftFileJobStatus(activeDraftForegroundJobId, 'running').catch(error => {
-                console.error('Failed to mark the foreground file job as running:', error);
-            });
-        }
         if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
         removeLoading();
@@ -2121,12 +2103,7 @@ function handleChatEvent(data) {
         finalizeAssistantTurnArtifacts();
         refreshWorkspace(true);
         if (DOCUMENT_CENTERED_MODE) {
-            if (activeDraftForegroundJobId) {
-                updateDraftFileJobStatus(activeDraftForegroundJobId, 'completed').catch(error => {
-                    console.error('Failed to mark the foreground file job as completed:', error);
-                });
-                activeDraftForegroundJobId = '';
-            }
+            activeDraftForegroundJobId = '';
             persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
             syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
             snapshotGeneratedOutputIfChanged(activeDraftPath).catch(error => {
@@ -2159,10 +2136,7 @@ function handleChatEvent(data) {
         currentTurnTransport = null;
         httpTurnAbortController = null;
         syncSendButton();
-        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
-            updateDraftFileJobStatus(activeDraftForegroundJobId, 'canceled', data.content || 'Stopped').catch(error => {
-                console.error('Failed to mark the foreground file job as canceled:', error);
-            });
+        if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
         }
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
@@ -2174,10 +2148,7 @@ function handleChatEvent(data) {
         currentTurnTransport = null;
         httpTurnAbortController = null;
         syncSendButton();
-        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
-            updateDraftFileJobStatus(activeDraftForegroundJobId, 'failed', data.content || 'The assistant hit an error.').catch(error => {
-                console.error('Failed to mark the foreground file job as failed:', error);
-            });
+        if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
         }
         recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
@@ -2471,11 +2442,10 @@ async function resetAllAppData() {
 
 function buildWelcomeMarkup() {
     const path = normalizeDraftFilename(activeDraftPath || defaultDraftPathForWorkspace());
-    const profile = getDraftProfileDefinition(activeDraftProfileKey || draftProfileKeyForPath(path));
     return `<div class="welcome">
             <div class="agent-rail-empty">
                 <div class="agent-rail-empty-title">Agent standing by</div>
-                <div class="agent-rail-empty-copy">Keep drafting in <code>${escapeHtml(path)}</code>. The app is treating it as ${escapeHtml(profile.label)} automatically, so chat can stay focused on guided edits, questions, and bigger changes when you need them.</div>
+                <div class="agent-rail-empty-copy">Keep writing in <code>${escapeHtml(path)}</code>. The agent will follow the shape of the page as it develops.</div>
             </div>
         </div>`;
 }
@@ -4543,23 +4513,6 @@ async function createDraftFileJob({
     return data;
 }
 
-async function updateDraftFileJobStatus(jobId, status, errorText = '') {
-    const safeJobId = String(jobId || '').trim();
-    if (!currentWorkspaceId || !safeJobId) return null;
-    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-session-jobs/${encodeURIComponent(safeJobId)}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            status,
-            error_text: String(errorText || '').trim() || null,
-        }),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
-    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
-    return data.job || null;
-}
-
 function adoptDraftSessionConversation(path = activeDraftPath) {
     const session = getDraftSessionRecord(currentWorkspaceId, path);
     const nextConversationId = String(session?.conversation_id || '').trim();
@@ -4741,19 +4694,21 @@ async function refreshDraftOutputPane() {
     const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
     const previewPath = String(draftOutputPreviewPath || targetPath || '').trim();
     if (!currentWorkspaceId || !previewPath) {
-        pathEl.textContent = basename(targetPath) || targetPath || 'Generated file';
-        stateEl.textContent = 'Waiting';
+        pathEl.textContent = targetPath && targetPath !== DEFAULT_DRAFT_FILENAME ? (basename(targetPath) || targetPath) : '';
+        stateEl.textContent = '';
         previewEl.innerHTML = '<div class="workspace-empty">The generated file will appear here as the agent works.</div>';
         return;
     }
 
     const viewingCurrent = compareWorkspacePaths(previewPath, targetPath);
-    pathEl.textContent = basename(previewPath) || previewPath;
-    stateEl.textContent = viewingCurrent ? 'Live' : 'Snapshot';
+    const resolvedPath = basename(previewPath) || previewPath;
+    pathEl.textContent = resolvedPath === DEFAULT_DRAFT_FILENAME ? '' : resolvedPath;
+    stateEl.textContent = viewingCurrent ? '' : 'Snapshot';
 
     const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(previewPath)}`);
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 404) {
+        stateEl.textContent = '';
         previewEl.innerHTML = '<div class="workspace-empty">No generated file yet. Keep drafting and the agent will build it here.</div>';
         return;
     }
@@ -4776,19 +4731,8 @@ async function refreshDraftOutputPane() {
 function draftSubtitleForProfile(profileKey, path) {
     const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
     const workspaceName = currentWorkspaceMeta?.display_name || currentWorkspaceMeta?.root_path || 'this workspace';
-    if (profileKey === 'html') {
-        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the natural-language outline for the HTML file the agent generates on your behalf.`;
-    }
-    if (profileKey === 'markdown') {
-        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the Markdown file the agent generates on your behalf.`;
-    }
-    if (profileKey === 'python') {
-        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the Python file the agent generates on your behalf.`;
-    }
-    if (profileKey === 'json') {
-        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the JSON file the agent generates on your behalf.`;
-    }
-    return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the generated file, not the final output itself.`;
+    void profileKey;
+    return `Drafting ${normalizedPath} in ${workspaceName}.`;
 }
 
 function previewDraftFilenameState(pathValue) {
@@ -4796,7 +4740,7 @@ function previewDraftFilenameState(pathValue) {
     const badge = document.getElementById('draftProfileBadge');
     const workspaceBadge = document.getElementById('draftWorkspaceBadge');
     const subtitle = document.getElementById('draftShellSubtitle');
-    if (badge) badge.textContent = `Auto: ${getDraftProfileDefinition(profileKey).label}`;
+    if (badge) badge.textContent = pathValue && String(pathValue).includes('.') ? getDraftProfileDefinition(profileKey).label : '';
     if (workspaceBadge) workspaceBadge.textContent = currentWorkspaceMeta?.display_name || 'No workspace';
     if (subtitle) subtitle.textContent = draftSubtitleForProfile(profileKey, pathValue || activeDraftPath || DEFAULT_DRAFT_FILENAME);
     refreshWelcomeMarkupIfNeeded();
@@ -4837,16 +4781,40 @@ function syncDraftHeader(path = activeDraftPath) {
     const filenameInput = document.getElementById('draftFilename');
     const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
     if (filenameInput && document.activeElement !== filenameInput) {
-        filenameInput.value = normalizedPath;
+        filenameInput.value = normalizedPath === DEFAULT_DRAFT_FILENAME ? '' : normalizedPath;
     }
     previewDraftFilenameState(normalizedPath);
+    refreshDraftHeaderTone();
+}
+
+function refreshDraftHeaderTone() {
+    const header = document.getElementById('draftShellHeader');
+    const input = document.getElementById('draftFilename');
+    if (!header || !input) return;
+    const isBlank = !String(input.value || '').trim();
+    const isFocused = document.activeElement === input;
+    header.classList.toggle('is-quiet', isBlank && !isFocused);
+}
+
+function focusDraftFilename() {
+    const input = document.getElementById('draftFilename');
+    if (!input) return;
+    input.focus();
+}
+
+async function handleDraftFilenameBlur() {
+    try {
+        await commitDraftFilename();
+    } finally {
+        refreshDraftHeaderTone();
+    }
 }
 
 function setDraftSaveState(state, text = '') {
     draftSaveState = state;
     const el = document.getElementById('draftSaveState');
     if (!el) return;
-    el.classList.remove('is-dirty', 'is-saving', 'is-saved', 'is-error');
+    el.classList.remove('is-dirty', 'is-saving', 'is-error');
     if (state === 'dirty') {
         el.textContent = text || 'Draft';
         el.classList.add('is-dirty');
@@ -4858,8 +4826,7 @@ function setDraftSaveState(state, text = '') {
         return;
     }
     if (state === 'saved') {
-        el.textContent = text || 'Saved';
-        el.classList.add('is-saved');
+        el.textContent = '';
         return;
     }
     if (state === 'error') {
@@ -4867,7 +4834,7 @@ function setDraftSaveState(state, text = '') {
         el.classList.add('is-error');
         return;
     }
-    el.textContent = text || 'Idle';
+    el.textContent = '';
 }
 
 function refreshWelcomeMarkupIfNeeded() {
@@ -5141,6 +5108,7 @@ async function loadDraftDocument(path, options = {}) {
 
 function handleDraftFilenameInput(value) {
     previewDraftFilenameState(value || DEFAULT_DRAFT_FILENAME);
+    refreshDraftHeaderTone();
 }
 
 async function commitDraftFilename() {

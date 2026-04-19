@@ -170,6 +170,25 @@ textarea {
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
+    min-height: 24px;
+    transition: opacity 180ms ease;
+}
+.draft-shell-header.is-quiet {
+    opacity: 0.03;
+}
+.draft-shell-header.is-quiet:hover,
+.draft-shell-header.is-quiet:focus-within {
+    opacity: 1;
+}
+.draft-shell-header.is-quiet .draft-filename-input {
+    color: transparent;
+    caret-color: var(--text_primary);
+}
+.draft-shell-header.is-quiet .draft-filename-input::placeholder {
+    color: transparent;
+}
+.draft-shell-header.is-quiet .draft-save-state {
+    opacity: 0;
 }
 .draft-filename-input {
     flex: 1 1 auto;
@@ -179,6 +198,7 @@ textarea {
     outline: none;
     background: transparent;
     color: var(--text_primary);
+    cursor: text;
     font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     font-size: clamp(1.2rem, 2.3vw, 1.8rem);
     font-weight: 700;
@@ -223,22 +243,23 @@ textarea {
 }
 .draft-save-state {
     flex: 0 0 auto;
-    min-width: 56px;
+    min-width: 0;
     color: color-mix(in srgb, var(--text_tertiary) 90%, transparent);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
     text-align: right;
+    transition: opacity 180ms ease;
+}
+.draft-save-state:empty {
+    opacity: 0;
 }
 .draft-save-state.is-dirty {
     color: color-mix(in srgb, var(--accent_primary) 88%, var(--text_primary));
 }
 .draft-save-state.is-saving {
     color: var(--text_secondary);
-}
-.draft-save-state.is-saved {
-    color: var(--status_connected);
 }
 .draft-save-state.is-error {
     color: var(--btn_danger);
@@ -274,41 +295,46 @@ textarea {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 6px;
 }
 .draft-output-header {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    padding: 2px 2px 0;
+    min-height: 18px;
+    padding: 0 2px;
+    opacity: 0.34;
+    transition: opacity 180ms ease;
+}
+.draft-output-pane:hover .draft-output-header,
+.draft-output-pane:focus-within .draft-output-header {
+    opacity: 0.75;
 }
 .draft-output-copy {
     min-width: 0;
 }
 .draft-output-label {
-    color: var(--text_secondary);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    display: none;
 }
 .draft-output-path {
-    margin-top: 4px;
-    color: var(--text_primary);
-    font-size: 15px;
-    font-weight: 600;
+    color: color-mix(in srgb, var(--text_secondary) 72%, transparent);
+    font-size: 12px;
+    font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .draft-output-state {
     flex: 0 0 auto;
-    color: var(--text_tertiary);
+    color: color-mix(in srgb, var(--text_tertiary) 88%, transparent);
     font-size: 10px;
-    font-weight: 700;
+    font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+}
+.draft-output-state:empty {
+    opacity: 0;
 }
 .draft-output-surface {
     flex: 1;
