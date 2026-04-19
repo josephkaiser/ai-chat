@@ -48,6 +48,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from src.python.ai_chat.deep_flow import DeepRouteRequest, decide_deep_route
+from src.python.ai_chat.task_engine import run_task as run_structured_task
+from src.python.ai_chat.task_planner import (
+    build_heuristic_task_plan,
+    summarize_structured_plan,
+    supports_structured_read_only_tools,
+)
+from src.python.ai_chat.task_types import TaskContext, TaskPathTarget, TaskResult, TaskState, TaskStep
 try:
     import numpy as np
 except Exception:
@@ -155,6 +162,7 @@ CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+STRUCTURED_TASK_ENGINE_ENABLED = os.getenv("STRUCTURED_TASK_ENGINE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "8"))
 TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "3")))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
@@ -6408,6 +6416,41 @@ async def send_final_replacement(websocket: WebSocket, content: str):
     await websocket.send_json({"type": "final_replace", "content": content})
 
 
+async def complete_successful_turn(
+    websocket: WebSocket,
+    conversation_id: str,
+    full_response: str,
+    *,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+    final_outcome: str = "completed_direct",
+) -> Optional[int]:
+    """Persist assistant output best-effort, then close the turn without surfacing bookkeeping errors."""
+    assistant_message_id: Optional[int] = None
+    try:
+        assistant_message_id = save_message(conversation_id, 'assistant', full_response)
+    except Exception as exc:
+        logger.warning("Failed to persist assistant message for %s: %s", conversation_id, exc)
+
+    try:
+        finalize_workflow_execution(
+            workflow_execution,
+            assistant_message_id=assistant_message_id,
+            final_outcome=final_outcome,
+        )
+    except Exception as exc:
+        logger.warning("Failed to finalize workflow execution for %s: %s", conversation_id, exc)
+
+    try:
+        schedule_conversation_summary_refresh(conversation_id)
+    except Exception as exc:
+        logger.warning("Failed to schedule conversation summary refresh for %s: %s", conversation_id, exc)
+
+    if assistant_message_id is not None:
+        await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
+    await websocket.send_json({'type': 'done'})
+    return assistant_message_id
+
+
 async def send_assistant_note(websocket: WebSocket, content: str):
     """Show a transient assistant note while work continues."""
     await websocket.send_json({"type": "assistant_note", "content": content})
@@ -11345,6 +11388,352 @@ def workspace_has_content(conversation_id: str) -> bool:
         return False
 
 
+STRUCTURED_TASK_ANSWER_SYSTEM_SUFFIX = """You are finishing a structured workspace task.
+- Use the provided workspace evidence to answer the latest user request directly.
+- Do not emit tool calls, plans, or JSON in the answer.
+- Only claim file inspection or search work that appears in the evidence.
+- If the evidence is partial, say what you checked and what remains uncertain."""
+
+
+def resolve_structured_task_targets(conversation_id: str, message: str) -> List[TaskPathTarget]:
+    """Resolve explicit file or directory references for the structured-engine slice."""
+    workspace = get_workspace_path(conversation_id)
+    targets: List[TaskPathTarget] = []
+    seen: set[str] = set()
+
+    for ref in extract_workspace_path_references(message):
+        cleaned = str(ref).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        try:
+            target = resolve_workspace_relative_path(conversation_id, cleaned)
+        except Exception:
+            continue
+        if target.is_file():
+            targets.append(TaskPathTarget(path=format_workspace_path(target, workspace), kind="file"))
+        elif target.is_dir():
+            targets.append(TaskPathTarget(path=format_workspace_path(target, workspace), kind="dir"))
+    return targets
+
+
+def build_structured_task_context(prepared: PreparedTurnRequest) -> Optional[TaskContext]:
+    """Return the structured-engine context when the current turn fits the safe rollout."""
+    if not STRUCTURED_TASK_ENGINE_ENABLED:
+        return None
+    if prepared.slash_command or prepared.resolved_mode == "deep":
+        return None
+    if prepared.auto_execute_workspace or prepared.resume_saved_workspace:
+        return None
+    if prepared.workspace_intent not in {"focused_read", "broad_read"}:
+        return None
+    if prepared.assessment.requires_planning or prepared.assessment.requires_step_review:
+        return None
+    if not supports_structured_read_only_tools(prepared.enabled_tools):
+        return None
+
+    path_targets = resolve_structured_task_targets(prepared.conversation_id, prepared.effective_message)
+    if not path_targets:
+        return None
+
+    return TaskContext(
+        conversation_id=prepared.conversation_id,
+        user_message=prepared.effective_message,
+        history=list(prepared.history),
+        workspace_intent=prepared.workspace_intent,
+        allowed_tools=list(prepared.enabled_tools),
+        path_targets=path_targets,
+        request_focus=summarize_request_for_plan(prepared.effective_message),
+    )
+
+
+def structured_task_step_to_call(step: TaskStep) -> Dict[str, Any]:
+    """Translate a typed task step into the existing deterministic workspace-tool shape."""
+    if step.kind == "list":
+        return {
+            "id": step.id,
+            "name": "workspace.list_files",
+            "arguments": {"path": str(step.args.get("path", ".") or ".")},
+        }
+    if step.kind == "search":
+        return {
+            "id": step.id,
+            "name": "workspace.grep",
+            "arguments": {
+                "path": str(step.args.get("path", ".") or "."),
+                "query": str(step.args.get("query", "") or ""),
+            },
+        }
+    if step.kind == "read":
+        return {
+            "id": step.id,
+            "name": "workspace.read_file",
+            "arguments": {"path": str(step.args.get("path", "") or "")},
+        }
+    if step.kind == "patch":
+        return {
+            "id": step.id,
+            "name": "workspace.patch_file",
+            "arguments": dict(step.args),
+        }
+    if step.kind == "run":
+        return {
+            "id": step.id,
+            "name": "workspace.run_command",
+            "arguments": dict(step.args),
+        }
+    raise ValueError(f"Unsupported structured task step: {step.kind}")
+
+
+async def execute_structured_task_step(
+    websocket: WebSocket,
+    task: TaskState,
+    step: TaskStep,
+    *,
+    features: Optional[FeatureFlags] = None,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> TaskResult:
+    """Run one structured step through the existing deterministic tool bridge."""
+    call = structured_task_step_to_call(step)
+    raw_result = await emit_direct_tool_call(
+        websocket,
+        task.context.conversation_id,
+        call,
+        features=features,
+        activity_phase="respond",
+        activity_step_label=step.title,
+        workflow_execution=workflow_execution,
+    )
+    if raw_result.get("ok"):
+        return TaskResult(
+            step_id=step.id,
+            ok=True,
+            output=raw_result.get("result", {}) if isinstance(raw_result.get("result"), dict) else {},
+        )
+    return TaskResult(
+        step_id=step.id,
+        ok=False,
+        output={
+            "message_to_user": str(raw_result.get("message_to_user", "") or "").strip(),
+        },
+        error=str(raw_result.get("error", "") or "Structured task execution failed.").strip(),
+        block_reason=(
+            "permission_denied"
+            if str(raw_result.get("error_code", "") or "").strip() == "permission_denied"
+            else ""
+        ),
+    )
+
+
+async def emit_structured_task_event(
+    websocket: WebSocket,
+    event_name: str,
+    task: TaskState,
+    step: Optional[TaskStep],
+    result: Optional[TaskResult],
+) -> None:
+    """Mirror structured-task milestones onto the existing activity stream."""
+    del result
+    if event_name == "plan_ready":
+        await send_activity_event(
+            websocket,
+            "plan",
+            "Structured Task",
+            f"Following a typed plan: {summarize_structured_plan(task.plan)}",
+        )
+        return
+    if event_name == "task_started":
+        await send_reasoning_note(
+            websocket,
+            "Using the structured task path for this file-grounded request, then I’ll answer from the gathered evidence.",
+            phase="plan",
+        )
+        return
+    if event_name == "task_blocked":
+        await send_activity_event(
+            websocket,
+            "blocked",
+            "Structured Task",
+            f"Paused during {step.title if step else 'the structured task'} because an approval was not granted.",
+            step_label=step.title if step else "",
+        )
+        return
+    if event_name == "task_failed":
+        await send_activity_event(
+            websocket,
+            "error",
+            "Structured Task",
+            f"Structured execution failed during {step.title if step else 'the current task'}. Falling back is safer here.",
+            step_label=step.title if step else "",
+        )
+        return
+    if event_name == "task_done":
+        await send_activity_event(
+            websocket,
+            "respond",
+            "Structured Task",
+            "The evidence is ready. Writing the final answer from the structured results.",
+        )
+
+
+def compact_structured_task_output(step: TaskStep, output: Dict[str, Any]) -> Dict[str, Any]:
+    """Trim structured step outputs so the final synthesis prompt stays readable."""
+    if step.kind == "read":
+        return {
+            "path": str(output.get("path", "") or ""),
+            "content_kind": str(output.get("content_kind", "") or ""),
+            "lines": output.get("lines"),
+            "size": output.get("size"),
+            "content": truncate_output(str(output.get("content", "") or ""), limit=8000),
+        }
+    if step.kind == "list":
+        items = output.get("items", [])
+        compact_items = []
+        for item in items[:24] if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            compact_items.append({
+                "path": str(item.get("path", "") or ""),
+                "name": str(item.get("name", "") or ""),
+                "is_dir": bool(item.get("is_dir")),
+            })
+        return {
+            "path": str(output.get("path", "") or ""),
+            "items": compact_items,
+            "truncated_items": bool(isinstance(items, list) and len(items) > len(compact_items)),
+        }
+    if step.kind == "search":
+        matches = output.get("grep_matches", [])
+        compact_matches = []
+        for match in matches[:12] if isinstance(matches, list) else []:
+            if not isinstance(match, dict):
+                continue
+            compact_matches.append({
+                "path": str(match.get("path", "") or ""),
+                "line": match.get("line"),
+                "text": truncate_output(str(match.get("text", "") or ""), limit=280),
+            })
+        return {
+            "query": str(output.get("query", "") or ""),
+            "path": str(output.get("path", "") or ""),
+            "count": output.get("count"),
+            "grep_matches": compact_matches,
+            "truncated_matches": bool(isinstance(matches, list) and len(matches) > len(compact_matches)),
+        }
+    return dict(output)
+
+
+def build_structured_task_evidence_message(task: TaskState) -> str:
+    """Format the structured results into one grounded synthesis prompt."""
+    lines = [
+        "Use this structured workspace evidence while answering the latest user request.",
+        f"Request focus: {task.context.request_focus or task.context.user_message}",
+    ]
+    step_map = {step.id: step for step in task.plan}
+    for result in task.results:
+        step = step_map.get(result.step_id)
+        if step is None:
+            continue
+        compact = compact_structured_task_output(step, result.output)
+        lines.extend([
+            "",
+            f"<structured_step kind=\"{step.kind}\" title=\"{step.title}\">",
+            json.dumps(compact, ensure_ascii=False, indent=2),
+            "</structured_step>",
+        ])
+    return "\n".join(lines)
+
+
+async def finalize_structured_task_turn(
+    websocket: WebSocket,
+    task: TaskState,
+    system_prompt: str,
+    max_tokens: int,
+    *,
+    response_started: bool = False,
+) -> tuple[str, bool]:
+    """Turn structured task results into the final user-visible assistant reply."""
+    if task.status == "blocked":
+        full_response = ensure_nonempty_turn_response(
+            task.final_text,
+            task.context.conversation_id,
+            task.context.user_message,
+        )
+        if not response_started:
+            await websocket.send_json({"type": "start"})
+            response_started = True
+        await send_final_replacement(websocket, full_response)
+        return full_response, response_started
+
+    if task.status != "done":
+        raise ValueError(f"Structured task ended in unsupported state: {task.status}")
+
+    messages = [{
+        "role": "system",
+        "content": system_prompt + "\n\n" + STRUCTURED_TASK_ANSWER_SYSTEM_SUFFIX,
+    }]
+    for message in task.context.history:
+        messages.append({"role": message["role"], "content": message["content"]})
+    messages.append({
+        "role": "user",
+        "content": build_structured_task_evidence_message(task),
+    })
+
+    drafted = await stream_chat_response(
+        websocket,
+        messages,
+        min(max_tokens, 1536),
+        start_output=not response_started,
+    )
+    response_started = True
+    full_response = strip_unverified_workspace_write_claims(
+        ensure_nonempty_turn_response(
+            drafted,
+            task.context.conversation_id,
+            task.context.user_message,
+        )
+    )
+    if full_response != drafted:
+        await send_final_replacement(websocket, full_response)
+    return full_response, response_started
+
+
+async def run_structured_task_turn(
+    websocket: WebSocket,
+    prepared: PreparedTurnRequest,
+    *,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> Optional[TaskState]:
+    """Run the first structured-engine slice for narrow file-grounded read tasks."""
+    context = build_structured_task_context(prepared)
+    if context is None:
+        return None
+
+    task = TaskState(
+        id=f"structured_{uuid.uuid4().hex[:12]}",
+        status="queued",
+        context=context,
+        plan=build_heuristic_task_plan(context),
+    )
+    return await run_structured_task(
+        task,
+        lambda task_state, step: execute_structured_task_step(
+            websocket,
+            task_state,
+            step,
+            features=prepared.features,
+            workflow_execution=workflow_execution,
+        ),
+        emit_event=lambda event_name, task_state, step, result: emit_structured_task_event(
+            websocket,
+            event_name,
+            task_state,
+            step,
+            result,
+        ),
+    )
+
+
 def should_use_workspace_tools(conversation_id: str, message: str, features: FeatureFlags) -> bool:
     """Heuristic: enter workspace mode when local files are likely to ground the answer or change."""
     if not features.agent_tools:
@@ -13399,15 +13788,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             await websocket.send_json({'type': 'start'})
             response_started = True
             await send_final_replacement(websocket, full_response)
-            assistant_message_id = save_message(conv_id, 'assistant', full_response)
-            finalize_workflow_execution(
-                workflow_execution,
-                assistant_message_id=assistant_message_id,
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                full_response,
+                workflow_execution=workflow_execution,
                 final_outcome="completed_slash",
             )
-            schedule_conversation_summary_refresh(conv_id)
-            await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
-            await websocket.send_json({'type': 'done'})
             return
 
         if mode == 'deep' or prepared.auto_execute_workspace:
@@ -13428,15 +13815,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
-                assistant_message_id = save_message(conv_id, 'assistant', full_response)
-                finalize_workflow_execution(
-                    workflow_execution,
-                    assistant_message_id=assistant_message_id,
+                await complete_successful_turn(
+                    websocket,
+                    conv_id,
+                    full_response,
+                    workflow_execution=workflow_execution,
                     final_outcome="completed_deep",
                 )
-                schedule_conversation_summary_refresh(conv_id)
-                await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
-                await websocket.send_json({'type': 'done'})
                 deep_succeeded = True
             except Exception as e:
                 logger.warning("Deep/auto workspace mode failed, falling back: %s", e)
@@ -13455,6 +13840,46 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 })
 
         if not deep_succeeded:
+            structured_task = None
+            try:
+                structured_task = await run_structured_task_turn(
+                    websocket,
+                    prepared,
+                    workflow_execution=workflow_execution,
+                )
+            except Exception as exc:
+                logger.warning("Structured task engine failed before completion, falling back: %s", exc)
+
+            if structured_task is not None:
+                if structured_task.status in {"done", "blocked"}:
+                    full_response, response_started = await finalize_structured_task_turn(
+                        websocket,
+                        structured_task,
+                        system_prompt,
+                        max_tokens,
+                        response_started=response_started,
+                    )
+                    await complete_successful_turn(
+                        websocket,
+                        conv_id,
+                        full_response,
+                        workflow_execution=workflow_execution,
+                        final_outcome=(
+                            "completed_structured"
+                            if structured_task.status == "done"
+                            else "completed_structured_blocked"
+                        ),
+                    )
+                    return
+
+                if structured_task.status == "failed":
+                    await send_activity_event(
+                        websocket,
+                        "status",
+                        "Structured Task",
+                        "Structured execution did not finish cleanly, so I’m falling back to the existing response path.",
+                    )
+
             await send_activity_event(
                 websocket,
                 "respond",
@@ -13561,19 +13986,17 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 full_response = strip_unverified_workspace_write_claims(full_response)
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
-            assistant_message_id = save_message(conv_id, 'assistant', full_response)
-            finalize_workflow_execution(
-                workflow_execution,
-                assistant_message_id=assistant_message_id,
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                full_response,
+                workflow_execution=workflow_execution,
                 final_outcome=(
                     "completed_with_tools"
                     if workflow_execution and workflow_execution.tool_count > 0
                     else "completed_direct"
                 ),
             )
-            schedule_conversation_summary_refresh(conv_id)
-            await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
-            await websocket.send_json({'type': 'done'})
 
     except asyncio.CancelledError:
         finalize_workflow_execution(workflow_execution, status="canceled", final_outcome="canceled")
@@ -13614,10 +14037,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             if not response_started:
                 await websocket.send_json({'type': 'start'})
             await send_final_replacement(websocket, fallback_response)
-            assistant_message_id = save_message(conv_id, 'assistant', fallback_response)
-            schedule_conversation_summary_refresh(conv_id)
-            await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
-            await websocket.send_json({'type': 'done'})
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                fallback_response,
+                workflow_execution=workflow_execution,
+                final_outcome="exception_fallback",
+            )
         else:
             await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})
     finally:

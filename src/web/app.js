@@ -104,6 +104,7 @@ let voiceRuntime = {
     stt_backend: 'unavailable',
     tts_voice: '',
 };
+let runtimeHealth = null;
 const SPEECH_SPEED_OPTIONS = Object.freeze([
     { value: '0', label: 'Low', rate: 0.85 },
     { value: '1', label: 'Low-Med', rate: 0.95 },
@@ -571,12 +572,14 @@ function updateStatus(status) {
     runtimeAvailabilityStatus = status === 'connected' ? 'connected' : (status === 'loading' ? 'loading' : 'disconnected');
     modelAvailable = status === 'connected';
     renderStatusDot(status);
+    renderSettingsRuntimeStatus();
     syncSendButton();
 }
 
 function setWebsocketConnected(connected) {
     websocketConnected = Boolean(connected);
     syncStatusIndicator();
+    renderSettingsRuntimeStatus();
     syncSendButton();
 }
 
@@ -774,6 +777,9 @@ function toggleWorkspaceConsole() {
 
 function closeWorkspacePanel() {
     if (!workspacePanelOpen) return;
+    if (inlineViewerPath) {
+        closeInlineViewer();
+    }
     workspacePanelOpen = false;
     applyWorkspacePanelState();
 }
@@ -1320,6 +1326,43 @@ async function refreshVoiceRuntime() {
         };
     }
     syncVoiceSupportUI();
+    renderSettingsRuntimeStatus();
+}
+
+async function refreshRuntimeHealth() {
+    try {
+        const resp = await fetch('/health');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        runtimeHealth = data;
+    } catch (error) {
+        runtimeHealth = null;
+    }
+    renderSettingsRuntimeStatus();
+}
+
+function renderSettingsRuntimeStatus() {
+    const runtimeBadge = document.getElementById('settingsRuntimeBadge');
+    const runtimeNote = document.getElementById('settingsRuntimeNote');
+    const modelName = document.getElementById('settingsModelName');
+    const connectionBadge = document.getElementById('settingsConnectionBadge');
+    if (!runtimeBadge || !runtimeNote || !modelName || !connectionBadge) return;
+
+    const health = runtimeHealth || {};
+    const loading = health.loading || {};
+    let runtimeLabel = 'Offline';
+    let note = 'The model server is disconnected or unavailable.';
+    if (health.model_available) {
+        runtimeLabel = 'Ready';
+        note = health.message || 'Model server is ready.';
+    } else if (loading.status === 'loading' || runtimeAvailabilityStatus === 'loading') {
+        runtimeLabel = 'Loading';
+        note = health.message || 'Model server is loading.';
+    }
+    runtimeBadge.textContent = runtimeLabel;
+    runtimeNote.textContent = note;
+    modelName.textContent = health.model || health.message || 'Unknown';
+    connectionBadge.textContent = websocketConnected ? 'WS Live' : 'WS Down';
 }
 
 function updateVoiceNote(text = '') {
@@ -2019,6 +2062,7 @@ function showSettings() {
     dismissMobileKeyboard(true);
     closeAbout();
     syncFeatureControls();
+    refreshRuntimeHealth().catch(() => {});
     document.getElementById('settingsOverlay').classList.add('show');
 }
 function closeSettings() {
@@ -2651,18 +2695,31 @@ function noteAssistantTurnArtifactPath(path) {
     currentAssistantTurnArtifactPaths.add(path);
 }
 
+function isWorkspaceArtifactRailCandidate(entry) {
+    if (!entry || entry.type !== 'file') return false;
+    const path = String(entry.path || '').trim();
+    if (!path) return false;
+    const contentKind = String(entry.content_kind || '').toLowerCase();
+    if (['image', 'html', 'pdf', 'csv', 'spreadsheet'].includes(contentKind)) return true;
+    if (isMarkdownPath(path) && !/\.txt$/i.test(path)) return true;
+    return false;
+}
+
 function noteAssistantArtifactsFromToolResult(data) {
     const payload = data?.payload || {};
     if (!payload || typeof payload !== 'object') return;
     if (typeof payload.path === 'string' && payload.path) {
-        noteAssistantTurnArtifactPath(payload.path);
+        const entry = findWorkspaceFileEntry(payload.path) || { path: payload.path, type: 'file', content_kind: '' };
+        if (isWorkspaceArtifactRailCandidate(entry)) noteAssistantTurnArtifactPath(payload.path);
     }
     if (typeof payload.open_path === 'string' && payload.open_path) {
         noteAssistantTurnArtifactPath(payload.open_path);
     }
     if (Array.isArray(payload.items)) {
         payload.items.forEach(item => {
-            if (item && typeof item.path === 'string') noteAssistantTurnArtifactPath(item.path);
+            if (item && typeof item.path === 'string' && isWorkspaceArtifactRailCandidate(item)) {
+                noteAssistantTurnArtifactPath(item.path);
+            }
         });
     }
 }
@@ -2925,6 +2982,7 @@ function getWorkspaceArtifactEntries(limit = WORKSPACE_ARTIFACT_LIMIT) {
     if (selectedWorkspaceFile) addEntryPath(selectedWorkspaceFile);
     latestAssistantTurnArtifactPaths.forEach(path => addEntryPath(path));
     files
+        .filter(entry => isWorkspaceArtifactRailCandidate(entry))
         .filter(entry => isWorkspaceEntryRecentlyChanged(entry))
         .sort((a, b) => {
             const aModified = new Date(a.modified_at || 0).getTime() || 0;
