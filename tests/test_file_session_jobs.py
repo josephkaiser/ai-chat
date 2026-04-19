@@ -2,6 +2,7 @@ import asyncio
 import pathlib
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 try:
@@ -241,6 +242,172 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         event_types = [event.get("type") for event in transport.events if isinstance(event, dict)]
         self.assertIn("draft_bootstrap", event_types)
         self.assertLess(event_types.index("draft_bootstrap"), event_types.index("start"))
+
+    def test_bootstrap_content_for_typescript_file_looks_like_code(self):
+        content = app.build_file_session_bootstrap_content(
+            "drafts/app.ts",
+            "Create a typescript app that compiles a simple static html webpage.",
+        )
+
+        self.assertIn("function renderApp", content)
+        self.assertIn("console.log(renderApp());", content)
+        self.assertNotIn("\nApp\n\n", content)
+        self.assertNotIn("\n- Create a typescript app", content)
+
+    def test_bootstrap_content_for_text_file_reads_like_prose(self):
+        content = app.build_file_session_bootstrap_content(
+            "drafts/note.txt",
+            "Write a note about how good I am at programming.",
+        )
+
+        self.assertIn("A note about how good I am at programming.", content)
+        self.assertNotIn("\nNote\n\n", content)
+        self.assertNotIn("\n- Write a note", content)
+
+    def test_bootstrap_refreshes_legacy_typescript_placeholder_output(self):
+        path = "drafts/app.ts"
+        app.ensure_file_session_record(self.workspace["id"], path)
+        app.write_workspace_text_for_session(
+            self.workspace["id"],
+            app.file_session_spec_path(path),
+            "Create a typescript app that compiles a simple static html webpage.",
+        )
+        app.write_workspace_text_for_session(
+            self.workspace["id"],
+            path,
+            (
+                "App\n\n"
+                "a typescript app that compiles a simple static html webpage.\n\n"
+                "- Create a typescript app that compiles a simple static html webpage.\n"
+            ),
+        )
+
+        payload = app.maybe_bootstrap_visible_file_session_output(self.workspace["id"], path)
+        refreshed = app.read_workspace_text_for_session(self.workspace["id"], path)
+
+        self.assertIsNotNone(payload)
+        self.assertIn("function renderApp", refreshed)
+        self.assertNotIn("\nApp\n\n", refreshed)
+
+    def test_extract_workspace_archive_safely_expands_zip_into_workspace(self):
+        archive_path = self.workspace_root / "uploads" / "bundle.zip"
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("src/main.py", "print('hi')\n")
+            archive.writestr("../ignored.txt", "nope")
+            archive.writestr("docs/readme.md", "# Hello\n")
+
+        payload = app.extract_workspace_archive_for_workspace(self.workspace["id"], "uploads/bundle.zip")
+
+        self.assertEqual(payload["archive_path"], "uploads/bundle.zip")
+        self.assertEqual(payload["count"], 2)
+        self.assertTrue((self.workspace_root / payload["destination_path"] / "src" / "main.py").exists())
+        self.assertTrue((self.workspace_root / payload["destination_path"] / "docs" / "readme.md").exists())
+        self.assertFalse((self.workspace_root / "ignored.txt").exists())
+
+    def test_infer_auto_command_plan_for_typescript_project_bootstraps_npm_then_typechecks(self):
+        path = "web/src/app.ts"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        app_file = self.workspace_root / path
+        app_file.parent.mkdir(parents=True, exist_ok=True)
+        app_file.write_text("export const answer: number = 42;\n", encoding="utf-8")
+        (self.workspace_root / "web" / "package.json").write_text(
+            (
+                "{\n"
+                '  "name": "demo",\n'
+                '  "scripts": {\n'
+                '    "typecheck": "tsc --noEmit -p tsconfig.json"\n'
+                "  }\n"
+                "}\n"
+            ),
+            encoding="utf-8",
+        )
+        (self.workspace_root / "web" / "package-lock.json").write_text("{\n}\n", encoding="utf-8")
+        (self.workspace_root / "web" / "tsconfig.json").write_text(
+            '{ "compilerOptions": { "target": "ES2020" }, "include": ["src/**/*.ts"] }\n',
+            encoding="utf-8",
+        )
+
+        plan = app.infer_auto_command_plan(session["conversation_id"], path)
+
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "command": ["npm", "ci", "--no-audit", "--no-fund"],
+                    "cwd": "web",
+                    "label": "Prepare Node workspace with npm ci",
+                    "phase": "setup",
+                },
+                {
+                    "command": ["npm", "run", "typecheck"],
+                    "cwd": "web",
+                    "label": "Auto-verify with npm run typecheck",
+                    "phase": "verify",
+                },
+            ],
+        )
+
+    def test_infer_auto_command_plan_for_plain_typescript_uses_tsc_without_package_json(self):
+        path = "standalone/app.ts"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        app_file = self.workspace_root / path
+        app_file.parent.mkdir(parents=True, exist_ok=True)
+        app_file.write_text("const answer: number = 42;\n", encoding="utf-8")
+        (self.workspace_root / "standalone" / "tsconfig.json").write_text(
+            '{ "compilerOptions": { "target": "ES2020" }, "include": ["app.ts"] }\n',
+            encoding="utf-8",
+        )
+
+        plan = app.infer_auto_command_plan(session["conversation_id"], path)
+
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "command": ["tsc", "--noEmit", "-p", "tsconfig.json"],
+                    "cwd": "standalone",
+                    "label": "Auto-verify with tsc --noEmit",
+                    "phase": "verify",
+                },
+            ],
+        )
+
+    def test_infer_auto_command_plan_for_rust_project_uses_cargo_fetch_then_check(self):
+        path = "rust/src/lib.rs"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        rust_file = self.workspace_root / path
+        rust_file.parent.mkdir(parents=True, exist_ok=True)
+        rust_file.write_text("pub fn meaning() -> i32 { 42 }\n", encoding="utf-8")
+        (self.workspace_root / "rust" / "Cargo.toml").write_text(
+            (
+                "[package]\n"
+                'name = "demo"\n'
+                'version = "0.1.0"\n'
+                'edition = "2021"\n'
+            ),
+            encoding="utf-8",
+        )
+
+        plan = app.infer_auto_command_plan(session["conversation_id"], path)
+
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "command": ["cargo", "fetch"],
+                    "cwd": "rust",
+                    "label": "Prepare Rust workspace with cargo fetch",
+                    "phase": "setup",
+                },
+                {
+                    "command": ["cargo", "check"],
+                    "cwd": "rust",
+                    "label": "Auto-verify with cargo check",
+                    "phase": "verify",
+                },
+            ],
+        )
 
     def test_delete_file_session_removes_hidden_artifacts_and_empty_conversation(self):
         path = "drafts/cleanup.md"
