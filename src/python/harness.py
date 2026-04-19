@@ -32,7 +32,7 @@ import traceback
 import uuid
 import venv
 import zipfile
-from html import unescape
+from html import escape, unescape
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -7643,6 +7643,22 @@ async def send_assistant_note(websocket: WebSocket, content: str):
     await websocket.send_json({"type": "assistant_note", "content": content})
 
 
+async def send_draft_bootstrap_event(websocket: WebSocket, path: str, payload: Dict[str, Any]) -> None:
+    """Tell the client that the server materialized a visible first-pass file."""
+    safe_path = normalize_file_session_path(path)
+    bytes_written = int(payload.get("bytes_written") or 0)
+    created = bool(payload.get("created"))
+    action = "Created" if created else "Updated"
+    filename = pathlib.PurePosixPath(safe_path).name or safe_path
+    await websocket.send_json({
+        "type": "draft_bootstrap",
+        "path": safe_path,
+        "payload": payload,
+        "content": f"{action} a visible first pass in {filename} so you can see the file while the agent keeps working.",
+        "bytes_written": bytes_written,
+    })
+
+
 async def send_reasoning_note(
     websocket: WebSocket,
     content: str,
@@ -9740,6 +9756,388 @@ def write_workspace_text_for_session(workspace_id: str, path: str, content: str)
         WorkspaceFileUpdateRequest(path=path, content=content),
     )
     return str(payload.get("path") or "").strip() or normalize_file_session_path(path)
+
+
+def file_session_bootstrap_title(path: str) -> str:
+    """Build a readable title from a visible file-session path."""
+    raw_name = pathlib.PurePosixPath(normalize_file_session_path(path)).name or "Draft"
+    stem = raw_name.rsplit(".", 1)[0] if "." in raw_name else raw_name
+    cleaned = re.sub(r"[-_]+", " ", stem).strip()
+    if not cleaned:
+        cleaned = "Draft"
+    return re.sub(r"\b\w", lambda match: match.group(0).upper(), cleaned)
+
+
+def clean_file_session_spec_line(line: str) -> str:
+    """Trim one draft-spec line into a user-facing cue."""
+    return re.sub(r"^\d+\.\s+", "", re.sub(r"^[-*+#]+\s*", "", str(line or "").strip())).strip()
+
+
+def file_session_spec_lines(spec_content: str, *, limit: int = 8) -> List[str]:
+    """Return the first unique, readable spec lines from one draft file."""
+    lines = [
+        clean_file_session_spec_line(line)
+        for line in str(spec_content or "").splitlines()
+    ]
+    deduped: List[str] = []
+    for line in lines:
+        if not line:
+            continue
+        lower_line = line.lower()
+        if any(existing.lower() == lower_line for existing in deduped):
+            continue
+        deduped.append(line)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def file_session_spec_quoted_phrase(spec_content: str) -> str:
+    """Return one quoted phrase from the spec when available."""
+    match = re.search(r'["“]([^"”\n]{4,80})["”]', str(spec_content or ""))
+    return clean_file_session_spec_line(match.group(1)) if match else ""
+
+
+def file_session_requested_year(spec_content: str) -> str:
+    """Extract an explicit year from the spec if one exists."""
+    match = re.search(r"\b(20\d{2})\b", str(spec_content or ""))
+    return match.group(1) if match else str(datetime.now().year)
+
+
+def summarize_file_session_spec(spec_content: str, fallback_title: str) -> str:
+    """Build a short sentence describing the current draft intent."""
+    first_line = next(iter(file_session_spec_lines(spec_content, limit=1)), "")
+    if not first_line:
+        return f"A live first pass for {fallback_title} is taking shape."
+    summary = re.sub(r"^(?:create|build|make|design|write|craft|generate)\s+", "", first_line, flags=re.IGNORECASE).strip()
+    return f"{summary[:147].rstrip()}..." if len(summary) > 150 else summary
+
+
+def file_session_interest_tags(spec_content: str, *, limit: int = 6) -> List[str]:
+    """Infer a few playful theme chips from the draft spec."""
+    text = str(spec_content or "").lower()
+    candidates = [
+        ("AI / ML", (" ai", " ai/", "machine learning", " ml", "model", "neural")),
+        ("Math", ("math", "mathematics", "algebra", "calculus")),
+        ("Science", ("science", "physics", "chemistry", "biology")),
+        ("Statistics", ("statistics", "stats", "probability", "bayes")),
+        ("Hockey", ("hockey", "nhl")),
+        ("Basketball", ("basketball", "nba")),
+    ]
+    tags: List[str] = []
+    for label, needles in candidates:
+        if any(needle in text for needle in needles):
+            tags.append(label)
+        if len(tags) >= limit:
+            break
+    return tags
+
+
+def build_file_session_bootstrap_html(path: str, spec_content: str) -> str:
+    """Generate an immediate visible HTML scaffold for one missing draft output."""
+    fallback_title = file_session_bootstrap_title(path)
+    heading = file_session_spec_quoted_phrase(spec_content) or fallback_title
+    subtitle = summarize_file_session_spec(spec_content, fallback_title)
+    notes = file_session_spec_lines(spec_content, limit=5)
+    tags = file_session_interest_tags(spec_content)
+    footer_year = file_session_requested_year(spec_content)
+    note_cards = "\n".join(
+        f'                    <article class="cue-card"><p>{escape(line)}</p></article>'
+        for line in notes
+    ) or '                    <article class="cue-card"><p>The agent is turning the draft spec into a real page.</p></article>'
+    chip_markup = "\n".join(
+        f'                    <span class="interest-chip">{escape(tag)}</span>'
+        for tag in tags
+    ) or '                    <span class="interest-chip">Live build</span>'
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{escape(heading)}</title>
+    <style>
+        :root {{
+            --bg-a: #07111f;
+            --bg-b: #102a54;
+            --accent: #f8d76a;
+            --accent-strong: #ff8f5a;
+            --ink: #ecf6ff;
+            --muted: rgba(236, 246, 255, 0.78);
+            --panel: rgba(8, 18, 36, 0.56);
+            --line: rgba(255, 255, 255, 0.12);
+        }}
+        * {{ box-sizing: border-box; }}
+        html {{ scroll-behavior: smooth; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Avenir Next", "Segoe UI", sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at top left, rgba(255, 143, 90, 0.28), transparent 28%),
+                radial-gradient(circle at right, rgba(120, 219, 255, 0.22), transparent 32%),
+                linear-gradient(145deg, var(--bg-a), var(--bg-b));
+        }}
+        .shell {{
+            width: min(1120px, calc(100vw - 32px));
+            margin: 0 auto;
+            padding: 32px 0 56px;
+        }}
+        .hero {{
+            min-height: 100vh;
+            display: grid;
+            align-items: center;
+        }}
+        .hero-card, .panel {{
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 28px;
+            backdrop-filter: blur(18px);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+        }}
+        .hero-card {{ padding: 28px; }}
+        .eyebrow {{
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: rgba(248, 215, 106, 0.14);
+            color: var(--accent);
+            font-size: 0.8rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }}
+        h1 {{
+            margin: 18px 0 10px;
+            font-size: clamp(3rem, 9vw, 6.2rem);
+            line-height: 0.95;
+            letter-spacing: -0.04em;
+        }}
+        .subtitle {{
+            max-width: 48rem;
+            margin: 0;
+            color: var(--muted);
+            font-size: clamp(1.05rem, 2.2vw, 1.28rem);
+            line-height: 1.65;
+        }}
+        .hero-actions {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            margin-top: 28px;
+        }}
+        button {{
+            border: 0;
+            border-radius: 999px;
+            padding: 14px 22px;
+            font: inherit;
+            cursor: pointer;
+        }}
+        .cta-primary {{
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #0c1322;
+            font-weight: 700;
+        }}
+        .cta-secondary {{
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--ink);
+            border: 1px solid var(--line);
+        }}
+        .interest-row, .cue-grid {{
+            display: grid;
+            gap: 14px;
+        }}
+        .interest-row {{
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            margin-top: 28px;
+        }}
+        .interest-chip {{
+            display: inline-flex;
+            justify-content: center;
+            padding: 12px 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--line);
+        }}
+        main {{
+            opacity: 0.3;
+            transform: translateY(28px);
+            transition: opacity 220ms ease, transform 220ms ease;
+        }}
+        body.revealed main {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+        .panel {{
+            padding: 24px;
+            margin-top: 22px;
+        }}
+        .panel h2 {{
+            margin: 0 0 16px;
+            font-size: 1.05rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }}
+        .cue-grid {{
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }}
+        .cue-card {{
+            padding: 18px;
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            min-height: 120px;
+        }}
+        .cue-card p {{
+            margin: 0;
+            line-height: 1.6;
+            color: var(--muted);
+        }}
+        footer {{
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            margin-top: 24px;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }}
+        @media (max-width: 720px) {{
+            .shell {{ width: min(100vw - 20px, 1120px); padding-top: 18px; }}
+            .hero-card, .panel {{ border-radius: 22px; padding: 20px; }}
+            footer {{ flex-direction: column; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <section class="hero">
+            <div class="hero-card">
+                <span class="eyebrow">Live Draft Preview</span>
+                <h1>{escape(heading)}</h1>
+                <p class="subtitle">{escape(subtitle)}</p>
+                <div class="hero-actions">
+                    <button class="cta-primary" id="previewCta">Enter the build</button>
+                    <button class="cta-secondary" type="button" id="previewPulse">Refresh the vibe</button>
+                </div>
+                <div class="interest-row">
+{chip_markup}
+                </div>
+            </div>
+        </section>
+        <main id="mainContent">
+            <section class="panel">
+                <h2>Draft Cues</h2>
+                <div class="cue-grid">
+{note_cards}
+                </div>
+            </section>
+        </main>
+        <footer>
+            <span>This first pass was materialized immediately while the agent keeps refining the file.</span>
+            <span>&copy; <span id="sessionYear">{escape(footer_year)}</span> Joe</span>
+        </footer>
+    </div>
+    <script>
+        const root = document.body;
+        const main = document.getElementById('mainContent');
+        document.getElementById('previewCta')?.addEventListener('click', () => {{
+            root.classList.add('revealed');
+            main?.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+        }});
+        document.getElementById('previewPulse')?.addEventListener('click', () => {{
+            root.classList.toggle('revealed');
+        }});
+        document.getElementById('sessionYear').textContent = {json.dumps(footer_year)};
+    </script>
+</body>
+</html>
+"""
+
+
+def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
+    """Generate one visible first-pass file from the active draft spec."""
+    safe_path = normalize_file_session_path(path)
+    suffix = pathlib.PurePosixPath(safe_path).suffix.lower()
+    fallback_title = file_session_bootstrap_title(safe_path)
+    summary = summarize_file_session_spec(spec_content, fallback_title)
+    lines = file_session_spec_lines(spec_content, limit=6)
+    if suffix in HTML_EXTENSIONS:
+        return build_file_session_bootstrap_html(safe_path, spec_content)
+    if suffix in {".md", ".markdown", ".rst"}:
+        body = lines or ["The agent is turning the live spec into the target file."]
+        return "\n".join([
+            f"# {file_session_spec_quoted_phrase(spec_content) or fallback_title}",
+            "",
+            summary,
+            "",
+            "## Direction",
+            *(f"- {line}" for line in body),
+        ]).strip() + "\n"
+    if suffix == ".py":
+        comment_lines = lines or ["The agent is preparing the real implementation."]
+        return "\n".join([
+            '"""',
+            fallback_title,
+            "",
+            summary,
+            '"""',
+            "",
+            "# Live scaffold from the current draft spec.",
+            *(f"# - {line}" for line in comment_lines),
+            "",
+        ])
+    if suffix == ".json":
+        return json.dumps({
+            "title": fallback_title,
+            "summary": summary,
+            "cues": lines,
+            "state": "live-preview",
+        }, indent=2)
+    body = lines or ["The agent is preparing the real file."]
+    return "\n".join([
+        fallback_title,
+        "",
+        summary,
+        "",
+        *(f"- {line}" for line in body),
+        "",
+    ])
+
+
+def maybe_bootstrap_visible_file_session_output(workspace_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """Create an actual first-pass output file immediately when the target is missing or empty."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    safe_path = normalize_file_session_path(path)
+    if not safe_workspace_id or not safe_path:
+        return None
+
+    _workspace_record, workspace, _run = get_workspace_route_target(safe_workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, safe_path)
+    if target.exists():
+        if not target.is_file():
+            return None
+        try:
+            existing_content = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        if existing_content.strip():
+            return None
+
+    spec_content = read_workspace_text_for_session(safe_workspace_id, file_session_spec_path(safe_path))
+    if not spec_content.strip():
+        return None
+
+    content = build_file_session_bootstrap_content(safe_path, spec_content)
+    if not content.strip():
+        return None
+
+    payload = write_workspace_file_for_workspace(
+        safe_workspace_id,
+        WorkspaceFileUpdateRequest(path=safe_path, content=content),
+    )
+    payload["bootstrap"] = True
+    return payload
 
 
 def current_file_session_target_digests(workspace_id: str, path: str) -> Dict[str, str]:
@@ -15567,6 +15965,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
     """Process a single chat turn so the websocket loop can also handle stop requests."""
     message = data.get('message', '').strip()
     conv_id = data.get('conversation_id')
+    requested_workspace_id = str(data.get("workspace_id") or "").strip()
+    requested_file_path = normalize_file_session_path(str(data.get("file_path") or "").strip()) if data.get("file_path") else ""
     client_turn_id = str(data.get("client_turn_id", "") or "").strip()
     background_job_id = str(data.get("background_job_id", "") or "").strip()
 
@@ -15594,6 +15994,29 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             foreground_job_record = updated
 
     try:
+        if not background_job_id and requested_file_path:
+            bootstrap_workspace_id = requested_workspace_id
+            if not bootstrap_workspace_id and conv_id:
+                bootstrap_workspace_id = str((get_conversation_record(str(conv_id).strip()) or {}).get("workspace_id") or "").strip()
+            if bootstrap_workspace_id:
+                try:
+                    bootstrap_payload = maybe_bootstrap_visible_file_session_output(
+                        bootstrap_workspace_id,
+                        requested_file_path,
+                    )
+                    if bootstrap_payload:
+                        await send_draft_bootstrap_event(
+                            websocket,
+                            requested_file_path,
+                            bootstrap_payload,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to bootstrap visible file-session output for %s:%s: %s",
+                        bootstrap_workspace_id,
+                        requested_file_path,
+                        exc,
+                    )
         if client_turn_id:
             setattr(websocket, "active_client_turn_id", client_turn_id)
         prepared = await prepare_turn_request(data)

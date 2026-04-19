@@ -73,6 +73,10 @@ let draftPendingAgentSync = false;
 let draftLastAgentSpecContent = '';
 let activeDraftGeneratedContent = '';
 let activeDraftForegroundJobId = '';
+let draftLiveOutputActive = false;
+let draftLiveOutputBuffer = '';
+let draftLiveOutputContent = '';
+let draftLiveOutputPath = '';
 let currentFileSymbols = [];
 let symbolGroupState = {};
 let currentAssistantTurnStartedAt = null;
@@ -1872,7 +1876,10 @@ function handleChatEvent(data) {
             syncToolApprovalToggle();
             renderDraftFileExplorer();
         }
+    } else if (data.type === 'draft_bootstrap') {
+        handleDraftBootstrapEvent(data);
     } else if (data.type === 'start') {
+        draftLiveOutputBuffer = '';
         if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
         removeLoading();
@@ -1898,6 +1905,9 @@ function handleChatEvent(data) {
     } else if (data.type === 'assistant_note') {
         ensureStreamingAssistantMessage();
         replaceAssistantAnswer(data.content || '');
+        if (DOCUMENT_CENTERED_MODE) {
+            updateDraftLiveOutputBuffer(data.content || '', { replace: true, path: activeDraftPath });
+        }
         recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
     } else if (data.type === 'plan_ready') {
         storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
@@ -1918,6 +1928,9 @@ function handleChatEvent(data) {
     } else if (data.type === 'token') {
         clearResolvedPermissionPrompt();
         appendAssistantAnswerToken(data.content);
+        if (DOCUMENT_CENTERED_MODE) {
+            updateDraftLiveOutputBuffer(data.content || '', { replace: false, path: activeDraftPath });
+        }
     } else if (data.type === 'status') {
         setLoadingText(data.content);
     } else if (data.type === 'activity') {
@@ -1965,6 +1978,7 @@ function handleChatEvent(data) {
             phase: data.ok === false ? 'error' : 'tool',
             stepLabel: data.step_label || currentBuildStepLabel(),
         });
+        maybeRefreshDraftOutputAfterToolResult(data);
         if (data.ok !== false) noteAssistantArtifactsFromToolResult(data);
         if (data.name === 'workspace.render' && data.ok !== false && data.payload?.path) {
             openWorkspaceFile(data.payload.path);
@@ -2079,6 +2093,9 @@ function handleChatEvent(data) {
     } else if (data.type === 'final_replace') {
         clearResolvedPermissionPrompt();
         replaceAssistantAnswer(data.content);
+        if (DOCUMENT_CENTERED_MODE) {
+            updateDraftLiveOutputBuffer(data.content || '', { replace: true, path: activeDraftPath });
+        }
         if (DOCUMENT_CENTERED_MODE) setDraftSaveState('saved', 'Ready');
         recordWorkspaceActivity('Draft', 'Draft updated.');
     } else if (data.type === 'message_id') {
@@ -2104,6 +2121,7 @@ function handleChatEvent(data) {
         refreshWorkspace(true);
         if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
+            clearDraftLiveOutput();
             persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
             syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
             snapshotGeneratedOutputIfChanged(activeDraftPath).catch(error => {
@@ -2138,6 +2156,10 @@ function handleChatEvent(data) {
         syncSendButton();
         if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
+            clearDraftLiveOutput();
+            refreshDraftOutputPane().catch(error => {
+                console.error('Failed to refresh generated output preview after cancel:', error);
+            });
         }
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
     } else if (data.type === 'error') {
@@ -2150,6 +2172,10 @@ function handleChatEvent(data) {
         syncSendButton();
         if (DOCUMENT_CENTERED_MODE) {
             activeDraftForegroundJobId = '';
+            clearDraftLiveOutput();
+            refreshDraftOutputPane().catch(error => {
+                console.error('Failed to refresh generated output preview after error:', error);
+            });
         }
         recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
         const errorMsg = streamingAssistantMessage || createMessageElement('', 'assistant');
@@ -4688,6 +4714,459 @@ async function syncGeneratedOutputBaseline(path = activeDraftPath) {
     return activeDraftGeneratedContent;
 }
 
+function clearDraftLiveOutput() {
+    draftLiveOutputActive = false;
+    draftLiveOutputBuffer = '';
+    draftLiveOutputContent = '';
+    draftLiveOutputPath = '';
+}
+
+function looksLikeGeneratedDraftOutput(content, path = activeDraftPath) {
+    const text = String(content || '').trim();
+    if (!text) return false;
+    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    if (isHtmlPath(normalizedPath)) {
+        return text.length >= 80 && /<(?:!doctype\s+html|html|head|body|main|section|article|header|footer|nav|style|script)\b/i.test(text);
+    }
+    if (isMarkdownPath(normalizedPath)) {
+        return text.length >= 60 && /(^#{1,6}\s)|(\n#{1,6}\s)|(\n[-*]\s)|(\n\d+\.\s)/m.test(text);
+    }
+    if (/\.json$/i.test(normalizedPath)) {
+        return /^[\[{]/.test(text);
+    }
+    if (/\.py$/i.test(normalizedPath)) {
+        return text.length >= 60 && /(^|\n)(import |from |def |class )/m.test(text);
+    }
+    return text.length >= 120 && text.split(/\r?\n/).length >= 4;
+}
+
+function setDraftLiveOutput(content, path = activeDraftPath) {
+    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    draftLiveOutputActive = true;
+    draftLiveOutputContent = String(content || '');
+    draftLiveOutputPath = normalizedPath;
+    if (compareWorkspacePaths(draftOutputPreviewPath || normalizedPath, normalizedPath)) {
+        refreshDraftOutputPane().catch(() => {});
+    }
+}
+
+function updateDraftLiveOutputBuffer(content, { replace = false, path = activeDraftPath } = {}) {
+    const nextPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const incoming = String(content || '');
+    if (!incoming.trim()) return false;
+    draftLiveOutputBuffer = replace ? incoming : `${draftLiveOutputBuffer}${incoming}`;
+    if (!looksLikeGeneratedDraftOutput(draftLiveOutputBuffer, nextPath)) return false;
+    setDraftLiveOutput(draftLiveOutputBuffer, nextPath);
+    return true;
+}
+
+function clearDraftLiveOutputForRealFile(path = activeDraftPath) {
+    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    if (!draftLiveOutputActive || !compareWorkspacePaths(draftLiveOutputPath || '', normalizedPath)) return;
+    clearDraftLiveOutput();
+}
+
+function draftFallbackTitleFromPath(path) {
+    const raw = basename(normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME)) || 'Draft';
+    const stem = raw.includes('.') ? raw.slice(0, raw.lastIndexOf('.')) : raw;
+    return stem
+        .replace(/[-_]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, letter => letter.toUpperCase()) || 'Draft';
+}
+
+function cleanDraftSpecLine(line) {
+    return String(line || '')
+        .replace(/^#{1,6}\s+/, '')
+        .replace(/^[-*+]\s+/, '')
+        .replace(/^\d+\.\s+/, '')
+        .trim();
+}
+
+function draftSpecLines(specContent) {
+    const lines = String(specContent || '')
+        .split(/\r?\n/)
+        .map(cleanDraftSpecLine)
+        .filter(Boolean);
+    const deduped = [];
+    for (const line of lines) {
+        if (!deduped.some(existing => existing.toLowerCase() === line.toLowerCase())) {
+            deduped.push(line);
+        }
+        if (deduped.length >= 8) break;
+    }
+    return deduped;
+}
+
+function draftSpecQuotedPhrase(specContent) {
+    const quoted = String(specContent || '').match(/["“]([^"”\n]{4,80})["”]/);
+    return quoted ? cleanDraftSpecLine(quoted[1]) : '';
+}
+
+function draftSpecRequestedYear(specContent) {
+    const match = String(specContent || '').match(/\b(20\d{2})\b/);
+    return match ? match[1] : String(new Date().getFullYear());
+}
+
+function summarizeDraftSpec(specContent, fallbackTitle) {
+    const firstLine = draftSpecLines(specContent)[0] || '';
+    if (!firstLine) return `A live preview for ${fallbackTitle} is taking shape.`;
+    const summary = firstLine
+        .replace(/^(?:create|build|make|design|write|craft|generate)\s+/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return summary.length > 150 ? `${summary.slice(0, 147).trimEnd()}...` : summary;
+}
+
+function draftSpecInterestTags(specContent) {
+    const text = String(specContent || '').toLowerCase();
+    const tags = [];
+    const candidates = [
+        ['AI / ML', [' ai', ' ai/', 'machine learning', ' ml', 'neural', 'model']],
+        ['Math', ['math', 'mathematics', 'algebra', 'calculus']],
+        ['Science', ['science', 'physics', 'chemistry', 'biology']],
+        ['Statistics', ['statistics', 'stats', 'probability', 'bayes']],
+        ['Hockey', ['hockey', 'nhl']],
+        ['Basketball', ['basketball', 'nba']],
+    ];
+    for (const [label, needles] of candidates) {
+        if (needles.some(needle => text.includes(needle))) tags.push(label);
+        if (tags.length >= 6) break;
+    }
+    return tags;
+}
+
+function buildImmediateHtmlDraftPreview(specContent, path) {
+    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const fallbackTitle = draftFallbackTitleFromPath(normalizedPath);
+    const heading = draftSpecQuotedPhrase(specContent) || fallbackTitle;
+    const subtitle = summarizeDraftSpec(specContent, fallbackTitle);
+    const notes = draftSpecLines(specContent).slice(0, 5);
+    const tags = draftSpecInterestTags(specContent);
+    const footerYear = draftSpecRequestedYear(specContent);
+    const noteCards = notes.length
+        ? notes.map(line => `<article class="cue-card"><p>${escapeHtml(line)}</p></article>`).join('\n')
+        : '<article class="cue-card"><p>The agent is turning the current draft spec into a real page.</p></article>';
+    const tagMarkup = tags.length
+        ? tags.map(tag => `<span class="interest-chip">${escapeHtml(tag)}</span>`).join('\n')
+        : '<span class="interest-chip">Live build</span>';
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapeHtmlTextForTemplate(heading)}</title>
+    <style>
+        :root {
+            --bg-a: #07111f;
+            --bg-b: #102a54;
+            --accent: #f8d76a;
+            --accent-strong: #ff8f5a;
+            --ink: #ecf6ff;
+            --muted: rgba(236, 246, 255, 0.78);
+            --panel: rgba(8, 18, 36, 0.56);
+            --line: rgba(255, 255, 255, 0.12);
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Avenir Next", "Segoe UI", sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at top left, rgba(255, 143, 90, 0.28), transparent 28%),
+                radial-gradient(circle at right, rgba(120, 219, 255, 0.22), transparent 32%),
+                linear-gradient(145deg, var(--bg-a), var(--bg-b));
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 34px 34px;
+            mask-image: linear-gradient(to bottom, rgba(0,0,0,0.75), transparent 92%);
+        }
+        .shell {
+            width: min(1120px, calc(100vw - 32px));
+            margin: 0 auto;
+            padding: 32px 0 56px;
+        }
+        .hero {
+            min-height: 100vh;
+            display: grid;
+            align-items: center;
+        }
+        .hero-card, .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 28px;
+            backdrop-filter: blur(18px);
+            box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+        }
+        .hero-card {
+            padding: 28px;
+        }
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 14px;
+            border-radius: 999px;
+            background: rgba(248, 215, 106, 0.14);
+            color: var(--accent);
+            font-size: 0.8rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+        h1 {
+            margin: 18px 0 10px;
+            font-size: clamp(3rem, 9vw, 6.4rem);
+            line-height: 0.95;
+            letter-spacing: -0.04em;
+        }
+        .subtitle {
+            max-width: 48rem;
+            margin: 0;
+            color: var(--muted);
+            font-size: clamp(1.05rem, 2.2vw, 1.28rem);
+            line-height: 1.65;
+        }
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            margin-top: 28px;
+        }
+        button {
+            border: 0;
+            border-radius: 999px;
+            padding: 14px 22px;
+            font: inherit;
+            cursor: pointer;
+        }
+        .cta-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #0c1322;
+            font-weight: 700;
+        }
+        .cta-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--ink);
+            border: 1px solid var(--line);
+        }
+        .interest-row, .cue-grid {
+            display: grid;
+            gap: 14px;
+        }
+        .interest-row {
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            margin-top: 28px;
+        }
+        .interest-chip {
+            display: inline-flex;
+            justify-content: center;
+            padding: 12px 14px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--line);
+            color: var(--ink);
+        }
+        main {
+            opacity: 0.3;
+            transform: translateY(28px);
+            transition: opacity 220ms ease, transform 220ms ease;
+        }
+        body.revealed main {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .panel {
+            padding: 24px;
+            margin-top: 22px;
+        }
+        .panel h2 {
+            margin: 0 0 16px;
+            font-size: 1.05rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+        .cue-grid {
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+        .cue-card {
+            padding: 18px;
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            min-height: 120px;
+        }
+        .cue-card p {
+            margin: 0;
+            line-height: 1.6;
+            color: var(--muted);
+        }
+        footer {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            margin-top: 24px;
+            padding: 0 4px 8px;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+        @media (max-width: 720px) {
+            .shell { width: min(100vw - 20px, 1120px); padding-top: 18px; }
+            .hero-card, .panel { border-radius: 22px; padding: 20px; }
+            footer { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <section class="hero">
+            <div class="hero-card">
+                <span class="eyebrow">Live Draft Preview</span>
+                <h1>${escapeHtml(heading)}</h1>
+                <p class="subtitle">${escapeHtml(subtitle)}</p>
+                <div class="hero-actions">
+                    <button class="cta-primary" id="previewCta">Enter the build</button>
+                    <button class="cta-secondary" type="button" id="previewPulse">Refresh the vibe</button>
+                </div>
+                <div class="interest-row">
+                    ${tagMarkup}
+                </div>
+            </div>
+        </section>
+        <main id="mainContent">
+            <section class="panel">
+                <h2>Draft Cues</h2>
+                <div class="cue-grid">
+                    ${noteCards}
+                </div>
+            </section>
+        </main>
+        <footer>
+            <span>This is the immediate scaffold while the agent keeps refining the real file.</span>
+            <span>&copy; <span id="sessionYear">${escapeHtml(footerYear)}</span> Joe</span>
+        </footer>
+    </div>
+    <script>
+        const root = document.body;
+        const main = document.getElementById('mainContent');
+        document.getElementById('previewCta')?.addEventListener('click', () => {
+            root.classList.add('revealed');
+            main?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+        document.getElementById('previewPulse')?.addEventListener('click', () => {
+            root.classList.toggle('revealed');
+        });
+        document.getElementById('sessionYear').textContent = ${JSON.stringify(footerYear)};
+    </script>
+</body>
+</html>`;
+}
+
+function buildImmediateMarkdownDraftPreview(specContent, path) {
+    const fallbackTitle = draftFallbackTitleFromPath(path);
+    const heading = draftSpecQuotedPhrase(specContent) || fallbackTitle;
+    const subtitle = summarizeDraftSpec(specContent, fallbackTitle);
+    const bullets = draftSpecLines(specContent).slice(0, 6);
+    const tags = draftSpecInterestTags(specContent);
+    return [
+        `# ${heading}`,
+        '',
+        subtitle,
+        '',
+        '## Direction',
+        ...(bullets.length ? bullets.map(line => `- ${line}`) : ['- The agent is turning the live spec into the target file.']),
+        ...(tags.length ? ['', '## Themes', ...tags.map(tag => `- ${tag}`)] : []),
+    ].join('\n');
+}
+
+function buildImmediateCodeDraftPreview(specContent, path, profileKey) {
+    const fallbackTitle = draftFallbackTitleFromPath(path);
+    const lines = draftSpecLines(specContent).slice(0, 6);
+    if (profileKey === 'python') {
+        return [
+            '"""',
+            `${fallbackTitle}`,
+            '',
+            summarizeDraftSpec(specContent, fallbackTitle),
+            '"""',
+            '',
+            '# Live scaffold from the current draft spec.',
+            ...(lines.length ? lines.map(line => `# - ${line}`) : ['# - The agent is preparing the real implementation.']),
+            '',
+        ].join('\n');
+    }
+    if (profileKey === 'json') {
+        return JSON.stringify({
+            title: fallbackTitle,
+            summary: summarizeDraftSpec(specContent, fallbackTitle),
+            cues: lines,
+            state: 'live-preview',
+        }, null, 2);
+    }
+    return [
+        `${fallbackTitle}`,
+        '',
+        summarizeDraftSpec(specContent, fallbackTitle),
+        '',
+        ...(lines.length ? lines.map(line => `- ${line}`) : ['- The agent is preparing the real file.']),
+    ].join('\n');
+}
+
+function buildImmediateDraftPreview(specContent, path, profileKey = activeDraftProfileKey) {
+    if (!String(specContent || '').trim()) return '';
+    if (profileKey === 'html') return buildImmediateHtmlDraftPreview(specContent, path);
+    if (profileKey === 'markdown') return buildImmediateMarkdownDraftPreview(specContent, path);
+    return buildImmediateCodeDraftPreview(specContent, path, profileKey);
+}
+
+function primeDraftLiveOutputFromSpec(specContent, path = activeDraftPath, profileKey = activeDraftProfileKey) {
+    const preview = buildImmediateDraftPreview(specContent, path, profileKey);
+    if (!preview) return false;
+    draftOutputPreviewPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    setDraftLiveOutput(preview, path);
+    return true;
+}
+
+function maybeRefreshDraftOutputAfterToolResult(data) {
+    if (!DOCUMENT_CENTERED_MODE || !activeDraftPath || !data || data.ok === false) return;
+    if (data.name !== 'workspace.patch_file') return;
+    const writtenPath = normalizeDraftFilename(data.payload?.path || '');
+    const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    if (!writtenPath || !compareWorkspacePaths(writtenPath, targetPath)) return;
+    clearDraftLiveOutputForRealFile(targetPath);
+    draftOutputPreviewPath = targetPath;
+    refreshDraftOutputPane().catch(error => {
+        console.error('Failed to refresh generated output after tool write:', error);
+    });
+}
+
+function handleDraftBootstrapEvent(data) {
+    if (!DOCUMENT_CENTERED_MODE || !data) return;
+    const bootstrapPath = normalizeDraftFilename(data.path || data.payload?.path || '');
+    if (!bootstrapPath) return;
+    recordWorkspaceActivity('Draft Seed', data.content || 'Materialized a visible first pass.');
+    if (!activeDraftPath || !compareWorkspacePaths(bootstrapPath, activeDraftPath)) {
+        scheduleWorkspaceRefresh();
+        return;
+    }
+    clearDraftLiveOutputForRealFile(bootstrapPath);
+    draftOutputPreviewPath = bootstrapPath;
+    refreshDraftOutputPane().catch(error => {
+        console.error('Failed to refresh generated output preview after bootstrap:', error);
+    });
+    scheduleWorkspaceRefresh();
+}
+
 async function snapshotGeneratedOutputIfChanged(path = activeDraftPath) {
     if (!currentWorkspaceId || !path) return '';
     const nextContent = await readWorkspaceTextFile(path);
@@ -4725,6 +5204,24 @@ async function refreshDraftOutputPane() {
     const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(previewPath)}`);
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 404) {
+        const canShowLiveOutput = Boolean(
+            draftLiveOutputActive
+            && viewingCurrent
+            && draftLiveOutputContent
+            && compareWorkspacePaths(draftLiveOutputPath || '', targetPath)
+        );
+        if (canShowLiveOutput) {
+            stateEl.textContent = 'Live';
+            const metadata = normalizeViewerMetadata(previewPath, {});
+            const content = draftLiveOutputContent;
+            previewEl.innerHTML = '';
+            previewEl.classList.remove('file-modal-markdown');
+            if (metadata.kind === 'html') renderHtmlPreview('draftOutputPreview', content, previewPath);
+            else if (metadata.kind === 'markdown') renderMarkdownPreview('draftOutputPreview', content);
+            else if (metadata.kind === 'csv') renderDelimitedPreview('draftOutputPreview', content, previewPath);
+            else renderCodePreview('draftOutputPreview', content, previewPath);
+            return;
+        }
         stateEl.textContent = '';
         previewEl.innerHTML = '<div class="workspace-empty">Nothing here yet.</div>';
         return;
@@ -5297,6 +5794,7 @@ async function requestDraftRealization(options = {}) {
     persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
     syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
     draftLastAgentSpecContent = specContent;
+    primeDraftLiveOutputFromSpec(specContent, activeDraftPath, activeDraftProfileKey);
     clearPendingPermissionRequest();
     dismissExecutionPlan();
     isGenerating = true;

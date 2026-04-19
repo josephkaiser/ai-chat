@@ -196,6 +196,52 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         self.assertIsNone(updated_session["active_job"])
         self.assertEqual([event.get("type") for event in transport.events if isinstance(event, dict)][-2:], ["message_id", "done"])
 
+    def test_process_chat_turn_bootstraps_missing_visible_output_before_main_generation(self):
+        path = "drafts/site.html"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        app.write_workspace_text_for_session(
+            self.workspace["id"],
+            app.file_session_spec_path(path),
+            (
+                'Create a website for Joe with a "Welcome to Joe\'s World" splash page, '
+                "a CTA button, fun gradients, math, science, ai / ml, statistics, hockey, and basketball."
+            ),
+        )
+
+        async def fake_orchestrated_chat(*_args, **_kwargs):
+            return "Refined the draft."
+
+        with (
+            mock.patch.object(app, "orchestrated_chat", side_effect=fake_orchestrated_chat),
+            mock.patch.object(app, "maybe_bootstrap_workspace_from_current_repo", return_value=None),
+            mock.patch.object(app, "schedule_conversation_summary_refresh", return_value=None),
+            mock.patch.object(app, "queue_background_optimize_job_for_file_session", return_value={}),
+        ):
+            transport = app.BufferedChatTransport()
+            asyncio.run(
+                app.process_chat_turn(
+                    transport,
+                    {
+                        "message": "Build the active draft.",
+                        "conversation_id": session["conversation_id"],
+                        "workspace_id": self.workspace["id"],
+                        "file_path": path,
+                        "attachments": [],
+                        "mode": "deep",
+                        "features": {},
+                        "slash_command": None,
+                        "plan_override_steps": [],
+                    },
+                )
+            )
+
+        output = app.read_workspace_text_for_session(self.workspace["id"], path)
+        self.assertIn("Welcome to Joe&#x27;s World", output)
+        self.assertIn("Enter the build", output)
+        event_types = [event.get("type") for event in transport.events if isinstance(event, dict)]
+        self.assertIn("draft_bootstrap", event_types)
+        self.assertLess(event_types.index("draft_bootstrap"), event_types.index("start"))
+
     def test_background_job_queues_follow_up_pass_after_promoting_incomplete_candidate(self):
         path = "drafts/site.html"
         session = app.ensure_file_session_record(self.workspace["id"], path)
