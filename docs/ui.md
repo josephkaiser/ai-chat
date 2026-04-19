@@ -101,16 +101,7 @@ The UI surfaces:
 - plan previews with editable build steps
 - direct approval of an execution plan from the composer
 
-Plan approval is always explicit. Approving a plan does not inject a fake user `yes` into chat, and per-chat tool auto-approve does not bypass plan approval.
-
-## Voice features
-
-The built-in voice UX is split across two paths:
-
-- browser microphone capture records locally and uploads an audio attachment into the workspace
-- spoken reply playback calls `/api/voice/speak` and plays the returned server audio file
-
-When auto-speak is enabled, fresh assistant replies are spoken in order so one reply does not cut off another.
+Document mode hides approval affordances and routes the visible draft through the background agent flow automatically.
 
 ## Related files
 

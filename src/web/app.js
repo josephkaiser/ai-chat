@@ -42,7 +42,8 @@ let collapsedWorkspaceDirs = new Set();
 let featureSettings = null;
 let voiceSettings = null;
 let pendingAttachments = [];
-let workspaceDraftSelections = loadStoredObject('workspaceDraftSelections', {});
+let draftFileSessions = [];
+let draftSessionDefaultPath = '';
 let inlineViewerPath = '';
 let inlineViewerKind = 'text';
 let inlineViewerEditable = false;
@@ -58,6 +59,7 @@ let inlineViewerPerformingUndo = false;
 let inlineViewerRequestToken = 0;
 let activeDraftPath = '';
 let activeDraftProfileKey = 'html';
+let draftOutputPreviewPath = '';
 let draftEditor = null;
 let draftEditorReady = false;
 let draftAutosaveTimer = null;
@@ -66,6 +68,10 @@ let draftSaveState = 'idle';
 let draftView = localStorage.getItem('draftView') === 'preview' ? 'preview' : 'edit';
 let draftApplyingRemoteContent = false;
 let draftOpenRequestToken = 0;
+let draftAgentSyncTimer = null;
+let draftPendingAgentSync = false;
+let draftLastAgentSpecContent = '';
+let activeDraftGeneratedContent = '';
 let currentFileSymbols = [];
 let symbolGroupState = {};
 let currentAssistantTurnStartedAt = null;
@@ -130,28 +136,30 @@ const LOADING_HINT_ROTATE_MS = 120000;
 const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
 const DRAFT_AUTOSAVE_DELAY_MS = 900;
+const DRAFT_AGENT_SYNC_DELAY_MS = 1400;
 const DEFAULT_DRAFT_FILENAME = 'index.html';
+const DOCUMENT_CENTERED_MODE = true;
 const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
     html: Object.freeze({
         label: 'HTML',
         extension: 'html',
         kind: 'html',
         lineWrapping: true,
-        defaultView: 'preview',
-        starter: filename => `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtmlTextForTemplate(basename(filename || 'index.html').replace(/\.[^.]+$/, '') || 'Document')}</title>
-</head>
-<body>
-  <main>
-    <h1>${escapeHtmlTextForTemplate(basename(filename || 'index.html').replace(/\.[^.]+$/, '') || 'Hello')}</h1>
-    <p>Start drafting here.</p>
-  </main>
-</body>
-</html>`,
+        defaultView: 'edit',
+        starter: filename => `Build the file \`${basename(filename || 'index.html') || 'index.html'}\`.
+
+Goal:
+- Describe what this page should do.
+
+Content:
+- List the main sections and what each one should say.
+
+Style:
+- Describe the mood, layout, typography, and colors you want.
+
+Notes:
+- Add any semantic HTML, responsiveness, or interaction wishes here.
+`,
     }),
     markdown: Object.freeze({
         label: 'Markdown',
@@ -159,7 +167,7 @@ const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
         kind: 'markdown',
         lineWrapping: true,
         defaultView: 'edit',
-        starter: filename => `# ${basename(filename || 'notes.md').replace(/\.[^.]+$/, '') || 'Notes'}\n\nStart drafting here.\n`,
+        starter: filename => `Write the file \`${basename(filename || 'notes.md') || 'notes.md'}\`.\n\nGoal:\n- Describe what this document should communicate.\n\nStructure:\n- List the headings or sections you want.\n\nTone:\n- Describe the writing style and level of detail.\n`,
     }),
     python: Object.freeze({
         label: 'Python',
@@ -167,7 +175,7 @@ const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
         kind: 'text',
         lineWrapping: false,
         defaultView: 'edit',
-        starter: filename => `def main():\n    print("Hello from ${basename(filename || 'app.py').replace(/\.[^.]+$/, '') || 'app'}")\n\n\nif __name__ == "__main__":\n    main()\n`,
+        starter: filename => `Build the Python file \`${basename(filename || 'app.py') || 'app.py'}\`.\n\nPurpose:\n- Describe what the script or module should do.\n\nInputs and outputs:\n- Describe the important functions, classes, or CLI behavior.\n\nConstraints:\n- Mention libraries, style preferences, or edge cases to handle.\n`,
     }),
     json: Object.freeze({
         label: 'JSON',
@@ -175,7 +183,7 @@ const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
         kind: 'text',
         lineWrapping: false,
         defaultView: 'edit',
-        starter: () => '{\n  "title": "Draft"\n}\n',
+        starter: filename => `Build the JSON file \`${basename(filename || 'data.json') || 'data.json'}\`.\n\nSchema ideas:\n- Describe the keys and nested structure you want.\n\nRules:\n- Mention any required values, formats, or constraints.\n`,
     }),
     text: Object.freeze({
         label: 'Text',
@@ -183,7 +191,7 @@ const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
         kind: 'text',
         lineWrapping: true,
         defaultView: 'edit',
-        starter: () => '',
+        starter: filename => `Create the file \`${basename(filename || 'notes.txt') || 'notes.txt'}\`.\n\nUse this draft as a wish list, outline, or rough brief for what the generated file should become.\n`,
     }),
 });
 const DISCOVERY_HINTS = Object.freeze([
@@ -649,6 +657,10 @@ function updateStatus(status) {
     renderStatusDot(status);
     renderSettingsRuntimeStatus();
     syncSendButton();
+    if (modelAvailable && draftPendingAgentSync) {
+        draftPendingAgentSync = false;
+        scheduleDraftAgentSync({ immediate: true });
+    }
 }
 
 function setWebsocketConnected(connected) {
@@ -669,6 +681,9 @@ function canUseWebsocketTransport() {
 
 function buildHttpFallbackPayload(payload = {}) {
     const nextPayload = { ...payload };
+    if (!nextPayload.file_path && activeDraftPath) {
+        nextPayload.file_path = normalizeDraftFilename(activeDraftPath);
+    }
     if (nextPayload.features && typeof nextPayload.features === 'object') {
         nextPayload.features = {
             ...nextPayload.features,
@@ -703,6 +718,14 @@ function syncChatShellLayout() {
     if (menuOpen && menuPanel) {
         const menuRect = menuPanel.getBoundingClientRect();
         desiredLeft = Math.max(0, menuRect.right - shellRect.left + CHAT_SURFACE_GAP_PX);
+    }
+
+    const fileExplorerOverlay = document.getElementById('fileExplorerOverlay');
+    const fileExplorerPanel = fileExplorerOverlay?.querySelector('.file-explorer-panel');
+    const fileExplorerOpen = Boolean(fileExplorerOverlay?.classList.contains('show') && fileExplorerPanel);
+    if (fileExplorerOpen && fileExplorerPanel) {
+        const explorerRect = fileExplorerPanel.getBoundingClientRect();
+        desiredRight = Math.max(desiredRight, shellRect.right - explorerRect.left + CHAT_SURFACE_GAP_PX);
     }
 
     const ideWorkspace = document.getElementById('ideWorkspace');
@@ -954,6 +977,98 @@ function downloadWorkspaceFile(path) {
     window.open(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file/download?${params.toString()}`, '_blank', 'noopener');
 }
 
+function downloadActiveGeneratedFile() {
+    if (!activeDraftPath) return;
+    downloadWorkspaceFile(activeDraftPath);
+}
+
+async function copyActiveGeneratedFile() {
+    if (!activeDraftPath) return;
+    try {
+        const content = await readWorkspaceTextFile(activeDraftPath);
+        if (!content) {
+            showTransientComposerHint('There is no generated file content to copy yet.', 5000);
+            return;
+        }
+        copyToClipboard(content);
+        showTransientComposerHint(`Copied ${basename(activeDraftPath)}.`, 4000);
+    } catch (error) {
+        showTransientComposerHint(`Copy failed: ${error.message}`, 5000);
+    }
+}
+
+function closeDraftVersionsModal() {
+    document.getElementById('draftVersionsModal')?.classList.remove('show');
+}
+
+async function openDraftVersionsModal() {
+    const modal = document.getElementById('draftVersionsModal');
+    const currentEl = document.getElementById('draftVersionsCurrentFile');
+    const listEl = document.getElementById('draftVersionsList');
+    if (!modal || !currentEl || !listEl) return;
+
+    const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    currentEl.textContent = `Target file: ${targetPath}`;
+    listEl.innerHTML = '<div class="workspace-empty">Loading versions...</div>';
+    modal.classList.add('show');
+
+    if (!currentWorkspaceId || !targetPath) {
+        listEl.innerHTML = '<div class="workspace-empty">Choose a workspace and draft first.</div>';
+        return;
+    }
+
+    try {
+        const currentContent = await readWorkspaceTextFile(targetPath);
+        const listing = await fetchWorkspaceDirectory(draftVersionDirectoryForTargetPath(targetPath)).catch(() => ({ items: [] }));
+        const items = Array.isArray(listing.items) ? listing.items.filter(item => item.type === 'file') : [];
+        const sortedItems = items.slice().sort((a, b) => String(b.modified_at || '').localeCompare(String(a.modified_at || '')));
+        const rows = [];
+        rows.push({
+            title: 'Current generated file',
+            path: targetPath,
+            downloadPath: targetPath,
+            modifiedAt: '',
+            empty: !currentContent,
+        });
+        sortedItems.forEach(item => {
+            rows.push({
+                title: new Date(item.modified_at || Date.now()).toLocaleString(),
+                path: item.path,
+                downloadPath: item.path,
+                modifiedAt: item.modified_at || '',
+                empty: false,
+            });
+        });
+
+        listEl.innerHTML = '';
+        if (!rows.length) {
+            listEl.innerHTML = '<div class="workspace-empty">No saved versions yet.</div>';
+            return;
+        }
+
+        rows.forEach(row => {
+            const item = document.createElement('div');
+            item.className = 'draft-version-item';
+            item.innerHTML = `
+                <div class="draft-version-copy">
+                    <div class="draft-version-title">${escapeHtml(row.title)}</div>
+                    <div class="draft-version-path">${escapeHtml(row.path)}</div>
+                </div>
+                <div class="draft-version-actions">
+                    <button type="button"${row.empty ? ' disabled' : ''}>Download</button>
+                </div>
+            `;
+            const button = item.querySelector('button');
+            if (button && !row.empty) {
+                button.onclick = () => downloadWorkspaceFile(row.downloadPath);
+            }
+            listEl.appendChild(item);
+        });
+    } catch (error) {
+        listEl.innerHTML = `<div class="workspace-empty">Could not load version history: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
 function workspaceFileInlineViewUrl(path) {
     if (!currentWorkspaceId || !path) return '';
     const params = new URLSearchParams({ path });
@@ -1176,7 +1291,7 @@ function resolveTurnFeatures(message, attachmentPaths = [], slashCommand = null)
         workspace_run_commands: workspaceRunCommands,
         allowed_commands: allowedCommands,
         allowed_tool_permissions: allowedToolPermissions,
-        auto_approve_tool_permissions: autoApproveToolPermissions,
+        auto_approve_tool_permissions: DOCUMENT_CENTERED_MODE || autoApproveToolPermissions,
     };
 }
 
@@ -1201,6 +1316,10 @@ function renderPermissionPanel() {
     const allowButton = document.getElementById('permissionAllowButton');
     const denyButton = document.getElementById('permissionDenyButton');
     if (!panel) return;
+    if (DOCUMENT_CENTERED_MODE) {
+        panel.hidden = true;
+        return;
+    }
 
     if (!pendingPermissionRequest) {
         panel.hidden = true;
@@ -1302,7 +1421,7 @@ function syncToolApprovalToggle() {
     const toggle = document.getElementById('toolApprovalToggle');
     const value = document.getElementById('toolApprovalToggleValue');
     if (!toggle) return;
-    const enabled = isToolAutoApproveEnabledForConversation(currentConvId);
+    const enabled = DOCUMENT_CENTERED_MODE ? true : isToolAutoApproveEnabledForConversation(currentConvId);
     toggle.classList.toggle('is-enabled', enabled);
     toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     toggle.setAttribute(
@@ -1318,6 +1437,7 @@ function syncToolApprovalToggle() {
 }
 
 function toggleToolApprovalMode() {
+    if (DOCUMENT_CENTERED_MODE) return;
     const nextEnabled = !isToolAutoApproveEnabledForConversation(currentConvId);
     setToolAutoApproveForConversation(currentConvId, nextEnabled);
     syncToolApprovalToggle();
@@ -1756,11 +1876,20 @@ function startHealthPolling() {
 
 function handleChatEvent(data) {
     if (!data || typeof data !== 'object') return;
-    if (data.type === 'start') {
+    if (data.type === 'file_session_bound') {
+        const boundPath = normalizeDraftFilename(data.file_path || DEFAULT_DRAFT_FILENAME);
+        const boundConversationId = String(data.conversation_id || '').trim();
+        if (boundConversationId && compareWorkspacePaths(boundPath, activeDraftPath || '')) {
+            currentConvId = boundConversationId;
+            syncToolApprovalToggle();
+            renderDraftFileExplorer();
+        }
+    } else if (data.type === 'start') {
         if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
         removeLoading();
         ensureStreamingAssistantMessage();
+        if (DOCUMENT_CENTERED_MODE) setDraftSaveState('saving', 'Agent');
         currentAssistantTurnStartedAt = Date.now();
         currentAssistantTurnArtifactPaths = new Set();
         currentPlanFocus = null;
@@ -1782,7 +1911,7 @@ function handleChatEvent(data) {
         recordWorkspaceActivity('Note', data.content || 'Updated the working draft.');
     } else if (data.type === 'plan_ready') {
         storeExecutionPlan(data.plan || '', data.execute_prompt || '', data.builder_steps || []);
-        recordWorkspaceActivity('Plan', 'Execution plan ready for approval.');
+        recordWorkspaceActivity('Plan', DOCUMENT_CENTERED_MODE ? 'Execution plan auto-approved.' : 'Execution plan ready for approval.');
     } else if (data.type === 'build_steps') {
         updateBuildSteps(
             data.steps || [],
@@ -1885,6 +2014,23 @@ function handleChatEvent(data) {
             }
             return;
         }
+        if (DOCUMENT_CENTERED_MODE) {
+            if (canUseWebsocketTransport()) {
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    conversation_id: permissionConversationId || currentConvId,
+                    client_turn_id: clientTurnId,
+                    permission_key: permissionKey,
+                    approval_target: approvalTarget,
+                    approved: true,
+                }));
+            }
+            recordWorkspaceActivity('Auto-Approve', `${data.title || 'Permission'} approved automatically.`, {
+                phase: 'active',
+                stepLabel: data.step_label || '',
+            });
+            return;
+        }
         const requestConversationId = permissionConversationId || currentConvId;
         if (isToolAutoApproveEnabledForConversation(requestConversationId)) {
             if (canUseWebsocketTransport()) {
@@ -1943,6 +2089,7 @@ function handleChatEvent(data) {
     } else if (data.type === 'final_replace') {
         clearResolvedPermissionPrompt();
         replaceAssistantAnswer(data.content);
+        if (DOCUMENT_CENTERED_MODE) setDraftSaveState('saved', 'Ready');
         recordWorkspaceActivity('Draft', 'Draft updated.');
     } else if (data.type === 'message_id') {
         clearResolvedPermissionPrompt();
@@ -1958,12 +2105,35 @@ function handleChatEvent(data) {
         isGenerating = false;
         currentTurnTransport = null;
         httpTurnAbortController = null;
+        if (DOCUMENT_CENTERED_MODE) setDraftSaveState('saved', 'Ready');
         syncSendButton();
-        document.getElementById('input').focus();
+        focusInput();
         renderMarkdown();
         loadConversations();
         finalizeAssistantTurnArtifacts();
         refreshWorkspace(true);
+        if (DOCUMENT_CENTERED_MODE) {
+            persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
+            syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
+            snapshotGeneratedOutputIfChanged(activeDraftPath).catch(error => {
+                console.error('Failed to snapshot the generated file version:', error);
+            });
+            if (draftPendingAgentSync) {
+                draftPendingAgentSync = false;
+                scheduleDraftAgentSync({ immediate: true });
+            } else if (activeDraftPath) {
+                loadDraftDocument(activeDraftPath, { preserveAgentState: true }).catch(error => {
+                    console.error('Failed to refresh the active draft spec after completion:', error);
+                });
+            }
+            renderDraftFileExplorer();
+            refreshDraftVersionsSidebar().catch(error => {
+                console.error('Failed to refresh draft versions:', error);
+            });
+            refreshDraftOutputPane().catch(error => {
+                console.error('Failed to refresh generated output preview:', error);
+            });
+        }
         recordWorkspaceActivity('Done', 'Turn complete.');
         activeStreamConversationId = null;
         streamingAssistantMessage = null;
@@ -1993,6 +2163,7 @@ function handleChatEvent(data) {
         }
         streamingAssistantMessage = errorMsg;
         appendStreamingAssistantMessageIfVisible();
+        if (DOCUMENT_CENTERED_MODE) setDraftSaveState('error', 'Agent');
         if (currentConvId === activeStreamConversationId) {
             activeStreamConversationId = null;
             streamingAssistantMessage = null;
@@ -2001,9 +2172,13 @@ function handleChatEvent(data) {
 }
 
 async function dispatchChatPayload(payload, options = {}) {
+    const nextPayload = {
+        ...payload,
+        file_path: payload?.file_path || (activeDraftPath ? normalizeDraftFilename(activeDraftPath) : null),
+    };
     if (canUseWebsocketTransport()) {
         currentTurnTransport = 'ws';
-        ws.send(JSON.stringify(payload));
+        ws.send(JSON.stringify(nextPayload));
         return;
     }
 
@@ -2017,7 +2192,7 @@ async function dispatchChatPayload(payload, options = {}) {
         const resp = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(buildHttpFallbackPayload(payload)),
+            body: JSON.stringify(buildHttpFallbackPayload(nextPayload)),
             signal: controller.signal,
         });
         const data = await resp.json().catch(() => ({}));
@@ -2109,7 +2284,11 @@ function toggleMenu() {
     if (!overlay) return;
     dismissMobileKeyboard(true);
     const open = !overlay.classList.contains('show');
-    if (open) closeWorkspacePanel();
+    if (open) {
+        closeWorkspacePanel();
+        closeFileExplorer();
+        refreshDraftVersionsSidebar().catch(() => {});
+    }
     overlay.classList.toggle('show', open);
     if (shell) shell.classList.toggle('menu-open', open);
     if (button) {
@@ -2124,6 +2303,36 @@ function closeMenu() {
     const shell = document.querySelector('.chat-shell');
     if (overlay) overlay.classList.remove('show');
     if (shell) shell.classList.remove('menu-open');
+    if (button) {
+        button.classList.remove('active');
+        button.setAttribute('aria-expanded', 'false');
+    }
+    syncChatShellLayout();
+}
+
+function toggleFileExplorer() {
+    const overlay = document.getElementById('fileExplorerOverlay');
+    const button = document.getElementById('fileExplorerToggle');
+    if (!overlay) return;
+    dismissMobileKeyboard(true);
+    const open = !overlay.classList.contains('show');
+    if (open) {
+        closeWorkspacePanel();
+        closeMenu();
+        renderDraftFileExplorer();
+    }
+    overlay.classList.toggle('show', open);
+    if (button) {
+        button.classList.toggle('active', open);
+        button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+    syncChatShellLayout();
+}
+
+function closeFileExplorer() {
+    const overlay = document.getElementById('fileExplorerOverlay');
+    const button = document.getElementById('fileExplorerToggle');
+    if (overlay) overlay.classList.remove('show');
     if (button) {
         button.classList.remove('active');
         button.setAttribute('aria-expanded', 'false');
@@ -2370,6 +2579,18 @@ function toggleDeepMode() {
 }
 
 function focusInput() {
+    if (DOCUMENT_CENTERED_MODE) {
+        const editor = ensureDraftEditor();
+        if (editor) {
+            editor.focus();
+            return;
+        }
+        const draftTextarea = document.getElementById('draftEditor');
+        if (draftTextarea) {
+            draftTextarea.focus();
+            return;
+        }
+    }
     const input = document.getElementById('input');
     if (input) {
         input.focus();
@@ -2378,6 +2599,10 @@ function focusInput() {
 }
 
 function focusInputAtStart() {
+    if (DOCUMENT_CENTERED_MODE) {
+        focusInput();
+        return;
+    }
     const input = document.getElementById('input');
     if (!input) return;
     input.focus();
@@ -3642,6 +3867,10 @@ function renderExecutionPlanApproval() {
     const checklist = document.getElementById('planApprovalChecklist');
     const checklistList = document.getElementById('planApprovalSteps');
     if (!panel || !summary || !checklist || !checklistList) return;
+    if (DOCUMENT_CENTERED_MODE) {
+        panel.hidden = true;
+        return;
+    }
 
     const hasPlan = Boolean(pendingExecutionPlan?.executePrompt);
     panel.hidden = !hasPlan;
@@ -3806,6 +4035,10 @@ function storeExecutionPlan(summary, executePrompt, builderSteps = [], options =
     };
     renderExecutionPlanApproval();
     syncSendButton();
+    if (DOCUMENT_CENTERED_MODE) {
+        window.setTimeout(() => approveExecutionPlan(), 0);
+        return;
+    }
 
     if (options.focusComposer !== false) {
         const input = document.getElementById('input');
@@ -4150,22 +4383,333 @@ function normalizeDraftFilename(path) {
     return normalized === '.' ? DEFAULT_DRAFT_FILENAME : normalized;
 }
 
+function draftStorageSlugForTargetPath(path) {
+    return normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME)
+        .replace(/[\\/]+/g, '__')
+        .replace(/[^a-zA-Z0-9._-]+/g, '_')
+        .replace(/^_+|_+$/g, '') || 'draft';
+}
+
+function draftSpecPathForTargetPath(path) {
+    return `.ai-chat/drafts/${draftStorageSlugForTargetPath(path)}.draft.md`;
+}
+
+function draftVersionDirectoryForTargetPath(path) {
+    return `.ai-chat/versions/${draftStorageSlugForTargetPath(path)}`;
+}
+
+async function loadDraftFileSessions(workspaceId = currentWorkspaceId) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    if (!safeWorkspaceId) {
+        draftFileSessions = [];
+        draftSessionDefaultPath = '';
+        renderDraftFileExplorer();
+        return [];
+    }
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(safeWorkspaceId)}/file-sessions`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    draftFileSessions = Array.isArray(data.sessions) ? data.sessions : [];
+    draftSessionDefaultPath = normalizeDraftFilename(data.default_path || DEFAULT_DRAFT_FILENAME);
+    renderDraftFileExplorer();
+    return draftFileSessions;
+}
+
+async function ensureDraftFileSession(path, preferredConversationId = '') {
+    if (!currentWorkspaceId) throw new Error('Choose a workspace first.');
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-sessions/ensure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            path: normalizedPath,
+            preferred_conversation_id: String(preferredConversationId || '').trim() || null,
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
+    return data;
+}
+
+function getDraftHistoryForWorkspace(workspaceId = currentWorkspaceId) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    if (!safeWorkspaceId) return [];
+    return draftFileSessions
+        .filter(item => String(item?.workspace_id || '').trim() === safeWorkspaceId)
+        .map(item => normalizeDraftFilename(item?.path || ''))
+        .filter(Boolean);
+}
+
+function persistDraftHistoryEntry(workspaceId, path) {
+    void workspaceId;
+    void path;
+}
+
+function getDraftSessionRecord(workspaceId = currentWorkspaceId, path = activeDraftPath) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    if (!safeWorkspaceId || !normalizedPath) return null;
+    return draftFileSessions.find(item =>
+        String(item?.workspace_id || '').trim() === safeWorkspaceId
+        && compareWorkspacePaths(item?.path || '', normalizedPath)
+    ) || null;
+}
+
+function getDraftSessionConversationId(workspaceId = currentWorkspaceId, path = activeDraftPath) {
+    return String(getDraftSessionRecord(workspaceId, path)?.conversation_id || '').trim();
+}
+
+function getDraftSessionPathForConversation(workspaceId = currentWorkspaceId, conversationId = currentConvId) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    const safeConversationId = String(conversationId || '').trim();
+    if (!safeWorkspaceId || !safeConversationId) return '';
+    const match = draftFileSessions.find(item =>
+        String(item?.workspace_id || '').trim() === safeWorkspaceId
+        && String(item?.conversation_id || '').trim() === safeConversationId
+    );
+    return normalizeDraftFilename(match?.path || '');
+}
+
+function persistDraftSession(workspaceId = currentWorkspaceId, path = activeDraftPath, conversationId = currentConvId) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const safeConversationId = String(conversationId || '').trim();
+    if (!safeWorkspaceId || !normalizedPath || !safeConversationId) return;
+    ensureDraftFileSession(normalizedPath, safeConversationId).catch(error => {
+        console.error('Failed to persist draft file session:', error);
+    });
+}
+
+function adoptDraftSessionConversation(path = activeDraftPath) {
+    const session = getDraftSessionRecord(currentWorkspaceId, path);
+    const nextConversationId = String(session?.conversation_id || '').trim();
+    if (!nextConversationId || nextConversationId === currentConvId) return false;
+    currentConvId = nextConversationId;
+    syncToolApprovalToggle();
+    return true;
+}
+
+async function syncCurrentConversationTitleToDraft(path = activeDraftPath) {
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const conversationId = String(currentConvId || '').trim();
+    if (!conversationId || !normalizedPath) return;
+    try {
+        await fetch(`/api/conversation/${encodeURIComponent(conversationId)}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: normalizedPath }),
+        });
+    } catch (error) {
+        console.debug('Draft session title sync skipped:', error);
+    }
+}
+
+function renderDraftFileExplorer() {
+    const listEl = document.getElementById('draftFileExplorerList');
+    if (!listEl) return;
+    const history = getDraftHistoryForWorkspace();
+    if (!currentWorkspaceId) {
+        listEl.innerHTML = '<div class="workspace-catalog-empty">Choose a workspace first.</div>';
+        return;
+    }
+    if (!history.length) {
+        listEl.innerHTML = '<div class="workspace-catalog-empty">No files yet.</div>';
+        return;
+    }
+    listEl.innerHTML = '';
+    history.forEach(path => {
+        const item = document.createElement('div');
+        const isActive = compareWorkspacePaths(path, activeDraftPath || '');
+        const hasSession = Boolean(getDraftSessionConversationId(currentWorkspaceId, path));
+        item.className = `conv-item is-file${isActive ? ' active' : ''}`;
+        item.innerHTML = `
+            <div class="conv-title">${escapeHtml(basename(path) || path)}${hasSession ? '<span class="conv-file-badge">Session</span>' : ''}</div>
+            <div class="conv-preview">${escapeHtml(path)}</div>
+        `;
+        item.onclick = () => {
+            switchToDraftFile(path).catch(error => {
+                alert(`Couldn't open that file: ${error.message}`);
+            });
+            closeFileExplorer();
+        };
+        listEl.appendChild(item);
+    });
+}
+
+async function listDraftVersionRows(targetPath = activeDraftPath) {
+    const normalizedPath = normalizeDraftFilename(targetPath || DEFAULT_DRAFT_FILENAME);
+    if (!currentWorkspaceId || !normalizedPath) return [];
+    const currentContent = await readWorkspaceTextFile(normalizedPath);
+    const listing = await fetchWorkspaceDirectory(draftVersionDirectoryForTargetPath(normalizedPath)).catch(() => ({ items: [] }));
+    const items = Array.isArray(listing.items) ? listing.items.filter(item => item.type === 'file') : [];
+    const sortedItems = items.slice().sort((a, b) => String(b.modified_at || '').localeCompare(String(a.modified_at || '')));
+    const rows = [{
+        title: 'Current output',
+        path: normalizedPath,
+        previewPath: normalizedPath,
+        meta: currentContent ? 'Live file' : 'Waiting for the first generated result',
+        empty: !currentContent,
+        current: true,
+    }];
+    sortedItems.forEach(item => {
+        rows.push({
+            title: new Date(item.modified_at || Date.now()).toLocaleString(),
+            path: item.path,
+            previewPath: item.path,
+            meta: item.path,
+            empty: false,
+            current: false,
+        });
+    });
+    return rows;
+}
+
+async function refreshDraftVersionsSidebar() {
+    const listEl = document.getElementById('draftVersionsSidebarList');
+    const fileLabelEl = document.getElementById('draftVersionMenuFileLabel');
+    if (!listEl || !fileLabelEl) return;
+    const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    fileLabelEl.textContent = basename(targetPath) || targetPath;
+    if (!currentWorkspaceId || !targetPath) {
+        listEl.innerHTML = '<div class="workspace-catalog-empty">Choose a file first.</div>';
+        return;
+    }
+    listEl.innerHTML = '<div class="workspace-catalog-empty">Loading versions...</div>';
+    const rows = await listDraftVersionRows(targetPath);
+    if (!rows.length) {
+        listEl.innerHTML = '<div class="workspace-catalog-empty">No saved versions yet.</div>';
+        return;
+    }
+    listEl.innerHTML = '';
+    rows.forEach(row => {
+        const item = document.createElement('div');
+        const active = compareWorkspacePaths(draftOutputPreviewPath || targetPath, row.previewPath);
+        item.className = `conv-item is-version${active ? ' active' : ''}`;
+        item.innerHTML = `
+            <div class="conv-title">${escapeHtml(row.title)}</div>
+            <div class="conv-preview">${escapeHtml(row.meta)}</div>
+            <div class="conv-timestamp">${row.current ? 'Current' : 'Snapshot'}</div>
+        `;
+        item.onclick = () => {
+            draftOutputPreviewPath = row.previewPath;
+            refreshDraftOutputPane().catch(error => {
+                console.error('Failed to preview that version:', error);
+            });
+            closeMenu();
+        };
+        listEl.appendChild(item);
+    });
+}
+
+async function readWorkspaceTextFile(path) {
+    if (!currentWorkspaceId || !path) return '';
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404) return '';
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    return typeof data.content === 'string' ? data.content : '';
+}
+
+async function writeWorkspaceTextFile(path, content) {
+    if (!currentWorkspaceId) throw new Error('Choose a workspace before saving.');
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, content }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    return data;
+}
+
+function draftVersionFilenameForTargetPath(path, timestamp = new Date()) {
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const ext = normalizedPath.includes('.') ? normalizedPath.slice(normalizedPath.lastIndexOf('.')) : '.txt';
+    const iso = timestamp.toISOString().replace(/[:.]/g, '-');
+    return `${draftVersionDirectoryForTargetPath(normalizedPath)}/${iso}${ext}`;
+}
+
+async function syncGeneratedOutputBaseline(path = activeDraftPath) {
+    if (!currentWorkspaceId || !path) {
+        activeDraftGeneratedContent = '';
+        return '';
+    }
+    activeDraftGeneratedContent = await readWorkspaceTextFile(path);
+    return activeDraftGeneratedContent;
+}
+
+async function snapshotGeneratedOutputIfChanged(path = activeDraftPath) {
+    if (!currentWorkspaceId || !path) return '';
+    const nextContent = await readWorkspaceTextFile(path);
+    if (nextContent === activeDraftGeneratedContent) return nextContent;
+    if (activeDraftGeneratedContent) {
+        await writeWorkspaceTextFile(
+            draftVersionFilenameForTargetPath(path),
+            activeDraftGeneratedContent,
+        );
+    }
+    activeDraftGeneratedContent = nextContent;
+    return nextContent;
+}
+
+async function refreshDraftOutputPane() {
+    const previewEl = document.getElementById('draftOutputPreview');
+    const pathEl = document.getElementById('draftOutputPath');
+    const stateEl = document.getElementById('draftOutputState');
+    if (!previewEl || !pathEl || !stateEl) return;
+
+    const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const previewPath = String(draftOutputPreviewPath || targetPath || '').trim();
+    if (!currentWorkspaceId || !previewPath) {
+        pathEl.textContent = basename(targetPath) || targetPath || 'Generated file';
+        stateEl.textContent = 'Waiting';
+        previewEl.innerHTML = '<div class="workspace-empty">The generated file will appear here as the agent works.</div>';
+        return;
+    }
+
+    const viewingCurrent = compareWorkspacePaths(previewPath, targetPath);
+    pathEl.textContent = basename(previewPath) || previewPath;
+    stateEl.textContent = viewingCurrent ? 'Live' : 'Snapshot';
+
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(previewPath)}`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 404) {
+        previewEl.innerHTML = '<div class="workspace-empty">No generated file yet. Keep drafting and the agent will build it here.</div>';
+        return;
+    }
+    if (!resp.ok) {
+        throw new Error(data.detail || `HTTP ${resp.status}`);
+    }
+
+    const metadata = normalizeViewerMetadata(previewPath, data);
+    const content = typeof data.content === 'string' ? data.content : '';
+    previewEl.innerHTML = '';
+    previewEl.classList.remove('file-modal-markdown');
+    if (metadata.kind === 'pdf') renderPdfPreview('draftOutputPreview', previewPath);
+    else if (metadata.kind === 'image') renderImagePreview('draftOutputPreview', previewPath);
+    else if (metadata.kind === 'html') renderHtmlPreview('draftOutputPreview', content, previewPath);
+    else if (metadata.kind === 'markdown') renderMarkdownPreview('draftOutputPreview', content);
+    else if (metadata.kind === 'csv') renderDelimitedPreview('draftOutputPreview', content, previewPath);
+    else renderCodePreview('draftOutputPreview', content, previewPath);
+}
+
 function draftSubtitleForProfile(profileKey, path) {
     const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
     const workspaceName = currentWorkspaceMeta?.display_name || currentWorkspaceMeta?.root_path || 'this workspace';
     if (profileKey === 'html') {
-        return `Saved as ${normalizedPath} in ${workspaceName}. HTML drafts render in preview, so the agent should preserve semantic structure and make targeted, viewer-friendly changes.`;
+        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the natural-language outline for the HTML file the agent generates on your behalf.`;
     }
     if (profileKey === 'markdown') {
-        return `Saved as ${normalizedPath} in ${workspaceName}. Markdown drafts should keep clear headings, sections, and readable prose flow.`;
+        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the Markdown file the agent generates on your behalf.`;
     }
     if (profileKey === 'python') {
-        return `Saved as ${normalizedPath} in ${workspaceName}. Python drafts should use patch-and-validate edits instead of full rewrites whenever possible.`;
+        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the Python file the agent generates on your behalf.`;
     }
     if (profileKey === 'json') {
-        return `Saved as ${normalizedPath} in ${workspaceName}. JSON drafts should preserve valid structure while editing.`;
+        return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the JSON file the agent generates on your behalf.`;
     }
-    return `Saved as ${normalizedPath} in ${workspaceName}. This draft is the main document for the current thread.`;
+    return `Drafting ${normalizedPath} in ${workspaceName}. This editor is the outline for the generated file, not the final output itself.`;
 }
 
 function previewDraftFilenameState(pathValue) {
@@ -4180,15 +4724,34 @@ function previewDraftFilenameState(pathValue) {
 }
 
 function defaultDraftPathForWorkspace(workspaceId = currentWorkspaceId) {
-    const stored = String(workspaceDraftSelections[String(workspaceId || '').trim()] || '').trim();
-    return normalizeDraftFilename(stored || DEFAULT_DRAFT_FILENAME);
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    if (safeWorkspaceId && safeWorkspaceId === currentWorkspaceId) {
+        const sessionPath = getDraftHistoryForWorkspace(safeWorkspaceId)[0] || '';
+        if (sessionPath) return normalizeDraftFilename(sessionPath);
+        if (draftSessionDefaultPath) return normalizeDraftFilename(draftSessionDefaultPath);
+        if (activeDraftPath) return normalizeDraftFilename(activeDraftPath);
+    }
+    return normalizeDraftFilename(DEFAULT_DRAFT_FILENAME);
 }
 
 function persistDraftSelection(workspaceId, path) {
-    const safeWorkspaceId = String(workspaceId || '').trim();
-    if (!safeWorkspaceId) return;
-    workspaceDraftSelections[safeWorkspaceId] = normalizeDraftFilename(path);
-    persistStoredObject('workspaceDraftSelections', workspaceDraftSelections);
+    void workspaceId;
+    void path;
+}
+
+async function switchToDraftFile(path, options = {}) {
+    const nextPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const changingFiles = !compareWorkspacePaths(nextPath, activeDraftPath || '');
+    const preferredConversationId = changingFiles && hasConversationMessages() ? '' : currentConvId;
+    const session = await ensureDraftFileSession(nextPath, preferredConversationId);
+    const nextSessionId = String(session?.conversation_id || '').trim();
+
+    if (nextSessionId && nextSessionId !== currentConvId) {
+        await loadConversation(nextSessionId, { filePath: nextPath, preserveActivity: false });
+        return;
+    }
+
+    await loadDraftDocument(nextPath);
 }
 
 function syncDraftHeader(path = activeDraftPath) {
@@ -4259,7 +4822,7 @@ function syncDraftView() {
 }
 
 function setDraftView(view) {
-    draftView = view === 'preview' ? 'preview' : 'edit';
+    draftView = DOCUMENT_CENTERED_MODE ? 'edit' : (view === 'preview' ? 'preview' : 'edit');
     localStorage.setItem('draftView', draftView);
     syncDraftView();
 }
@@ -4389,6 +4952,7 @@ async function saveDraftDocument(options = {}) {
     if (!currentWorkspaceId) throw new Error('Choose a workspace before saving a draft.');
     const saveButton = document.getElementById('draftSaveButton');
     const draftPath = normalizeDraftFilename(document.getElementById('draftFilename')?.value || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const specPath = draftSpecPathForTargetPath(draftPath);
     const content = getDraftContent();
     activeDraftPath = draftPath;
     activeDraftProfileKey = draftProfileKeyForPath(draftPath);
@@ -4396,18 +4960,23 @@ async function saveDraftDocument(options = {}) {
     if (saveButton) saveButton.disabled = true;
     setDraftSaveState('saving', options.autosave ? 'Autosaving' : 'Saving');
     try {
-        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: draftPath, content }),
+        const data = await writeWorkspaceTextFile(specPath, content);
+        const session = await ensureDraftFileSession(draftPath, currentConvId).catch(error => {
+            console.error('Failed to sync file session after saving:', error);
+            return null;
         });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        if (session?.conversation_id) {
+            currentConvId = String(session.conversation_id).trim() || currentConvId;
+            syncToolApprovalToggle();
+        }
         draftLastSavedContent = content;
         persistDraftSelection(currentWorkspaceId, draftPath);
+        persistDraftHistoryEntry(currentWorkspaceId, draftPath);
+        renderDraftFileExplorer();
         setDraftSaveState('saved');
         if (options.autosave) scheduleWorkspaceRefresh();
         else await refreshWorkspace(false);
+        if (!options.skipAgentSync) scheduleDraftAgentSync();
         return data;
     } catch (error) {
         setDraftSaveState('error');
@@ -4423,26 +4992,34 @@ async function loadDraftDocument(path, options = {}) {
     const draftPath = normalizeDraftFilename(path || defaultDraftPathForWorkspace());
     const profileKey = draftProfileKeyForPath(draftPath);
     const previousPath = activeDraftPath;
+    const specPath = draftSpecPathForTargetPath(draftPath);
     const requestToken = ++draftOpenRequestToken;
     activeDraftPath = draftPath;
     activeDraftProfileKey = profileKey;
+    draftOutputPreviewPath = draftPath;
+    adoptDraftSessionConversation(draftPath);
     if (!compareWorkspacePaths(previousPath || '', draftPath)) {
-        draftView = getDraftProfileDefinition(profileKey).defaultView || 'edit';
+        draftView = DOCUMENT_CENTERED_MODE ? 'edit' : (getDraftProfileDefinition(profileKey).defaultView || 'edit');
         localStorage.setItem('draftView', draftView);
     }
     syncDraftHeader(draftPath);
+    persistDraftHistoryEntry(currentWorkspaceId, draftPath);
+    renderDraftFileExplorer();
     configureDraftEditorLanguage(draftPath);
     if (!currentWorkspaceId) {
         const starter = buildDraftStarterContent(draftPath, profileKey);
         setDraftContent(starter);
         draftLastSavedContent = '';
+        draftLastAgentSpecContent = starter;
         renderDraftPreview();
         setDraftSaveState('idle');
         syncDraftView();
+        refreshDraftVersionsSidebar().catch(() => {});
+        refreshDraftOutputPane().catch(() => {});
         return;
     }
     try {
-        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(draftPath)}`);
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(specPath)}`);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             if (resp.status !== 404) throw new Error(data.detail || `HTTP ${resp.status}`);
@@ -4450,27 +5027,36 @@ async function loadDraftDocument(path, options = {}) {
             if (requestToken !== draftOpenRequestToken) return;
             setDraftContent(starter);
             draftLastSavedContent = '';
-            persistDraftSelection(currentWorkspaceId, draftPath);
+            draftLastAgentSpecContent = starter;
             renderDraftPreview();
             setDraftSaveState(starter ? 'dirty' : 'idle');
             syncDraftView();
+            await syncGeneratedOutputBaseline(draftPath);
+            refreshDraftVersionsSidebar().catch(() => {});
+            refreshDraftOutputPane().catch(() => {});
             return;
         }
         if (requestToken !== draftOpenRequestToken) return;
         const content = typeof data.content === 'string' ? data.content : '';
         setDraftContent(content);
         draftLastSavedContent = content;
-        persistDraftSelection(currentWorkspaceId, draftPath);
+        draftLastAgentSpecContent = options.preserveAgentState ? draftLastAgentSpecContent : content;
         renderDraftPreview();
         setDraftSaveState('saved');
         syncDraftView();
+        await syncGeneratedOutputBaseline(draftPath);
+        refreshDraftVersionsSidebar().catch(() => {});
+        refreshDraftOutputPane().catch(() => {});
     } catch (error) {
         console.error('Failed to load draft document:', error);
         if (requestToken !== draftOpenRequestToken) return;
         setDraftContent('');
         draftLastSavedContent = '';
+        draftLastAgentSpecContent = '';
         renderDraftPreview();
         setDraftSaveState('error');
+        refreshDraftVersionsSidebar().catch(() => {});
+        refreshDraftOutputPane().catch(() => {});
     }
 }
 
@@ -4492,7 +5078,7 @@ async function commitDraftFilename() {
             console.error('Failed to save the previous draft before switching files:', error);
         }
     }
-    await loadDraftDocument(nextPath);
+    await switchToDraftFile(nextPath);
 }
 
 function handleDraftFilenameKeyDown(event) {
@@ -4515,20 +5101,34 @@ function seedChatFromDraft() {
     focusInput();
 }
 
+function buildDraftRealizationPrompt() {
+    const targetPath = normalizeDraftFilename(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const specPath = draftSpecPathForTargetPath(targetPath);
+    return [
+        `Read the active draft spec at \`${specPath}\` and realize it into the target file \`${targetPath}\`.`,
+        '',
+        'Treat the visible draft as a wish list, outline, and intent document rather than finished code.',
+        'Translate the natural-language draft into a proper file of the same type as the target filename.',
+        'Create or update the target file directly in the workspace, but do not overwrite the spec file.',
+        'Preserve any good existing structure in the target file and make the smallest useful revision that keeps the file coherent.',
+        'Use web search when it would materially improve the result, especially for factual content, examples, references, or content expansion.',
+    ].join('\n');
+}
+
 function draftAgentHintForProfile(profileKey) {
     if (profileKey === 'html') {
-        return 'Treat the active draft as HTML. Prefer semantic structure, preserve the document shell, and use rendered preview-friendly changes.';
+        return 'The visible draft is a natural-language outline for an HTML file. Read the spec, then generate semantic HTML in the target file.';
     }
     if (profileKey === 'markdown') {
-        return 'Treat the active draft as Markdown. Preserve headings, list structure, and readable prose flow.';
+        return 'The visible draft is a natural-language outline for a Markdown file. Turn it into readable, well-structured Markdown in the target file.';
     }
     if (profileKey === 'python') {
-        return 'Treat the active draft as Python code. Prefer patch-and-validate style edits instead of rewriting the whole file.';
+        return 'The visible draft is a natural-language outline for a Python file. Translate it into proper Python code in the target file.';
     }
     if (profileKey === 'json') {
-        return 'Treat the active draft as JSON. Preserve valid JSON structure while editing it.';
+        return 'The visible draft is a natural-language outline for a JSON file. Generate valid JSON in the target file.';
     }
-    return 'Treat the active draft as the primary working document for this turn.';
+    return 'The visible draft is a natural-language outline for the target file. Read the spec and realize it in the target path.';
 }
 
 async function ensureDraftReadyForTurn() {
@@ -4541,16 +5141,87 @@ async function ensureDraftReadyForTurn() {
 function buildActiveDraftContextForTurn() {
     if (!activeDraftPath) return '';
     const profile = getDraftProfileDefinition(activeDraftProfileKey);
+    const specPath = draftSpecPathForTargetPath(activeDraftPath);
     return [
         '',
         '<active_draft>',
-        `path: ${activeDraftPath}`,
+        `target_path: ${activeDraftPath}`,
+        `spec_path: ${specPath}`,
         `profile: ${profile.label}`,
         `extension: .${profile.extension}`,
-        'The active draft is the main working document for this turn and is already saved in the workspace.',
+        'The visible editor is a natural-language spec, outline, and wish list for the target file.',
+        'Read the spec file first, then create or update the target file.',
+        'Do not overwrite the spec file when generating the target output.',
         draftAgentHintForProfile(activeDraftProfileKey),
         '</active_draft>',
     ].join('\n');
+}
+
+function scheduleDraftAgentSync(options = {}) {
+    if (!DOCUMENT_CENTERED_MODE || !currentWorkspaceId || !activeDraftPath) return;
+    if (draftAgentSyncTimer) {
+        clearTimeout(draftAgentSyncTimer);
+        draftAgentSyncTimer = null;
+    }
+    const run = () => {
+        draftAgentSyncTimer = null;
+        requestDraftRealization(options).catch(error => {
+            console.error('Failed to sync the draft spec into the generated file:', error);
+            setDraftSaveState('error', 'Agent');
+        });
+    };
+    if (options.immediate) {
+        run();
+        return;
+    }
+    draftAgentSyncTimer = window.setTimeout(run, DRAFT_AGENT_SYNC_DELAY_MS);
+}
+
+async function requestDraftRealization(options = {}) {
+    if (!DOCUMENT_CENTERED_MODE || !currentWorkspaceId || !activeDraftPath) return;
+    if (!modelAvailable) {
+        draftPendingAgentSync = true;
+        return;
+    }
+    const specContent = getDraftContent();
+    if (!specContent.trim()) return;
+    if (!options.force && specContent === draftLastAgentSpecContent) return;
+    if (isGenerating) {
+        draftPendingAgentSync = true;
+        return;
+    }
+    await ensureDraftReadyForTurn();
+    const prompt = `${buildDraftRealizationPrompt()}${buildActiveDraftContextForTurn()}`;
+    const turnFeatures = resolveTurnFeatures(prompt, [], null);
+    turnFeatures.workspace_write = true;
+    turnFeatures.workspace_run_commands = turnFeatures.workspace_run_commands || activeDraftProfileKey === 'python';
+    turnFeatures.auto_approve_tool_permissions = true;
+    rememberTurnFeatures(currentConvId, turnFeatures);
+    persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
+    syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
+    draftLastAgentSpecContent = specContent;
+    clearPendingPermissionRequest();
+    dismissExecutionPlan();
+    isGenerating = true;
+    activeStreamConversationId = currentConvId;
+    streamingAssistantMessage = null;
+    setDraftSaveState('saving', 'Agent');
+    syncSendButton();
+    const clientTurnId = beginClientTurn();
+    dispatchChatPayload({
+        message: prompt,
+        attachments: [],
+        conversation_id: currentConvId,
+        workspace_id: currentWorkspaceId || null,
+        client_turn_id: clientTurnId,
+        system_prompt: localStorage.getItem('customSystemPrompt') || null,
+        mode: BASE_REASONING_MODE,
+        features: turnFeatures,
+        slash_command: null,
+    }, {
+        fallbackStatusText: 'Generating the file from the active draft...',
+        fallbackActivityText: 'Running a hidden draft-to-file generation turn.',
+    });
 }
 
 function normalizeIndentLevel(indent) {
@@ -6075,7 +6746,7 @@ function ensureAssistantMessageActions(msg) {
     }
 
     let feedbackGroup = actions.querySelector('.message-feedback-group');
-    if (!feedbackGroup) {
+    if (!feedbackGroup && !DOCUMENT_CENTERED_MODE) {
         feedbackGroup = document.createElement('div');
         feedbackGroup.className = 'message-feedback-group';
         feedbackGroup.setAttribute('role', 'group');
@@ -6100,7 +6771,7 @@ function ensureAssistantMessageActions(msg) {
     }
 
     let feedbackStatus = actions.querySelector('.message-feedback-status');
-    if (!feedbackStatus) {
+    if (!feedbackStatus && !DOCUMENT_CENTERED_MODE) {
         feedbackStatus = document.createElement('button');
         feedbackStatus.type = 'button';
         feedbackStatus.className = 'message-feedback-status';
@@ -6495,6 +7166,7 @@ function renderMarkdown() {
 
 function copyToClipboard(text, button) {
     const onSuccess = () => {
+        if (!button) return;
         const orig = button.innerHTML;
         button.innerHTML = '&#10003; Copied';
         button.classList.add('copied');
@@ -6625,11 +7297,17 @@ async function refreshWorkspace(force = false) {
 
 function setCurrentWorkspaceSelection(workspaceId) {
     const nextId = String(workspaceId || '').trim();
+    const workspaceChanged = nextId !== currentWorkspaceId;
     currentWorkspaceId = nextId;
     currentWorkspaceMeta = workspaceCatalog.find(item => item.id === nextId) || null;
     if (nextId) localStorage.setItem('lastWorkspaceId', nextId);
     else localStorage.removeItem('lastWorkspaceId');
-    if (!activeDraftPath) {
+    if (workspaceChanged) {
+        draftFileSessions = [];
+        draftSessionDefaultPath = '';
+    }
+    renderDraftFileExplorer();
+    if (workspaceChanged || !activeDraftPath) {
         syncDraftHeader(defaultDraftPathForWorkspace(nextId));
         return;
     }
@@ -6637,6 +7315,10 @@ function setCurrentWorkspaceSelection(workspaceId) {
 }
 
 function hasConversationMessages() {
+    if (DOCUMENT_CENTERED_MODE) {
+        const session = getDraftSessionRecord(currentWorkspaceId, activeDraftPath);
+        if ((Number(session?.message_count) || 0) > 0) return true;
+    }
     return Boolean(document.querySelector('#messages .message'));
 }
 
@@ -6679,11 +7361,21 @@ async function loadWorkspaceCatalog(options = {}) {
             nextWorkspaceId = String(data.default_workspace_id || workspaceCatalog[0]?.id || '').trim();
         }
         setCurrentWorkspaceSelection(nextWorkspaceId);
+        if (nextWorkspaceId) {
+            await loadDraftFileSessions(nextWorkspaceId);
+        } else {
+            draftFileSessions = [];
+            draftSessionDefaultPath = '';
+            renderDraftFileExplorer();
+        }
         renderWorkspaceCatalog();
         return workspaceCatalog;
     } catch (error) {
         workspaceCatalog = [];
         currentWorkspaceMeta = null;
+        draftFileSessions = [];
+        draftSessionDefaultPath = '';
+        renderDraftFileExplorer();
         renderWorkspaceCatalog();
         throw error;
     }
@@ -6705,6 +7397,7 @@ async function selectWorkspace(workspaceId, options = {}) {
         newChat({ preserveWorkspaceSelection: true });
     } else {
         currentRunId = null;
+        await loadDraftFileSessions(nextWorkspaceId);
         refreshWorkspace(true);
         await loadDraftDocument(defaultDraftPathForWorkspace(nextWorkspaceId));
     }
@@ -6892,7 +7585,10 @@ async function loadConversation(id, options = {}) {
     } catch (error) {
         console.error('Failed to refresh workspaces while loading conversation:', error);
     }
-    await loadDraftDocument(defaultDraftPathForWorkspace());
+    const sessionPath = options.filePath
+        || getDraftSessionPathForConversation(currentWorkspaceId, id)
+        || defaultDraftPathForWorkspace(currentWorkspaceId);
+    await loadDraftDocument(sessionPath, { preserveAgentState: preserveActivity });
     const messages = document.getElementById('messages');
     stopSpeaking();
     messages.innerHTML = '';
@@ -6943,12 +7639,21 @@ function newChat(options = {}) {
     if (!preserveWorkspaceSelection) {
         setCurrentWorkspaceSelection(workspaceCatalog[0]?.id || '');
     }
-    loadDraftDocument(defaultDraftPathForWorkspace()).catch(error => {
-        console.error('Failed to load the active draft for the new chat:', error);
-    });
+    loadDraftFileSessions(currentWorkspaceId)
+        .catch(error => {
+            console.error('Failed to refresh file sessions for the new chat:', error);
+        })
+        .finally(() => {
+            loadDraftDocument(defaultDraftPathForWorkspace()).catch(error => {
+                console.error('Failed to load the active draft for the new chat:', error);
+            });
+        });
     renderWorkspaceCatalog();
     loadConversations();
     refreshWorkspace(true);
+    renderDraftFileExplorer();
+    refreshDraftVersionsSidebar().catch(() => {});
+    refreshDraftOutputPane().catch(() => {});
 }
 
 // ==================== Modals ====================
@@ -7027,6 +7732,7 @@ document.addEventListener('keydown', (e) => {
     if (document.getElementById('aboutOverlay').classList.contains('show')) { closeAbout(); return; }
     if (document.getElementById('settingsOverlay').classList.contains('show')) { closeSettings(); return; }
     if (document.getElementById('menuOverlay').classList.contains('show')) { closeMenu(); return; }
+    if (document.getElementById('fileExplorerOverlay').classList.contains('show')) { closeFileExplorer(); return; }
     if (workspacePanelOpen) { closeWorkspacePanel(); }
 });
 
@@ -7050,10 +7756,10 @@ updateStatus('loading');
 connectWS();
 applyFeatureSettingsToUI();
 syncMobileReasoningBadge();
-refreshVoiceRuntime();
 syncDraftHeader(defaultDraftPathForWorkspace());
 setDraftView(draftView);
 renderDraftPreview();
+renderDraftFileExplorer();
 loadWorkspaceCatalog()
     .catch(error => {
         console.error('Failed to load workspaces:', error);
@@ -7064,6 +7770,8 @@ loadWorkspaceCatalog()
         loadDraftDocument(defaultDraftPathForWorkspace()).catch(error => {
             console.error('Failed to load the active draft on startup:', error);
         });
+        refreshDraftVersionsSidebar().catch(() => {});
+        refreshDraftOutputPane().catch(() => {});
     });
 startWelcomeHintRotation();
 

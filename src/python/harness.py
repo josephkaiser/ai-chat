@@ -213,6 +213,7 @@ RETRIEVAL_RRF_K = int(os.getenv("RETRIEVAL_RRF_K", "60"))
 DOCUMENT_COMMAND_TIMEOUT_SECONDS = float(os.getenv("DOCUMENT_COMMAND_TIMEOUT_SECONDS", "30"))
 PDFTOTEXT_BIN = shutil.which("pdftotext") or ""
 PDFINFO_BIN = shutil.which("pdfinfo") or ""
+DRAFT_DEFAULT_TARGET_PATH = "index.html"
 WORKSPACE_SIGNAL_VERBS = {
     "inspect", "read", "open", "show", "list", "search", "find", "grep",
     "edit", "change", "update", "patch", "refactor", "create", "write", "add",
@@ -835,6 +836,187 @@ def ensure_default_workspace() -> Dict[str, Any]:
     if not workspaces:
         raise ValueError("Unable to create a default workspace")
     return workspaces[0]
+
+
+def normalize_file_session_path(path: str) -> str:
+    """Normalize a file-session target path into a safe workspace-relative path."""
+    raw = str(path or "").strip().replace("\\", "/")
+    normalized = str(pathlib.PurePosixPath(raw or DRAFT_DEFAULT_TARGET_PATH))
+    if normalized in {"", "."}:
+        normalized = DRAFT_DEFAULT_TARGET_PATH
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized.startswith("/"):
+        normalized = normalized.lstrip("/")
+    if normalized in {"", "."}:
+        normalized = DRAFT_DEFAULT_TARGET_PATH
+    return normalized
+
+
+def file_session_storage_slug(path: str) -> str:
+    """Build the hidden storage slug for one target file path."""
+    normalized = normalize_file_session_path(path)
+    slug = re.sub(r"[\\/]+", "__", normalized)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", slug)
+    slug = slug.strip("_")
+    return slug or "draft"
+
+
+def file_session_spec_path(path: str) -> str:
+    """Return the hidden draft-spec path for one file session."""
+    return f".ai-chat/drafts/{file_session_storage_slug(path)}.draft.md"
+
+
+def file_session_row_to_record(row: Optional[tuple]) -> Optional[Dict[str, Any]]:
+    """Convert one file-session row into a JSON-safe payload."""
+    if not row:
+        return None
+    session_id = str(row[0] or "").strip()
+    workspace_id = str(row[1] or "").strip()
+    target_path = normalize_file_session_path(str(row[2] or ""))
+    spec_path = str(row[3] or "").strip() or file_session_spec_path(target_path)
+    conversation_id = str(row[4] or "").strip()
+    created_at = row[5]
+    updated_at = row[6]
+    title = str(row[7] or "").strip() or target_path
+    message_count = int(row[8] or 0) if len(row) > 8 else 0
+    return {
+        "id": session_id,
+        "workspace_id": workspace_id,
+        "path": target_path,
+        "generated_path": target_path,
+        "spec_path": spec_path,
+        "conversation_id": conversation_id,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "title": title,
+        "message_count": max(0, message_count),
+    }
+
+
+def get_file_session_record(workspace_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """Return one file session for a workspace/path pair."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    safe_path = normalize_file_session_path(path)
+    if not safe_workspace_id:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, workspace_id, path, spec_path, conversation_id, created_at, updated_at, title,
+                      COALESCE((SELECT COUNT(*) FROM messages WHERE conversation_id = file_sessions.conversation_id), 0)
+               FROM file_sessions
+               WHERE workspace_id = ? AND path = ?''',
+            (safe_workspace_id, safe_path),
+        )
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return file_session_row_to_record(row)
+
+
+def list_file_session_records(workspace_id: str) -> List[Dict[str, Any]]:
+    """Return all file sessions for one workspace ordered by recency."""
+    safe_workspace_id = str(workspace_id or "").strip()
+    if not safe_workspace_id:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute(
+            '''SELECT id, workspace_id, path, spec_path, conversation_id, created_at, updated_at, title,
+                      COALESCE((SELECT COUNT(*) FROM messages WHERE conversation_id = file_sessions.conversation_id), 0)
+               FROM file_sessions
+               WHERE workspace_id = ?
+               ORDER BY updated_at DESC, created_at DESC, LOWER(path)''',
+            (safe_workspace_id,),
+        )
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        record = file_session_row_to_record(row)
+        if record:
+            records.append(record)
+    return records
+
+
+def ensure_file_session_record(
+    workspace_id: str,
+    path: str,
+    *,
+    preferred_conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or update one durable file session and ensure it has a conversation."""
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise ValueError("Workspace not found")
+
+    safe_workspace_id = workspace["id"]
+    safe_path = normalize_file_session_path(path)
+    now = utcnow_iso()
+    existing = get_file_session_record(safe_workspace_id, safe_path)
+
+    conversation_id = str((existing or {}).get("conversation_id") or "").strip()
+    if conversation_id and not get_conversation_record(conversation_id):
+        conversation_id = ""
+
+    preferred_id = str(preferred_conversation_id or "").strip()
+    if not conversation_id:
+        conversation_id = preferred_id or uuid.uuid4().hex
+        ensure_conversation_record(conversation_id, title=safe_path, workspace_id=safe_workspace_id)
+    else:
+        ensure_conversation_record(conversation_id, title=safe_path, workspace_id=safe_workspace_id)
+
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if existing:
+        c.execute(
+            '''UPDATE file_sessions
+               SET conversation_id = ?, updated_at = ?, title = ?, spec_path = ?
+               WHERE workspace_id = ? AND path = ?''',
+            (
+                conversation_id,
+                now,
+                safe_path,
+                file_session_spec_path(safe_path),
+                safe_workspace_id,
+                safe_path,
+            ),
+        )
+    else:
+        c.execute(
+            '''INSERT INTO file_sessions
+               (id, workspace_id, path, spec_path, conversation_id, created_at, updated_at, title)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                uuid.uuid4().hex,
+                safe_workspace_id,
+                safe_path,
+                file_session_spec_path(safe_path),
+                conversation_id,
+                now,
+                now,
+                safe_path,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return get_file_session_record(safe_workspace_id, safe_path) or {
+        "id": "",
+        "workspace_id": safe_workspace_id,
+        "path": safe_path,
+        "generated_path": safe_path,
+        "spec_path": file_session_spec_path(safe_path),
+        "conversation_id": conversation_id,
+        "created_at": now,
+        "updated_at": now,
+        "title": safe_path,
+    }
 
 
 def get_conversation_record(conversation_id: str) -> Optional[Dict[str, Any]]:
@@ -2119,6 +2301,7 @@ async def reset_application_state() -> None:
         c.execute('DELETE FROM messages')
         c.execute('DELETE FROM document_chunks')
         c.execute('DELETE FROM document_sources')
+        c.execute('DELETE FROM file_sessions')
         c.execute('DELETE FROM conversations')
         c.execute('DELETE FROM runs')
         try:
@@ -4157,6 +4340,7 @@ class FeatureFlags:
 class PreparedTurnRequest:
     """Normalized routing state for one user turn before execution starts."""
     conversation_id: str
+    active_file_path: str
     user_message_id: int
     saved_user_message: str
     effective_message: str
@@ -6789,6 +6973,17 @@ def init_db():
                       summary TEXT NOT NULL DEFAULT '',
                       promoted_count INTEGER NOT NULL DEFAULT 0)''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS file_sessions
+                     (id TEXT PRIMARY KEY,
+                      workspace_id TEXT NOT NULL,
+                      path TEXT NOT NULL,
+                      spec_path TEXT NOT NULL,
+                      conversation_id TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      title TEXT NOT NULL DEFAULT '',
+                      UNIQUE(workspace_id, path))''')
+
         try:
             c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
         except sqlite3.OperationalError:
@@ -6830,6 +7025,7 @@ def init_db():
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_conversation_id ON runs(conversation_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_conversations_workspace_id ON conversations(workspace_id)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_runs_workspace_id ON runs(workspace_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_file_sessions_workspace_id ON file_sessions(workspace_id, updated_at)')
         except sqlite3.OperationalError:
             pass
 
@@ -6972,6 +7168,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: str
     workspace_id: Optional[str] = None
+    file_path: Optional[str] = None
     attachments: List[str] = Field(default_factory=list)
     system_prompt: Optional[str] = None
     mode: str = "deep"
@@ -6987,6 +7184,11 @@ class FeedbackRequest(BaseModel):
 class WorkspaceFileUpdateRequest(BaseModel):
     path: str
     content: str
+
+
+class FileSessionEnsureRequest(BaseModel):
+    path: str
+    preferred_conversation_id: Optional[str] = None
 
 
 class VoiceSynthesisRequest(BaseModel):
@@ -7861,145 +8063,6 @@ async def home(request: Request):
         raise HTTPException(status_code=500, detail=f"Error loading page: {str(e)}")
 
 
-@app.get("/api/voice/status")
-async def voice_status():
-    return get_voice_runtime_summary()
-
-
-@app.post("/api/voice/transcribe")
-async def transcribe_voice_audio(
-    file: UploadFile = File(...),
-    conversation_id: Optional[str] = Form(None),
-):
-    runtime = get_voice_runtime_summary()
-    if not runtime["stt_available"]:
-        raise HTTPException(
-            status_code=503,
-            detail="Server transcription is unavailable. Install a native STT tool or set VOICE_STT_COMMAND.",
-        )
-
-    suffix = pathlib.Path(file.filename or "").suffix.lower()[:16] or ".webm"
-    session_id = build_voice_artifact_id(conversation_id)
-    input_dir = get_voice_dir("input")
-    output_dir = get_voice_dir("transcripts")
-    input_path = input_dir / f"{session_id}{suffix}"
-    transcript_path = output_dir / f"{session_id}.txt"
-    bytes_written = 0
-
-    try:
-        with input_path.open("wb") as handle:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                bytes_written += len(chunk)
-                if bytes_written > VOICE_INPUT_SIZE_LIMIT:
-                    raise HTTPException(status_code=400, detail="Audio file is too large")
-                handle.write(chunk)
-    finally:
-        await file.close()
-
-    replacements = {
-        "input": str(input_path),
-        "output_dir": str(output_dir),
-        "transcript": str(transcript_path),
-    }
-    command = build_voice_command(
-        VOICE_STT_COMMAND,
-        replacements,
-        fallback=default_stt_command(input_path, output_dir),
-    )
-    try:
-        result = await run_native_voice_command(command)
-        transcript = read_transcript_output(output_dir, input_path, transcript_path)
-        return {
-            "transcript": transcript,
-            "bytes": bytes_written,
-            "content_type": file.content_type or "application/octet-stream",
-            "backend": runtime["stt_backend"],
-            "command": result["command"][0],
-        }
-    finally:
-        delete_voice_file(input_path)
-        delete_voice_file(transcript_path)
-        prune_voice_storage_if_needed()
-
-
-@app.post("/api/voice/speak")
-async def synthesize_voice_audio(request: VoiceSynthesisRequest):
-    runtime = get_voice_runtime_summary()
-    if not runtime["tts_available"]:
-        raise HTTPException(
-            status_code=503,
-            detail="Server speech synthesis is unavailable. Install a native TTS tool or set VOICE_TTS_COMMAND.",
-        )
-
-    text = str(request.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
-
-    speech_id = build_voice_artifact_id(request.conversation_id)
-    text_dir = get_voice_dir("tts-text")
-    output_dir = get_voice_dir("tts-audio")
-    text_path = text_dir / f"{speech_id}.txt"
-    output_ext = infer_tts_output_suffix(VOICE_TTS_COMMAND)
-    output_path = output_dir / f"{speech_id}{output_ext}"
-    text_path.write_text(text, encoding="utf-8")
-
-    replacements = {
-        "input": "",
-        "output": str(output_path),
-        "output_dir": str(output_dir),
-        "transcript": "",
-        "textfile": str(text_path),
-    }
-    response_payload: Optional[Dict[str, Any]] = None
-    keep_output = False
-    try:
-        result = await run_native_voice_command(
-            build_voice_command(
-                VOICE_TTS_COMMAND,
-                replacements,
-                fallback=default_tts_command(output_path, text_path),
-            )
-        )
-        if not output_path.exists():
-            raise HTTPException(status_code=500, detail="Speech synthesis finished but no audio file was created")
-        media_type = guess_audio_media_type(output_path)
-        response_payload = {
-            "audio_url": f"/api/voice/file/{output_path.name}",
-            "media_type": media_type,
-            "backend": runtime["tts_backend"],
-            "voice": runtime["tts_voice"],
-            "command": result["command"][0],
-        }
-        keep_output = True
-    finally:
-        delete_voice_file(text_path)
-        if not keep_output:
-            delete_voice_file(output_path)
-        prune_voice_storage_if_needed(
-            protected_paths=[output_path] if keep_output and output_path.exists() else None
-        )
-
-    return response_payload
-
-
-@app.get("/api/voice/file/{filename}")
-async def get_voice_file(filename: str):
-    safe_name = pathlib.Path(filename).name
-    target = (get_voice_dir("tts-audio", create=False) / safe_name).resolve()
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    if get_voice_dir("tts-audio", create=False) not in target.parents:
-        raise HTTPException(status_code=403, detail="Access denied")
-    try:
-        os.utime(target, None)
-    except OSError:
-        pass
-    return FileResponse(target, media_type=guess_audio_media_type(target), filename=target.name)
-
-
 def build_workspace_catalog_payload(workspace: Dict[str, Any]) -> Dict[str, Any]:
     """Serialize one workspace row for the shared catalog UI."""
     workspace_id = str(workspace.get("id") or "").strip()
@@ -8252,15 +8315,14 @@ async def rename_conversation(conversation_id: str, request: RenameRequest):
 @app.delete("/api/conversation/{conversation_id}")
 async def delete_conversation(conversation_id: str):
     try:
-        delete_voice_artifacts_for_conversation(conversation_id)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        c.execute('UPDATE file_sessions SET conversation_id = NULL WHERE conversation_id = ?', (conversation_id,))
         c.execute('DELETE FROM messages WHERE conversation_id = ?', (conversation_id,))
         c.execute('DELETE FROM conversation_summaries WHERE conversation_id = ?', (conversation_id,))
         c.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
         conn.commit()
         conn.close()
-        prune_voice_storage_if_needed()
         return {'status': 'success'}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -8594,6 +8656,33 @@ async def list_workspace_files_by_workspace(workspace_id: str, path: str = ""):
 @app.get("/api/workspaces/{workspace_id}/file")
 async def read_workspace_file_by_workspace(workspace_id: str, path: str):
     return read_workspace_file_for_workspace(workspace_id, path)
+
+
+@app.get("/api/workspaces/{workspace_id}/file-sessions")
+async def list_file_sessions(workspace_id: str):
+    workspace = get_workspace_record(workspace_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    sessions = list_file_session_records(workspace["id"])
+    default_path = sessions[0]["path"] if sessions else DRAFT_DEFAULT_TARGET_PATH
+    return {
+        "workspace_id": workspace["id"],
+        "sessions": sessions,
+        "default_path": default_path,
+    }
+
+
+@app.post("/api/workspaces/{workspace_id}/file-sessions/ensure")
+async def ensure_file_session(workspace_id: str, request: FileSessionEnsureRequest):
+    try:
+        session = ensure_file_session_record(
+            workspace_id,
+            request.path,
+            preferred_conversation_id=request.preferred_conversation_id,
+        )
+        return session
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/workspaces/{workspace_id}/file/view")
@@ -13733,8 +13822,9 @@ def format_turn_route_activity(
 async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
-    conv_id = data.get('conversation_id')
+    conv_id = str(data.get('conversation_id') or '').strip()
     requested_workspace_id = str(data.get("workspace_id") or "").strip()
+    active_file_path = normalize_file_session_path(str(data.get("file_path") or "").strip()) if data.get("file_path") else ""
     attachments_raw = data.get('attachments', [])
     attachments = [
         str(item).strip()
@@ -13749,7 +13839,15 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         or infer_direct_slash_command_from_message(message)
     )
 
-    conversation_title = message[:50] + "..." if len(message) > 50 else message
+    if requested_workspace_id and active_file_path:
+        ensured_session = ensure_file_session_record(
+            requested_workspace_id,
+            active_file_path,
+            preferred_conversation_id=conv_id or None,
+        )
+        conv_id = str(ensured_session.get("conversation_id") or conv_id or "").strip()
+
+    conversation_title = active_file_path or (message[:50] + "..." if len(message) > 50 else message)
     ensure_conversation_record(conv_id, title=conversation_title, workspace_id=requested_workspace_id or None)
 
     attachment_context = await build_attachment_context(conv_id, attachments, message)
@@ -13854,6 +13952,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
 
     return PreparedTurnRequest(
         conversation_id=conv_id,
+        active_file_path=active_file_path,
         user_message_id=user_message_id,
         saved_user_message=saved_user_message,
         effective_message=effective_message,
@@ -13893,6 +13992,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         if client_turn_id:
             setattr(websocket, "active_client_turn_id", client_turn_id)
         prepared = await prepare_turn_request(data)
+        conv_id = prepared.conversation_id
         mode = prepared.resolved_mode
         slash_command = prepared.slash_command
         features = prepared.features
@@ -13902,6 +14002,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         enabled_tools = list(prepared.enabled_tools)
         effective_message = prepared.effective_message
         deep_succeeded = False
+        if prepared.active_file_path:
+            await websocket.send_json({
+                'type': 'file_session_bound',
+                'conversation_id': conv_id,
+                'file_path': prepared.active_file_path,
+            })
         workflow_execution = create_workflow_execution(
             conv_id,
             prepared.user_message_id,
@@ -14366,7 +14472,6 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
 @app.get("/health")
 async def health():
     runtime = await get_model_runtime_summary()
-    voice = get_voice_runtime_summary()
     loading = runtime["loading"]
     if runtime["model_ok"]:
         message = f"Model {runtime['loaded_model_name']} is ready"
@@ -14382,7 +14487,6 @@ async def health():
         "model_available": runtime["model_ok"],
         "model_profile": runtime["active_profile"]["key"],
         "loading": loading,
-        "voice": voice,
         "message": message,
     }
 

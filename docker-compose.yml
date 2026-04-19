@@ -5,17 +5,10 @@ services:
     ports:
       - "8001:8000"
     command: >
-      --model Qwen/Qwen3-14B-AWQ
+      --model ${VLLM_SELECTED_MODEL_NAME:-Qwen/Qwen3-14B-AWQ}
       --host 0.0.0.0
       --port 8000
-      --gpu-memory-utilization 0.95
-      --max-model-len 8192
-      --enable-prefix-caching
-      --max-num-seqs 16
-      --enable-chunked-prefill
-      --quantization awq_marlin
-      --trust-remote-code
-      --enforce-eager
+      ${VLLM_SELECTED_MODEL_ARGS:---gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager}
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     deploy:
@@ -39,22 +32,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - VLLM_HOST=http://vllm:8000/v1
-      - MODEL_NAME=Qwen/Qwen3-14B-AWQ
+      - MODEL_NAME=${VLLM_SELECTED_MODEL_NAME:-Qwen/Qwen3-14B-AWQ}
       - MODEL_14B_NAME=Qwen/Qwen3-14B-AWQ
       - MODEL_14B_ARGS=--gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager
       - MODEL_8B_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
       - MODEL_8B_ARGS=--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --enforce-eager
       - MODEL_GEMMA_4_NAME=google/gemma-4-E4B-it
       - MODEL_GEMMA_4_ARGS=--gpu-memory-utilization 0.85 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 12 --enable-chunked-prefill --enforce-eager
-      - DEFAULT_MODEL_PROFILE=14b
+      - DEFAULT_MODEL_PROFILE=${VLLM_SELECTED_PROFILE:-14b}
       - HF_CACHE_PATH=/cache/huggingface
       - DOCKER_CONTROL_ENABLED=true
       - INTERACTIVE_TERMINAL_ENABLED=false
       - EXECUTE_CODE_ENABLED=false
       - STRICT_WORKSPACE_COMMAND_PATHS=true
-      - VOICE_TTS_VOICE=Samantha
-      - VOICE_STT_LANGUAGE=en
-      - PIPER_MODEL=/app/data/voice/models/en_US-lessac-high.onnx
     depends_on:
       - vllm
     restart: unless-stopped

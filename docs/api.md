@@ -62,7 +62,7 @@ Preferred `activity.phase` values:
 - `GET /api/conversations` — List conversations
 - `GET /api/conversation/{conversation_id}` — Get recent messages, pending plan preview, and attached workspace metadata
 - `POST /api/conversation/{conversation_id}/rename` — Rename conversation
-- `DELETE /api/conversation/{conversation_id}` — Delete only the conversation transcript and scoped voice artifacts
+- `DELETE /api/conversation/{conversation_id}` — Delete only the conversation transcript
 
 ## Messages
 
@@ -99,14 +99,7 @@ Workspace API notes:
 - File reads can return non-text preview metadata. For images, the payload uses `content_kind: "image"` with binary preview metadata instead of raw file bytes.
 - Tool results from `workspace.run_command` may include detected artifact metadata in `result.items`, plus `result.path` and `result.open_path` when there is a primary artifact worth surfacing in the viewer.
 
-## Voice
-
-- `GET /api/voice/status` — Report STT/TTS availability
-- `POST /api/voice/transcribe` — Upload audio and receive a transcript
-- `POST /api/voice/speak` — Generate reply audio for browser playback
-- `GET /api/voice/file/{filename}` — Fetch synthesized audio
-
 ## System
 
-- `GET /health` — Health check with model availability and voice runtime summary
-- `POST /api/reset-all` — Reset chats, workspaces, cached voice artifacts, and related app data
+- `GET /health` — Health check with model availability and loading status
+- `POST /api/reset-all` — Reset chats, workspaces, and related app data

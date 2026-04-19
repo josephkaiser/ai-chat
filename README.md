@@ -34,13 +34,9 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 - **GPU** — NVIDIA GPU with CUDA support plus the NVIDIA container runtime/toolkit available to Docker.
 - **VRAM** — `24GB` recommended for the default `14B` profile in [`docker-compose.yml`](/Users/joe/dev/ai-chat/docker-compose.yml). `12GB` can work if you switch to the lighter `8B` profile described in [docs/configuration.md](/Users/joe/dev/ai-chat/docs/configuration.md).
 - **System RAM** — enough to comfortably run Docker, the chat app, and model-loading overhead alongside your desktop workload. More headroom helps when downloading models and working with larger workspaces.
-- **Disk** — enough free SSD space for Docker images, the Hugging Face model cache, app data, and optional voice models. Plan for tens of GB rather than a minimal install.
+- **Disk** — enough free SSD space for Docker images, the Hugging Face model cache, and app data. Plan for tens of GB rather than a minimal install.
 - **Network** — internet access is needed for first-time image pulls, model downloads, and optional web search.
-- **Browser** — a current Chromium, Firefox, or Safari-class browser for the web UI. Microphone recording needs browser media-capture support.
-
-Optional feature requirements:
-
-- **Server TTS/STT** — the container already installs Piper/Whisper dependencies, but host-native TTS like macOS `say` is only available when you run outside Docker or deliberately expose host tools.
+- **Browser** — a current Chromium, Firefox, or Safari-class browser for the web UI.
 
 ## Prerequisites
 
@@ -99,12 +95,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Optional voice dependencies:
-
-```bash
-pip install -r requirements-voice.txt
-```
-
 Then run the app locally while pointing it at your remote OpenAI-compatible server:
 
 ```bash
@@ -121,7 +111,8 @@ Notes:
 
 - `fastembed` runs on CPU, so semantic retrieval works fine on a Mac without CUDA.
 - The checked-in `docker-compose.yml` is mainly for the bundled local `vllm` + app stack and assumes NVIDIA GPU support for the `vllm` service.
-- macOS can use the built-in `say` command for TTS, so `requirements-voice.txt` is optional unless you specifically want the Whisper/Piper server pipeline.
+- `./chat install` now downloads only the model you choose instead of pulling both local presets.
+- `./chat start` prompts for which downloaded model to run for the current session.
 
 ## Documentation
 
@@ -130,4 +121,4 @@ Notes:
 - [Architecture](docs/architecture.md) — Main modules and high-level data flow
 - [Capability Playbook](docs/capabilities.md) — How to add new agent capabilities with docs, approvals, installs, and workflow entry points
 - [Harness And Tools](docs/harness.md) — Tool loop, deep-mode orchestration, permissions, and workspace model
-- [UI Features](docs/ui.md) — Workspace panel, attachments, voice, and slash command behaviors
+- [UI Features](docs/ui.md) — Document editor, workspace panel, and slash command behaviors

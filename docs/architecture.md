@@ -49,7 +49,6 @@ ai-chat/
 - Python package installs use a managed workspace-scoped environment outside the workspace tree, so new conversations in the same workspace reuse the same environment.
 - Assistant message feedback is stored in SQLite and reused during history ranking.
 - Corrective user follow-ups can automatically mark the previous assistant turn as negative feedback, and feedback-driven deep runs can persist a recent-feedback digest into the workspace task state.
-- Voice artifacts live under `VOICE_ROOT` and are cleaned up by pruning plus conversation/app reset flows.
 
 ## Additional guides
 
