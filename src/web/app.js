@@ -72,6 +72,7 @@ let draftAgentSyncTimer = null;
 let draftPendingAgentSync = false;
 let draftLastAgentSpecContent = '';
 let activeDraftGeneratedContent = '';
+let activeDraftForegroundJobId = '';
 let currentFileSymbols = [];
 let symbolGroupState = {};
 let currentAssistantTurnStartedAt = null;
@@ -1885,11 +1886,18 @@ function handleChatEvent(data) {
             renderDraftFileExplorer();
         }
     } else if (data.type === 'start') {
+        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
+            updateDraftFileJobStatus(activeDraftForegroundJobId, 'running').catch(error => {
+                console.error('Failed to mark the foreground file job as running:', error);
+            });
+        }
         if (data.client_turn_id) clearActiveClientTurn(String(data.client_turn_id));
         clearPendingPermissionRequest();
         removeLoading();
         ensureStreamingAssistantMessage();
-        if (DOCUMENT_CENTERED_MODE) setDraftSaveState('saving', 'Agent');
+        if (DOCUMENT_CENTERED_MODE) {
+            setDraftSaveState('saving', 'Agent');
+        }
         currentAssistantTurnStartedAt = Date.now();
         currentAssistantTurnArtifactPaths = new Set();
         currentPlanFocus = null;
@@ -2113,6 +2121,12 @@ function handleChatEvent(data) {
         finalizeAssistantTurnArtifacts();
         refreshWorkspace(true);
         if (DOCUMENT_CENTERED_MODE) {
+            if (activeDraftForegroundJobId) {
+                updateDraftFileJobStatus(activeDraftForegroundJobId, 'completed').catch(error => {
+                    console.error('Failed to mark the foreground file job as completed:', error);
+                });
+                activeDraftForegroundJobId = '';
+            }
             persistDraftSession(currentWorkspaceId, activeDraftPath, currentConvId);
             syncCurrentConversationTitleToDraft(activeDraftPath).catch(() => {});
             snapshotGeneratedOutputIfChanged(activeDraftPath).catch(error => {
@@ -2145,6 +2159,12 @@ function handleChatEvent(data) {
         currentTurnTransport = null;
         httpTurnAbortController = null;
         syncSendButton();
+        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
+            updateDraftFileJobStatus(activeDraftForegroundJobId, 'canceled', data.content || 'Stopped').catch(error => {
+                console.error('Failed to mark the foreground file job as canceled:', error);
+            });
+            activeDraftForegroundJobId = '';
+        }
         recordWorkspaceActivity('Canceled', data.content || 'Stopped');
     } else if (data.type === 'error') {
         clearActiveClientTurn();
@@ -2154,6 +2174,12 @@ function handleChatEvent(data) {
         currentTurnTransport = null;
         httpTurnAbortController = null;
         syncSendButton();
+        if (DOCUMENT_CENTERED_MODE && activeDraftForegroundJobId) {
+            updateDraftFileJobStatus(activeDraftForegroundJobId, 'failed', data.content || 'The assistant hit an error.').catch(error => {
+                console.error('Failed to mark the foreground file job as failed:', error);
+            });
+            activeDraftForegroundJobId = '';
+        }
         recordWorkspaceActivity('Error', data.content || 'The assistant hit an error.', { error: true });
         const errorMsg = streamingAssistantMessage || createMessageElement('', 'assistant');
         const contentDiv = errorMsg.querySelector('.message-content');
@@ -4481,6 +4507,59 @@ function persistDraftSession(workspaceId = currentWorkspaceId, path = activeDraf
     });
 }
 
+async function createDraftFileJob({
+    path = activeDraftPath,
+    lane = 'foreground',
+    jobKind = 'realize_draft',
+    title = '',
+    payload = {},
+    status = 'queued',
+    sourceConversationId = currentConvId,
+    supersedeMatchingKind = false,
+} = {}) {
+    if (!currentWorkspaceId) throw new Error('Choose a workspace first.');
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-session-jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            path: normalizedPath,
+            lane,
+            job_kind: jobKind,
+            title,
+            payload,
+            status,
+            source_conversation_id: String(sourceConversationId || '').trim() || null,
+            supersede_matching_kind: Boolean(supersedeMatchingKind),
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    if (data.session?.conversation_id) {
+        currentConvId = String(data.session.conversation_id).trim() || currentConvId;
+        syncToolApprovalToggle();
+    }
+    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
+    return data;
+}
+
+async function updateDraftFileJobStatus(jobId, status, errorText = '') {
+    const safeJobId = String(jobId || '').trim();
+    if (!currentWorkspaceId || !safeJobId) return null;
+    const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file-session-jobs/${encodeURIComponent(safeJobId)}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            status,
+            error_text: String(errorText || '').trim() || null,
+        }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+    await loadDraftFileSessions(currentWorkspaceId).catch(() => {});
+    return data.job || null;
+}
+
 function adoptDraftSessionConversation(path = activeDraftPath) {
     const session = getDraftSessionRecord(currentWorkspaceId, path);
     const nextConversationId = String(session?.conversation_id || '').trim();
@@ -5192,6 +5271,27 @@ async function requestDraftRealization(options = {}) {
     }
     await ensureDraftReadyForTurn();
     const prompt = `${buildDraftRealizationPrompt()}${buildActiveDraftContextForTurn()}`;
+    const specPath = draftSpecPathForTargetPath(activeDraftPath);
+    const queuedJob = await createDraftFileJob({
+        path: activeDraftPath,
+        lane: 'foreground',
+        jobKind: 'realize_draft',
+        title: `Realize ${basename(activeDraftPath) || activeDraftPath}`,
+        payload: {
+            trigger: options.force ? 'manual' : 'live',
+            profile: activeDraftProfileKey,
+            target_path: activeDraftPath,
+            spec_path: specPath,
+        },
+        status: 'queued',
+        sourceConversationId: currentConvId,
+    }).catch(error => {
+        console.error('Failed to queue the foreground draft job:', error);
+        return null;
+    });
+    if (queuedJob?.job?.id) {
+        activeDraftForegroundJobId = String(queuedJob.job.id).trim();
+    }
     const turnFeatures = resolveTurnFeatures(prompt, [], null);
     turnFeatures.workspace_write = true;
     turnFeatures.workspace_run_commands = turnFeatures.workspace_run_commands || activeDraftProfileKey === 'python';
@@ -7561,6 +7661,7 @@ async function loadConversations() {
 async function loadConversation(id, options = {}) {
     const preserveActivity = Boolean(options.preserveActivity);
     const preserveScroll = Boolean(options.preserveScroll);
+    activeDraftForegroundJobId = '';
     currentConvId = id;
     syncToolApprovalToggle();
     currentRunId = null;
@@ -7618,6 +7719,7 @@ function newChat(options = {}) {
     const preserveWorkspaceSelection = options.preserveWorkspaceSelection !== false;
     dismissMobileKeyboard(true);
     stopSpeaking();
+    activeDraftForegroundJobId = '';
     clearAllowedCommandsForConversation(currentConvId);
     clearAllowedToolPermissionsForConversation(currentConvId);
     currentConvId = generateId();

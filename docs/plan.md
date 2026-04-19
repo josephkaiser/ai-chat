@@ -1,135 +1,331 @@
-# Plan: Path-backed workspaces with a catalog UI (single shared userspace)
+# Plan: File-Session-First Draft Runtime
 
 ## Purpose
 
-Refactor the app so **durable execution state** (filesystem + managed Python env + command sandbox) is keyed to a **stable workspace** tied to a **real root directory**, while the **chat transcript** stays ephemeral per session. The UI presents **named workspaces** (catalog UX); persistence follows **path-keyed** semantics (Implementation model 3 in UI, model 2 on disk).
+Refactor the app from a chat-first coding assistant into a **file-session-first document runtime**:
 
-This document is the **authoritative checklist** for agents implementing the change.
+- the **user edits a durable draft/spec file**
+- the **agent creates and maintains a separate generated file**
+- the **draft is the source of intent**
+- the **agent runtime treats the draft, generated file, search results, tests, git state, and versions as external environment**
 
-## Goals
+This is the authoritative working plan for implementing that product direction.
 
-- **Workspace-first:** Opening or creating a “workspace” picks a canonical **absolute root path** on the server host. All `workspace.*` tools, uploads, viewer, and downloads operate under that root (subject to existing path-safety checks).
-- **Fresh-chat friendly:** New conversations **attach** to an existing workspace row; users are not required to reuse old chats to continue work. Multiple chats may reference the same workspace over time.
-- **Catalog UI:** Users see a list of named workspaces (create, rename in UI, optional “open existing folder,” remove from list). Display names are **not** the source of truth; **resolved path** is.
-- **Shared userspace:** No authentication or per-user isolation in this phase. Everyone hitting the same server shares one logical catalog (acceptable for local/single-operator deployments).
+## Product Thesis
 
-## Non-goals (this phase)
+The app should feel like a lightweight document tool:
 
-- Multi-user accounts, ACLs, or per-row permissions.
-- Remote workspaces over SSH or cloud mount protocols.
-- Automatic git hosting or repo hosting product features beyond what the agent already does via commands.
-- Replacing SQLite with another DB.
+- one filename at the top, like `index.html`
+- one draft editor where the user writes natural-language structure, outline, and wishes
+- one generated output view beside it
+- no prompt tennis in a visible chat window
 
-## Current state (as of this plan)
+The user is not “chatting with a coding agent.” The user is **editing an evolving brief** and the agent is **interpreting that brief into a better static artifact**.
 
-- `src/python/harness.py` implements SQLite schema (`conversations`, `runs`, …). Each **conversation** has at most one **run** (`runs.conversation_id` is `UNIQUE`). `ensure_run_for_conversation` materializes `RUNS_ROOT/<run-id>/` and `…/workspace/`.
-- `get_workspace_path(conversation_id)` and tool execution ultimately resolve the workspace directory from that run.
-- Managed Python environments live under `MANAGED_PYTHON_ENVS_ROOT` keyed by **conversation id** (`get_managed_python_env_path`), not by workspace path.
-- REST routes under `/api/workspace/{conversation_id}/…` and WebSocket chat identify the workspace implicitly via **conversation id** (`docs/api.md`).
+## Core Principles
 
-## Target architecture
+### 1. The draft is the prompt
 
-### Data model
+The visible draft document is the agent’s prompt surface.
 
-Introduce a first-class **`workspaces`** (name TBD; avoid clashing with env `WORKSPACE_ROOT`) table, for example:
+- do not bounce the prompt back and forth through chat
+- do not depend on the user re-explaining intent in a transcript
+- store the prompt as a durable file in the workspace
 
-| Column | Notes |
-|--------|--------|
-| `id` | Stable UUID primary key (string). |
-| `display_name` | User-facing label for the catalog. |
-| `root_path` | Canonical **absolute** path; normalized and validated on write. Unique per server deployment unless explicitly allowed otherwise. |
-| `created_at` / `updated_at` | Metadata. |
+### 2. The prompt lives outside the model window
 
-**Link conversations to workspaces:**
+We want an RLM-like runtime shape:
 
-- Add `conversations.workspace_id` (nullable at first for migration, then required for new rows).
-- Either **drop** `runs.conversation_id UNIQUE` and allow many conversations per run, or **merge** “run” into “workspace execution record.” Preferred direction: **one row in `runs` (or renamed table) per workspace**, not per conversation:
-  - `runs.id` or `workspace_id` owns `sandbox_path` where `sandbox_path` is the **same as** `workspaces.root_path`, or `sandbox_path` points at a designated subtree (see “Layout” below).
+- the draft/spec file lives in the environment, not only in context
+- the generated artifact lives in the environment
+- intermediate state lives in durable storage
+- the model receives focused slices, summaries, diffs, and metadata
 
-**Managed Python environment:** Key `venv` location by **`workspace_id`** (or stable hash of resolved `root_path`), **not** `conversation_id`. Optionally keep a symlink or legacy migration path from old per-conversation env paths.
+This keeps the model context narrow while letting the product operate over long-lived, growing files and histories.
 
-### Layout options (choose one in implementation; document the choice in `docs/configuration.md`)
+### 3. The file session is the primary unit
 
-1. **Direct root:** `workspaces.root_path` **is** the directory the user chose (e.g. `~/dev/my-app`). Tools use it as cwd roots for file ops and commands. No nested `runs/.../workspace` unless temporarily for migration.
-2. **Hosted mirror:** Each workspace has `root_path` under `WORKSPACE_ROOT/<workspace_id>/` with optional “import” from user path — more isolation, more sync complexity. Prefer (1) unless security requirements change.
+Each target file has a durable **file session**.
 
-Default recommendation for this repo: **(1) direct root**, aligned with “path-keyed.”
+A file session owns:
 
-### API & routing
+- target path
+- hidden draft/spec path
+- generated file path
+- attached conversation/session id for hidden agent turns
+- version history
+- queued jobs
+- search/test/git memory
 
-- Add REST endpoints to **CRUD workspace catalog entries** and **resolve** path normalization errors (duplicate path, missing directory, path escapes).
-- Evolve workspace file APIs from `/api/workspace/{conversation_id}/…` to either:
-  - **`/api/workspaces/{workspace_id}/…`** for static resources, and keep conversation only for chat history, or
-  - Keep path shape but resolve via **lookup: conversation → workspace** (incremental migration path).
+### 4. Most user edits should stay local
 
-WebSocket `/ws/chat` should accept (or require) **`workspace_id`** alongside **`conversation_id`**, or derive workspace from conversation server-side once `conversations.workspace_id` is always set.
+Not every draft change should trigger a full rewrite.
 
-Update **`docs/api.md`** in the same PR as the new routes.
+Default behavior should prefer:
 
-### Frontend (`src/web/app.js`, `static/index.html`, `static/style.css`)
+- inline patch
+- section patch
+- targeted regeneration
 
-- **Entry flow:** Before or alongside “new chat,” user picks **active workspace** from catalog, or creates one (display name + directory create or picker — exact UX left to implementer; must work in browser constraints: may need server-side “create folder under default root” if no native folder picker).
-- **Persistence:** Client stores `workspace_id` in `localStorage` (or equivalent) as “last active workspace” for new chats.
-- **Conversation list:** May show workspace name/label per thread; optional filter “chats in this workspace.”
+Full-file regeneration should be reserved for genuine structural changes.
 
-### Backend harness refactor (`src/python/harness.py`, related `src/python/ai_chat/*`)
+### 5. Foreground and background work must be separate
 
-Central refactor: replace `get_workspace_path(conversation_id)` with **`get_workspace_path_for_conversation`** that:
+Fast reactive work and slow exploratory work should not share the same loop.
 
-1. Loads `conversation → workspace_id → root_path`, or
-2. Resolves `workspace_id` directly for tool loops.
+## Target Runtime
 
-**Functions that today take `conversation_id` only for workspace/env resolution** (grep and update call sites systematically):
+### Foreground lane
 
-- Workspace read/write, `workspace.run_command` cwd and allowed paths.
-- `build_workspace_command_env`, `normalize_command_for_managed_python`, managed venv creation, `delete_managed_python_env` (trigger on workspace delete, not only conversation delete).
-- Attachment upload paths, zip download, `delete_run_workspace` semantics — split **“delete chat transcript”** from **“delete workspace disk”** (destructive; confirm in UI).
+Purpose:
 
-**Prompt copy** in `src/python/ai_chat/prompts.py`: adjust references from “conversation workspace” to “project workspace” where helpful; keep instructions about durable files.
+- respond to live user edits
+- keep the generated file aligned with the latest draft structure
+- preserve flow during rapid typing
 
-### Voice and ancillary paths
+Characteristics:
 
-- If voice artifacts are keyed by conversation only, keep that for isolation of audio; no need to move voice storage to workspace unless product requires it. Document any coupling.
+- debounced
+- narrow context
+- low latency
+- single-file by default
+- minimal tool use
 
-## Migration
+Typical operations:
 
-1. **DB migration:** Create `workspaces` table; backfill one workspace per existing conversation from current `runs.sandbox_path` / `get_workspace_path` behavior (derive `root_path` = `…/workspace` inside existing run layout).
-2. **Link:** Set `conversations.workspace_id` for every existing conversation.
-3. **Managed env:** Optionally copy or symlink old per-conversation venv to first workspace id mapping when first used; or regenerate venv on next `pip` (simpler but slower). Document tradeoff in PR.
-4. **Disk:** Do not delete existing `runs/` trees until a later cleanup task; new workspaces use direct paths going forward.
+- diff draft snapshot
+- classify change scope
+- patch one section of the target file
+- validate syntax or renderability
+- refresh preview
 
-Add a short **`docs/migration-workspaces.md`** or a section in **`docs/configuration.md`** describing one-time upgrade steps and rollback limits (optional; only if migration is non-trivial).
+### Background lane
 
-## Testing & verification
+Purpose:
 
-- **Unit tests:** Any new path normalization and ` workspaces.root_path` uniqueness constraints (`tests/`).
-- **Integration:** Create two conversations attached to the same `workspace_id`; verify both see the same file tree and share the same managed env.
-- **Backward compatibility:** One existing conversation still loads and tools resolve after migration.
+- improve quality without interrupting the user
+- search for better supporting content
+- test alternatives
+- run validations
+- compare candidate outputs
 
-## Documentation updates (required in scope)
+Characteristics:
 
-- `docs/architecture.md` — persistence model section.
-- `docs/api.md` — new/changed endpoints.
-- `docs/harness.md` — workspace and managed Python keying.
-- `docs/ui.md` — workspace catalog and “new chat” flow.
+- queue-backed
+- snapshot-based
+- cancellable / supersedable
+- can use search, tests, and git-backed experiments
 
-## Suggested implementation order
+Typical operations:
 
-1. Schema + migration + internal resolver: `conversation_id` → `workspace` → `root_path` (keep old code paths working via adapter).
-2. Key managed Python env by `workspace_id`; migration shim from old paths.
-3. REST workspace catalog + switch workspace file APIs to `workspace_id` (or dual-read old routes).
-4. Frontend: catalog UI + attach conversation to workspace on create.
-5. Remove dead conversation-only workspace assumptions; tighten `DELETE` semantics (conversation vs workspace).
-6. Docs sweep and manual QA checklist.
+- web or workspace search
+- content expansion
+- alternative generation
+- lint/test/render checks
+- git experiment branches or worktrees
+- reviewer/evaluator passes
 
-## Risks / explicit decisions for implementers
+## Execution Modes
 
-- **Concurrent writes:** Same workspace from two chats → same as two users editing one folder; acceptable for v1; optional file-lock or “workspace busy” later.
-- **Renaming host paths:** If user moves folder on disk, DB `root_path` is stale; provide “Relink path” or a `.ai-chat-workspace.json` marker file **inside** the root with `workspace_id` for repair (optional enhancement).
-- **Security:** Single shared catalog does not reduce path traversal risk; keep `STRICT_WORKSPACE_COMMAND_PATHS` and existing containment checks, now against `workspaces.root_path`.
+### Live
 
-## Success criteria
+Used for rapid user edits.
 
-- User can **create named workspace → pick path → start new chat** without reopening an old thread, and **see prior files** in that root.
-- **Managed pip installs** persist for that workspace across **new** conversations sharing the same workspace id.
-- **Deleting a chat** does not delete the shared workspace disk by default.
+- target: very fast
+- no heavy search
+- no broad testing
+- patch the current file from the latest draft diff
+
+### Build
+
+Used for a stronger realization pass.
+
+- may rework structure
+- may run lightweight validation
+- still focused on the active file session
+
+### Research
+
+Used in background.
+
+- search for better supporting material
+- gather references or examples
+- prepare candidate improvements
+
+### Optimize
+
+Used in background.
+
+- run tests
+- compare alternatives
+- review or score candidates
+- promote only better results
+
+## Data Model
+
+### File sessions
+
+`file_sessions` should remain the durable source of file identity.
+
+Each record should own:
+
+- `id`
+- `workspace_id`
+- `path`
+- `spec_path`
+- `conversation_id`
+- `created_at`
+- `updated_at`
+- `title`
+
+### File session jobs
+
+Add durable `file_session_jobs` for both foreground and background work.
+
+Each job should include:
+
+- `id`
+- `workspace_id`
+- `file_session_id`
+- `lane` = `foreground | background`
+- `job_kind`
+- `status` = `queued | running | completed | failed | canceled | superseded`
+- `payload_json`
+- `title`
+- `source_conversation_id`
+- `created_at`
+- `updated_at`
+- `started_at`
+- `finished_at`
+- `error_text`
+
+## Queue Rules
+
+### Foreground jobs
+
+- represent the current live draft-to-output realization
+- new foreground work supersedes stale foreground work for the same file session
+- should track the latest draft snapshot, not arbitrary old state
+
+### Background jobs
+
+- operate on snapshots
+- must not overwrite newer user intent blindly
+- should rebase or re-evaluate before promotion
+
+## Search, Testing, and Git
+
+These are background capabilities first, not the default foreground loop.
+
+### Search
+
+Use search to improve:
+
+- factual content
+- examples
+- references
+- implementation quality
+- reusable project content
+
+### Testing and review
+
+Use testing and review to:
+
+- verify generated code or structured files
+- compare alternatives
+- prevent regressions
+
+### Git
+
+Use git as an experiment engine:
+
+- branch or worktree for candidate variations
+- compare outputs
+- promote only accepted results
+
+Git is internal infrastructure here, not the primary user-facing model.
+
+## UI Direction
+
+The user-facing surface should stay minimal:
+
+- filename header
+- draft editor
+- generated output view
+
+Hidden or secondary infrastructure:
+
+- job queues
+- search results
+- testing outputs
+- git experiments
+- internal agent traces
+
+Version history and file explorer stay useful, but they support the file session rather than exposing chat transcripts.
+
+## Implementation Phases
+
+### Phase 1: File-session foundation
+
+- file session becomes the primary unit of identity
+- backend owns file-to-session mapping
+- frontend follows backend session identity
+- draft and generated file are clearly separated
+
+Status:
+
+- in progress
+
+### Phase 2: Durable queue
+
+- add `file_session_jobs`
+- support foreground and background lanes
+- supersede stale foreground work
+- expose job state through backend APIs
+
+Status:
+
+- started
+
+### Phase 3: Foreground realization runtime
+
+- classify draft diffs
+- choose `inline_patch | section_patch | regenerate`
+- keep the generated file close to the draft with low latency
+
+### Phase 4: Background runtime
+
+- research lane
+- optimize lane
+- candidate generation and evaluation
+- promotion rules for accepted improvements
+
+### Phase 5: Search, test, and git integration
+
+- background search
+- validation/testing
+- git-backed experiments
+- reviewer/evaluator passes
+
+### Phase 6: Remove chat-first assumptions
+
+- rename remaining chat/conversation concepts in product copy
+- demote or remove visible transcript-centric UI
+- treat hidden conversation state strictly as runtime plumbing
+
+## Immediate Next Steps
+
+1. Finish wiring the new durable file-session job queue into the live draft realization flow.
+2. Add job listing and status use on the client side for hidden runtime bookkeeping.
+3. Rename more backend/frontend “conversation/chat” assumptions to “file session” where product-facing.
+4. Add a first background job type for research or optimization snapshots.
+5. Introduce candidate evaluation before background work can replace the visible generated file.
+
+## Success Criteria
+
+- The user edits a draft/spec file and sees a generated file update beside it.
+- The visible draft acts as the durable prompt.
+- The generated file is improved without requiring visible chat turns.
+- File identity, versions, and hidden agent context persist through backend-managed file sessions.
+- Fast foreground updates do not require large-context prompt stuffing.
+- Slower search/test/git work can happen in the background and only promote better results.
