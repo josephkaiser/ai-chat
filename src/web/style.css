@@ -16,9 +16,9 @@ body {
     --bg_glow_base_mix: 22%;
     font-family: var(--font_sans);
     background:
-        radial-gradient(circle at top left, color-mix(in srgb, var(--accent_primary) var(--bg_glow_accent_mix), transparent), transparent var(--bg_glow_accent_falloff)),
-        radial-gradient(circle at 82% 0%, color-mix(in srgb, var(--accent_secondary) 5%, transparent), transparent 48%),
-        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) var(--bg_glow_base_mix), var(--bg_primary)) 0%, var(--bg_primary) 38%, color-mix(in srgb, var(--bg_primary) 96%, var(--bg_secondary)) 100%);
+        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 22%, var(--bg_primary)) 0%, color-mix(in srgb, var(--bg_primary) 98%, var(--bg_secondary)) 100%),
+        linear-gradient(90deg, color-mix(in srgb, var(--text_primary) 2%, transparent) 0, color-mix(in srgb, var(--text_primary) 2%, transparent) 1px, transparent 1px);
+    background-size: 100% 100%, 24px 24px;
     color: var(--text_primary);
     height: 100vh;
     height: 100dvh;
@@ -86,13 +86,13 @@ textarea {
     --chat-column-max: 760px;
     --menu-sidebar-width: clamp(252px, 19vw, 300px);
     --file-explorer-width: clamp(252px, 19vw, 320px);
-    --workspace-sidebar-width: clamp(288px, 18vw, 348px);
-    --workspace-viewer-width: clamp(460px, 29vw, 700px);
-    --workspace-pane-gap: 12px;
+    --workspace-sidebar-width: clamp(304px, 18vw, 368px);
+    --workspace-viewer-width: clamp(560px, 34vw, 920px);
+    --workspace-pane-gap: 10px;
     --workspace-shell-width: var(--workspace-sidebar-width);
     --workspace-shell-width-split: calc(var(--workspace-sidebar-width) + var(--workspace-viewer-width) + var(--workspace-pane-gap));
     --workspace-shell-width-compact: clamp(320px, 34vw, 400px);
-    --desktop-main-max-width: 1680px;
+    --desktop-main-max-width: 1880px;
     --menu-toggle-open-left: calc(min(var(--menu-sidebar-width), calc(100vw - (var(--chrome-gutter) * 2))) - var(--sidebar-toggle-size) - 20px);
     --panel-radius: 22px;
     --surface-radius: 16px;
@@ -120,8 +120,8 @@ textarea {
     justify-content: center;
     min-height: 0;
     position: relative;
-    padding: calc(var(--safe-top) + 18px) var(--chrome-gutter) var(--chrome-gutter);
-    gap: 14px;
+    padding: calc(var(--safe-top) + 12px) var(--chrome-gutter) var(--chrome-gutter);
+    gap: 12px;
 }
 .chat-main {
     flex: 1;
@@ -136,14 +136,15 @@ textarea {
     position: relative;
     margin-left: var(--chat-main-inset-left);
     margin-right: var(--chat-main-inset-right);
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 94%, transparent);
+    border-radius: 30px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 96%, transparent), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(10px);
     transition: margin 0.22s ease;
 }
 .chat-shell.chrome-shifted .chat-main {
-    box-shadow: none;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
 }
 .messages {
     flex: 1;
@@ -151,7 +152,7 @@ textarea {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 26px 26px 14px;
+    padding: 18px 18px 12px;
 }
 .draft-hidden-chrome {
     display: none !important;
@@ -161,12 +162,12 @@ textarea {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding: 18px 18px 16px;
-    border: 1px solid color-mix(in srgb, var(--dense-border) 42%, transparent);
-    border-radius: 30px;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 99%, transparent), color-mix(in srgb, var(--bg_primary) 98%, transparent));
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.14);
+    gap: 14px;
+    padding: 16px 16px 14px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
     overflow: hidden;
 }
 .draft-shell-header {
@@ -174,7 +175,9 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    min-height: 34px;
+    min-height: 38px;
+    padding: 0 2px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--dense-border) 82%, transparent);
     transition: opacity 180ms ease;
 }
 .draft-shell-header.is-quiet {
@@ -204,9 +207,9 @@ textarea {
     color: var(--text_primary);
     cursor: text;
     font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-    font-size: clamp(1.2rem, 2.3vw, 1.8rem);
+    font-size: clamp(1.22rem, 2vw, 1.72rem);
     font-weight: 700;
-    letter-spacing: -0.04em;
+    letter-spacing: -0.045em;
     line-height: 1.08;
 }
 .draft-filename-input::placeholder {
@@ -248,7 +251,7 @@ textarea {
 .draft-save-state {
     flex: 0 0 auto;
     min-width: 0;
-    color: color-mix(in srgb, var(--text_tertiary) 90%, transparent);
+    color: color-mix(in srgb, var(--text_tertiary) 86%, transparent);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.12em;
@@ -281,17 +284,23 @@ textarea {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(460px, 0.96fr) minmax(560px, 1.14fr);
-    gap: 18px;
+    grid-template-columns: minmax(520px, 1.02fr) minmax(620px, 1.18fr);
+    gap: 0;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 90%, transparent);
+    border-radius: 24px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 86%, transparent), color-mix(in srgb, var(--bg_primary) 82%, black 18%));
+    overflow: hidden;
 }
 .draft-shell-pane {
     flex: 1;
     min-height: 0;
 }
 .draft-shell-pane-editor {
-    border: 1px solid color-mix(in srgb, var(--dense-border) 34%, transparent);
-    border-radius: 24px;
-    background: color-mix(in srgb, var(--bg_primary) 92%, transparent);
+    border: none;
+    border-right: 1px solid color-mix(in srgb, var(--dense-border) 86%, transparent);
+    border-radius: 0;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_primary) 82%, transparent), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     overflow: hidden;
 }
 .draft-output-pane {
@@ -299,16 +308,18 @@ textarea {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 0;
+    padding: 12px 14px 14px;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 54%, transparent), color-mix(in srgb, var(--bg_primary) 68%, transparent));
 }
 .draft-output-header {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    min-height: 18px;
-    padding: 0 2px;
-    opacity: 0.34;
+    min-height: 24px;
+    padding: 0 2px 10px;
+    opacity: 0.62;
     transition: opacity 180ms ease;
 }
 .draft-output-pane:hover .draft-output-header,
@@ -322,9 +333,10 @@ textarea {
     display: none;
 }
 .draft-output-path {
-    color: color-mix(in srgb, var(--text_secondary) 72%, transparent);
-    font-size: 12px;
-    font-weight: 500;
+    color: color-mix(in srgb, var(--text_secondary) 78%, transparent);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -343,16 +355,18 @@ textarea {
 .draft-output-surface {
     flex: 1;
     min-height: 0;
-    border: 1px solid color-mix(in srgb, var(--dense-border) 30%, transparent);
-    border-radius: 24px;
-    background: color-mix(in srgb, var(--bg_primary) 94%, transparent);
+    border: 1px solid color-mix(in srgb, var(--dense-border) 78%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg_primary) 72%, transparent);
     overflow: hidden;
 }
 .draft-output-preview {
     height: 100%;
     min-height: 0;
     overflow: auto;
-    padding: 18px;
+    padding: 16px 18px 18px;
+    font-size: 14px;
+    line-height: 1.65;
 }
 .draft-output-preview pre {
     margin: 0;
@@ -1130,7 +1144,7 @@ textarea {
     border: 1px solid var(--dense-border);
     background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
     color: var(--text_primary);
-    border-radius: 14px;
+    border-radius: 12px;
     width: 38px;
     height: 38px;
     padding: 0;
@@ -1139,7 +1153,7 @@ textarea {
     align-items: center;
     justify-content: center;
     backdrop-filter: blur(12px);
-    box-shadow: 0 18px 28px rgba(0,0,0,0.24);
+    box-shadow: 0 12px 22px rgba(0,0,0,0.18);
     transition: right 0.24s ease, transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 .workspace-toggle:hover {
@@ -1177,9 +1191,9 @@ textarea {
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 6%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
     border: 1px solid var(--dense-border);
-    border-radius: 24px;
+    border-radius: 20px;
     overflow: hidden;
-    box-shadow: 0 20px 46px rgba(0, 0, 0, 0.22);
+    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.18);
     transform: translateX(100%);
     pointer-events: auto;
     transition: opacity 0.22s ease, transform 0.24s ease;
@@ -1196,7 +1210,7 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 14px 14px 12px 56px;
+    padding: 14px 14px 12px 50px;
     border-bottom: 1px solid var(--dense-border);
 }
 .workspace-heading {
@@ -1805,13 +1819,13 @@ textarea {
     transform: translateX(calc(var(--workspace-shell-width) * 0.25));
     transition: opacity 0.22s ease, transform 0.24s ease, visibility 0.24s step-end;
     z-index: 960;
-    padding: 14px;
+    padding: 10px;
     border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
-    border-radius: 30px;
+    border-radius: 24px;
     background:
         linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 7%, var(--bg_secondary)), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
-    box-shadow: 0 24px 52px rgba(0, 0, 0, 0.28);
-    backdrop-filter: blur(14px);
+    box-shadow: 0 20px 42px rgba(0, 0, 0, 0.22);
+    backdrop-filter: blur(10px);
 }
 .chat.workspace-reader-open {
     --workspace-shell-width: var(--workspace-shell-width-split);
@@ -1874,10 +1888,10 @@ textarea {
     display: flex;
     flex-direction: column;
     border: 1px solid var(--dense-border);
-    border-radius: 24px;
+    border-radius: 20px;
     background: linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 94%, transparent), color-mix(in srgb, var(--bg_primary) 88%, black 12%));
     overflow: hidden;
-    box-shadow: 0 20px 46px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 16px 34px rgba(0, 0, 0, 0.18);
     pointer-events: auto;
 }
 .ide-viewer.is-hidden {
@@ -2017,14 +2031,14 @@ textarea {
     min-height: 100%;
     margin-bottom: 0;
     resize: none;
-    border: 1px solid var(--dense-border);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
+    border: none;
+    border-radius: 0;
+    background: transparent;
     color: var(--text_primary);
-    padding: 10px;
+    padding: 14px 16px;
     font-family: "IBM Plex Mono", "Courier New", monospace;
-    font-size: 11px;
-    line-height: 1.45;
+    font-size: 12px;
+    line-height: 1.6;
 }
 #inlineViewerEditor[data-editor-ready="true"],
 #draftEditor[data-editor-ready="true"] {
@@ -2033,18 +2047,18 @@ textarea {
 .ide-viewer-pane .CodeMirror,
 .draft-shell-pane .CodeMirror {
     height: 100%;
-    border: 1px solid var(--dense-border);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
+    border: none;
+    border-radius: 0;
+    background: transparent;
     color: var(--text_primary);
     font-family: "IBM Plex Mono", "Courier New", monospace;
-    font-size: 11px;
-    line-height: 1.45;
+    font-size: 12px;
+    line-height: 1.6;
 }
 .ide-viewer-pane .CodeMirror-gutters,
 .draft-shell-pane .CodeMirror-gutters {
-    background: color-mix(in srgb, var(--bg_secondary) 88%, var(--bg_primary));
-    border-right: 1px solid var(--bg_tertiary);
+    background: color-mix(in srgb, var(--bg_secondary) 72%, var(--bg_primary));
+    border-right: 1px solid color-mix(in srgb, var(--dense-border) 82%, transparent);
 }
 .ide-viewer-pane .CodeMirror-foldgutter,
 .draft-shell-pane .CodeMirror-foldgutter {
@@ -2072,10 +2086,10 @@ textarea {
 #draftPreview {
     height: 100%;
     overflow: auto;
-    border: 1px solid var(--dense-border);
-    border-radius: 18px;
-    background: color-mix(in srgb, var(--bg_primary) 86%, black 14%);
-    padding: 12px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: 16px 18px 18px;
 }
 .workspace-image-preview {
     display: block;
@@ -2091,6 +2105,47 @@ textarea {
     box-shadow: 0 20px 40px rgba(0,0,0,0.28);
     object-fit: contain;
 }
+.workspace-archive-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.workspace-archive-preview-meta {
+    color: color-mix(in srgb, var(--text_secondary) 82%, transparent);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.workspace-archive-preview-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.workspace-archive-entry {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 28%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg_primary) 78%, transparent);
+}
+.workspace-archive-entry-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font_mono);
+    font-size: 12px;
+    color: var(--text_primary);
+}
+.workspace-archive-entry-size {
+    flex: 0 0 auto;
+    color: var(--text_secondary);
+    font-size: 12px;
+}
 /* === Menu Button === */
 .menu-btn {
     position: fixed;
@@ -2100,14 +2155,14 @@ textarea {
     width: 38px;
     height: 38px;
     border: 1px solid var(--dense-border);
-    border-radius: 14px;
+    border-radius: 12px;
     background: color-mix(in srgb, var(--bg_secondary) 92%, transparent);
     color: var(--text_primary);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 18px 28px rgba(0,0,0,0.24);
+    box-shadow: 0 12px 22px rgba(0,0,0,0.18);
     backdrop-filter: blur(12px);
     transition: left 0.24s ease, background 0.2s, border-color 0.2s, transform 0.15s;
 }
@@ -3283,7 +3338,7 @@ textarea {
 
 /* === Input Area === */
 .input-area {
-    padding: 0 18px 18px;
+    padding: 0 14px 14px;
     background: transparent;
 }
 .input-container {
@@ -3292,16 +3347,16 @@ textarea {
     max-width: none;
     margin: 0;
     background: color-mix(in srgb, var(--bg_secondary) 90%, var(--bg_primary));
-    border-radius: 26px;
+    border-radius: 18px;
     border: 1px solid color-mix(in srgb, var(--text_tertiary) 18%, var(--dense-border));
-    box-shadow: 0 20px 36px rgba(0,0,0,0.2);
+    box-shadow: 0 10px 20px rgba(0,0,0,0.12);
     transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-    padding: 15px 16px 13px;
+    padding: 12px 14px 11px;
     gap: 8px;
 }
 .input-container:focus-within {
     border-color: color-mix(in srgb, var(--accent_primary) 28%, var(--dense-border));
-    box-shadow: 0 24px 40px rgba(0,0,0,0.24);
+    box-shadow: 0 14px 26px rgba(0,0,0,0.16);
 }
 .input-container textarea {
     width: 100%;
@@ -3700,26 +3755,23 @@ textarea {
     50% { transform: scaleY(1.08); }
 }
 
-/* Welcome mode: vertically center content on page */
+/* Welcome mode: keep the shell roomy on desktop instead of clamping it like a splash card */
 .chat.welcome-layout {
     justify-content: flex-start;
 }
 .chat.welcome-layout .chat-main {
-    max-width: min(860px, calc(100% - var(--chat-main-inset-left) - var(--chat-main-inset-right)));
-    width: auto;
-    min-height: min(62vh, 620px);
-    margin-top: auto;
-    margin-bottom: auto;
-    margin-left: auto;
-    margin-right: auto;
+    width: min(100%, var(--desktop-main-max-width));
+    max-width: min(var(--desktop-main-max-width), calc(100vw - (var(--chrome-gutter) * 2)));
+    min-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - (var(--chrome-gutter) * 2));
+    margin: 0 auto;
 }
 .chat.welcome-layout .messages {
     flex: 1;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: visible;
-    padding: clamp(24px, 9vh, 72px) 18px 42px;
+    align-items: stretch;
+    justify-content: flex-start;
+    overflow-y: auto;
+    padding: clamp(18px, 4vh, 38px) 0 20px;
 }
 .chat.welcome-layout .input-area {
     padding-bottom: 0;
@@ -3729,7 +3781,9 @@ textarea {
     margin-top: 30px;
 }
 .chat.welcome-layout .draft-shell {
-    min-height: min(54vh, 680px);
+    width: 100%;
+    max-width: none;
+    min-height: 100%;
 }
 .chat.welcome-layout .agent-rail {
     flex-basis: clamp(132px, 18vh, 186px);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import mimetypes
+import zipfile
 from typing import Any, Callable, Dict, Optional
 
 
@@ -10,6 +11,8 @@ HTML_EXTENSIONS = {".htm", ".html"}
 DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
 BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+ARCHIVE_EXTENSIONS = {".zip"}
+RTF_EXTENSIONS = {".rtf"}
 
 PAUSE_REASON_COMMAND_APPROVAL = "command_approval"
 PAUSE_REASON_WRITE_BLOCKED = "write_blocked"
@@ -48,6 +51,8 @@ def workspace_file_content_kind(path: str | pathlib.Path) -> str:
     suffix = pathlib.Path(path).suffix.lower()
     if is_pdf_path(path):
         return "pdf"
+    if suffix in ARCHIVE_EXTENSIONS:
+        return "archive"
     if suffix in IMAGE_EXTENSIONS:
         return "image"
     if suffix in MARKDOWN_EXTENSIONS:
@@ -62,8 +67,13 @@ def workspace_file_content_kind(path: str | pathlib.Path) -> str:
 
 
 def workspace_file_live_reader_mode(path: str | pathlib.Path) -> str:
+    suffix = pathlib.Path(path).suffix.lower()
     kind = workspace_file_content_kind(path)
     if kind == "pdf":
+        return "document_preview"
+    if kind == "archive":
+        return "archive_preview"
+    if suffix in RTF_EXTENSIONS:
         return "document_preview"
     if kind == "spreadsheet":
         return "spreadsheet"
@@ -116,6 +126,40 @@ def build_binary_preview_result(
         "file_type": "binary",
         "media_type": media_type,
         "truncated": False,
+    }
+
+
+def build_archive_preview_result(
+    target: pathlib.Path,
+    rel_path: str,
+    *,
+    max_entries: int = 200,
+) -> Dict[str, Any]:
+    entries = []
+    truncated = False
+    with zipfile.ZipFile(target) as archive:
+        members = archive.infolist()
+        truncated = len(members) > max_entries
+        for info in members[:max_entries]:
+            entries.append({
+                "path": info.filename,
+                "is_dir": info.is_dir(),
+                "size": int(info.file_size),
+                "compressed_size": int(info.compress_size),
+            })
+    listing = "\n".join(
+        f"{entry['path']}{'/' if entry['is_dir'] and not str(entry['path']).endswith('/') else ''}"
+        for entry in entries
+    )
+    return {
+        "path": rel_path,
+        "content": listing,
+        "size": target.stat().st_size,
+        "lines": listing.count("\n") + 1 if listing else 0,
+        "file_type": "zip",
+        "entry_count": len(entries),
+        "entries": entries,
+        "truncated": truncated,
     }
 
 
@@ -181,6 +225,8 @@ def build_workspace_file_result(
             )
     elif live_mode == "binary_preview":
         payload = build_binary_preview_result(target, resolved_rel_path)
+    elif live_mode == "archive_preview":
+        payload = build_archive_preview_result(target, resolved_rel_path)
     else:
         payload = build_text_file_result(
             target,

@@ -976,6 +976,32 @@ function downloadWorkspaceFile(path) {
     window.open(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file/download?${params.toString()}`, '_blank', 'noopener');
 }
 
+async function extractWorkspaceArchive(path) {
+    if (!currentWorkspaceId || !path) return;
+    try {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/archive/extract`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        const count = Number(data.count || 0);
+        const destination = String(data.destination_path || '').trim();
+        showTransientComposerHint(
+            count
+                ? `Extracted ${count} file${count === 1 ? '' : 's'} to ${destination || 'the workspace'}.`
+                : `Created ${destination || 'the extraction folder'}, but the archive had no files to extract.`,
+            5000,
+        );
+        recordWorkspaceActivity('Extract', `Extracted ${basename(path) || path} to ${destination || 'the workspace'}.`);
+        await refreshWorkspace(true);
+    } catch (error) {
+        showTransientComposerHint(`Archive extract failed: ${error.message}`, 6000);
+        recordWorkspaceActivity('Extract Error', `Archive extract failed: ${error.message}`, { error: true });
+    }
+}
+
 function downloadActiveGeneratedFile() {
     if (!activeDraftPath) return;
     downloadWorkspaceFile(activeDraftPath);
@@ -3415,6 +3441,18 @@ function renderWorkspaceArtifactList() {
         };
         actions.appendChild(insertAction);
 
+        if (isArchivePath(entry.path)) {
+            const extractAction = document.createElement('button');
+            extractAction.type = 'button';
+            extractAction.className = 'workspace-artifact-action';
+            extractAction.textContent = 'Extract';
+            extractAction.onclick = async (event) => {
+                event.stopPropagation();
+                await extractWorkspaceArchive(entry.path);
+            };
+            actions.appendChild(extractAction);
+        }
+
         card.appendChild(actions);
         listEl.appendChild(card);
     });
@@ -3524,6 +3562,19 @@ function renderWorkspaceTreeNode(entry, options = {}) {
     if (!isDirectory) {
         const actions = document.createElement('div');
         actions.className = 'workspace-tree-actions';
+        if (isArchivePath(entry.path)) {
+            const extractButton = document.createElement('button');
+            extractButton.type = 'button';
+            extractButton.className = 'workspace-tree-action';
+            extractButton.title = `Extract ${entry.name || basename(entry.path) || 'archive'}`;
+            extractButton.setAttribute('aria-label', `Extract ${entry.name || basename(entry.path) || 'archive'}`);
+            extractButton.textContent = '⇣';
+            extractButton.onclick = async (event) => {
+                event.stopPropagation();
+                await extractWorkspaceArchive(entry.path);
+            };
+            actions.appendChild(extractButton);
+        }
         const downloadButton = document.createElement('button');
         downloadButton.type = 'button';
         downloadButton.className = 'workspace-tree-action';
@@ -3584,6 +3635,10 @@ function isMarkdownPath(path) {
     return /\.(md|markdown)$/i.test(path || '');
 }
 
+function isArchivePath(path) {
+    return /\.zip$/i.test(path || '');
+}
+
 function basename(path) {
     const parts = String(path || '').split('/');
     return parts[parts.length - 1] || path || '';
@@ -3612,7 +3667,7 @@ function insertArtifactReference(path) {
 }
 
 function isEditableTextPath(path) {
-    return !/\.(pdf|xlsx|xls|xlsm|png|jpg|jpeg|gif|svg|webp)$/i.test(path || '');
+    return !/\.(pdf|xlsx|xls|xlsm|png|jpg|jpeg|gif|svg|webp|zip)$/i.test(path || '');
 }
 
 function isImagePath(path) {
@@ -3622,9 +3677,9 @@ function isImagePath(path) {
 function normalizeViewerMetadata(path, data = {}) {
     const backendKind = typeof data.content_kind === 'string' ? data.content_kind.toLowerCase() : '';
     const kind = (
-        ['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image'].includes(backendKind)
+        ['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image', 'archive'].includes(backendKind)
             ? backendKind
-            : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path || '') ? 'csv' : 'text'))))
+            : (isArchivePath(path) ? 'archive' : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path || '') ? 'csv' : 'text')))))
     );
     const backendEditable = typeof data.editable === 'boolean' ? data.editable : isEditableTextPath(path);
     const editable = LIVE_AREA_READ_ONLY ? false : backendEditable;
@@ -3660,11 +3715,18 @@ function getLanguageForPath(path) {
         xml: 'xml',
         css: 'css',
         json: 'json',
+        toml: 'toml',
+        ini: 'properties',
+        cfg: 'properties',
+        conf: 'properties',
         yml: 'yaml',
         yaml: 'yaml',
         md: 'markdown',
         sh: 'bash',
+        bash: 'bash',
+        zsh: 'bash',
         sql: 'sql',
+        rtf: 'plaintext',
     };
     return map[ext] || '';
 }
@@ -4812,21 +4874,55 @@ function clearDraftLiveOutput() {
     draftLiveOutputPath = '';
 }
 
-function looksLikeGeneratedDraftOutput(content, path = activeDraftPath) {
+function looksLikeSystemFallbackDraftMessage(content) {
     const text = String(content || '').trim();
     if (!text) return false;
-    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const markers = [
+        /unexpected internal error/i,
+        /saved (?:the )?current workspace state/i,
+        /say continue to resume/i,
+        /\[\[artifact:/i,
+        /^progress:\s+/im,
+        /^next step:\s+/im,
+        /^touched files:\s+/im,
+        /^verification:\s+/im,
+        /^latest saved note:\s+/im,
+    ];
+    return markers.some(pattern => pattern.test(text));
+}
+
+function looksLikeCodeDraftOutput(text, normalizedPath) {
+    const lineCount = text.split(/\r?\n/).length;
     if (isHtmlPath(normalizedPath)) {
         return text.length >= 80 && /<(?:!doctype\s+html|html|head|body|main|section|article|header|footer|nav|style|script)\b/i.test(text);
-    }
-    if (isMarkdownPath(normalizedPath)) {
-        return text.length >= 60 && /(^#{1,6}\s)|(\n#{1,6}\s)|(\n[-*]\s)|(\n\d+\.\s)/m.test(text);
     }
     if (/\.json$/i.test(normalizedPath)) {
         return /^[\[{]/.test(text);
     }
     if (/\.py$/i.test(normalizedPath)) {
         return text.length >= 60 && /(^|\n)(import |from |def |class )/m.test(text);
+    }
+    if (/\.(js|jsx|ts|tsx|cjs|mjs|java|c|cc|cpp|hpp|cs|go|rs|rb|php|swift|kt|scala|sh|bash|zsh|sql|css|scss|sass|less|xml|yaml|yml|toml)$/i.test(normalizedPath)) {
+        return (
+            text.length >= 40
+            && lineCount >= 3
+            && /(^|\n)\s*(?:import |export |const |let |var |function |async function |class |interface |type |enum |console\.log\(|document\.|window\.|return\b|if\s*\(|for\s*\(|while\s*\(|try\s*\{|catch\s*\(|<\?xml|[A-Za-z0-9_-]+\s*:\s*.+)/m.test(text)
+        );
+    }
+    return false;
+}
+
+function looksLikeGeneratedDraftOutput(content, path = activeDraftPath) {
+    const text = String(content || '').trim();
+    if (!text) return false;
+    if (looksLikeSystemFallbackDraftMessage(text)) return false;
+    const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    if (looksLikeCodeDraftOutput(text, normalizedPath)) return true;
+    if (isMarkdownPath(normalizedPath)) {
+        return text.length >= 60 && /(^#{1,6}\s)|(\n#{1,6}\s)|(\n[-*]\s)|(\n\d+\.\s)/m.test(text);
+    }
+    if (/\.txt$/i.test(normalizedPath) || !/\.[a-z0-9]+$/i.test(normalizedPath)) {
+        return text.length >= 60 && text.split(/\r?\n/).length >= 2;
     }
     return text.length >= 120 && text.split(/\r?\n/).length >= 4;
 }
@@ -4865,6 +4961,12 @@ function draftFallbackTitleFromPath(path) {
         .replace(/\s+/g, ' ')
         .trim()
         .replace(/\b\w/g, letter => letter.toUpperCase()) || 'Draft';
+}
+
+function draftSuffixFromPath(path) {
+    const normalized = basename(normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME));
+    const match = normalized.match(/(\.[^.]+)$/);
+    return match ? match[1].toLowerCase() : '';
 }
 
 function cleanDraftSpecLine(line) {
@@ -4908,6 +5010,28 @@ function summarizeDraftSpec(specContent, fallbackTitle) {
         .replace(/\s+/g, ' ')
         .trim();
     return summary.length > 150 ? `${summary.slice(0, 147).trimEnd()}...` : summary;
+}
+
+function normalizeDraftSentence(text) {
+    const trimmed = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!trimmed) return '';
+    const sentence = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+    return /[.!?](?:["'])?$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+function draftSpecStem(text) {
+    return String(text || '')
+        .replace(/^(?:create|build|make|design|write|craft|generate)\s+/i, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function supportingDraftSpecLines(specContent, summary, limit = 4) {
+    const summaryStem = draftSpecStem(summary);
+    return draftSpecLines(specContent)
+        .filter(line => draftSpecStem(line) !== summaryStem)
+        .slice(0, limit);
 }
 
 function draftSpecInterestTags(specContent) {
@@ -5167,12 +5291,12 @@ function buildImmediateMarkdownDraftPreview(specContent, path) {
     const fallbackTitle = draftFallbackTitleFromPath(path);
     const heading = draftSpecQuotedPhrase(specContent) || fallbackTitle;
     const subtitle = summarizeDraftSpec(specContent, fallbackTitle);
-    const bullets = draftSpecLines(specContent).slice(0, 6);
+    const bullets = supportingDraftSpecLines(specContent, subtitle, 6);
     const tags = draftSpecInterestTags(specContent);
     return [
         `# ${heading}`,
         '',
-        subtitle,
+        normalizeDraftSentence(subtitle),
         '',
         '## Direction',
         ...(bullets.length ? bullets.map(line => `- ${line}`) : ['- The agent is turning the live spec into the target file.']),
@@ -5182,13 +5306,17 @@ function buildImmediateMarkdownDraftPreview(specContent, path) {
 
 function buildImmediateCodeDraftPreview(specContent, path, profileKey) {
     const fallbackTitle = draftFallbackTitleFromPath(path);
-    const lines = draftSpecLines(specContent).slice(0, 6);
+    const suffix = draftSuffixFromPath(path);
+    const summary = summarizeDraftSpec(specContent, fallbackTitle);
+    const lines = supportingDraftSpecLines(specContent, summary, 4);
+    const looksLikeHtmlBuild = /\b(html|web ?page|website|landing page|site)\b/i.test(String(specContent || ''));
+    const quotedPhrase = draftSpecQuotedPhrase(specContent);
     if (profileKey === 'python') {
         return [
             '"""',
             `${fallbackTitle}`,
             '',
-            summarizeDraftSpec(specContent, fallbackTitle),
+            normalizeDraftSentence(summary),
             '"""',
             '',
             '# Live scaffold from the current draft spec.',
@@ -5199,17 +5327,76 @@ function buildImmediateCodeDraftPreview(specContent, path, profileKey) {
     if (profileKey === 'json') {
         return JSON.stringify({
             title: fallbackTitle,
-            summary: summarizeDraftSpec(specContent, fallbackTitle),
+            summary: normalizeDraftSentence(summary),
             cues: lines,
             state: 'live-preview',
         }, null, 2);
     }
+    if (suffix === '.js' || suffix === '.jsx' || suffix === '.ts' || suffix === '.tsx') {
+        const typed = suffix === '.ts' || suffix === '.tsx';
+        const consoleMessage = quotedPhrase || `${fallbackTitle} is taking shape.`;
+        if (looksLikeHtmlBuild) {
+            const htmlTitle = fallbackTitle;
+            return [
+                '/**',
+                ' * Live scaffold generated from the current draft spec.',
+                ` * Goal: ${normalizeDraftSentence(summary)}`,
+                ...lines.map(line => ` * Cue: ${normalizeDraftSentence(line)}`),
+                ' */',
+                '',
+                `${typed ? 'export ' : ''}function renderApp${typed ? '(): string' : '()'} {`,
+                '  return [',
+                "    '<!DOCTYPE html>',",
+                "    '<html lang=\"en\">',",
+                "    '  <head>',",
+                "    '    <meta charset=\"UTF-8\" />',",
+                "    '    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />',",
+                `    ${JSON.stringify(`    <title>${htmlTitle}</title>`)},`,
+                "    '  </head>',",
+                "    '  <body>',",
+                `    ${JSON.stringify(`    <main><h1>${htmlTitle}</h1><p>${normalizeDraftSentence(summary)}</p></main>`)},`,
+                "    '  </body>',",
+                "    '</html>',",
+                "  ].join('\\n');",
+                '}',
+                '',
+                `${typed ? 'export ' : ''}function main${typed ? '(): void' : '()'} {`,
+                '  console.log(renderApp());',
+                '}',
+                '',
+                'main();',
+                '',
+            ].join('\n');
+        }
+        return [
+            '/**',
+            ' * Live scaffold generated from the current draft spec.',
+            ` * Goal: ${normalizeDraftSentence(summary)}`,
+            ...lines.map(line => ` * Cue: ${normalizeDraftSentence(line)}`),
+            ' */',
+            '',
+            `${typed ? 'export ' : ''}function main${typed ? '(): void' : '()'} {`,
+            `  console.log(${JSON.stringify(consoleMessage)});`,
+            '}',
+            '',
+            'main();',
+            '',
+        ].join('\n');
+    }
+    if (suffix === '.txt' || !suffix) {
+        const proseLines = lines.map(normalizeDraftSentence).filter(Boolean);
+        return [
+            normalizeDraftSentence(summary),
+            '',
+            ...(proseLines.length ? proseLines : ['The agent is expanding this into a fuller draft now.']),
+            '',
+        ].join('\n');
+    }
     return [
-        `${fallbackTitle}`,
+        `# ${normalizeDraftSentence(summary)}`,
         '',
-        summarizeDraftSpec(specContent, fallbackTitle),
+        ...(lines.length ? lines.map(line => `# ${normalizeDraftSentence(line)}`) : ['# The agent is preparing the real file.']),
         '',
-        ...(lines.length ? lines.map(line => `- ${line}`) : ['- The agent is preparing the real file.']),
     ].join('\n');
 }
 
@@ -5705,6 +5892,9 @@ async function loadDraftDocument(path, options = {}) {
         console.error('Failed to sync draft agent focus:', error);
     });
     try {
+        await ensureDraftFileSession(draftPath, currentConvId).catch(error => {
+            console.error('Failed to ensure draft session before opening:', error);
+        });
         const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(specPath)}`);
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
@@ -6247,11 +6437,52 @@ function syncInlineViewerCopyButton() {
     button.title = show ? 'Copy current file contents' : '';
 }
 
+function syncInlineViewerArchiveButton() {
+    const button = document.getElementById('inlineViewerExtractButton');
+    if (!button) return;
+    const state = getViewerState('inlineViewer');
+    const show = Boolean(state?.path) && state.kind === 'archive';
+    button.hidden = !show;
+    button.disabled = !show;
+    button.title = show ? `Extract ${basename(state.path) || 'archive'}` : '';
+}
+
 function copyInlineViewerContent() {
     const button = document.getElementById('inlineViewerCopyButton');
     const state = getViewerState('inlineViewer');
     if (!button || !viewerSupportsCopy(state)) return;
     copyToClipboard(getViewerContent('inlineViewer'), button);
+}
+
+async function extractInlineViewerArchive() {
+    const state = getViewerState('inlineViewer');
+    if (!currentWorkspaceId || !state?.path || state.kind !== 'archive') return;
+    const button = document.getElementById('inlineViewerExtractButton');
+    if (button) button.disabled = true;
+    try {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/archive/extract`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: state.path }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        const count = Number(data.count || 0);
+        const destination = String(data.destination_path || '').trim();
+        showTransientComposerHint(
+            count
+                ? `Extracted ${count} file${count === 1 ? '' : 's'} to ${destination || 'the workspace'}.`
+                : `Created ${destination || 'the extraction folder'}, but the archive had no files to extract.`,
+            5000,
+        );
+        recordWorkspaceActivity('Extract', `Extracted ${basename(state.path) || state.path} to ${destination || 'the workspace'}.`);
+        await refreshWorkspace(true);
+    } catch (error) {
+        showTransientComposerHint(`Archive extract failed: ${error.message}`, 6000);
+        recordWorkspaceActivity('Extract Error', `Archive extract failed: ${error.message}`, { error: true });
+    } finally {
+        syncInlineViewerArchiveButton();
+    }
 }
 
 function getInlineSelection() {
@@ -6388,6 +6619,7 @@ function setInlineViewerView(view) {
 
 function inlineViewerModeLabel() {
     if (!inlineViewerPath) return 'No file';
+    if (inlineViewerKind === 'archive') return 'Archive';
     if (inlineViewerKind === 'spreadsheet') return 'Preview only';
     if (!inlineViewerEditable) return 'Read only';
     if (inlineViewerView === 'preview') return 'Preview';
@@ -6557,6 +6789,51 @@ function renderImagePreview(targetId, path) {
     img.alt = basename(path) || 'Image preview';
     img.src = workspaceFileInlineViewUrl(path);
     previewEl.appendChild(img);
+}
+
+function renderArchivePreview(targetId, data = {}) {
+    const previewEl = document.getElementById(targetId);
+    if (!previewEl) return;
+    previewEl.classList.remove('file-modal-markdown');
+    previewEl.innerHTML = '';
+
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const card = document.createElement('div');
+    card.className = 'workspace-archive-preview';
+
+    const meta = document.createElement('div');
+    meta.className = 'workspace-archive-preview-meta';
+    const entryCount = Number.isFinite(Number(data.entry_count)) ? Number(data.entry_count) : entries.length;
+    const parts = [];
+    if (entryCount) parts.push(`${entryCount} entr${entryCount === 1 ? 'y' : 'ies'}`);
+    if (Number.isFinite(Number(data.size))) parts.push(formatBytes(Number(data.size)));
+    meta.textContent = parts.join(' • ') || 'Zip archive';
+    card.appendChild(meta);
+
+    const list = document.createElement('div');
+    list.className = 'workspace-archive-preview-list';
+    if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'workspace-empty';
+        empty.textContent = 'No visible archive entries.';
+        list.appendChild(empty);
+    } else {
+        entries.forEach(entry => {
+            const row = document.createElement('div');
+            row.className = 'workspace-archive-entry';
+            const pathEl = document.createElement('span');
+            pathEl.className = 'workspace-archive-entry-path';
+            pathEl.textContent = String(entry.path || '');
+            row.appendChild(pathEl);
+            const sizeEl = document.createElement('span');
+            sizeEl.className = 'workspace-archive-entry-size';
+            sizeEl.textContent = entry.is_dir ? 'folder' : formatBytes(Number(entry.size || 0));
+            row.appendChild(sizeEl);
+            list.appendChild(row);
+        });
+    }
+    card.appendChild(list);
+    previewEl.appendChild(card);
 }
 
 function renderMarkdownPreview(targetId, content) {
@@ -6775,6 +7052,7 @@ function syncViewerControls(prefix, editable, defaultView = 'preview') {
     syncInlineViewerMode();
     syncInlineViewerVisibility();
     syncInlineViewerCopyButton();
+    syncInlineViewerArchiveButton();
 }
 
 function closeInlineViewer() {
@@ -6822,7 +7100,7 @@ async function openWorkspaceFile(path, options = {}) {
     const requestToken = ++inlineViewerRequestToken;
     const provisionalKind = /\.(xlsx|xls|xlsm)$/i.test(path)
         ? 'spreadsheet'
-        : (/\.pdf$/i.test(path) ? 'pdf' : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text')))));
+        : (isArchivePath(path) ? 'archive' : (/\.pdf$/i.test(path) ? 'pdf' : (isImagePath(path) ? 'image' : (isHtmlPath(path) ? 'html' : (isMarkdownPath(path) ? 'markdown' : (/\.(csv|tsv)$/i.test(path) ? 'csv' : 'text'))))));
     if (!preserveSheet) selectedSpreadsheetSheet = '';
     selectedWorkspaceFile = path;
     inlineViewerPath = path;
@@ -6875,6 +7153,9 @@ async function openWorkspaceFile(path, options = {}) {
 
         if (kind === 'pdf') {
             renderPdfPreview('inlineViewerPreview', path);
+        }
+        else if (kind === 'archive') {
+            renderArchivePreview('inlineViewerPreview', data);
         }
         else if (kind === 'image') {
             renderImagePreview('inlineViewerPreview', path);

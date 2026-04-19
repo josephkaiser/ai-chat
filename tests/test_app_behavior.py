@@ -1,6 +1,7 @@
 import pathlib
 import tempfile
 import unittest
+import zipfile
 
 from src.python.ai_chat.prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
 import src.python.ai_chat.workspace_reader as workspace_reader
@@ -91,6 +92,51 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertFalse(payload["editable"])
         self.assertEqual(payload["default_view"], "preview")
         self.assertEqual(payload["metadata"].get("preview_error"), "pdftotext unavailable")
+
+    def test_rtf_reader_uses_document_preview_mode_and_stays_read_only(self):
+        target = self._write_text("notes.rtf", "{\\rtf1\\ansi Hello world}")
+        preview_payload = {
+            "path": "notes.rtf",
+            "content": "Hello world",
+            "size": 11,
+            "lines": 1,
+            "file_type": "rtf",
+            "extractor": "rtf-parser",
+            "page_count": None,
+            "title": "notes.rtf",
+            "metadata": {},
+        }
+        payload = workspace_reader.build_workspace_file_result(
+            target,
+            rel_path="notes.rtf",
+            max_bytes=1024 * 1024,
+            document_preview_builder=lambda *_args, **_kwargs: dict(preview_payload),
+            text_limit=40000,
+            truncate_output_func=lambda text, _limit: text,
+        )
+        self.assertEqual(payload["content"], "Hello world")
+        self.assertEqual(payload["content_kind"], "text")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["default_view"], "preview")
+
+    def test_zip_reader_returns_archive_preview_entries(self):
+        target = self.workspace / "bundle.zip"
+        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("src/main.py", "print('hi')\n")
+            archive.writestr("README.md", "# Hello\n")
+        payload = workspace_reader.build_workspace_file_result(
+            target,
+            rel_path="bundle.zip",
+            max_bytes=1024 * 1024,
+            document_preview_builder=lambda *_args, **_kwargs: {},
+            text_limit=None,
+            truncate_output_func=lambda text, _limit: text,
+        )
+        self.assertEqual(payload["content_kind"], "archive")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["file_type"], "zip")
+        self.assertGreaterEqual(payload["entry_count"], 2)
+        self.assertIn("src/main.py", payload["content"])
 
     def test_image_files_open_as_non_editable_binary_previews(self):
         target = self._write_bytes("plots/chart.png", b"\x89PNG\r\n\x1a\n")

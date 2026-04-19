@@ -192,13 +192,15 @@ SPREADSHEET_MAX_COLUMNS = 40
 SPREADSHEET_SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls", ".xlsm"}
 TEXT_DOCUMENT_EXTENSIONS = {
     ".c", ".cc", ".cfg", ".conf", ".cpp", ".css", ".csv", ".env", ".go", ".h", ".hpp", ".html",
-    ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".py", ".rb", ".rs", ".rst", ".sh",
+    ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".py", ".rb", ".rs", ".rst", ".rtf", ".sh",
     ".sql", ".svg", ".tex", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
 }
 MARKDOWN_EXTENSIONS = {".md", ".markdown", ".rst"}
 HTML_EXTENSIONS = {".htm", ".html"}
 DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
 BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
+ARCHIVE_EXTENSIONS = {".zip"}
+RTF_EXTENSIONS = {".rtf"}
 DOCUMENT_INDEX_SIZE_LIMIT = int(os.getenv("DOCUMENT_INDEX_SIZE_LIMIT", str(25 * 1024 * 1024)))
 DOCUMENT_TEXT_READ_LIMIT = int(os.getenv("DOCUMENT_TEXT_READ_LIMIT", str(8 * 1024 * 1024)))
 DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "900"))
@@ -211,6 +213,8 @@ MESSAGE_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("MESSAGE_RETRIEVAL_SEMANTIC_LIM
 EMBEDDING_TEXT_CHAR_LIMIT = int(os.getenv("EMBEDDING_TEXT_CHAR_LIMIT", "2400"))
 RETRIEVAL_RRF_K = int(os.getenv("RETRIEVAL_RRF_K", "60"))
 DOCUMENT_COMMAND_TIMEOUT_SECONDS = float(os.getenv("DOCUMENT_COMMAND_TIMEOUT_SECONDS", "30"))
+ZIP_EXTRACT_FILE_LIMIT = max(1, int(os.getenv("ZIP_EXTRACT_FILE_LIMIT", "1000")))
+ZIP_EXTRACT_TOTAL_BYTES_LIMIT = int(os.getenv("ZIP_EXTRACT_TOTAL_BYTES_LIMIT", str(150 * 1024 * 1024)))
 PDFTOTEXT_BIN = shutil.which("pdftotext") or ""
 PDFINFO_BIN = shutil.which("pdfinfo") or ""
 DRAFT_DEFAULT_TARGET_PATH = "untitled"
@@ -3416,6 +3420,8 @@ def classify_workspace_file_kind(path: str) -> str:
         return "spreadsheet"
     if is_pdf_path(path):
         return "pdf"
+    if pathlib.Path(path).suffix.lower() in ARCHIVE_EXTENSIONS:
+        return "archive"
     if workspace_file_content_kind(path) == "image":
         return "image"
     if is_text_document_path(path):
@@ -3441,7 +3447,7 @@ def build_workspace_listing_item(path: pathlib.Path, workspace: pathlib.Path) ->
 
 def is_previewable_workspace_kind(kind: str) -> bool:
     """Return whether the inline viewer can preview this workspace content kind."""
-    return str(kind or "").strip().lower() in {"image", "html", "markdown", "pdf", "csv", "spreadsheet"}
+    return str(kind or "").strip().lower() in {"image", "html", "markdown", "pdf", "csv", "spreadsheet", "archive"}
 
 
 def preview_priority_for_workspace_kind(kind: str) -> int:
@@ -3457,12 +3463,14 @@ def preview_priority_for_workspace_kind(kind: str) -> int:
         return 3
     if normalized in {"csv", "spreadsheet"}:
         return 4
-    if normalized == "document":
+    if normalized == "archive":
         return 5
-    if normalized == "data":
+    if normalized == "document":
         return 6
-    if normalized == "code":
+    if normalized == "data":
         return 7
+    if normalized == "code":
+        return 8
     return 8
 
 
@@ -3692,6 +3700,11 @@ def is_pdf_path(path: str | pathlib.Path) -> bool:
     return pathlib.Path(path).suffix.lower() == ".pdf"
 
 
+def is_rtf_path(path: str | pathlib.Path) -> bool:
+    """Return whether the given path looks like an RTF document."""
+    return pathlib.Path(path).suffix.lower() in RTF_EXTENSIONS
+
+
 def is_text_document_path(path: str | pathlib.Path) -> bool:
     """Return whether the path extension is commonly safe to parse as text."""
     return pathlib.Path(path).suffix.lower() in TEXT_DOCUMENT_EXTENSIONS
@@ -3891,6 +3904,126 @@ def extract_pdf_document(target: pathlib.Path) -> Dict[str, Any]:
     }
 
 
+def decode_rtf_to_text(raw: str) -> str:
+    """Convert a lightweight RTF payload into readable plain text."""
+    text = str(raw or "")
+    if not text:
+        return ""
+
+    output: List[str] = []
+    stack: List[tuple[bool, bool]] = []
+    ignorable = False
+    ucskip = 1
+    curskip = 0
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        if curskip > 0:
+            curskip -= 1
+            index += 1
+            continue
+        if char == "{":
+            stack.append((ignorable, ucskip))
+            index += 1
+            continue
+        if char == "}":
+            ignorable, ucskip = stack.pop() if stack else (False, 1)
+            index += 1
+            continue
+        if char == "\\":
+            index += 1
+            if index >= len(text):
+                break
+            next_char = text[index]
+            if next_char in "\\{}":
+                if not ignorable:
+                    output.append(next_char)
+                index += 1
+                continue
+            if next_char == "'":
+                hex_code = text[index + 1:index + 3]
+                if len(hex_code) == 2:
+                    try:
+                        if not ignorable:
+                            output.append(bytes.fromhex(hex_code).decode("cp1252", errors="replace"))
+                    except Exception:
+                        pass
+                index += 3
+                continue
+
+            match = re.match(r"([a-zA-Z]+)(-?\d+)? ?", text[index:])
+            if not match:
+                if next_char == "*":
+                    ignorable = True
+                    index += 1
+                    continue
+                if next_char == "~" and not ignorable:
+                    output.append("\u00A0")
+                elif next_char in {"-", "_"} and not ignorable:
+                    output.append("\u00AD" if next_char == "-" else "\u2011")
+                index += 1
+                continue
+
+            word = match.group(1)
+            arg = match.group(2)
+            index += len(match.group(0))
+
+            if word in {"par", "line"} and not ignorable:
+                output.append("\n")
+            elif word == "tab" and not ignorable:
+                output.append("\t")
+            elif word in {"emdash", "endash", "bullet"} and not ignorable:
+                output.append({"emdash": "\u2014", "endash": "\u2013", "bullet": "\u2022"}[word])
+            elif word == "u":
+                try:
+                    codepoint = int(arg or "0")
+                    if codepoint < 0:
+                        codepoint += 65536
+                    if not ignorable:
+                        output.append(chr(codepoint))
+                except Exception:
+                    pass
+                curskip = ucskip
+            elif word == "uc":
+                try:
+                    ucskip = max(0, int(arg or "1"))
+                except Exception:
+                    ucskip = 1
+            elif word in {
+                "fonttbl", "colortbl", "datastore", "themedata", "stylesheet", "info",
+                "pict", "object", "objdata", "header", "footer", "headerl", "headerr",
+                "footerl", "footerr",
+            }:
+                ignorable = True
+            continue
+
+        if not ignorable:
+            output.append(char)
+        index += 1
+
+    return clean_document_text("".join(output))
+
+
+def extract_rtf_document(target: pathlib.Path) -> Dict[str, Any]:
+    """Extract readable text from an RTF document without depending on OCR or external tools."""
+    if target.stat().st_size > DOCUMENT_TEXT_READ_LIMIT:
+        raise ValueError(f"RTF file too large to index (max {DOCUMENT_TEXT_READ_LIMIT // (1024 * 1024)}MB)")
+    raw = target.read_text(encoding="utf-8", errors="replace")
+    cleaned = decode_rtf_to_text(raw)
+    return {
+        "file_type": "rtf",
+        "extractor": "rtf-parser",
+        "title": target.name,
+        "page_count": None,
+        "pages": [cleaned] if cleaned else [],
+        "full_text": cleaned,
+        "metadata": {
+            "line_count": raw.count("\n") + (1 if raw else 0),
+        },
+    }
+
+
 def extract_text_document(target: pathlib.Path) -> Dict[str, Any]:
     """Read a text-like file and normalize it for downstream chunking."""
     if target.stat().st_size > DOCUMENT_TEXT_READ_LIMIT:
@@ -3919,6 +4052,8 @@ def extract_document_payload(target: pathlib.Path) -> Dict[str, Any]:
         raise ValueError(f"File too large to index (max {DOCUMENT_INDEX_SIZE_LIMIT // (1024 * 1024)}MB)")
     if is_pdf_path(target):
         return extract_pdf_document(target)
+    if is_rtf_path(target):
+        return extract_rtf_document(target)
     if is_text_document_path(target) or file_sample_looks_textual(target):
         return extract_text_document(target)
     raise ValueError("Unsupported document type for text extraction")
@@ -8327,6 +8462,11 @@ class WorkspaceFileUpdateRequest(BaseModel):
     content: str
 
 
+class WorkspaceArchiveExtractRequest(BaseModel):
+    path: str
+    destination_path: Optional[str] = None
+
+
 class FileSessionEnsureRequest(BaseModel):
     path: str
     preferred_conversation_id: Optional[str] = None
@@ -9810,6 +9950,110 @@ def build_workspace_archive_response(workspace_id: str) -> Response:
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
 
 
+def unique_workspace_directory_path(base_dir: pathlib.Path, preferred_name: str) -> pathlib.Path:
+    """Return a non-conflicting directory path inside the workspace."""
+    cleaned = sanitize_uploaded_filename(preferred_name or "archive")
+    stem = pathlib.Path(cleaned).stem or "archive"
+    candidate = base_dir / stem
+    if not candidate.exists():
+        return candidate
+    suffix = pathlib.Path(cleaned).suffix
+    for index in range(2, 1000):
+        numbered = base_dir / f"{stem}-{index}{suffix}"
+        if not numbered.exists():
+            return numbered
+    raise HTTPException(status_code=400, detail="Could not find a free extraction directory name")
+
+
+def normalize_zip_member_path(name: str) -> Optional[pathlib.PurePosixPath]:
+    """Normalize one zip member path and reject unsafe traversal."""
+    raw = str(name or "").replace("\\", "/").strip()
+    if not raw:
+        return None
+    normalized = pathlib.PurePosixPath(raw)
+    parts = [part for part in normalized.parts if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return None
+    if normalized.is_absolute():
+        return None
+    return pathlib.PurePosixPath(*parts) if parts else None
+
+
+def extract_workspace_archive_for_workspace(
+    workspace_id: str,
+    path: str,
+    destination_path: Optional[str] = None,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Extract one zip archive into a workspace directory."""
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    target = resolve_workspace_relative_path_from_root(workspace, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Archive not found")
+    if target.suffix.lower() not in ARCHIVE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Only .zip archives can be extracted here")
+
+    archive_parent_rel = format_workspace_path(target.parent, workspace)
+    if destination_path and str(destination_path).strip():
+        destination = resolve_workspace_relative_path_from_root(workspace, str(destination_path).strip())
+        if destination.exists() and not destination.is_dir():
+            raise HTTPException(status_code=400, detail="destination_path must be a directory")
+    else:
+        destination = unique_workspace_directory_path(target.parent, target.stem)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    extracted_files: List[Dict[str, Any]] = []
+    extracted_count = 0
+    total_uncompressed = 0
+    destination_rel = format_workspace_path(destination, workspace)
+
+    try:
+        with zipfile.ZipFile(target) as archive:
+            members = archive.infolist()
+            if len(members) > ZIP_EXTRACT_FILE_LIMIT:
+                raise HTTPException(status_code=400, detail=f"Archive contains too many entries (max {ZIP_EXTRACT_FILE_LIMIT})")
+            for info in members:
+                safe_member = normalize_zip_member_path(info.filename)
+                if safe_member is None:
+                    continue
+                total_uncompressed += int(info.file_size or 0)
+                if total_uncompressed > ZIP_EXTRACT_TOTAL_BYTES_LIMIT:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Archive is too large to extract here (max {ZIP_EXTRACT_TOTAL_BYTES_LIMIT // (1024 * 1024)}MB uncompressed)",
+                    )
+                out_path = destination / safe_member
+                if info.is_dir():
+                    out_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, out_path.open("wb") as sink:
+                    shutil.copyfileobj(source, sink)
+                extracted_count += 1
+                extracted_files.append({
+                    "path": format_workspace_path(out_path, workspace),
+                    "size": out_path.stat().st_size,
+                    "content_kind": workspace_file_content_kind(out_path),
+                    "editable": workspace_file_is_editable(out_path),
+                })
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid zip archive: {exc}") from exc
+
+    payload = {
+        "workspace_id": workspace_id,
+        "workspace_path": str(workspace),
+        "archive_path": format_workspace_path(target, workspace),
+        "archive_parent_path": archive_parent_rel,
+        "destination_path": destination_rel,
+        "count": extracted_count,
+        "files": extracted_files[:200],
+    }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    return payload
+
+
 def read_workspace_text_for_session(workspace_id: str, path: str) -> str:
     """Read one workspace text file for hidden file-session processing."""
     _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
@@ -9839,6 +10083,11 @@ def file_session_bootstrap_title(path: str) -> str:
     if not cleaned:
         cleaned = "Draft"
     return re.sub(r"\b\w", lambda match: match.group(0).upper(), cleaned)
+
+
+def file_session_bootstrap_suffix(path: str) -> str:
+    """Return the lowercase suffix for one file-session target path."""
+    return pathlib.PurePosixPath(normalize_file_session_path(path)).suffix.lower()
 
 
 def clean_file_session_spec_line(line: str) -> str:
@@ -9884,6 +10133,86 @@ def summarize_file_session_spec(spec_content: str, fallback_title: str) -> str:
         return f"A live first pass for {fallback_title} is taking shape."
     summary = re.sub(r"^(?:create|build|make|design|write|craft|generate)\s+", "", first_line, flags=re.IGNORECASE).strip()
     return f"{summary[:147].rstrip()}..." if len(summary) > 150 else summary
+
+
+def normalize_file_session_sentence(text: str) -> str:
+    """Normalize one summary or cue into a readable sentence."""
+    trimmed = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not trimmed:
+        return ""
+    sentence = trimmed[:1].upper() + trimmed[1:]
+    return sentence if re.search(r'[.!?](?:["\'])?$', sentence) else f"{sentence}."
+
+
+def file_session_spec_stem(text: str) -> str:
+    """Normalize a spec line for deduplication against the summary sentence."""
+    return re.sub(r"\s+", " ", re.sub(r"^(?:create|build|make|design|write|craft|generate)\s+", "", str(text or ""), flags=re.IGNORECASE)).strip().lower()
+
+
+def supporting_file_session_spec_lines(spec_content: str, summary: str, *, limit: int = 4) -> List[str]:
+    """Return supporting cue lines that do not just repeat the top-level summary."""
+    summary_stem = file_session_spec_stem(summary)
+    cues = [
+        line
+        for line in file_session_spec_lines(spec_content, limit=max(limit + 2, 6))
+        if file_session_spec_stem(line) != summary_stem
+    ]
+    return cues[:limit]
+
+
+def looks_like_current_file_session_bootstrap_content(path: str, content: str) -> bool:
+    """Return whether the visible output still looks like one of our provisional bootstrap scaffolds."""
+    safe_path = normalize_file_session_path(path)
+    suffix = file_session_bootstrap_suffix(safe_path)
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if suffix in HTML_EXTENSIONS:
+        return "Live Draft Preview" in text or "This first pass was materialized immediately while the agent keeps refining the file." in text
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        return "Live scaffold generated from the current draft spec." in text
+    if suffix == ".json":
+        return '"state": "live-preview"' in text
+    if suffix == ".py":
+        return "# Live scaffold from the current draft spec." in text
+    return False
+
+
+def looks_like_legacy_file_session_bootstrap_content(path: str, content: str, spec_content: str) -> bool:
+    """Return whether one visible file still matches the older title/summary/bullet bootstrap shape."""
+    safe_path = normalize_file_session_path(path)
+    suffix = file_session_bootstrap_suffix(safe_path)
+    if suffix not in {".js", ".jsx", ".ts", ".tsx", ".txt", ""}:
+        return False
+    text = str(content or "").strip()
+    if not text:
+        return False
+    fallback_title = file_session_bootstrap_title(safe_path)
+    summary = summarize_file_session_spec(spec_content, fallback_title)
+    summary_stem = file_session_spec_stem(summary)
+    nonempty_lines = [str(line).strip() for line in text.splitlines() if str(line).strip()]
+    if len(nonempty_lines) < 3:
+        return False
+    first_stem = file_session_spec_stem(nonempty_lines[0])
+    has_title = first_stem == file_session_spec_stem(fallback_title)
+    has_summary = any(file_session_spec_stem(line) == summary_stem for line in nonempty_lines[1:])
+    has_bullet_echo = any(
+        re.match(r"^[-*]\s+", line) and file_session_spec_stem(line) == summary_stem
+        for line in nonempty_lines[1:]
+    )
+    lacks_code_shape = not any(
+        re.search(r"(^|\n)\s*(?:import |export |const |let |var |function |async function |class |interface |type |enum |console\.log\(|document\.|window\.|return\b)", text, flags=re.MULTILINE)
+        for _ in [0]
+    )
+    return has_title and (has_summary or has_bullet_echo) and lacks_code_shape
+
+
+def is_refreshable_file_session_bootstrap_content(path: str, content: str, spec_content: str) -> bool:
+    """Return whether an existing visible output is still a provisional bootstrap that may be safely refreshed."""
+    return (
+        looks_like_current_file_session_bootstrap_content(path, content)
+        or looks_like_legacy_file_session_bootstrap_content(path, content, spec_content)
+    )
 
 
 def file_session_interest_tags(spec_content: str, *, limit: int = 6) -> List[str]:
@@ -10131,10 +10460,10 @@ def build_file_session_bootstrap_html(path: str, spec_content: str) -> str:
 def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
     """Generate one visible first-pass file from the active draft spec."""
     safe_path = normalize_file_session_path(path)
-    suffix = pathlib.PurePosixPath(safe_path).suffix.lower()
+    suffix = file_session_bootstrap_suffix(safe_path)
     fallback_title = file_session_bootstrap_title(safe_path)
     summary = summarize_file_session_spec(spec_content, fallback_title)
-    lines = file_session_spec_lines(spec_content, limit=6)
+    lines = supporting_file_session_spec_lines(spec_content, summary, limit=6)
     if suffix in HTML_EXTENSIONS:
         return build_file_session_bootstrap_html(safe_path, spec_content)
     if suffix in {".md", ".markdown", ".rst"}:
@@ -10142,7 +10471,7 @@ def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
         return "\n".join([
             f"# {file_session_spec_quoted_phrase(spec_content) or fallback_title}",
             "",
-            summary,
+            normalize_file_session_sentence(summary),
             "",
             "## Direction",
             *(f"- {line}" for line in body),
@@ -10153,27 +10482,80 @@ def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
             '"""',
             fallback_title,
             "",
-            summary,
+            normalize_file_session_sentence(summary),
             '"""',
             "",
             "# Live scaffold from the current draft spec.",
             *(f"# - {line}" for line in comment_lines),
             "",
         ])
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        typed = suffix in {".ts", ".tsx"}
+        quoted = file_session_spec_quoted_phrase(spec_content) or f"{fallback_title} is taking shape."
+        looks_like_html_build = bool(re.search(r"\b(html|web ?page|website|landing page|site)\b", str(spec_content or ""), flags=re.IGNORECASE))
+        comment_lines = [
+            "/**",
+            " * Live scaffold generated from the current draft spec.",
+            f" * Goal: {normalize_file_session_sentence(summary)}",
+            *(f" * Cue: {normalize_file_session_sentence(line)}" for line in lines[:4]),
+            " */",
+            "",
+        ]
+        if looks_like_html_build:
+            html_title = fallback_title
+            html_summary = normalize_file_session_sentence(summary)
+            return "\n".join(comment_lines + [
+                f"{'export ' if typed else ''}function renderApp{'(): string' if typed else '()'} {{",
+                "  return [",
+                "    '<!DOCTYPE html>',",
+                "    '<html lang=\"en\">',",
+                "    '  <head>',",
+                "    '    <meta charset=\"UTF-8\" />',",
+                "    '    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />',",
+                f"    {json.dumps(f'    <title>{html_title}</title>')},",
+                "    '  </head>',",
+                "    '  <body>',",
+                f"    {json.dumps(f'    <main><h1>{html_title}</h1><p>{html_summary}</p></main>')},",
+                "    '  </body>',",
+                "    '</html>',",
+                r"  ].join('\n');",
+                "}",
+                "",
+                f"{'export ' if typed else ''}function main{'(): void' if typed else '()'} {{",
+                "  console.log(renderApp());",
+                "}",
+                "",
+                "main();",
+                "",
+            ])
+        return "\n".join(comment_lines + [
+            f"{'export ' if typed else ''}function main{'(): void' if typed else '()'} {{",
+            f"  console.log({json.dumps(quoted)});",
+            "}",
+            "",
+            "main();",
+            "",
+        ])
     if suffix == ".json":
         return json.dumps({
             "title": fallback_title,
-            "summary": summary,
+            "summary": normalize_file_session_sentence(summary),
             "cues": lines,
             "state": "live-preview",
         }, indent=2)
+    if suffix == ".txt" or not suffix:
+        prose_lines = [normalize_file_session_sentence(line) for line in lines if normalize_file_session_sentence(line)]
+        return "\n".join([
+            normalize_file_session_sentence(summary),
+            "",
+            *(prose_lines or ["The agent is expanding this into a fuller draft now."]),
+            "",
+        ])
     body = lines or ["The agent is preparing the real file."]
     return "\n".join([
-        fallback_title,
+        f"# {normalize_file_session_sentence(summary)}",
         "",
-        summary,
-        "",
-        *(f"- {line}" for line in body),
+        *(f"# {normalize_file_session_sentence(line)}" for line in body),
         "",
     ])
 
@@ -10185,8 +10567,13 @@ def maybe_bootstrap_visible_file_session_output(workspace_id: str, path: str) ->
     if not safe_workspace_id or not safe_path:
         return None
 
+    spec_content = read_workspace_text_for_session(safe_workspace_id, file_session_spec_path(safe_path))
+    if not spec_content.strip():
+        return None
+
     _workspace_record, workspace, _run = get_workspace_route_target(safe_workspace_id, create=True)
     target = resolve_workspace_relative_path_from_root(workspace, safe_path)
+    existing_content = ""
     if target.exists():
         if not target.is_file():
             return None
@@ -10194,15 +10581,13 @@ def maybe_bootstrap_visible_file_session_output(workspace_id: str, path: str) ->
             existing_content = target.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
-        if existing_content.strip():
+        if existing_content.strip() and not is_refreshable_file_session_bootstrap_content(safe_path, existing_content, spec_content):
             return None
-
-    spec_content = read_workspace_text_for_session(safe_workspace_id, file_session_spec_path(safe_path))
-    if not spec_content.strip():
-        return None
 
     content = build_file_session_bootstrap_content(safe_path, spec_content)
     if not content.strip():
+        return None
+    if existing_content.strip() and existing_content == content:
         return None
 
     payload = write_workspace_file_for_workspace(
@@ -10587,7 +10972,11 @@ async def ensure_file_session(workspace_id: str, request: FileSessionEnsureReque
             request.path,
             preferred_conversation_id=request.preferred_conversation_id,
         )
-        return enrich_file_session_records(workspace_id, [session])[0]
+        bootstrap_payload = maybe_bootstrap_visible_file_session_output(workspace_id, request.path)
+        enriched = enrich_file_session_records(workspace_id, [session])[0]
+        if bootstrap_payload:
+            enriched["bootstrapped_output"] = bootstrap_payload
+        return enriched
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -10757,6 +11146,11 @@ async def upload_workspace_files_by_workspace(
     return await upload_workspace_files_for_workspace(workspace_id, files, target_path)
 
 
+@app.post("/api/workspaces/{workspace_id}/archive/extract")
+async def extract_workspace_archive_by_workspace(workspace_id: str, request: WorkspaceArchiveExtractRequest):
+    return extract_workspace_archive_for_workspace(workspace_id, request.path, request.destination_path)
+
+
 @app.get("/api/workspaces/{workspace_id}/download")
 async def download_workspace_by_workspace(workspace_id: str):
     return build_workspace_archive_response(workspace_id)
@@ -10778,6 +11172,17 @@ async def upload_workspace_files(
 ):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return await upload_workspace_files_for_workspace(workspace_id, files, target_path, conversation_id=conversation_id)
+
+
+@app.post("/api/workspace/{conversation_id}/archive/extract")
+async def extract_workspace_archive(conversation_id: str, request: WorkspaceArchiveExtractRequest):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return extract_workspace_archive_for_workspace(
+        workspace_id,
+        request.path,
+        request.destination_path,
+        conversation_id=conversation_id,
+    )
 
 
 @app.get("/api/workspace/{conversation_id}/files")
@@ -11901,6 +12306,20 @@ def find_nearest_workspace_file_any(start: pathlib.Path, workspace: pathlib.Path
     return None
 
 
+def find_nearest_workspace_glob(start: pathlib.Path, workspace: pathlib.Path, patterns: List[str]) -> Optional[pathlib.Path]:
+    """Find the nearest file matching one of the glob patterns by walking upward."""
+    current = start if start.is_dir() else start.parent
+    workspace_resolved = workspace.resolve()
+    while True:
+        for pattern in patterns:
+            for candidate in sorted(current.glob(pattern)):
+                if candidate.is_file():
+                    return candidate
+        if current == workspace_resolved or current.parent == current:
+            return None
+        current = current.parent
+
+
 def load_package_json_scripts(package_json_path: pathlib.Path) -> Dict[str, str]:
     """Read package.json scripts without failing the wider tool loop."""
     try:
@@ -11919,26 +12338,57 @@ def load_package_json_scripts(package_json_path: pathlib.Path) -> Dict[str, str]
     }
 
 
-def path_has_segment(path: pathlib.Path, name: str) -> bool:
-    """Return whether a path contains a given directory segment."""
-    lowered = {part.lower() for part in path.parts}
-    return name.lower() in lowered
+def workspace_relpath_from(base_dir: pathlib.Path, target: pathlib.Path) -> str:
+    """Render one target path relative to a command cwd inside the workspace."""
+    try:
+        return target.relative_to(base_dir).as_posix()
+    except ValueError:
+        return os.path.relpath(str(target), str(base_dir)).replace(os.sep, "/")
 
 
-def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
-    """Guess a focused verification command after a file patch."""
+def build_auto_command_spec(command: List[str], cwd: str, label: str, *, phase: str = "verify") -> Dict[str, Any]:
+    """Normalize one auto-generated environment or verification command spec."""
+    return {
+        "command": list(command),
+        "cwd": str(cwd or ".") or ".",
+        "label": str(label or "Run command"),
+        "phase": str(phase or "verify") or "verify",
+    }
+
+
+def infer_auto_command_plan(conversation_id: str, rel_path: str) -> List[Dict[str, Any]]:
+    """Guess a small prepare/verify command plan after a file patch."""
     workspace = get_workspace_path(conversation_id)
     target = resolve_workspace_relative_path(conversation_id, rel_path)
     rel_target = format_workspace_path(target, workspace)
     ext = target.suffix.lower()
     name = target.name.lower()
+    plan: List[Dict[str, Any]] = []
 
     package_json = find_nearest_workspace_file(target, workspace, "package.json")
     if package_json:
         scripts = load_package_json_scripts(package_json)
-        package_dir = format_workspace_path(package_json.parent, workspace)
-        preferred_scripts: List[str] = []
+        package_dir = package_json.parent
+        package_cwd = format_workspace_path(package_dir, workspace)
+        node_modules_dir = package_dir / "node_modules"
+        package_lock = package_dir / "package-lock.json"
+        if not node_modules_dir.exists():
+            if package_lock.exists():
+                plan.append(build_auto_command_spec(
+                    ["npm", "ci", "--no-audit", "--no-fund"],
+                    package_cwd,
+                    "Prepare Node workspace with npm ci",
+                    phase="setup",
+                ))
+            else:
+                plan.append(build_auto_command_spec(
+                    ["npm", "install", "--no-audit", "--no-fund"],
+                    package_cwd,
+                    "Prepare Node workspace with npm install",
+                    phase="setup",
+                ))
 
+        preferred_scripts: List[str] = []
         if ext in {".ts", ".tsx"}:
             preferred_scripts.extend(["typecheck", "lint", "test", "build"])
         elif ext in {".jsx", ".js", ".mjs", ".cjs", ".css", ".scss", ".sass", ".less", ".html", ".vue", ".svelte"}:
@@ -11951,11 +12401,41 @@ def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[D
 
         for script_name in preferred_scripts:
             if script_name in scripts:
-                return {
-                    "command": ["npm", "run", script_name],
-                    "cwd": package_dir,
-                    "label": f"Auto-verify with npm run {script_name}",
-                }
+                plan.append(build_auto_command_spec(
+                    ["npm", "run", script_name],
+                    package_cwd,
+                    f"Auto-verify with npm run {script_name}",
+                ))
+                return plan
+
+        if ext in {".ts", ".tsx"}:
+            tsconfig = find_nearest_workspace_file_any(
+                target,
+                workspace,
+                ["tsconfig.json", "tsconfig.build.json"],
+            )
+            if tsconfig:
+                plan.append(build_auto_command_spec(
+                    ["npx", "--no-install", "tsc", "--noEmit", "-p", workspace_relpath_from(package_dir, tsconfig)],
+                    package_cwd,
+                    "Auto-verify with tsc --noEmit",
+                ))
+                return plan
+
+    if ext in {".ts", ".tsx"}:
+        tsconfig = find_nearest_workspace_file_any(
+            target,
+            workspace,
+            ["tsconfig.json", "tsconfig.build.json"],
+        )
+        if tsconfig:
+            tsconfig_dir = tsconfig.parent
+            plan.append(build_auto_command_spec(
+                ["tsc", "--noEmit", "-p", workspace_relpath_from(tsconfig_dir, tsconfig)],
+                format_workspace_path(tsconfig_dir, workspace),
+                "Auto-verify with tsc --noEmit",
+            ))
+            return plan
 
     if ext == ".py":
         python_config = find_nearest_workspace_file_any(
@@ -11968,54 +12448,164 @@ def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[D
             or name.startswith("test_")
             or name.endswith("_test.py")
         ):
-            return {
-                "command": ["pytest", rel_target],
-                "cwd": format_workspace_path(python_config.parent, workspace),
-                "label": f"Auto-verify with pytest {rel_target}",
-            }
-        return {
-            "command": ["python3", "-m", "py_compile", rel_target],
-            "cwd": ".",
-            "label": f"Auto-verify syntax for {rel_target}",
-        }
+            plan.append(build_auto_command_spec(
+                ["pytest", rel_target],
+                format_workspace_path(python_config.parent, workspace),
+                f"Auto-verify with pytest {rel_target}",
+            ))
+            return plan
+        plan.append(build_auto_command_spec(
+            ["python3", "-m", "py_compile", rel_target],
+            ".",
+            f"Auto-verify syntax for {rel_target}",
+        ))
+        return plan
 
     if ext in {".js", ".mjs", ".cjs"}:
-        return {
-            "command": ["node", "--check", rel_target],
-            "cwd": ".",
-            "label": f"Auto-verify syntax for {rel_target}",
-        }
+        plan.append(build_auto_command_spec(
+            ["node", "--check", rel_target],
+            ".",
+            f"Auto-verify syntax for {rel_target}",
+        ))
+        return plan
 
     cargo_toml = find_nearest_workspace_file(target, workspace, "Cargo.toml")
     if cargo_toml and ext == ".rs":
-        cargo_dir = format_workspace_path(cargo_toml.parent, workspace)
+        cargo_dir = cargo_toml.parent
+        cargo_cwd = format_workspace_path(cargo_dir, workspace)
+        if not (cargo_dir / "target").exists():
+            plan.append(build_auto_command_spec(
+                ["cargo", "fetch"],
+                cargo_cwd,
+                "Prepare Rust workspace with cargo fetch",
+                phase="setup",
+            ))
         if path_has_segment(target, "tests") or name.endswith("_test.rs"):
-            return {
-                "command": ["cargo", "test"],
-                "cwd": cargo_dir,
-                "label": "Auto-verify with cargo test",
-            }
-        return {
-            "command": ["cargo", "check"],
-            "cwd": cargo_dir,
-            "label": "Auto-verify with cargo check",
-        }
+            plan.append(build_auto_command_spec(
+                ["cargo", "test"],
+                cargo_cwd,
+                "Auto-verify with cargo test",
+            ))
+        else:
+            plan.append(build_auto_command_spec(
+                ["cargo", "check"],
+                cargo_cwd,
+                "Auto-verify with cargo check",
+            ))
+        return plan
 
     go_mod = find_nearest_workspace_file(target, workspace, "go.mod")
     if go_mod and ext == ".go":
-        go_dir = format_workspace_path(target.parent, workspace)
-        if name.endswith("_test.go"):
-            return {
-                "command": ["go", "test", "."],
-                "cwd": go_dir,
-                "label": "Auto-verify with go test .",
-            }
-        return {
-            "command": ["go", "test", "."],
-            "cwd": go_dir,
-            "label": "Auto-verify with go test .",
-        }
+        go_dir = go_mod.parent
+        go_cwd = format_workspace_path(go_dir, workspace)
+        plan.append(build_auto_command_spec(
+            ["go", "mod", "download"],
+            go_cwd,
+            "Prepare Go workspace with go mod download",
+            phase="setup",
+        ))
+        plan.append(build_auto_command_spec(
+            ["go", "test", "./..."],
+            go_cwd,
+            "Auto-verify with go test ./...",
+        ))
+        return plan
 
+    pom_xml = find_nearest_workspace_file(target, workspace, "pom.xml")
+    if pom_xml and ext == ".java":
+        maven_cwd = format_workspace_path(pom_xml.parent, workspace)
+        plan.append(build_auto_command_spec(
+            ["mvn", "test"],
+            maven_cwd,
+            "Auto-verify with mvn test",
+        ))
+        return plan
+
+    gradle_build = find_nearest_workspace_file_any(target, workspace, ["build.gradle", "build.gradle.kts"])
+    if gradle_build and ext == ".java":
+        gradle_dir = gradle_build.parent
+        gradle_cwd = format_workspace_path(gradle_dir, workspace)
+        gradlew = gradle_dir / ("gradlew.bat" if os.name == "nt" else "gradlew")
+        gradle_command = [workspace_relpath_from(gradle_dir, gradlew), "test"] if gradlew.exists() else ["gradle", "test"]
+        plan.append(build_auto_command_spec(
+            gradle_command,
+            gradle_cwd,
+            "Auto-verify with Gradle test",
+        ))
+        return plan
+
+    cs_project = find_nearest_workspace_glob(target, workspace, ["*.sln", "*.csproj"])
+    if cs_project and ext == ".cs":
+        dotnet_dir = cs_project.parent
+        dotnet_cwd = format_workspace_path(dotnet_dir, workspace)
+        plan.append(build_auto_command_spec(
+            ["dotnet", "restore", workspace_relpath_from(dotnet_dir, cs_project)],
+            dotnet_cwd,
+            "Prepare .NET workspace with dotnet restore",
+            phase="setup",
+        ))
+        dotnet_action = "test" if path_has_segment(target, "tests") or name.endswith(".tests.cs") or name.endswith(".spec.cs") else "build"
+        plan.append(build_auto_command_spec(
+            ["dotnet", dotnet_action, workspace_relpath_from(dotnet_dir, cs_project)],
+            dotnet_cwd,
+            f"Auto-verify with dotnet {dotnet_action}",
+        ))
+        return plan
+
+    if ext in {".c", ".h"}:
+        plan.append(build_auto_command_spec(
+            ["gcc", "-fsyntax-only", rel_target],
+            ".",
+            f"Auto-verify syntax for {rel_target}",
+        ))
+        return plan
+
+    if ext in {".cc", ".cpp", ".hpp"}:
+        plan.append(build_auto_command_spec(
+            ["g++", "-std=c++17", "-fsyntax-only", rel_target],
+            ".",
+            f"Auto-verify syntax for {rel_target}",
+        ))
+        return plan
+
+    if ext == ".java":
+        plan.append(build_auto_command_spec(
+            ["javac", rel_target],
+            ".",
+            f"Auto-verify compile for {rel_target}",
+        ))
+        return plan
+
+    if ext in {".sh", ".bash", ".zsh"}:
+        if shutil.which("shellcheck"):
+            plan.append(build_auto_command_spec(
+                ["shellcheck", rel_target],
+                ".",
+                f"Auto-verify with shellcheck {rel_target}",
+            ))
+        else:
+            plan.append(build_auto_command_spec(
+                ["sh", "-n", rel_target],
+                ".",
+                f"Auto-verify shell syntax for {rel_target}",
+            ))
+        return plan
+
+    return plan
+
+
+def path_has_segment(path: pathlib.Path, name: str) -> bool:
+    """Return whether a path contains a given directory segment."""
+    lowered = {part.lower() for part in path.parts}
+    return name.lower() in lowered
+
+
+def infer_auto_verify_command(conversation_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+    """Guess a focused verification command after a file patch."""
+    plan = infer_auto_command_plan(conversation_id, rel_path)
+    for spec in reversed(plan):
+        if str(spec.get("phase") or "verify") != "setup":
+            return spec
     return None
 
 
@@ -13240,80 +13830,87 @@ async def run_tool_loop(
             and (not allowed_tools or "workspace.run_command" in allowed_tools)
         ):
             patched_path = str(result.get("result", {}).get("path", "")).strip()
-            auto_verify = infer_auto_verify_command(conversation_id, patched_path) if patched_path else None
-            if auto_verify:
+            auto_plan = infer_auto_command_plan(conversation_id, patched_path) if patched_path else []
+            for plan_index, auto_spec in enumerate(auto_plan, start=1):
+                if auto_verify_runs >= AUTO_VERIFY_MAX_RUNS:
+                    break
                 signature = json.dumps(
-                    [auto_verify.get("cwd", "."), auto_verify.get("command", [])],
+                    [auto_spec.get("cwd", "."), auto_spec.get("command", [])],
                     ensure_ascii=False,
                     sort_keys=True,
                 )
-                if signature not in auto_verify_signatures:
-                    auto_verify_signatures.add(signature)
-                    auto_verify_runs += 1
-                    auto_call = {
-                        "id": f"{call['id']}_auto_verify",
-                        "name": "workspace.run_command",
-                        "arguments": {
-                            "command": auto_verify["command"],
-                            "cwd": auto_verify.get("cwd", "."),
-                        },
-                    }
-                    await websocket.send_json({
-                        "type": "tool_start",
-                        "name": auto_call["name"],
-                        "content": f"{status_prefix}{auto_verify.get('label', tool_status_summary(auto_call['name'], auto_call['arguments']))}",
-                        "arguments": auto_call["arguments"],
-                    })
-                    await send_activity_event(
-                        websocket,
-                        "verify",
-                        tool_activity_label(auto_call["name"]),
-                        f"{status_prefix}{auto_verify.get('label', tool_status_summary(auto_call['name'], auto_call['arguments']))}",
-                        step_label=activity_step_label,
-                    )
-                    auto_started = time.perf_counter()
-                    auto_result = await execute_tool_call(conversation_id, auto_call, features)
-                    auto_latency_ms = int((time.perf_counter() - auto_started) * 1000)
-                    auto_result_summary = tool_result_preview(auto_result, auto_call["name"], auto_call.get("arguments", {}))
-                    await websocket.send_json({
-                        "type": "tool_result",
-                        "name": auto_call["name"],
-                        "ok": auto_result.get("ok", False),
-                        "content": f"{status_prefix}{auto_result_summary}",
-                        "arguments": auto_call["arguments"],
-                        "payload": auto_result.get("result", {}) if auto_result.get("ok") else {
-                            "error": auto_result.get("error", "Tool failed"),
-                        },
-                    })
-                    await send_activity_event(
-                        websocket,
-                        "verify" if auto_result.get("ok") else "error",
-                        tool_activity_label(auto_call["name"]),
-                        f"{status_prefix}{auto_result_summary}",
-                        step_label=activity_step_label,
-                    )
-                    tool_results.append({
-                        "call": auto_call,
-                        "result": auto_result,
-                        "auto_generated": True,
-                    })
-                    record_workflow_step(
-                        workflow_execution,
-                        step_name=activity_step_label or "auto_verify",
-                        call=auto_call,
-                        result=auto_result,
-                        latency_ms=auto_latency_ms,
-                        auto_generated=True,
-                    )
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "The system ran an automatic verification command after the patch.\n"
-                            "<tool_result>\n"
-                            + json.dumps(auto_result, ensure_ascii=False)
-                            + "\n</tool_result>"
-                        ),
-                    })
+                if signature in auto_verify_signatures:
+                    continue
+                auto_verify_signatures.add(signature)
+                auto_verify_runs += 1
+                auto_phase = str(auto_spec.get("phase") or "verify")
+                auto_call = {
+                    "id": f"{call['id']}_auto_{auto_phase}_{plan_index}",
+                    "name": "workspace.run_command",
+                    "arguments": {
+                        "command": auto_spec["command"],
+                        "cwd": auto_spec.get("cwd", "."),
+                    },
+                }
+                auto_label = auto_spec.get("label", tool_status_summary(auto_call["name"], auto_call["arguments"]))
+                await websocket.send_json({
+                    "type": "tool_start",
+                    "name": auto_call["name"],
+                    "content": f"{status_prefix}{auto_label}",
+                    "arguments": auto_call["arguments"],
+                })
+                await send_activity_event(
+                    websocket,
+                    auto_phase,
+                    tool_activity_label(auto_call["name"]),
+                    f"{status_prefix}{auto_label}",
+                    step_label=activity_step_label,
+                )
+                auto_started = time.perf_counter()
+                auto_result = await execute_tool_call(conversation_id, auto_call, features)
+                auto_latency_ms = int((time.perf_counter() - auto_started) * 1000)
+                auto_result_summary = tool_result_preview(auto_result, auto_call["name"], auto_call.get("arguments", {}))
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "name": auto_call["name"],
+                    "ok": auto_result.get("ok", False),
+                    "content": f"{status_prefix}{auto_result_summary}",
+                    "arguments": auto_call["arguments"],
+                    "payload": auto_result.get("result", {}) if auto_result.get("ok") else {
+                        "error": auto_result.get("error", "Tool failed"),
+                    },
+                })
+                await send_activity_event(
+                    websocket,
+                    auto_phase if auto_result.get("ok") else "error",
+                    tool_activity_label(auto_call["name"]),
+                    f"{status_prefix}{auto_result_summary}",
+                    step_label=activity_step_label,
+                )
+                tool_results.append({
+                    "call": auto_call,
+                    "result": auto_result,
+                    "auto_generated": True,
+                })
+                record_workflow_step(
+                    workflow_execution,
+                    step_name=activity_step_label or f"auto_{auto_phase}",
+                    call=auto_call,
+                    result=auto_result,
+                    latency_ms=auto_latency_ms,
+                    auto_generated=True,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"The system ran an automatic {auto_phase} command after the patch.\n"
+                        "<tool_result>\n"
+                        + json.dumps(auto_result, ensure_ascii=False)
+                        + "\n</tool_result>"
+                    ),
+                })
+                if not auto_result.get("ok"):
+                    break
 
     return ToolLoopOutcome(
         final_text=(
@@ -13596,22 +14193,24 @@ def build_structured_task_plan(context: TaskContext) -> List[TaskStep]:
     if target is None:
         return plan
 
-    auto_verify = infer_auto_verify_command(context.conversation_id, target.path)
-    if not auto_verify:
+    auto_plan = infer_auto_command_plan(context.conversation_id, target.path)
+    if not auto_plan:
         return plan
 
     finish_step = plan[-1] if plan and plan[-1].kind == "finish" else None
     if finish_step is not None:
         plan = plan[:-1]
-    plan.append(TaskStep(
-        id=f"s_verify_{len(plan) + 1}",
-        kind="run",
-        title=str(auto_verify.get("label", "Verify the change") or "Verify the change"),
-        args={
-            "command": list(auto_verify.get("command", [])),
-            "cwd": str(auto_verify.get("cwd", ".") or "."),
-        },
-    ))
+    for auto_spec in auto_plan:
+        auto_phase = str(auto_spec.get("phase") or "verify")
+        plan.append(TaskStep(
+            id=f"s_{auto_phase}_{len(plan) + 1}",
+            kind="run",
+            title=str(auto_spec.get("label", "Run command") or "Run command"),
+            args={
+                "command": list(auto_spec.get("command", [])),
+                "cwd": str(auto_spec.get("cwd", ".") or "."),
+            },
+        ))
     if finish_step is not None:
         plan.append(finish_step)
     return plan

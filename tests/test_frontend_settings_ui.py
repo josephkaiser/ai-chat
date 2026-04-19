@@ -81,8 +81,18 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("function shouldAutoOpenArtifactPreview(path)", js)
         self.assertIn("data.name === 'workspace.run_command' && data.ok !== false && shouldAutoOpenArtifactPreview(data.payload?.open_path)", js)
         self.assertIn("renderImagePreview('inlineViewerPreview', path);", js)
-        self.assertIn("['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image'].includes(backendKind)", js)
+        self.assertIn("['text', 'markdown', 'html', 'csv', 'pdf', 'spreadsheet', 'image', 'archive'].includes(backendKind)", js)
         self.assertIn(".workspace-image-preview", css)
+
+    def test_workspace_viewer_exposes_archive_preview_and_extract_controls(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn('id="inlineViewerExtractButton"', html)
+        self.assertIn("function renderArchivePreview(targetId, data = {})", js)
+        self.assertIn("function extractInlineViewerArchive()", js)
+        self.assertIn("function extractWorkspaceArchive(path)", js)
+        self.assertIn(".workspace-archive-preview", css)
 
     def test_workspace_artifact_rail_no_longer_backfills_with_arbitrary_repo_files(self):
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
