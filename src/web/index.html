@@ -59,7 +59,7 @@
             <div class="menu-section">
                 <div class="menu-section-header">
                     <span>Current File</span>
-                    <span class="menu-section-note" id="draftVersionMenuFileLabel">index.html</span>
+                    <span class="menu-section-note" id="draftVersionMenuFileLabel">Untitled</span>
                 </div>
                 <div class="menu-chats menu-versions" id="draftVersionsSidebarList">
                     <div class="workspace-catalog-empty">No saved versions yet.</div>
@@ -208,26 +208,27 @@
         <div class="chat-shell">
             <div class="chat-main">
                 <section class="draft-shell" id="draftShell" aria-label="Draft document">
-                    <div class="draft-shell-header">
+                    <div class="draft-shell-header" id="draftShellHeader" onclick="focusDraftFilename()">
                         <input
                             type="text"
                             class="draft-filename-input"
                             id="draftFilename"
-                            value="index.html"
-                            placeholder="index.html"
+                            value=""
+                            placeholder=""
                             spellcheck="false"
                             autocomplete="off"
                             oninput="handleDraftFilenameInput(this.value)"
-                            onblur="commitDraftFilename()"
+                            onfocus="refreshDraftHeaderTone()"
+                            onblur="handleDraftFilenameBlur()"
                             onkeydown="handleDraftFilenameKeyDown(event)"
                             aria-label="Draft filename"
                         >
-                        <span class="draft-save-state" id="draftSaveState">Idle</span>
+                        <span class="draft-save-state" id="draftSaveState"></span>
                     </div>
                     <div class="draft-shell-hidden-meta" hidden>
-                        <span class="draft-profile-chip" id="draftProfileBadge">Auto: HTML</span>
+                        <span class="draft-profile-chip" id="draftProfileBadge"></span>
                         <span class="draft-workspace-chip" id="draftWorkspaceBadge">Workspace</span>
-                        <div class="draft-shell-subtitle" id="draftShellSubtitle">Type a filename like <code>index.html</code> or <code>notes.md</code>. The extension selects the draft profile automatically.</div>
+                        <div class="draft-shell-subtitle" id="draftShellSubtitle"></div>
                         <button class="workspace-view-button draft-view-toggle" id="draftEditTab" type="button" onclick="setDraftView('edit')">Edit</button>
                         <button class="workspace-view-button draft-view-toggle" id="draftPreviewTab" type="button" onclick="setDraftView('preview')">Preview</button>
                         <button class="workspace-refresh" type="button" onclick="seedChatFromDraft()">Ask Agent</button>
@@ -244,10 +245,10 @@
                         <div class="draft-output-pane" id="draftOutputPane">
                             <div class="draft-output-header">
                                 <div class="draft-output-copy">
-                                    <div class="draft-output-label">Generated File</div>
-                                    <div class="draft-output-path" id="draftOutputPath">index.html</div>
+                                    <div class="draft-output-label" aria-hidden="true"></div>
+                                    <div class="draft-output-path" id="draftOutputPath"></div>
                                 </div>
-                                <div class="draft-output-state" id="draftOutputState">Waiting</div>
+                                <div class="draft-output-state" id="draftOutputState"></div>
                             </div>
                             <div class="draft-output-surface">
                                 <div class="draft-output-preview" id="draftOutputPreview">
@@ -269,7 +270,7 @@
                         <div class="welcome">
                             <div class="agent-rail-empty">
                                 <div class="agent-rail-empty-title">Agent standing by</div>
-                                <div class="agent-rail-empty-copy">Keep drafting in <code>index.html</code>. The app will infer the file type from the filename so chat can stay focused on guided edits, questions, and bigger changes.</div>
+                                <div class="agent-rail-empty-copy">Keep writing. The agent will follow the shape of the page as it develops.</div>
                             </div>
                         </div>
                     </div>

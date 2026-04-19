@@ -82,8 +82,9 @@ Preferred `activity.phase` values:
 - `DELETE /api/workspaces/{workspace_id}` — Remove a workspace from the catalog when no chats still reference it
 - `GET /api/workspaces/{workspace_id}/files?path=...` — List one workspace directory
 - `GET /api/workspaces/{workspace_id}/file?path=...` — Read a workspace file or structured preview payload
-- `GET /api/workspaces/{workspace_id}/file-sessions` — List durable file sessions for a workspace, including lazy backend job summaries (`latest_job`, `active_job`)
-- `POST /api/workspaces/{workspace_id}/file-sessions/ensure` — Ensure a durable file session exists for a target path and return its lazy backend job summaries
+- `GET /api/workspaces/{workspace_id}/file-sessions` — List durable file sessions for a workspace, including the persisted session-level `job_summary`, compatibility fields (`latest_job`, `active_job`), and current artifact state (`artifact_state`)
+- `POST /api/workspaces/{workspace_id}/file-sessions/ensure` — Ensure a durable file session exists for a target path and return its persisted job summary plus current artifact state
+- `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}` — Return one lazy document bundle with the file session, its persisted job summary, spec file payload, current output payload, and version rows
 - `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}/jobs` — List durable foreground/background jobs for one file session
 - `POST /api/workspaces/{workspace_id}/file-session-jobs` — Create a durable file-session job
 - `POST /api/workspaces/{workspace_id}/file-session-jobs/{job_id}/status` — Update one durable file-session job status
@@ -104,6 +105,7 @@ Workspace API notes:
 - File reads can return non-text preview metadata. For images, the payload uses `content_kind: "image"` with binary preview metadata instead of raw file bytes.
 - File sessions bind a target file, its hidden draft/spec file, and the hidden agent conversation/runtime context together.
 - File-session jobs are the durable queue substrate for foreground live realization and future background research/optimization work.
+- File-session rows now persist a stable `job_summary` (`current_lane`, `current_status`, `current_job`, `last_result`) so clients can read bundle state without mirroring websocket lifecycle events back into the server.
 - Tool results from `workspace.run_command` may include detected artifact metadata in `result.items`, plus `result.path` and `result.open_path` when there is a primary artifact worth surfacing in the viewer.
 
 ## System
