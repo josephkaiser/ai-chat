@@ -114,6 +114,37 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         self.assertEqual(finished_session["latest_job"]["id"], job["id"])
         self.assertIsNone(finished_session["active_job"])
 
+    def test_background_focus_moves_to_new_file_and_supersedes_old_jobs(self):
+        first_path = "drafts/first.html"
+        second_path = "drafts/second.html"
+        first_session = app.ensure_file_session_record(self.workspace["id"], first_path)
+        second_session = app.ensure_file_session_record(self.workspace["id"], second_path)
+
+        first_job = app.create_file_session_job_record(
+            self.workspace["id"],
+            first_path,
+            lane="background",
+            job_kind="optimize_output",
+            status="queued",
+        )
+
+        app.activate_background_focus_for_file(self.workspace["id"], first_path)
+        moved_workspace = app.activate_background_focus_for_file(self.workspace["id"], second_path)
+
+        refreshed_first_job = app.get_file_session_job_record(self.workspace["id"], first_job["id"])
+        self.assertEqual(refreshed_first_job["status"], "superseded")
+        self.assertIn("moved to another file", refreshed_first_job["error_text"])
+        self.assertEqual(moved_workspace["background_focus_path"], second_path)
+        self.assertTrue(moved_workspace["background_focus_enabled"])
+
+        enriched = app.enrich_file_session_records(
+            self.workspace["id"],
+            [first_session, second_session],
+        )
+        by_path = {item["path"]: item for item in enriched}
+        self.assertFalse(by_path[first_path]["background_focus_active"])
+        self.assertTrue(by_path[second_path]["background_focus_active"])
+
     def test_process_chat_turn_marks_foreground_job_completed_server_side(self):
         path = "drafts/active.md"
         session = app.ensure_file_session_record(self.workspace["id"], path)
@@ -164,6 +195,56 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         self.assertEqual(updated_session["latest_job"]["id"], foreground_job["id"])
         self.assertIsNone(updated_session["active_job"])
         self.assertEqual([event.get("type") for event in transport.events if isinstance(event, dict)][-2:], ["message_id", "done"])
+
+    def test_background_job_queues_follow_up_pass_after_promoting_incomplete_candidate(self):
+        path = "drafts/site.html"
+        session = app.ensure_file_session_record(self.workspace["id"], path)
+        spec_path = app.file_session_spec_path(path)
+        app.write_workspace_text_for_session(
+            self.workspace["id"],
+            spec_path,
+            "Build a slick HTML dev site with a hero CTA that opens the main content.",
+        )
+        app.write_workspace_text_for_session(
+            self.workspace["id"],
+            path,
+            "<html><body><h1>Hello</h1></body></html>",
+        )
+
+        job = app.queue_background_optimize_job_for_file_session(
+            self.workspace["id"],
+            path,
+            source_conversation_id=session["conversation_id"],
+            attempt=1,
+        )
+        payload = dict(job["payload"])
+        candidate_path = payload["candidate_output_path"]
+        evaluation_path = payload["evaluation_output_path"]
+
+        async def fake_hidden_turn(_workspace_id, _conversation_id, _file_path, prompt, **_kwargs):
+            if "Write an improved candidate" in prompt:
+                app.write_workspace_text_for_session(
+                    self.workspace["id"],
+                    candidate_path,
+                    "<html><body><button>Enter Joe's World</button><main hidden>Real site</main></body></html>",
+                )
+            else:
+                app.write_workspace_text_for_session(
+                    self.workspace["id"],
+                    evaluation_path,
+                    '{"decision":"promote","summary":"Much better but can still be polished.","current_score":3,"candidate_score":7.5,"should_promote":true,"follow_up_needed":true}',
+                )
+            return []
+
+        with mock.patch.object(app, "run_hidden_file_session_turn", side_effect=fake_hidden_turn):
+            asyncio.run(app.process_background_file_session_job(job))
+
+        jobs = app.list_file_session_job_records(self.workspace["id"], session["id"], lane="background", limit=5)
+        self.assertEqual(jobs[0]["status"], "queued")
+        self.assertEqual(jobs[0]["payload"].get("attempt"), 2)
+        self.assertEqual(jobs[1]["id"], job["id"])
+        self.assertEqual(jobs[1]["status"], "completed")
+        self.assertIn("Enter Joe's World", app.read_workspace_text_for_session(self.workspace["id"], path))
 
 
 if __name__ == "__main__":
