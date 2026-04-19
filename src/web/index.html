@@ -90,6 +90,20 @@
                     <section class="settings-sheet" aria-label="Settings">
                         <div class="settings-group">
                             <div class="settings-group-title">General</div>
+                            <div class="settings-row settings-row-static">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Runtime Status</span>
+                                    <span class="settings-row-note" id="settingsRuntimeNote">Checking model and server status.</span>
+                                </span>
+                                <span class="settings-row-meta" id="settingsRuntimeBadge">Loading</span>
+                            </div>
+                            <div class="settings-row settings-row-static">
+                                <span class="settings-row-copy">
+                                    <span class="settings-row-label">Model</span>
+                                    <span class="settings-row-note" id="settingsModelName">Unknown</span>
+                                </span>
+                                <span class="settings-row-meta" id="settingsConnectionBadge">WS</span>
+                            </div>
                             <button class="settings-row settings-row-button" onclick="toggleTheme()">
                                 <span class="settings-row-copy">
                                     <span class="settings-row-label">Appearance</span>

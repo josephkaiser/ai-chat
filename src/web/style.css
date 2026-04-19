@@ -2568,6 +2568,12 @@ textarea {
     font-weight: 600;
     color: var(--text_secondary);
 }
+.settings-row-static .settings-row-meta {
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 .settings-check {
     width: 16px;
     height: 16px;
