@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Sequence
+from typing import List, Sequence
 
 from src.python.ai_chat.task_types import TaskContext, TaskStep
 
@@ -11,6 +11,13 @@ STRUCTURED_READ_ONLY_TOOLS = frozenset({
     "workspace.list_files",
     "workspace.grep",
     "workspace.read_file",
+})
+STRUCTURED_WRITE_TOOLS = frozenset({
+    "workspace.list_files",
+    "workspace.grep",
+    "workspace.read_file",
+    "workspace.patch_file",
+    "workspace.run_command",
 })
 
 SEARCH_QUERY_STOPWORDS = {
@@ -41,14 +48,21 @@ SEARCH_QUERY_STOPWORDS = {
 }
 
 
-def supports_structured_read_only_tools(allowed_tools: Sequence[str]) -> bool:
+def supports_structured_task_tools(allowed_tools: Sequence[str], workspace_intent: str) -> bool:
     """Return whether the allowed tools fit the current structured-engine slice."""
     cleaned = {
         str(tool_name).strip()
         for tool_name in allowed_tools
         if isinstance(tool_name, str) and str(tool_name).strip()
     }
-    return bool(cleaned) and cleaned.issubset(STRUCTURED_READ_ONLY_TOOLS)
+    if not cleaned:
+        return False
+    if workspace_intent == "focused_write":
+        return cleaned.issubset(STRUCTURED_WRITE_TOOLS) and {
+            "workspace.read_file",
+            "workspace.patch_file",
+        }.issubset(cleaned)
+    return cleaned.issubset(STRUCTURED_READ_ONLY_TOOLS)
 
 
 def summarize_structured_plan(steps: Sequence[TaskStep]) -> str:
@@ -60,10 +74,34 @@ def summarize_structured_plan(steps: Sequence[TaskStep]) -> str:
 
 
 def build_heuristic_task_plan(context: TaskContext) -> List[TaskStep]:
-    """Build a short read-only plan grounded in explicit workspace paths."""
+    """Build a short structured plan grounded in explicit workspace paths."""
     steps: List[TaskStep] = []
     next_id = 1
     toolset = set(context.allowed_tools)
+    if context.workspace_intent == "focused_write":
+        file_target = next((target for target in context.path_targets if target.kind == "file"), None)
+        if file_target and "workspace.read_file" in toolset and "workspace.patch_file" in toolset:
+            steps.append(TaskStep(
+                id=f"s{next_id}",
+                kind="read",
+                title=f"Read {file_target.path}",
+                args={"path": file_target.path},
+            ))
+            next_id += 1
+            steps.append(TaskStep(
+                id=f"s{next_id}",
+                kind="patch",
+                title=f"Patch {file_target.path}",
+                args={"path": file_target.path},
+            ))
+            next_id += 1
+            steps.append(TaskStep(
+                id=f"s{next_id}",
+                kind="finish",
+                title="Answer the user",
+                args={"summary_hint": context.request_focus or f"Summarize the change made to {file_target.path}."},
+            ))
+            return steps
 
     for target in context.path_targets[:2]:
         if target.kind == "file" and "workspace.read_file" in toolset:

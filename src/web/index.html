@@ -235,13 +235,65 @@
         </button>
         <div class="chat-shell">
             <div class="chat-main">
-                <div class="messages" id="messages">
-                    <div class="welcome">
-                        <div class="welcome-brand" aria-label="{{ app_title }}">
-                            <h1 class="welcome-title">{{ app_title }}</h1>
+                <section class="draft-shell" id="draftShell" aria-label="Draft document">
+                    <div class="draft-shell-header">
+                        <div class="draft-shell-heading">
+                            <div class="draft-heading-copy">
+                                <input
+                                    type="text"
+                                    class="draft-filename-input"
+                                    id="draftFilename"
+                                    value="index.html"
+                                    placeholder="index.html"
+                                    spellcheck="false"
+                                    autocomplete="off"
+                                    oninput="handleDraftFilenameInput(this.value)"
+                                    onblur="commitDraftFilename()"
+                                    onkeydown="handleDraftFilenameKeyDown(event)"
+                                    aria-label="Draft filename"
+                                >
+                                <div class="draft-heading-meta">
+                                    <span class="draft-profile-chip" id="draftProfileBadge">Auto: HTML</span>
+                                    <span class="draft-workspace-chip" id="draftWorkspaceBadge">Workspace</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="draft-shell-actions">
+                            <span class="draft-save-state" id="draftSaveState">Idle</span>
+                            <button class="workspace-view-button draft-view-toggle" id="draftEditTab" type="button" onclick="setDraftView('edit')">Edit</button>
+                            <button class="workspace-view-button draft-view-toggle" id="draftPreviewTab" type="button" onclick="setDraftView('preview')">Preview</button>
+                            <button class="workspace-refresh" type="button" onclick="seedChatFromDraft()">Ask Agent</button>
+                            <button class="workspace-refresh" id="draftSaveButton" type="button" onclick="saveDraftDocument()">Save</button>
                         </div>
                     </div>
-                </div>
+                    <div class="draft-shell-subtitle" id="draftShellSubtitle">Type a filename like <code>index.html</code> or <code>notes.md</code>. The extension selects the draft profile automatically.</div>
+                    <div class="draft-shell-body">
+                        <div class="draft-shell-pane" id="draftEditPane">
+                            <textarea
+                                id="draftEditor"
+                                spellcheck="false"
+                                oninput="handleDraftEditorInput()"
+                            ></textarea>
+                        </div>
+                        <div class="draft-shell-pane file-modal-pane-hidden" id="draftPreviewPane">
+                            <div id="draftPreview"></div>
+                        </div>
+                    </div>
+                </section>
+                <section class="agent-rail" id="agentRail" aria-label="Agent chat">
+                    <div class="agent-rail-header">
+                        <div class="agent-rail-title">Agent Chat</div>
+                        <div class="agent-rail-note">Use chat for guided edits, questions, and bigger structural requests.</div>
+                    </div>
+                    <div class="messages" id="messages">
+                        <div class="welcome">
+                            <div class="agent-rail-empty">
+                                <div class="agent-rail-empty-title">Agent standing by</div>
+                                <div class="agent-rail-empty-copy">Keep drafting in <code>index.html</code>. The app will infer the file type from the filename so chat can stay focused on guided edits, questions, and bigger changes.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
                 <div class="input-area welcome-mode" id="inputArea">
                     <div class="input-area-stack">
                         <div class="slash-menu" id="slashMenu" hidden>

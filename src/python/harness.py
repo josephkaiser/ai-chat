@@ -52,7 +52,7 @@ from src.python.ai_chat.task_engine import run_task as run_structured_task
 from src.python.ai_chat.task_planner import (
     build_heuristic_task_plan,
     summarize_structured_plan,
-    supports_structured_read_only_tools,
+    supports_structured_task_tools,
 )
 from src.python.ai_chat.task_types import TaskContext, TaskPathTarget, TaskResult, TaskState, TaskStep
 try:
@@ -11394,6 +11394,18 @@ STRUCTURED_TASK_ANSWER_SYSTEM_SUFFIX = """You are finishing a structured workspa
 - Only claim file inspection or search work that appears in the evidence.
 - If the evidence is partial, say what you checked and what remains uncertain."""
 
+STRUCTURED_PATCH_PLAN_SYSTEM_PROMPT = """Return one JSON object and nothing else.
+You are preparing exact-match edits for one existing workspace text file.
+
+Rules:
+- Output JSON with an `edits` array and optional `summary_hint` string.
+- Each edit must be an object with `old_text`, `new_text`, and optional `expected_count`.
+- `old_text` must appear verbatim in the provided file content.
+- Prefer 1-3 surgical edits over rewriting the whole file.
+- Do not create new files, rename files, or describe shell commands.
+- Do not use markdown fences.
+- If you cannot produce a safe exact-match edit from the provided content, return `{"error":"short reason"}`."""
+
 
 def resolve_structured_task_targets(conversation_id: str, message: str) -> List[TaskPathTarget]:
     """Resolve explicit file or directory references for the structured-engine slice."""
@@ -11425,15 +11437,19 @@ def build_structured_task_context(prepared: PreparedTurnRequest) -> Optional[Tas
         return None
     if prepared.auto_execute_workspace or prepared.resume_saved_workspace:
         return None
-    if prepared.workspace_intent not in {"focused_read", "broad_read"}:
+    if prepared.workspace_intent not in {"focused_read", "broad_read", "focused_write"}:
         return None
-    if prepared.assessment.requires_planning or prepared.assessment.requires_step_review:
+    if prepared.assessment.requires_planning:
         return None
-    if not supports_structured_read_only_tools(prepared.enabled_tools):
-        return None
-
     path_targets = resolve_structured_task_targets(prepared.conversation_id, prepared.effective_message)
     if not path_targets:
+        return None
+    if prepared.workspace_intent == "focused_write":
+        if not prepared.features.workspace_write:
+            return None
+        if len(path_targets) != 1 or path_targets[0].kind != "file":
+            return None
+    if not supports_structured_task_tools(prepared.enabled_tools, prepared.workspace_intent):
         return None
 
     return TaskContext(
@@ -11445,6 +11461,37 @@ def build_structured_task_context(prepared: PreparedTurnRequest) -> Optional[Tas
         path_targets=path_targets,
         request_focus=summarize_request_for_plan(prepared.effective_message),
     )
+
+
+def build_structured_task_plan(context: TaskContext) -> List[TaskStep]:
+    """Build the typed structured plan and attach deterministic verification when available."""
+    plan = build_heuristic_task_plan(context)
+    if context.workspace_intent != "focused_write" or "workspace.run_command" not in context.allowed_tools:
+        return plan
+
+    target = next((item for item in context.path_targets if item.kind == "file"), None)
+    if target is None:
+        return plan
+
+    auto_verify = infer_auto_verify_command(context.conversation_id, target.path)
+    if not auto_verify:
+        return plan
+
+    finish_step = plan[-1] if plan and plan[-1].kind == "finish" else None
+    if finish_step is not None:
+        plan = plan[:-1]
+    plan.append(TaskStep(
+        id=f"s_verify_{len(plan) + 1}",
+        kind="run",
+        title=str(auto_verify.get("label", "Verify the change") or "Verify the change"),
+        args={
+            "command": list(auto_verify.get("command", [])),
+            "cwd": str(auto_verify.get("cwd", ".") or "."),
+        },
+    ))
+    if finish_step is not None:
+        plan.append(finish_step)
+    return plan
 
 
 def structured_task_step_to_call(step: TaskStep) -> Dict[str, Any]:
@@ -11485,15 +11532,106 @@ def structured_task_step_to_call(step: TaskStep) -> Dict[str, Any]:
     raise ValueError(f"Unsupported structured task step: {step.kind}")
 
 
+def find_structured_step_output(
+    task: TaskState,
+    *,
+    kind: str,
+    path: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Return the latest successful output for a matching structured step."""
+    path_value = str(path or "").strip()
+    step_map = {step.id: step for step in task.plan}
+    for result in reversed(task.results):
+        if not result.ok:
+            continue
+        step = step_map.get(result.step_id)
+        if step is None or step.kind != kind:
+            continue
+        if path_value and str(result.output.get("path", "") or "").strip() != path_value:
+            continue
+        return result.output
+    return None
+
+
+async def prepare_structured_patch_step(
+    task: TaskState,
+    step: TaskStep,
+    *,
+    max_tokens: int,
+) -> None:
+    """Fill a placeholder patch step with exact-match edits derived from the read result."""
+    if step.args.get("edits") or step.args.get("new_content") is not None:
+        return
+
+    rel_path = str(step.args.get("path", "") or "").strip()
+    if not rel_path:
+        raise ValueError("Structured patch step is missing its target path.")
+
+    read_output = find_structured_step_output(task, kind="read", path=rel_path)
+    if not isinstance(read_output, dict):
+        raise ValueError("Structured patch step requires a successful read of the target file first.")
+    if bool(read_output.get("truncated")):
+        raise ValueError("Structured patch step requires the full file content, but the read result was truncated.")
+    if not bool(read_output.get("editable", False)):
+        raise ValueError("Structured patch step only supports editable text files.")
+
+    current_content = str(read_output.get("content", "") or "")
+    if not current_content:
+        raise ValueError("Structured patch step only supports non-empty existing files for now.")
+
+    planner_messages = [
+        {"role": "system", "content": STRUCTURED_PATCH_PLAN_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"User request:\n{task.context.user_message}\n\n"
+                f"Target path:\n{rel_path}\n\n"
+                "Current file content:\n"
+                "<file>\n"
+                f"{current_content}\n"
+                "</file>\n\n"
+                "Return exact-match edits that implement the requested change."
+            ),
+        },
+    ]
+    raw = await vllm_chat_complete(planner_messages, max_tokens=min(max_tokens, 1024), temperature=0.05)
+    parsed = parse_json_object(raw)
+    if str(parsed.get("error", "") or "").strip():
+        raise ValueError(str(parsed.get("error", "")).strip())
+
+    edits = parsed.get("edits")
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("Structured patch planner did not return any exact-match edits.")
+
+    step.args = {
+        **dict(step.args),
+        "path": rel_path,
+        "edits": edits,
+    }
+
+    summary_hint = str(parsed.get("summary_hint", "") or "").strip()
+    if summary_hint:
+        for candidate in task.plan:
+            if candidate.kind == "finish":
+                candidate.args = {
+                    **dict(candidate.args),
+                    "summary_hint": summary_hint,
+                }
+                break
+
+
 async def execute_structured_task_step(
     websocket: WebSocket,
     task: TaskState,
     step: TaskStep,
     *,
     features: Optional[FeatureFlags] = None,
+    max_tokens: int = 1024,
     workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> TaskResult:
     """Run one structured step through the existing deterministic tool bridge."""
+    if step.kind == "patch":
+        await prepare_structured_patch_step(task, step, max_tokens=max_tokens)
     call = structured_task_step_to_call(step)
     raw_result = await emit_direct_tool_call(
         websocket,
@@ -11620,6 +11758,23 @@ def compact_structured_task_output(step: TaskStep, output: Dict[str, Any]) -> Di
             "grep_matches": compact_matches,
             "truncated_matches": bool(isinstance(matches, list) and len(matches) > len(compact_matches)),
         }
+    if step.kind == "patch":
+        return {
+            "path": str(output.get("path", "") or ""),
+            "edits_applied": output.get("edits_applied"),
+            "bytes_written": output.get("bytes_written"),
+            "created": bool(output.get("created")),
+            "validation": output.get("validation"),
+        }
+    if step.kind == "run":
+        return {
+            "cwd": str(output.get("cwd", "") or ""),
+            "returncode": output.get("returncode"),
+            "stdout": truncate_output(str(output.get("stdout", "") or ""), limit=3000),
+            "stderr": truncate_output(str(output.get("stderr", "") or ""), limit=3000),
+            "path": str(output.get("path", "") or ""),
+            "open_path": str(output.get("open_path", "") or ""),
+        }
     return dict(output)
 
 
@@ -11713,7 +11868,7 @@ async def run_structured_task_turn(
         id=f"structured_{uuid.uuid4().hex[:12]}",
         status="queued",
         context=context,
-        plan=build_heuristic_task_plan(context),
+        plan=build_structured_task_plan(context),
     )
     return await run_structured_task(
         task,
@@ -11722,6 +11877,7 @@ async def run_structured_task_turn(
             task_state,
             step,
             features=prepared.features,
+            max_tokens=prepared.max_tokens,
             workflow_execution=workflow_execution,
         ),
         emit_event=lambda event_name, task_state, step, result: emit_structured_task_event(
