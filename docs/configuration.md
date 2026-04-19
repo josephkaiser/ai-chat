@@ -22,7 +22,7 @@ The checked-in Docker setup assumes a local host that can run GPU-backed vLLM:
 
 - Docker with the `docker compose` plugin
 - NVIDIA GPU support exposed to Docker
-- Enough disk for Docker images, the Hugging Face cache, app data, and optional voice models
+- Enough disk for Docker images, the Hugging Face cache, and app data
 - `bash` and `curl` for the `./chat` helper script
 
 Workspace roots are now path-backed catalog entries. Managed workspace directories are typically bind-mounted under `./workspaces`, while legacy hosted runs may still exist under `./runs` after migration.
@@ -55,7 +55,6 @@ Code defaults and useful tunables:
 - `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — core runtime paths/settings
 - `COMMAND_TIMEOUT_SECONDS` — default timeout for ordinary workspace commands
 - `CURATED_SOURCE_FAILURE_THRESHOLD` and `CURATED_SOURCE_DISABLE_MINUTES` — web-search source fan-out behavior
-- `VOICE_STORAGE_LIMIT_BYTES` — cap retained server-owned voice artifacts
 - `STRICT_WORKSPACE_COMMAND_PATHS` — reject workspace command arguments that point outside the current workspace root
 
 Install/setup note:
@@ -69,23 +68,7 @@ The Docker image copies `app.py`, `src/python/ai_chat/themes.py`, `src/python/ai
 
 The built-in voice stack has two paths:
 
-- the web mic button records in the browser and uploads the clip into the workspace as an attachment
-- assistant reply playback is generated on the server and returned as an audio file
-
-Useful env vars:
-
-```yaml
-environment:
-  - VOICE_ROOT=/app/data/voice
-  - VOICE_INPUT_SIZE_LIMIT=15728640
-  - VOICE_COMMAND_TIMEOUT_SECONDS=180
-  - VOICE_STORAGE_LIMIT_BYTES=3221225472
-  - VOICE_TTS_VOICE=Samantha
-  - VOICE_STT_LANGUAGE=en
-  - PIPER_MODEL=/app/data/voice/models/en_US-lessac-high.onnx
-  - VOICE_TTS_COMMAND=
-  - VOICE_STT_COMMAND=
-```
+The bundled Docker path no longer installs server voice tooling. The launcher chooses one local model profile per install and one downloaded profile per session.
 
 ## GPU configurations
 

@@ -29,13 +29,20 @@
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/comment-fold.min.js"></script>
 </head>
 <body>
-    <!-- Menu button with status dot -->
-    <button class="menu-btn" id="menuBtn" onclick="toggleMenu()" title="Toggle chats" aria-label="Toggle chats" aria-expanded="false">
+    <!-- Version history button with status dot -->
+    <button class="menu-btn" id="menuBtn" onclick="toggleMenu()" title="Version history" aria-label="Version history" aria-expanded="false">
         <svg class="menu-btn-icon" viewBox="0 0 24 24" aria-hidden="true">
             <rect x="4.5" y="5.5" width="15" height="13" rx="2"></rect>
             <path d="M9.25 5.5v13"></path>
         </svg>
         <span class="status-dot loading" id="statusDot"></span>
+    </button>
+    <button class="file-explorer-toggle" id="fileExplorerToggle" onclick="toggleFileExplorer()" title="File explorer" aria-label="File explorer" aria-expanded="false">
+        <svg class="menu-btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4.5 7.5h15"></path>
+            <path d="M4.5 12h15"></path>
+            <path d="M4.5 16.5h15"></path>
+        </svg>
     </button>
     <!-- Mobile top bar -->
     <button class="mobile-title-btn" id="mobileTitleBtn" onclick="focusInput()">
@@ -47,28 +54,48 @@
     <div class="overlay" id="menuOverlay" onclick="closeMenu()">
         <div class="menu-panel" onclick="event.stopPropagation()">
             <div class="panel-header">
-                <span>{{ app_title }}</span>
-            </div>
-            <div class="menu-actions">
-                <button onclick="newChat(); closeMenu()"><span>+ New Chat</span><kbd class="shortcut-hint"></kbd></button>
-                <button onclick="promptCreateWorkspace()"><span>+ Workspace</span><kbd class="shortcut-hint"></kbd></button>
-                <button onclick="closeMenu(); showSettings()"><span>Settings</span><kbd class="shortcut-hint"></kbd></button>
-                <button onclick="closeMenu(); showAbout()"><span>About</span><kbd class="shortcut-hint"></kbd></button>
+                <span>Versions</span>
             </div>
             <div class="menu-section">
                 <div class="menu-section-header">
-                    <span>Workspaces</span>
-                    <span class="menu-section-note">Shared folders</span>
+                    <span>Current File</span>
+                    <span class="menu-section-note" id="draftVersionMenuFileLabel">index.html</span>
                 </div>
+                <div class="menu-chats menu-versions" id="draftVersionsSidebarList">
+                    <div class="workspace-catalog-empty">No saved versions yet.</div>
+                </div>
+            </div>
+            <div class="menu-footer">
+                <button class="menu-footer-button" onclick="copyActiveGeneratedFile(); closeMenu()">Copy File</button>
+                <button class="menu-footer-button" onclick="downloadActiveGeneratedFile(); closeMenu()">Download File</button>
+                <button class="menu-footer-button" onclick="closeMenu(); showSettings()">Settings</button>
+            </div>
+            <div class="menu-support-hidden" hidden>
                 <div class="workspace-catalog" id="workspaceCatalog">
                     <div class="workspace-catalog-empty">Loading workspaces...</div>
                 </div>
+                <div class="menu-search">
+                    <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
+                    <div class="search-results" id="searchResults"></div>
+                </div>
+                <div class="menu-chats" id="conversations"></div>
             </div>
-            <div class="menu-search">
-                <input type="text" id="searchInput" placeholder="Search chats..." oninput="handleSearch(this.value)">
-                <div class="search-results" id="searchResults"></div>
+        </div>
+    </div>
+    <div class="overlay overlay-right" id="fileExplorerOverlay" onclick="closeFileExplorer()">
+        <div class="file-explorer-panel" onclick="event.stopPropagation()">
+            <div class="panel-header">
+                <span>Files</span>
             </div>
-            <div class="menu-chats" id="conversations"></div>
+            <div class="menu-section">
+                <div class="menu-section-header">
+                    <span>Recent Files</span>
+                    <span class="menu-section-note">Persistent draft sessions</span>
+                </div>
+                <div class="menu-chats menu-files" id="draftFileExplorerList">
+                    <div class="workspace-catalog-empty">No files yet.</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -85,7 +112,7 @@
             <div class="settings-content">
                 <div class="settings-view" id="settingsMainView">
                     <div class="settings-intro">
-                        <p>Adjust appearance, voice playback, and local data from one place.</p>
+                        <p>Adjust appearance, runtime behavior, and local data from one place.</p>
                     </div>
                     <section class="settings-sheet" aria-label="Settings">
                         <div class="settings-group">
@@ -118,61 +145,6 @@
                                 </span>
                                 <span class="settings-row-meta">Edit</span>
                             </button>
-                        </div>
-                        <div class="settings-group">
-                            <div class="settings-group-title">Voice</div>
-                            <label class="settings-row settings-row-check">
-                                <span class="settings-row-copy">
-                                    <span class="settings-row-label">Auto-Speak Replies</span>
-                                    <span class="settings-row-note">Read assistant replies aloud on supported browsers.</span>
-                                </span>
-                                <input class="settings-check" type="checkbox" id="settingAutoSpeak" onchange="updateVoiceSetting('autoSpeakReplies', this.checked)">
-                            </label>
-                            <div class="settings-row settings-row-control">
-                                <div class="settings-row-copy">
-                                    <span class="settings-row-label">Speech Speed</span>
-                                    <span class="settings-row-note">Choose a slower or faster playback pace for spoken replies.</span>
-                                </div>
-                                <div class="settings-control-inline">
-                                    <div class="speed-control" id="speechSpeedControl">
-                                        <div class="speed-control-labels" aria-hidden="true">
-                                            <span>Low</span>
-                                            <span>Med</span>
-                                            <span>Fast</span>
-                                        </div>
-                                        <input
-                                            type="range"
-                                            id="settingSpeechSpeed"
-                                            min="0"
-                                            max="6"
-                                            step="1"
-                                            list="speechSpeedTicks"
-                                            value="2"
-                                            oninput="updateSpeechSpeed(this.value)"
-                                            aria-label="Speech speed"
-                                        >
-                                        <datalist id="speechSpeedTicks">
-                                            <option value="0"></option>
-                                            <option value="1"></option>
-                                            <option value="2"></option>
-                                            <option value="3"></option>
-                                            <option value="4"></option>
-                                            <option value="5"></option>
-                                            <option value="6"></option>
-                                        </datalist>
-                                        <div class="speed-control-scale" aria-hidden="true">
-                                            <span></span>
-                                            <span></span>
-                                            <span></span>
-                                            <span></span>
-                                            <span></span>
-                                            <span></span>
-                                            <span></span>
-                                        </div>
-                                        <div class="speed-control-readout" id="speechSpeedReadout">Medium</div>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                         <div class="settings-group settings-group-danger">
                             <div class="settings-group-title">Data</div>
@@ -227,7 +199,7 @@
 
     <!-- Main chat area -->
     <div class="chat welcome-layout" id="chatRoot">
-        <button class="workspace-toggle" id="workspaceToggle" onclick="toggleWorkspacePanel()" title="Toggle workspace" aria-label="Toggle workspace" aria-expanded="false">
+        <button class="workspace-toggle draft-hidden-chrome" id="workspaceToggle" onclick="toggleWorkspacePanel()" title="Toggle workspace" aria-label="Toggle workspace" aria-expanded="false">
             <svg class="workspace-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <rect x="4.5" y="5.5" width="15" height="13" rx="2"></rect>
                 <path d="M14.75 5.5v13"></path>
@@ -237,50 +209,58 @@
             <div class="chat-main">
                 <section class="draft-shell" id="draftShell" aria-label="Draft document">
                     <div class="draft-shell-header">
-                        <div class="draft-shell-heading">
-                            <div class="draft-heading-copy">
-                                <input
-                                    type="text"
-                                    class="draft-filename-input"
-                                    id="draftFilename"
-                                    value="index.html"
-                                    placeholder="index.html"
-                                    spellcheck="false"
-                                    autocomplete="off"
-                                    oninput="handleDraftFilenameInput(this.value)"
-                                    onblur="commitDraftFilename()"
-                                    onkeydown="handleDraftFilenameKeyDown(event)"
-                                    aria-label="Draft filename"
-                                >
-                                <div class="draft-heading-meta">
-                                    <span class="draft-profile-chip" id="draftProfileBadge">Auto: HTML</span>
-                                    <span class="draft-workspace-chip" id="draftWorkspaceBadge">Workspace</span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="draft-shell-actions">
-                            <span class="draft-save-state" id="draftSaveState">Idle</span>
-                            <button class="workspace-view-button draft-view-toggle" id="draftEditTab" type="button" onclick="setDraftView('edit')">Edit</button>
-                            <button class="workspace-view-button draft-view-toggle" id="draftPreviewTab" type="button" onclick="setDraftView('preview')">Preview</button>
-                            <button class="workspace-refresh" type="button" onclick="seedChatFromDraft()">Ask Agent</button>
-                            <button class="workspace-refresh" id="draftSaveButton" type="button" onclick="saveDraftDocument()">Save</button>
-                        </div>
+                        <input
+                            type="text"
+                            class="draft-filename-input"
+                            id="draftFilename"
+                            value="index.html"
+                            placeholder="index.html"
+                            spellcheck="false"
+                            autocomplete="off"
+                            oninput="handleDraftFilenameInput(this.value)"
+                            onblur="commitDraftFilename()"
+                            onkeydown="handleDraftFilenameKeyDown(event)"
+                            aria-label="Draft filename"
+                        >
+                        <span class="draft-save-state" id="draftSaveState">Idle</span>
                     </div>
-                    <div class="draft-shell-subtitle" id="draftShellSubtitle">Type a filename like <code>index.html</code> or <code>notes.md</code>. The extension selects the draft profile automatically.</div>
+                    <div class="draft-shell-hidden-meta" hidden>
+                        <span class="draft-profile-chip" id="draftProfileBadge">Auto: HTML</span>
+                        <span class="draft-workspace-chip" id="draftWorkspaceBadge">Workspace</span>
+                        <div class="draft-shell-subtitle" id="draftShellSubtitle">Type a filename like <code>index.html</code> or <code>notes.md</code>. The extension selects the draft profile automatically.</div>
+                        <button class="workspace-view-button draft-view-toggle" id="draftEditTab" type="button" onclick="setDraftView('edit')">Edit</button>
+                        <button class="workspace-view-button draft-view-toggle" id="draftPreviewTab" type="button" onclick="setDraftView('preview')">Preview</button>
+                        <button class="workspace-refresh" type="button" onclick="seedChatFromDraft()">Ask Agent</button>
+                        <button class="workspace-refresh" id="draftSaveButton" type="button" onclick="saveDraftDocument()">Save</button>
+                    </div>
                     <div class="draft-shell-body">
-                        <div class="draft-shell-pane" id="draftEditPane">
+                        <div class="draft-shell-pane draft-shell-pane-editor" id="draftEditPane">
                             <textarea
                                 id="draftEditor"
                                 spellcheck="false"
                                 oninput="handleDraftEditorInput()"
                             ></textarea>
                         </div>
-                        <div class="draft-shell-pane file-modal-pane-hidden" id="draftPreviewPane">
+                        <div class="draft-output-pane" id="draftOutputPane">
+                            <div class="draft-output-header">
+                                <div class="draft-output-copy">
+                                    <div class="draft-output-label">Generated File</div>
+                                    <div class="draft-output-path" id="draftOutputPath">index.html</div>
+                                </div>
+                                <div class="draft-output-state" id="draftOutputState">Waiting</div>
+                            </div>
+                            <div class="draft-output-surface">
+                                <div class="draft-output-preview" id="draftOutputPreview">
+                                    <div class="workspace-empty">The generated file will appear here as the agent works.</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="draft-shell-pane file-modal-pane-hidden draft-hidden-chrome" id="draftPreviewPane">
                             <div id="draftPreview"></div>
                         </div>
                     </div>
                 </section>
-                <section class="agent-rail" id="agentRail" aria-label="Agent chat">
+                <section class="agent-rail draft-hidden-chrome" id="agentRail" aria-label="Agent chat">
                     <div class="agent-rail-header">
                         <div class="agent-rail-title">Agent Chat</div>
                         <div class="agent-rail-note">Use chat for guided edits, questions, and bigger structural requests.</div>
@@ -294,7 +274,7 @@
                         </div>
                     </div>
                 </section>
-                <div class="input-area welcome-mode" id="inputArea">
+                <div class="input-area welcome-mode draft-hidden-chrome" id="inputArea">
                     <div class="input-area-stack">
                         <div class="slash-menu" id="slashMenu" hidden>
                             <div class="slash-menu-header">
@@ -403,7 +383,7 @@
                     </div>
                 </div>
             </div>
-            <div class="ide-workspace" id="ideWorkspace">
+            <div class="ide-workspace draft-hidden-chrome" id="ideWorkspace">
                 <div class="ide-top">
                     <aside class="workspace-panel" id="workspacePanel">
                         <div class="workspace-header">
@@ -516,6 +496,19 @@
                 <button onclick="resetSystemPrompt()">Reset</button>
                 <button onclick="closeSystemPromptModal()">Cancel</button>
                 <button class="primary" onclick="saveSystemPrompt()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="draftVersionsModal">
+        <div class="modal-content">
+            <h3>Generated File History</h3>
+            <div class="draft-versions-current" id="draftVersionsCurrentFile">No active file selected.</div>
+            <div class="draft-versions-list" id="draftVersionsList">
+                <div class="workspace-empty">No saved versions yet.</div>
+            </div>
+            <div class="modal-buttons">
+                <button onclick="closeDraftVersionsModal()">Close</button>
             </div>
         </div>
     </div>
