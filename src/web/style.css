@@ -124,6 +124,7 @@ textarea {
     flex: 1;
     display: flex;
     flex-direction: column;
+    gap: 12px;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
@@ -146,6 +147,195 @@ textarea {
     flex-direction: column;
     align-items: center;
     padding: 26px 26px 14px;
+}
+.draft-shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--dense-border);
+    border-radius: 24px;
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg_secondary) 96%, transparent), color-mix(in srgb, var(--bg_primary) 92%, black 8%));
+    box-shadow: 0 24px 52px rgba(0, 0, 0, 0.18);
+    overflow: hidden;
+}
+.draft-shell-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+.draft-shell-heading {
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+}
+.draft-heading-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.draft-heading-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.draft-filename-input {
+    width: min(100%, 420px);
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text_primary);
+    font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: clamp(1.2rem, 2.3vw, 1.8rem);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+}
+.draft-filename-input::placeholder {
+    color: color-mix(in srgb, var(--text_tertiary) 86%, transparent);
+}
+.draft-profile-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent_primary) 22%, var(--dense-border));
+    background: color-mix(in srgb, var(--accent_primary) 10%, var(--bg_secondary));
+    color: var(--accent_hover);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.draft-workspace-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
+    background: color-mix(in srgb, var(--bg_primary) 66%, transparent);
+    color: var(--text_secondary);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}
+.draft-shell-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.draft-save-state {
+    min-width: 52px;
+    color: var(--text_secondary);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: right;
+}
+.draft-save-state.is-dirty {
+    color: color-mix(in srgb, var(--accent_primary) 88%, var(--text_primary));
+}
+.draft-save-state.is-saving {
+    color: var(--text_secondary);
+}
+.draft-save-state.is-saved {
+    color: var(--status_connected);
+}
+.draft-save-state.is-error {
+    color: var(--btn_danger);
+}
+.draft-shell-subtitle {
+    color: var(--text_secondary);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.draft-shell-subtitle code {
+    font-family: var(--font_mono);
+    font-size: 0.95em;
+}
+.draft-shell-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.draft-shell-pane {
+    flex: 1;
+    min-height: 0;
+}
+.agent-rail {
+    flex: 0 0 clamp(152px, 24vh, 236px);
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, var(--dense-border) 92%, transparent);
+    border-radius: 20px;
+    background: color-mix(in srgb, var(--bg_primary) 62%, transparent);
+    overflow: hidden;
+}
+.agent-rail-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--dense-border) 88%, transparent);
+}
+.agent-rail-title {
+    color: var(--text_primary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.agent-rail-note {
+    color: var(--text_tertiary);
+    font-size: 11px;
+    line-height: 1.35;
+    text-align: right;
+}
+.agent-rail .messages {
+    align-items: stretch;
+    padding: 16px 16px 10px;
+}
+.agent-rail-empty {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 100%;
+    justify-content: center;
+    padding: 8px 2px;
+    text-align: left;
+}
+.agent-rail-empty-title {
+    color: var(--text_primary);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+.agent-rail-empty-copy {
+    color: var(--text_secondary);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.agent-rail-empty-copy code {
+    font-family: var(--font_mono);
+    font-size: 0.95em;
 }
 .chat.workspace-reader-open .messages {
     align-items: flex-start;
@@ -1741,7 +1931,8 @@ textarea {
 .ide-viewer-pane {
     height: 100%;
 }
-#inlineViewerEditor {
+#inlineViewerEditor,
+#draftEditor {
     width: 100%;
     height: 100%;
     min-height: 100%;
@@ -1756,10 +1947,12 @@ textarea {
     font-size: 11px;
     line-height: 1.45;
 }
-#inlineViewerEditor[data-editor-ready="true"] {
+#inlineViewerEditor[data-editor-ready="true"],
+#draftEditor[data-editor-ready="true"] {
     display: none;
 }
-.ide-viewer-pane .CodeMirror {
+.ide-viewer-pane .CodeMirror,
+.draft-shell-pane .CodeMirror {
     height: 100%;
     border: 1px solid var(--dense-border);
     border-radius: 18px;
@@ -1769,27 +1962,35 @@ textarea {
     font-size: 11px;
     line-height: 1.45;
 }
-.ide-viewer-pane .CodeMirror-gutters {
+.ide-viewer-pane .CodeMirror-gutters,
+.draft-shell-pane .CodeMirror-gutters {
     background: color-mix(in srgb, var(--bg_secondary) 88%, var(--bg_primary));
     border-right: 1px solid var(--bg_tertiary);
 }
-.ide-viewer-pane .CodeMirror-foldgutter {
+.ide-viewer-pane .CodeMirror-foldgutter,
+.draft-shell-pane .CodeMirror-foldgutter {
     width: 1rem;
 }
 .ide-viewer-pane .CodeMirror-foldgutter-open::after,
-.ide-viewer-pane .CodeMirror-foldgutter-folded::after {
+.ide-viewer-pane .CodeMirror-foldgutter-folded::after,
+.draft-shell-pane .CodeMirror-foldgutter-open::after,
+.draft-shell-pane .CodeMirror-foldgutter-folded::after {
     color: var(--text_tertiary);
 }
-.ide-viewer-pane .CodeMirror-linenumber {
+.ide-viewer-pane .CodeMirror-linenumber,
+.draft-shell-pane .CodeMirror-linenumber {
     color: var(--text_tertiary);
 }
-.ide-viewer-pane .CodeMirror-cursor {
+.ide-viewer-pane .CodeMirror-cursor,
+.draft-shell-pane .CodeMirror-cursor {
     border-left-color: var(--text_primary);
 }
-.ide-viewer-pane .CodeMirror-activeline-background {
+.ide-viewer-pane .CodeMirror-activeline-background,
+.draft-shell-pane .CodeMirror-activeline-background {
     background: color-mix(in srgb, var(--accent_primary) 6%, transparent);
 }
-#inlineViewerPreview {
+#inlineViewerPreview,
+#draftPreview {
     height: 100%;
     overflow: auto;
     border: 1px solid var(--dense-border);
@@ -3332,6 +3533,12 @@ textarea {
 .chat.welcome-layout .composer-hint {
     margin-top: 30px;
 }
+.chat.welcome-layout .draft-shell {
+    min-height: min(54vh, 680px);
+}
+.chat.welcome-layout .agent-rail {
+    flex-basis: clamp(132px, 18vh, 186px);
+}
 #send {
     border: 1px solid color-mix(in srgb, var(--accent_primary) 56%, transparent);
     background: linear-gradient(180deg, color-mix(in srgb, var(--accent_primary) 88%, white 12%), color-mix(in srgb, var(--accent_secondary) 82%, var(--accent_primary)));
@@ -4424,6 +4631,8 @@ pre:hover .copy-btn { opacity: 1; }
     .workspace-activity-list,
     #inlineViewerPreview,
     #inlineViewerEditor,
+    #draftPreview,
+    #draftEditor,
     .ide-viewer-empty,
     .file-modal-pdf {
         border-radius: 12px;
@@ -4441,8 +4650,32 @@ pre:hover .copy-btn { opacity: 1; }
         padding: 8px;
     }
     #inlineViewerPreview,
-    #inlineViewerEditor {
+    #inlineViewerEditor,
+    #draftPreview,
+    #draftEditor {
         min-height: 0;
         height: 100%;
+    }
+    .draft-shell {
+        padding: 12px;
+        border-radius: 18px;
+    }
+    .draft-shell-header,
+    .agent-rail-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .draft-heading-meta {
+        width: 100%;
+    }
+    .draft-shell-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+    .draft-filename-input {
+        width: 100%;
+    }
+    .agent-rail-note {
+        text-align: left;
     }
 }

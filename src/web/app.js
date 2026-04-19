@@ -42,6 +42,7 @@ let collapsedWorkspaceDirs = new Set();
 let featureSettings = null;
 let voiceSettings = null;
 let pendingAttachments = [];
+let workspaceDraftSelections = loadStoredObject('workspaceDraftSelections', {});
 let inlineViewerPath = '';
 let inlineViewerKind = 'text';
 let inlineViewerEditable = false;
@@ -55,6 +56,16 @@ let inlineViewerUndoStacks = {};
 let inlineViewerApplyingRemoteContent = false;
 let inlineViewerPerformingUndo = false;
 let inlineViewerRequestToken = 0;
+let activeDraftPath = '';
+let activeDraftProfileKey = 'html';
+let draftEditor = null;
+let draftEditorReady = false;
+let draftAutosaveTimer = null;
+let draftLastSavedContent = '';
+let draftSaveState = 'idle';
+let draftView = localStorage.getItem('draftView') === 'preview' ? 'preview' : 'edit';
+let draftApplyingRemoteContent = false;
+let draftOpenRequestToken = 0;
 let currentFileSymbols = [];
 let symbolGroupState = {};
 let currentAssistantTurnStartedAt = null;
@@ -118,6 +129,63 @@ const WELCOME_HINT_ROTATE_MS = 120000;
 const LOADING_HINT_ROTATE_MS = 120000;
 const PLAN_STEP_LIMIT = 4;
 const INLINE_ACTIVITY_LIMIT = 4;
+const DRAFT_AUTOSAVE_DELAY_MS = 900;
+const DEFAULT_DRAFT_FILENAME = 'index.html';
+const DRAFT_PROFILE_DEFINITIONS = Object.freeze({
+    html: Object.freeze({
+        label: 'HTML',
+        extension: 'html',
+        kind: 'html',
+        lineWrapping: true,
+        defaultView: 'preview',
+        starter: filename => `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtmlTextForTemplate(basename(filename || 'index.html').replace(/\.[^.]+$/, '') || 'Document')}</title>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtmlTextForTemplate(basename(filename || 'index.html').replace(/\.[^.]+$/, '') || 'Hello')}</h1>
+    <p>Start drafting here.</p>
+  </main>
+</body>
+</html>`,
+    }),
+    markdown: Object.freeze({
+        label: 'Markdown',
+        extension: 'md',
+        kind: 'markdown',
+        lineWrapping: true,
+        defaultView: 'edit',
+        starter: filename => `# ${basename(filename || 'notes.md').replace(/\.[^.]+$/, '') || 'Notes'}\n\nStart drafting here.\n`,
+    }),
+    python: Object.freeze({
+        label: 'Python',
+        extension: 'py',
+        kind: 'text',
+        lineWrapping: false,
+        defaultView: 'edit',
+        starter: filename => `def main():\n    print("Hello from ${basename(filename || 'app.py').replace(/\.[^.]+$/, '') || 'app'}")\n\n\nif __name__ == "__main__":\n    main()\n`,
+    }),
+    json: Object.freeze({
+        label: 'JSON',
+        extension: 'json',
+        kind: 'text',
+        lineWrapping: false,
+        defaultView: 'edit',
+        starter: () => '{\n  "title": "Draft"\n}\n',
+    }),
+    text: Object.freeze({
+        label: 'Text',
+        extension: 'txt',
+        kind: 'text',
+        lineWrapping: true,
+        defaultView: 'edit',
+        starter: () => '',
+    }),
+});
 const DISCOVERY_HINTS = Object.freeze([
     'Try Python! Ask me to build a small script, explain it, and verify it.',
     'Try Python! Say: "Make a quick script for this and keep it in the workspace."',
@@ -388,6 +456,13 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function escapeHtmlTextForTemplate(text) {
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function generateId() {
@@ -2160,9 +2235,12 @@ async function resetAllAppData() {
 }
 
 function buildWelcomeMarkup() {
+    const path = normalizeDraftFilename(activeDraftPath || defaultDraftPathForWorkspace());
+    const profile = getDraftProfileDefinition(activeDraftProfileKey || draftProfileKeyForPath(path));
     return `<div class="welcome">
-            <div class="welcome-brand" aria-label="${escapeHtml(window.APP_TITLE || '')}">
-                <h1 class="welcome-title">${escapeHtml(window.APP_TITLE || '')}</h1>
+            <div class="agent-rail-empty">
+                <div class="agent-rail-empty-title">Agent standing by</div>
+                <div class="agent-rail-empty-copy">Keep drafting in <code>${escapeHtml(path)}</code>. The app is treating it as ${escapeHtml(profile.label)} automatically, so chat can stay focused on guided edits, questions, and bigger changes when you need them.</div>
             </div>
         </div>`;
 }
@@ -4054,6 +4132,153 @@ function getCodeMirrorModeForPath(path) {
     return window.CodeMirror.findModeByFileName(path || '') || null;
 }
 
+function draftProfileKeyForPath(path) {
+    const normalized = String(path || '').trim().toLowerCase();
+    if (/\.(html?|xhtml)$/.test(normalized)) return 'html';
+    if (/\.(md|markdown|mdx|rst)$/.test(normalized)) return 'markdown';
+    if (/\.py$/.test(normalized)) return 'python';
+    if (/\.json$/.test(normalized)) return 'json';
+    return 'text';
+}
+
+function getDraftProfileDefinition(profileKey = activeDraftProfileKey) {
+    return DRAFT_PROFILE_DEFINITIONS[profileKey] || DRAFT_PROFILE_DEFINITIONS.text;
+}
+
+function normalizeDraftFilename(path) {
+    const normalized = normalizeWorkspacePath(path || '');
+    return normalized === '.' ? DEFAULT_DRAFT_FILENAME : normalized;
+}
+
+function draftSubtitleForProfile(profileKey, path) {
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    const workspaceName = currentWorkspaceMeta?.display_name || currentWorkspaceMeta?.root_path || 'this workspace';
+    if (profileKey === 'html') {
+        return `Saved as ${normalizedPath} in ${workspaceName}. HTML drafts render in preview, so the agent should preserve semantic structure and make targeted, viewer-friendly changes.`;
+    }
+    if (profileKey === 'markdown') {
+        return `Saved as ${normalizedPath} in ${workspaceName}. Markdown drafts should keep clear headings, sections, and readable prose flow.`;
+    }
+    if (profileKey === 'python') {
+        return `Saved as ${normalizedPath} in ${workspaceName}. Python drafts should use patch-and-validate edits instead of full rewrites whenever possible.`;
+    }
+    if (profileKey === 'json') {
+        return `Saved as ${normalizedPath} in ${workspaceName}. JSON drafts should preserve valid structure while editing.`;
+    }
+    return `Saved as ${normalizedPath} in ${workspaceName}. This draft is the main document for the current thread.`;
+}
+
+function previewDraftFilenameState(pathValue) {
+    const profileKey = draftProfileKeyForPath(pathValue || DEFAULT_DRAFT_FILENAME);
+    const badge = document.getElementById('draftProfileBadge');
+    const workspaceBadge = document.getElementById('draftWorkspaceBadge');
+    const subtitle = document.getElementById('draftShellSubtitle');
+    if (badge) badge.textContent = `Auto: ${getDraftProfileDefinition(profileKey).label}`;
+    if (workspaceBadge) workspaceBadge.textContent = currentWorkspaceMeta?.display_name || 'No workspace';
+    if (subtitle) subtitle.textContent = draftSubtitleForProfile(profileKey, pathValue || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    refreshWelcomeMarkupIfNeeded();
+}
+
+function defaultDraftPathForWorkspace(workspaceId = currentWorkspaceId) {
+    const stored = String(workspaceDraftSelections[String(workspaceId || '').trim()] || '').trim();
+    return normalizeDraftFilename(stored || DEFAULT_DRAFT_FILENAME);
+}
+
+function persistDraftSelection(workspaceId, path) {
+    const safeWorkspaceId = String(workspaceId || '').trim();
+    if (!safeWorkspaceId) return;
+    workspaceDraftSelections[safeWorkspaceId] = normalizeDraftFilename(path);
+    persistStoredObject('workspaceDraftSelections', workspaceDraftSelections);
+}
+
+function syncDraftHeader(path = activeDraftPath) {
+    const filenameInput = document.getElementById('draftFilename');
+    const normalizedPath = normalizeDraftFilename(path || DEFAULT_DRAFT_FILENAME);
+    if (filenameInput && document.activeElement !== filenameInput) {
+        filenameInput.value = normalizedPath;
+    }
+    previewDraftFilenameState(normalizedPath);
+}
+
+function setDraftSaveState(state, text = '') {
+    draftSaveState = state;
+    const el = document.getElementById('draftSaveState');
+    if (!el) return;
+    el.classList.remove('is-dirty', 'is-saving', 'is-saved', 'is-error');
+    if (state === 'dirty') {
+        el.textContent = text || 'Draft';
+        el.classList.add('is-dirty');
+        return;
+    }
+    if (state === 'saving') {
+        el.textContent = text || 'Saving';
+        el.classList.add('is-saving');
+        return;
+    }
+    if (state === 'saved') {
+        el.textContent = text || 'Saved';
+        el.classList.add('is-saved');
+        return;
+    }
+    if (state === 'error') {
+        el.textContent = text || 'Error';
+        el.classList.add('is-error');
+        return;
+    }
+    el.textContent = text || 'Idle';
+}
+
+function refreshWelcomeMarkupIfNeeded() {
+    const messages = document.getElementById('messages');
+    if (!messages || hasConversationMessages()) return;
+    messages.innerHTML = buildWelcomeMarkup();
+}
+
+function buildDraftStarterContent(path, profileKey = draftProfileKeyForPath(path)) {
+    const profile = getDraftProfileDefinition(profileKey);
+    const starter = profile.starter;
+    return typeof starter === 'function' ? String(starter(path) || '') : '';
+}
+
+function syncDraftView() {
+    const editTab = document.getElementById('draftEditTab');
+    const previewTab = document.getElementById('draftPreviewTab');
+    const editPane = document.getElementById('draftEditPane');
+    const previewPane = document.getElementById('draftPreviewPane');
+    const editing = draftView !== 'preview';
+    if (editTab) editTab.classList.toggle('active', editing);
+    if (previewTab) previewTab.classList.toggle('active', !editing);
+    if (editPane) editPane.classList.toggle('file-modal-pane-hidden', !editing);
+    if (previewPane) previewPane.classList.toggle('file-modal-pane-hidden', editing);
+    if (editing) {
+        const editor = ensureDraftEditor();
+        if (editor) setTimeout(() => editor.refresh(), 0);
+    } else {
+        renderDraftPreview();
+    }
+}
+
+function setDraftView(view) {
+    draftView = view === 'preview' ? 'preview' : 'edit';
+    localStorage.setItem('draftView', draftView);
+    syncDraftView();
+}
+
+function configureDraftEditorLanguage(path) {
+    const editor = ensureDraftEditor();
+    if (!editor) return;
+    const modeInfo = getCodeMirrorModeForPath(path);
+    editor.setOption('lineWrapping', Boolean(getDraftProfileDefinition(draftProfileKeyForPath(path)).lineWrapping));
+    if (!modeInfo) {
+        editor.setOption('mode', null);
+        return;
+    }
+    editor.setOption('mode', modeInfo.mime || modeInfo.mode || null);
+    if (window.CodeMirror.autoLoadMode && modeInfo.mode) {
+        window.CodeMirror.autoLoadMode(editor, modeInfo.mode);
+    }
+}
+
 function configureInlineEditorLanguage(path) {
     const editor = ensureInlineEditor();
     if (!editor) return;
@@ -4066,6 +4291,266 @@ function configureInlineEditorLanguage(path) {
     if (window.CodeMirror.autoLoadMode && modeInfo.mode) {
         window.CodeMirror.autoLoadMode(editor, modeInfo.mode);
     }
+}
+
+function ensureDraftEditor() {
+    if (draftEditorReady) return draftEditor;
+    const textarea = document.getElementById('draftEditor');
+    if (!textarea) return null;
+    if (!(window.CodeMirror && typeof window.CodeMirror.fromTextArea === 'function')) return null;
+    if (window.CodeMirror.modeURL === undefined) {
+        window.CodeMirror.modeURL = 'https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/%N/%N.min.js';
+    }
+    draftEditor = window.CodeMirror.fromTextArea(textarea, {
+        lineNumbers: true,
+        keyMap: 'default',
+        lineWrapping: true,
+        indentUnit: 2,
+        tabSize: 2,
+        viewportMargin: Infinity,
+        gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+        foldGutter: true,
+        autoCloseBrackets: true,
+        matchBrackets: true,
+        styleActiveLine: true,
+    });
+    textarea.dataset.editorReady = 'true';
+    draftEditor.on('change', () => {
+        if (draftApplyingRemoteContent) return;
+        handleDraftEditorInput();
+    });
+    draftEditor.on('focus', () => {
+        if (draftSaveState === 'saved') setDraftSaveState('idle');
+    });
+    draftEditorReady = true;
+    configureDraftEditorLanguage(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    return draftEditor;
+}
+
+function getDraftContent() {
+    const editor = ensureDraftEditor();
+    if (editor) return editor.getValue();
+    const textarea = document.getElementById('draftEditor');
+    return textarea ? (textarea.value || '') : '';
+}
+
+function setDraftContent(content) {
+    const editor = ensureDraftEditor();
+    if (editor) {
+        draftApplyingRemoteContent = true;
+        if (editor.getValue() !== (content || '')) editor.setValue(content || '');
+        draftApplyingRemoteContent = false;
+        configureDraftEditorLanguage(activeDraftPath || DEFAULT_DRAFT_FILENAME);
+        editor.refresh();
+        return;
+    }
+    const textarea = document.getElementById('draftEditor');
+    if (textarea) textarea.value = content || '';
+}
+
+function renderDraftPreview() {
+    const content = getDraftContent();
+    const profile = getDraftProfileDefinition(activeDraftProfileKey);
+    if (profile.kind === 'html') {
+        renderHtmlPreview('draftPreview', content, activeDraftPath || DEFAULT_DRAFT_FILENAME);
+        return;
+    }
+    if (profile.kind === 'markdown') {
+        renderMarkdownPreview('draftPreview', content);
+        return;
+    }
+    renderCodePreview('draftPreview', content, activeDraftPath || DEFAULT_DRAFT_FILENAME);
+}
+
+function handleDraftEditorInput() {
+    renderDraftPreview();
+    scheduleDraftAutosave();
+}
+
+function scheduleDraftAutosave() {
+    const content = getDraftContent();
+    if (content === draftLastSavedContent) {
+        if (draftAutosaveTimer) {
+            clearTimeout(draftAutosaveTimer);
+            draftAutosaveTimer = null;
+        }
+        setDraftSaveState('saved');
+        return;
+    }
+    setDraftSaveState('dirty');
+    if (draftAutosaveTimer) clearTimeout(draftAutosaveTimer);
+    draftAutosaveTimer = setTimeout(() => {
+        draftAutosaveTimer = null;
+        saveDraftDocument({ autosave: true }).catch(() => {});
+    }, DRAFT_AUTOSAVE_DELAY_MS);
+}
+
+async function saveDraftDocument(options = {}) {
+    if (!currentWorkspaceId) throw new Error('Choose a workspace before saving a draft.');
+    const saveButton = document.getElementById('draftSaveButton');
+    const draftPath = normalizeDraftFilename(document.getElementById('draftFilename')?.value || activeDraftPath || DEFAULT_DRAFT_FILENAME);
+    const content = getDraftContent();
+    activeDraftPath = draftPath;
+    activeDraftProfileKey = draftProfileKeyForPath(draftPath);
+    syncDraftHeader(draftPath);
+    if (saveButton) saveButton.disabled = true;
+    setDraftSaveState('saving', options.autosave ? 'Autosaving' : 'Saving');
+    try {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: draftPath, content }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        draftLastSavedContent = content;
+        persistDraftSelection(currentWorkspaceId, draftPath);
+        setDraftSaveState('saved');
+        if (options.autosave) scheduleWorkspaceRefresh();
+        else await refreshWorkspace(false);
+        return data;
+    } catch (error) {
+        setDraftSaveState('error');
+        if (!options.autosave) throw error;
+        console.error('Draft autosave failed:', error);
+        return null;
+    } finally {
+        if (saveButton) saveButton.disabled = false;
+    }
+}
+
+async function loadDraftDocument(path, options = {}) {
+    const draftPath = normalizeDraftFilename(path || defaultDraftPathForWorkspace());
+    const profileKey = draftProfileKeyForPath(draftPath);
+    const previousPath = activeDraftPath;
+    const requestToken = ++draftOpenRequestToken;
+    activeDraftPath = draftPath;
+    activeDraftProfileKey = profileKey;
+    if (!compareWorkspacePaths(previousPath || '', draftPath)) {
+        draftView = getDraftProfileDefinition(profileKey).defaultView || 'edit';
+        localStorage.setItem('draftView', draftView);
+    }
+    syncDraftHeader(draftPath);
+    configureDraftEditorLanguage(draftPath);
+    if (!currentWorkspaceId) {
+        const starter = buildDraftStarterContent(draftPath, profileKey);
+        setDraftContent(starter);
+        draftLastSavedContent = '';
+        renderDraftPreview();
+        setDraftSaveState('idle');
+        syncDraftView();
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/file?path=${encodeURIComponent(draftPath)}`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            if (resp.status !== 404) throw new Error(data.detail || `HTTP ${resp.status}`);
+            const starter = buildDraftStarterContent(draftPath, profileKey);
+            if (requestToken !== draftOpenRequestToken) return;
+            setDraftContent(starter);
+            draftLastSavedContent = '';
+            persistDraftSelection(currentWorkspaceId, draftPath);
+            renderDraftPreview();
+            setDraftSaveState(starter ? 'dirty' : 'idle');
+            syncDraftView();
+            return;
+        }
+        if (requestToken !== draftOpenRequestToken) return;
+        const content = typeof data.content === 'string' ? data.content : '';
+        setDraftContent(content);
+        draftLastSavedContent = content;
+        persistDraftSelection(currentWorkspaceId, draftPath);
+        renderDraftPreview();
+        setDraftSaveState('saved');
+        syncDraftView();
+    } catch (error) {
+        console.error('Failed to load draft document:', error);
+        if (requestToken !== draftOpenRequestToken) return;
+        setDraftContent('');
+        draftLastSavedContent = '';
+        renderDraftPreview();
+        setDraftSaveState('error');
+    }
+}
+
+function handleDraftFilenameInput(value) {
+    previewDraftFilenameState(value || DEFAULT_DRAFT_FILENAME);
+}
+
+async function commitDraftFilename() {
+    const input = document.getElementById('draftFilename');
+    const nextPath = normalizeDraftFilename(input?.value || DEFAULT_DRAFT_FILENAME);
+    if (compareWorkspacePaths(nextPath, activeDraftPath || '')) {
+        syncDraftHeader(nextPath);
+        return;
+    }
+    if (activeDraftPath && getDraftContent() !== draftLastSavedContent) {
+        try {
+            await saveDraftDocument({ autosave: true });
+        } catch (error) {
+            console.error('Failed to save the previous draft before switching files:', error);
+        }
+    }
+    await loadDraftDocument(nextPath);
+}
+
+function handleDraftFilenameKeyDown(event) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    commitDraftFilename().catch(error => {
+        alert(`Couldn't open that draft: ${error.message}`);
+    });
+}
+
+function seedChatFromDraft() {
+    const input = document.getElementById('input');
+    if (!input) return;
+    const prompt = [
+        `Please work on the active draft \`${activeDraftPath || DEFAULT_DRAFT_FILENAME}\`.`,
+        '',
+        'Use the draft as the main working document, keep its current file type and structure, and make the smallest useful change that matches my request.'
+    ].join('\n');
+    setInputValue(prompt, prompt.length);
+    focusInput();
+}
+
+function draftAgentHintForProfile(profileKey) {
+    if (profileKey === 'html') {
+        return 'Treat the active draft as HTML. Prefer semantic structure, preserve the document shell, and use rendered preview-friendly changes.';
+    }
+    if (profileKey === 'markdown') {
+        return 'Treat the active draft as Markdown. Preserve headings, list structure, and readable prose flow.';
+    }
+    if (profileKey === 'python') {
+        return 'Treat the active draft as Python code. Prefer patch-and-validate style edits instead of rewriting the whole file.';
+    }
+    if (profileKey === 'json') {
+        return 'Treat the active draft as JSON. Preserve valid JSON structure while editing it.';
+    }
+    return 'Treat the active draft as the primary working document for this turn.';
+}
+
+async function ensureDraftReadyForTurn() {
+    if (!activeDraftPath) return;
+    if (getDraftContent() !== draftLastSavedContent) {
+        await saveDraftDocument({ autosave: true });
+    }
+}
+
+function buildActiveDraftContextForTurn() {
+    if (!activeDraftPath) return '';
+    const profile = getDraftProfileDefinition(activeDraftProfileKey);
+    return [
+        '',
+        '<active_draft>',
+        `path: ${activeDraftPath}`,
+        `profile: ${profile.label}`,
+        `extension: .${profile.extension}`,
+        'The active draft is the main working document for this turn and is already saved in the workspace.',
+        draftAgentHintForProfile(activeDraftProfileKey),
+        '</active_draft>',
+    ].join('\n');
 }
 
 function normalizeIndentLevel(indent) {
@@ -5220,7 +5705,7 @@ async function handleAttachmentSelection(event) {
     }
 }
 
-function sendMessage() {
+async function sendMessage() {
     const input = document.getElementById('input');
     const displayText = input.value.trim();
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
@@ -5234,13 +5719,20 @@ function sendMessage() {
         message = message.replace(block.placeholder, block.actual);
     }
     if (!message) message = buildAttachmentOnlyMessage(pendingAttachments);
+    try {
+        await ensureDraftReadyForTurn();
+    } catch (error) {
+        alert(`Draft save failed: ${error.message}`);
+        return;
+    }
+    const outboundMessage = `${message}${buildActiveDraftContextForTurn()}`;
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
     addMessage(buildDisplayedMessageText(displayText, pendingAttachments) || message, 'user', null, { forceScroll: true });
     input.value = '';
     pastedBlocks = [];
-    const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
+    const turnFeatures = resolveTurnFeatures(outboundMessage, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     clearPendingPermissionRequest();
@@ -5257,7 +5749,7 @@ function sendMessage() {
     syncSendButton();
     const clientTurnId = beginClientTurn();
     dispatchChatPayload({
-        message,
+        message: outboundMessage,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         workspace_id: currentWorkspaceId || null,
@@ -5273,13 +5765,20 @@ function sendMessage() {
     });
 }
 
-function sendInterruptMessage(messageText) {
+async function sendInterruptMessage(messageText) {
     const text = String(messageText || '').trim();
     const attachmentPaths = pendingAttachments.map(file => file.path).filter(Boolean);
     const outboundText = text || buildAttachmentOnlyMessage(pendingAttachments);
     if (!outboundText || !canUseWebsocketTransport()) return;
     const slashCommand = parseDirectSlashCommandInput(outboundText);
-    const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
+    try {
+        await ensureDraftReadyForTurn();
+    } catch (error) {
+        alert(`Draft save failed: ${error.message}`);
+        return;
+    }
+    const fullOutboundText = `${outboundText}${buildActiveDraftContextForTurn()}`;
+    const turnFeatures = resolveTurnFeatures(fullOutboundText, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     clearPendingPermissionRequest();
@@ -5291,7 +5790,7 @@ function sendInterruptMessage(messageText) {
     const clientTurnId = beginClientTurn();
     ws.send(JSON.stringify({
         type: 'interrupt',
-        message: outboundText,
+        message: fullOutboundText,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         workspace_id: currentWorkspaceId || null,
@@ -6130,6 +6629,11 @@ function setCurrentWorkspaceSelection(workspaceId) {
     currentWorkspaceMeta = workspaceCatalog.find(item => item.id === nextId) || null;
     if (nextId) localStorage.setItem('lastWorkspaceId', nextId);
     else localStorage.removeItem('lastWorkspaceId');
+    if (!activeDraftPath) {
+        syncDraftHeader(defaultDraftPathForWorkspace(nextId));
+        return;
+    }
+    syncDraftHeader(activeDraftPath);
 }
 
 function hasConversationMessages() {
@@ -6202,6 +6706,7 @@ async function selectWorkspace(workspaceId, options = {}) {
     } else {
         currentRunId = null;
         refreshWorkspace(true);
+        await loadDraftDocument(defaultDraftPathForWorkspace(nextWorkspaceId));
     }
 }
 
@@ -6387,6 +6892,7 @@ async function loadConversation(id, options = {}) {
     } catch (error) {
         console.error('Failed to refresh workspaces while loading conversation:', error);
     }
+    await loadDraftDocument(defaultDraftPathForWorkspace());
     const messages = document.getElementById('messages');
     stopSpeaking();
     messages.innerHTML = '';
@@ -6437,6 +6943,9 @@ function newChat(options = {}) {
     if (!preserveWorkspaceSelection) {
         setCurrentWorkspaceSelection(workspaceCatalog[0]?.id || '');
     }
+    loadDraftDocument(defaultDraftPathForWorkspace()).catch(error => {
+        console.error('Failed to load the active draft for the new chat:', error);
+    });
     renderWorkspaceCatalog();
     loadConversations();
     refreshWorkspace(true);
@@ -6542,6 +7051,9 @@ connectWS();
 applyFeatureSettingsToUI();
 syncMobileReasoningBadge();
 refreshVoiceRuntime();
+syncDraftHeader(defaultDraftPathForWorkspace());
+setDraftView(draftView);
+renderDraftPreview();
 loadWorkspaceCatalog()
     .catch(error => {
         console.error('Failed to load workspaces:', error);
@@ -6549,6 +7061,9 @@ loadWorkspaceCatalog()
     .finally(() => {
         loadConversations();
         refreshWorkspace(true);
+        loadDraftDocument(defaultDraftPathForWorkspace()).catch(error => {
+            console.error('Failed to load the active draft on startup:', error);
+        });
     });
 startWelcomeHintRotation();
 
