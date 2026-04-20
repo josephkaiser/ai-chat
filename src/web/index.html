@@ -7,7 +7,9 @@
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
 </head>
-<body data-app-title="{{ app_title }}">
+<body data-app-title="{{ app_title }}" data-left-sidebar-open="false" data-viewer-open="false">
+    <button id="sidebarToggle" class="shell-toggle shell-toggle-left" type="button">Workspace</button>
+    <button id="viewerToggle" class="shell-toggle shell-toggle-right" type="button" hidden>Selected File</button>
     <div class="app-shell">
         <aside class="sidebar">
             <div class="sidebar-brand">
@@ -21,6 +23,16 @@
                 <div class="workspace-controls">
                     <select id="workspaceSelect" aria-label="Workspace"></select>
                     <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
+                </div>
+            </section>
+
+            <section class="sidebar-panel">
+                <div class="sidebar-panel-header">
+                    <span>Replay Triage</span>
+                    <button id="refreshContextEvalButton" type="button">Refresh</button>
+                </div>
+                <div id="contextEvalReport" class="context-eval-report">
+                    <div class="context-eval-empty">No replay report loaded yet.</div>
                 </div>
             </section>
 

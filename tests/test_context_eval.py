@@ -103,6 +103,34 @@ class ContextEvalTests(unittest.TestCase):
         self.assertIn("trigger_counts", summary)
         self.assertIn("explicit_feedback", summary["trigger_counts"])
         self.assertTrue(summary["recent_failures"])
+        self.assertTrue(summary["top_triage_buckets"])
+        self.assertEqual(summary["recommended_fix"]["key"], "forbidden_selected:workspace_excerpts")
+        self.assertEqual(summary["top_triage_buckets"][0]["severity"], "high")
+        self.assertEqual(summary["top_triage_buckets"][0]["case_count"], 1)
+
+    def test_summarize_captured_context_eval_results_groups_similar_failures(self):
+        missing_workspace_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        missing_workspace_payload["capture"] = {"trigger": "retry", "phase": "plan"}
+        missing_workspace_payload["expectation"]["required_selected_keys"] = ["workspace_excerpts", "missing_key"]
+
+        another_missing_workspace_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        another_missing_workspace_payload["capture"] = {"trigger": "implicit_feedback", "phase": "plan"}
+        another_missing_workspace_payload["expectation"]["required_selected_keys"] = ["workspace_excerpts", "missing_key"]
+
+        results = [
+            replay_captured_context_eval_payload(missing_workspace_payload, source_path="/tmp/one.json"),
+            replay_captured_context_eval_payload(another_missing_workspace_payload, source_path="/tmp/two.json"),
+        ]
+
+        summary = summarize_captured_context_eval_results(results)
+        top_bucket = summary["top_triage_buckets"][0]
+
+        self.assertEqual(top_bucket["key"], "missing_selected:missing_key")
+        self.assertEqual(top_bucket["failure_count"], 2)
+        self.assertEqual(top_bucket["case_count"], 2)
+        self.assertIn("retry", top_bucket["trigger_counts"])
+        self.assertIn("plan", top_bucket["phase_counts"])
+        self.assertTrue(top_bucket["example_cases"])
 
 
 if __name__ == "__main__":

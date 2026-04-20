@@ -12,11 +12,11 @@
     --user-bubble: #132226;
     --user-text: #f8f7f2;
     --assistant-bubble: #ffffff;
-    --shadow: 0 24px 60px rgba(17, 30, 33, 0.12);
-    --radius-xl: 28px;
-    --radius-lg: 20px;
-    --radius-md: 14px;
-    --radius-sm: 10px;
+    --shadow: none;
+    --radius-xl: 0px;
+    --radius-lg: 0px;
+    --radius-md: 10px;
+    --radius-sm: 8px;
     --font-sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
     --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     --font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
@@ -37,6 +37,7 @@ body {
 
 body {
     font-family: var(--font-sans);
+    font-size: 13px;
     color: var(--text);
     background:
         radial-gradient(circle at top left, rgba(13, 122, 122, 0.13), transparent 28%),
@@ -75,28 +76,60 @@ button:disabled {
     transform: none;
 }
 
+.shell-toggle {
+    position: fixed;
+    top: 10px;
+    z-index: 20;
+    min-height: 32px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 253, 248, 0.94);
+    font-size: 0.78rem;
+    box-shadow: 0 8px 20px rgba(17, 30, 33, 0.08);
+}
+
+.shell-toggle-left {
+    left: 10px;
+}
+
+.shell-toggle-right {
+    right: 10px;
+}
+
 .app-shell {
     height: 100vh;
-    padding: 22px;
+    padding: 0;
     display: grid;
-    grid-template-columns: 272px minmax(0, 1fr);
-    gap: 18px;
+    grid-template-columns: 248px minmax(0, 1fr);
+    gap: 0;
+}
+
+body[data-left-sidebar-open="false"] .app-shell {
+    grid-template-columns: 0 minmax(0, 1fr);
+}
+
+body[data-left-sidebar-open="false"] .sidebar {
+    padding: 0;
+    border-right: 0;
+    opacity: 0;
+    pointer-events: none;
 }
 
 .sidebar,
 .panel {
     backdrop-filter: blur(14px);
     background: var(--panel);
-    border: 1px solid rgba(255, 255, 255, 0.58);
+    border: 0;
     box-shadow: var(--shadow);
 }
 
 .sidebar {
-    border-radius: var(--radius-xl);
-    padding: 20px;
+    border-right: 1px solid var(--line);
+    padding: 12px;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 10px;
     min-height: 0;
     overflow: hidden;
 }
@@ -104,9 +137,10 @@ button:disabled {
 .sidebar-brand h1,
 .panel-header h2 {
     margin: 0;
-    font-family: var(--font-serif);
-    font-size: clamp(1.6rem, 2.2vw, 2.2rem);
-    letter-spacing: -0.04em;
+    font-family: var(--font-sans);
+    font-size: clamp(1.1rem, 1.5vw, 1.45rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
 }
 
 .sidebar-brand p,
@@ -123,8 +157,8 @@ button:disabled {
 .panel-eyebrow,
 .sidebar-panel-label {
     text-transform: uppercase;
-    letter-spacing: 0.14em;
-    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    font-size: 0.64rem;
     font-weight: 700;
     color: var(--muted);
 }
@@ -132,7 +166,7 @@ button:disabled {
 .sidebar-panel {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
     min-height: 0;
 }
 
@@ -146,12 +180,12 @@ button:disabled {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px;
 }
 
 .workspace-controls {
     display: grid;
-    gap: 10px;
+    gap: 6px;
 }
 
 #workspaceSelect,
@@ -159,8 +193,9 @@ button:disabled {
 #newChatButton,
 #upDirectoryButton,
 #sendButton {
-    min-height: 44px;
-    padding: 0 16px;
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 0.92rem;
 }
 
 #workspaceSelect {
@@ -190,8 +225,8 @@ button:disabled {
 .conversation-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-right: 4px;
+    gap: 0;
+    padding-right: 0;
 }
 
 .conversation-item,
@@ -199,9 +234,10 @@ button:disabled {
     width: 100%;
     text-align: left;
     border-radius: var(--radius-md);
-    padding: 14px 16px;
+    padding: 10px 12px;
     border: 1px solid transparent;
-    background: rgba(255, 255, 255, 0.54);
+    background: transparent;
+    box-shadow: none;
 }
 
 .conversation-item.active,
@@ -218,8 +254,8 @@ button:disabled {
 
 .conversation-preview,
 .file-item-meta {
-    margin-top: 6px;
-    font-size: 0.9rem;
+    margin-top: 3px;
+    font-size: 0.82rem;
     color: var(--muted);
 }
 
@@ -227,18 +263,26 @@ button:disabled {
     min-width: 0;
     display: grid;
     grid-template-columns: minmax(420px, 0.88fr) minmax(520px, 1.12fr);
-    gap: 18px;
+    gap: 0;
+}
+
+body[data-viewer-open="false"] .main-grid {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+body[data-viewer-open="false"] .viewer-panel {
+    display: none;
 }
 
 .panel {
-    border-radius: var(--radius-xl);
     min-height: 0;
-    height: calc(100vh - 44px);
-    padding: 22px;
+    height: 100vh;
+    padding: 12px;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 8px;
     overflow: hidden;
+    border-left: 1px solid var(--line);
 }
 
 .header-copy {
@@ -246,22 +290,22 @@ button:disabled {
 }
 
 .panel-subtitle {
-    margin: 8px 0 0;
-    font-size: 0.94rem;
-    line-height: 1.45;
+    margin: 4px 0 0;
+    font-size: 0.84rem;
+    line-height: 1.35;
 }
 
 .status-stack {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 6px;
+    gap: 3px;
 }
 
 .status-badge {
-    padding: 6px 10px;
+    padding: 4px 8px;
     border-radius: 999px;
-    font-size: 0.84rem;
+    font-size: 0.72rem;
     font-weight: 700;
     background: rgba(19, 34, 38, 0.08);
 }
@@ -291,15 +335,16 @@ button:disabled {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 4px 8px 0 2px;
+    gap: 8px;
+    padding: 0;
 }
 
 .message {
-    padding: 16px 18px;
-    border-radius: var(--radius-lg);
+    padding: 10px 12px;
+    border-radius: 10px;
     max-width: min(760px, 100%);
     white-space: normal;
+    font-size: 0.92rem;
 }
 
 .message.user {
@@ -321,8 +366,8 @@ button:disabled {
 }
 
 .message-content {
-    margin-top: 8px;
-    line-height: 1.65;
+    margin-top: 4px;
+    line-height: 1.5;
     overflow-wrap: anywhere;
 }
 
@@ -336,7 +381,7 @@ button:disabled {
     background: #122126;
     color: #eff8f8;
     border-radius: var(--radius-md);
-    padding: 16px;
+    padding: 12px;
 }
 
 .message-content code {
@@ -344,7 +389,7 @@ button:disabled {
 }
 
 .message-content p + p {
-    margin-top: 0.9em;
+    margin-top: 0.6em;
 }
 
 .composer {
@@ -353,17 +398,17 @@ button:disabled {
     z-index: 2;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 18px;
-    border-radius: var(--radius-lg);
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 12px;
     border: 1px solid var(--line);
     background:
         linear-gradient(180deg, rgba(255, 253, 248, 0.88), rgba(255, 253, 248, 0.96));
-    box-shadow: 0 -12px 30px rgba(17, 30, 33, 0.08);
+    box-shadow: none;
 }
 
 .composer-label {
-    font-size: 0.8rem;
+    font-size: 0.68rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.12em;
@@ -373,13 +418,13 @@ button:disabled {
 #composerInput {
     width: 100%;
     resize: vertical;
-    min-height: 110px;
+    min-height: 72px;
     border: none;
     outline: none;
     background: transparent;
     color: var(--text);
-    font-size: 1rem;
-    line-height: 1.55;
+    font-size: 0.92rem;
+    line-height: 1.42;
 }
 
 .viewer-layout {
@@ -387,12 +432,11 @@ button:disabled {
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(210px, 240px) minmax(0, 1fr);
-    gap: 16px;
+    gap: 0;
 }
 
 .file-browser,
 .file-preview {
-    border-radius: var(--radius-lg);
     border: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.62);
 }
@@ -401,20 +445,21 @@ button:disabled {
     display: flex;
     flex-direction: column;
     min-height: 0;
+    border-right: 0;
 }
 
 .directory-path {
-    padding: 14px 16px 10px;
+    padding: 10px 12px 8px;
     border-bottom: 1px solid var(--line);
     font-family: var(--font-mono);
-    font-size: 0.88rem;
+    font-size: 0.78rem;
 }
 
 .file-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 12px;
+    gap: 0;
+    padding: 4px;
 }
 
 .file-item.up {
@@ -423,26 +468,26 @@ button:disabled {
 
 .file-item-kind {
     display: inline-flex;
-    min-width: 2.75rem;
+    min-width: 2.25rem;
     justify-content: center;
-    margin-right: 10px;
-    padding: 3px 8px;
+    margin-right: 8px;
+    padding: 2px 6px;
     border-radius: 999px;
     background: rgba(19, 34, 38, 0.08);
     color: var(--muted);
-    font-size: 0.72rem;
+    font-size: 0.64rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
 
 .file-preview {
-    padding: 18px;
+    padding: 12px;
 }
 
 .file-preview-frame,
 .file-preview-media {
     width: 100%;
-    min-height: 560px;
+    min-height: 520px;
     border: 0;
     border-radius: var(--radius-md);
     background: white;
@@ -459,7 +504,8 @@ button:disabled {
 
 .preview-markdown,
 .preview-html {
-    line-height: 1.7;
+    line-height: 1.55;
+    font-size: 0.9rem;
 }
 
 .preview-table {
@@ -472,10 +518,11 @@ button:disabled {
 
 .preview-table th,
 .preview-table td {
-    padding: 10px 12px;
+    padding: 8px 10px;
     text-align: left;
     border: 1px solid rgba(19, 34, 38, 0.09);
     vertical-align: top;
+    font-size: 0.84rem;
 }
 
 .empty-state {
@@ -483,13 +530,14 @@ button:disabled {
     display: grid;
     place-items: center;
     text-align: center;
-    padding: 32px;
+    padding: 20px;
 }
 
 .empty-state-title {
-    font-family: var(--font-serif);
-    font-size: 1.6rem;
-    margin-bottom: 10px;
+    font-family: var(--font-sans);
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin-bottom: 6px;
 }
 
 @media (max-width: 1180px) {
@@ -497,6 +545,10 @@ button:disabled {
     .main-grid,
     .viewer-layout {
         grid-template-columns: 1fr;
+    }
+
+    .shell-toggle {
+        top: 8px;
     }
 
     body {
@@ -522,14 +574,19 @@ button:disabled {
 
 @media (max-width: 720px) {
     .app-shell {
-        padding: 12px;
-        gap: 12px;
+        padding: 0;
+        gap: 0;
     }
 
     .sidebar,
     .panel {
-        padding: 16px;
-        border-radius: 22px;
+        padding: 12px;
+        border-radius: 0;
+    }
+
+    .shell-toggle {
+        min-height: 30px;
+        font-size: 0.74rem;
     }
 
     .panel-header,

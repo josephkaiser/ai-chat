@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence
@@ -350,6 +351,134 @@ def replay_captured_context_eval_files(paths: Sequence[pathlib.Path | str]) -> L
     return results
 
 
+def _humanize_context_key(key: str) -> str:
+    """Convert an internal context key into a compact label."""
+    return str(key or "").replace("_", " ").strip() or "unknown context"
+
+
+def _recommendation_for_context_key(key: str, *, missing: bool) -> str:
+    """Return a short fix recommendation for one context key."""
+    normalized = str(key or "").strip()
+    if normalized == "workspace_excerpts":
+        return (
+            "Promote workspace excerpts earlier in retrieval and selection for planning and verification turns."
+            if missing
+            else "Downrank workspace excerpts when the phase should stay conversational instead of file-grounded."
+        )
+    if normalized == "conversation_context":
+        return (
+            "Retain recent visible-chat context for follow-up turns that depend on user intent continuity."
+            if missing
+            else "Downrank chat history for evidence-heavy phases so file and artifact context win."
+        )
+    if normalized == "retrieved_history":
+        return (
+            "Increase memory retrieval or lower the selection threshold for relevant prior chat history."
+            if missing
+            else "Limit retrieved history in phases that should focus on workspace evidence."
+        )
+    if normalized == "step_reports":
+        return (
+            "Pull step reports into the candidate set before verify or synthesize so execution evidence is available."
+            if missing
+            else "Only keep step reports when the phase is evaluating work that actually produced them."
+        )
+    if normalized == "scope_gaps":
+        return (
+            "Preserve scope-gap evidence during planning and verification when open issues are present."
+            if missing
+            else "Drop scope-gap context when the request is a direct answer rather than a status review."
+        )
+    if normalized == "changed_files":
+        return (
+            "Prioritize changed-file evidence when summarizing or verifying recent edits."
+            if missing
+            else "Avoid changed-file context when no concrete file work happened in the turn."
+        )
+    return (
+        f"Raise the rank of {_humanize_context_key(normalized)} in relevant phases."
+        if missing
+        else f"Lower the rank of {_humanize_context_key(normalized)} when it distracts from the active phase."
+    )
+
+
+def _triage_bucket_for_failed_check(failed_check: str) -> Dict[str, object]:
+    """Map a failed replay check into a ranked triage bucket."""
+    text = str(failed_check or "").strip()
+
+    if text.startswith("required selected key missing: "):
+        key = text.split(": ", 1)[1].strip()
+        return {
+            "bucket_key": f"missing_selected:{key}",
+            "category": "selection_missing_key",
+            "title": f"Missing context: {_humanize_context_key(key)}",
+            "severity": "high",
+            "severity_rank": 4,
+            "recommendation": _recommendation_for_context_key(key, missing=True),
+        }
+
+    if text.startswith("forbidden selected key present: "):
+        key = text.split(": ", 1)[1].strip()
+        return {
+            "bucket_key": f"forbidden_selected:{key}",
+            "category": "selection_forbidden_key",
+            "title": f"Wrong context kept: {_humanize_context_key(key)}",
+            "severity": "high",
+            "severity_rank": 4,
+            "recommendation": _recommendation_for_context_key(key, missing=False),
+        }
+
+    retrieval_match = re.match(r"^(retrieve_[a-z_]+) expected (True|False) but got (True|False)$", text)
+    if retrieval_match:
+        field_name, expected, actual = retrieval_match.groups()
+        is_workspace = field_name == "retrieve_workspace_previews"
+        return {
+            "bucket_key": f"policy:{field_name}:{expected}->{actual}",
+            "category": "policy_retrieval",
+            "title": (
+                "Workspace retrieval policy mismatch"
+                if is_workspace else "Memory retrieval policy mismatch"
+            ),
+            "severity": "high" if is_workspace else "medium",
+            "severity_rank": 4 if is_workspace else 3,
+            "recommendation": (
+                "Adjust phase policy so file-grounded phases request workspace previews."
+                if is_workspace
+                else "Adjust phase policy so follow-up turns pull chat memory when intent depends on prior context."
+            ),
+        }
+
+    limit_match = re.match(r"^(memory_limit|workspace_preview_limit) expected >= (\d+) but got (\d+)$", text)
+    if limit_match:
+        field_name, expected, actual = limit_match.groups()
+        is_workspace = field_name == "workspace_preview_limit"
+        return {
+            "bucket_key": f"limit:{field_name}:{expected}->{actual}",
+            "category": "policy_limit",
+            "title": (
+                "Workspace preview depth too low"
+                if is_workspace
+                else "Memory retrieval depth too low"
+            ),
+            "severity": "medium",
+            "severity_rank": 2,
+            "recommendation": (
+                "Increase workspace preview depth for evidence-heavy phases so key files are available."
+                if is_workspace
+                else "Increase memory retrieval depth when short follow-ups need more conversation history."
+            ),
+        }
+
+    return {
+        "bucket_key": f"generic:{text or 'unknown'}",
+        "category": "generic",
+        "title": "Unclassified replay mismatch",
+        "severity": "medium",
+        "severity_rank": 1,
+        "recommendation": "Review the failed check and add a specific policy or selection rule for it.",
+    }
+
+
 def summarize_captured_context_eval_results(results: Sequence[CapturedContextEvalResult]) -> Dict[str, object]:
     """Aggregate replay results from captured workspace payloads."""
     materialized = list(results)
@@ -382,12 +511,97 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
         for item in materialized
         if not item.result.passed
     ][:10]
+
+    triage_buckets: Dict[str, Dict[str, object]] = {}
+    for item in materialized:
+        if item.result.passed:
+            continue
+        trigger = str(item.capture.get("trigger", "")).strip() or "unknown"
+        phase = (
+            str(item.capture.get("phase", "")).strip()
+            or (item.result.name.split("_", 2)[1] if "_" in item.result.name else "unknown")
+        )
+        example_case = {
+            "name": item.result.name,
+            "source_path": item.source_path,
+            "trigger": trigger,
+            "phase": phase,
+            "failed_checks": list(item.result.failed_checks),
+            "selected_keys": list(item.result.selection_output.selected_keys),
+        }
+        for failed_check in item.result.failed_checks:
+            bucket_meta = _triage_bucket_for_failed_check(failed_check)
+            bucket_key = str(bucket_meta["bucket_key"])
+            bucket = triage_buckets.setdefault(
+                bucket_key,
+                {
+                    "key": bucket_key,
+                    "category": bucket_meta["category"],
+                    "title": bucket_meta["title"],
+                    "severity": bucket_meta["severity"],
+                    "severity_rank": bucket_meta["severity_rank"],
+                    "recommendation": bucket_meta["recommendation"],
+                    "failure_count": 0,
+                    "case_names": set(),
+                    "trigger_counts": Counter(),
+                    "phase_counts": Counter(),
+                    "sample_failed_checks": [],
+                    "example_cases": [],
+                },
+            )
+            bucket["failure_count"] = int(bucket["failure_count"]) + 1
+            bucket["case_names"].add(item.result.name)
+            bucket["trigger_counts"][trigger] += 1
+            bucket["phase_counts"][phase] += 1
+            if failed_check not in bucket["sample_failed_checks"] and len(bucket["sample_failed_checks"]) < 3:
+                bucket["sample_failed_checks"].append(failed_check)
+            if len(bucket["example_cases"]) < 3 and all(
+                existing.get("source_path") != item.source_path or existing.get("name") != item.result.name
+                for existing in bucket["example_cases"]
+            ):
+                bucket["example_cases"].append(example_case)
+
+    ranked_triage_buckets = []
+    for bucket in triage_buckets.values():
+        case_count = len(bucket["case_names"])
+        priority_score = round(
+            float(bucket["failure_count"]) * float(bucket["severity_rank"]) + case_count * 0.25,
+            4,
+        )
+        ranked_triage_buckets.append(
+            {
+                "key": bucket["key"],
+                "category": bucket["category"],
+                "title": bucket["title"],
+                "severity": bucket["severity"],
+                "recommendation": bucket["recommendation"],
+                "failure_count": bucket["failure_count"],
+                "case_count": case_count,
+                "priority_score": priority_score,
+                "trigger_counts": dict(bucket["trigger_counts"].most_common()),
+                "phase_counts": dict(bucket["phase_counts"].most_common()),
+                "sample_failed_checks": list(bucket["sample_failed_checks"]),
+                "example_cases": list(bucket["example_cases"]),
+            }
+        )
+    ranked_triage_buckets.sort(
+        key=lambda bucket: (
+            -float(bucket["priority_score"]),
+            -int(bucket["failure_count"]),
+            -int(bucket["case_count"]),
+            str(bucket["title"]),
+        )
+    )
+
     return {
         **eval_summary,
         "failed_check_counts": dict(failed_check_counts.most_common(12)),
         "trigger_counts": dict(trigger_counts.most_common()),
         "phase_counts": dict(phase_counts.most_common()),
         "recent_failures": recent_failures,
+        "triage_bucket_count": len(ranked_triage_buckets),
+        "top_triage_buckets": ranked_triage_buckets[:8],
+        "recommended_fix": ranked_triage_buckets[0] if ranked_triage_buckets else None,
     }
 
 
