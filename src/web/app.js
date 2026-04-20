@@ -15,7 +15,9 @@ const state = {
     activeAssistantIndex: -1,
     currentDirectoryPath: ".",
     fileItems: [],
-    selectedFilePath: ""
+    selectedFilePath: "",
+    leftSidebarOpen: false,
+    viewerOpen: false
 };
 function query(selector) {
     const element = document.querySelector(selector);
@@ -25,6 +27,8 @@ function query(selector) {
     return element;
 }
 const workspaceSelect = query("#workspaceSelect");
+const sidebarToggle = query("#sidebarToggle");
+const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
 const newChatButton = query("#newChatButton");
 const conversationList = query("#conversationList");
@@ -94,6 +98,13 @@ function fileViewUrl(path) {
 }
 function currentWorkspaceName() {
     return state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
+}
+function syncShellLayout() {
+    document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
+    document.body.dataset.viewerOpen = String(state.viewerOpen && Boolean(state.selectedFilePath));
+    sidebarToggle.textContent = state.leftSidebarOpen ? "Close Workspace" : "Workspace";
+    viewerToggle.hidden = !state.selectedFilePath;
+    viewerToggle.textContent = state.viewerOpen ? "Hide File" : "Selected File";
 }
 function syncRuntimeSummary() {
     if (state.connectionState === "offline") {
@@ -367,6 +378,15 @@ function renderPreview(payload) {
     }
     filePreview.innerHTML = `<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
 }
+function closeViewer() {
+    state.viewerOpen = false;
+    syncShellLayout();
+}
+function openViewer() {
+    if (!state.selectedFilePath) return;
+    state.viewerOpen = true;
+    syncShellLayout();
+}
 async function fetchJson(url, init) {
     const response = await fetch(url, init);
     const data = await response.json().catch(()=>({}));
@@ -419,6 +439,8 @@ async function loadConversation(id) {
     state.currentConversationId = id;
     state.messages = payload.messages || [];
     state.activeAssistantIndex = -1;
+    state.selectedFilePath = "";
+    state.viewerOpen = false;
     const matchingConversation = state.conversations.find((conversation)=>conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
     chatTitle.textContent = state.currentConversationTitle;
@@ -428,15 +450,19 @@ async function loadConversation(id) {
         renderConversations();
     }
     renderMessages();
+    syncShellLayout();
 }
 function startNewChat() {
     state.currentConversationId = generateId();
     state.currentConversationTitle = "New chat";
     state.messages = [];
     state.activeAssistantIndex = -1;
+    state.selectedFilePath = "";
+    state.viewerOpen = false;
     chatTitle.textContent = state.currentConversationTitle;
     renderMessages();
     renderConversations();
+    syncShellLayout();
 }
 function ensureAssistantMessage() {
     const existing = state.messages[state.activeAssistantIndex];
@@ -494,7 +520,26 @@ function handleChatEvent(event) {
         return;
     }
     if (event.type === "tool_result" && event.payload?.open_path) {
-        void openFile(event.payload.open_path);
+        void openFile(event.payload.open_path, {
+            reveal: true
+        });
+        return;
+    }
+    if (event.type === "permission_required") {
+        const socket = state.ws;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                type: "permission_response",
+                conversation_id: event.conversation_id || state.currentConversationId,
+                client_turn_id: event.client_turn_id || "",
+                permission_key: event.permission_key || "",
+                approval_target: event.approval_target || "tool",
+                approved: true
+            }));
+            setComposerHint("Auto-approved workspace access. Continuing...");
+        } else {
+            setComposerHint(event.content || "Permission is required to continue.");
+        }
         return;
     }
     if (event.type === "error") {
@@ -558,7 +603,8 @@ async function sendCurrentMessage() {
         conversation_id: state.currentConversationId,
         workspace_id: state.currentWorkspaceId || null,
         mode: "deep",
-        turn_kind: "visible_chat"
+        turn_kind: "visible_chat",
+        auto_approve_tool_permissions: true
     };
     try {
         await dispatchChatPayload(payload);
@@ -577,9 +623,13 @@ async function loadDirectory(path) {
     state.fileItems = payload.items || [];
     renderFileList();
 }
-async function openFile(path) {
+async function openFile(path, options = {}) {
     if (!state.currentWorkspaceId) return;
     state.selectedFilePath = path;
+    if (options.reveal !== false) {
+        state.viewerOpen = true;
+    }
+    syncShellLayout();
     renderFileList();
     try {
         const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
@@ -623,7 +673,21 @@ function attachEvents() {
     newChatButton.addEventListener("click", ()=>startNewChat());
     refreshWorkspaceButton.addEventListener("click", ()=>{
         void loadDirectory(state.currentDirectoryPath);
-        if (state.selectedFilePath) void openFile(state.selectedFilePath);
+        if (state.selectedFilePath) void openFile(state.selectedFilePath, {
+            reveal: state.viewerOpen
+        });
+    });
+    sidebarToggle.addEventListener("click", ()=>{
+        state.leftSidebarOpen = !state.leftSidebarOpen;
+        syncShellLayout();
+    });
+    viewerToggle.addEventListener("click", ()=>{
+        if (!state.selectedFilePath) return;
+        if (state.viewerOpen) {
+            closeViewer();
+            return;
+        }
+        openViewer();
     });
     workspaceSelect.addEventListener("change", async ()=>{
         const nextWorkspaceId = workspaceSelect.value;
@@ -651,6 +715,7 @@ function attachEvents() {
 }
 async function bootstrap() {
     attachEvents();
+    syncShellLayout();
     renderMessages();
     renderConversations();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");

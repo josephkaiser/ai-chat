@@ -9,6 +9,8 @@ WEB_ROOT = ROOT / "src" / "web"
 class FrontendSettingsUiTests(unittest.TestCase):
     def test_index_is_now_a_minimal_chat_and_file_viewer_shell(self):
         html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="sidebarToggle"', html)
+        self.assertIn('id="viewerToggle"', html)
         self.assertIn('id="workspaceSelect"', html)
         self.assertIn('id="conversationList"', html)
         self.assertIn('id="chatMessages"', html)
@@ -18,7 +20,6 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('id="filePreview"', html)
         self.assertIn('id="viewerMeta"', html)
         self.assertIn('type="module" src="/static/app.js', html)
-        self.assertNotIn('id="contextEvalReport"', html)
         self.assertNotIn('id="settingsOverlay"', html)
         self.assertNotIn('id="aboutOverlay"', html)
         self.assertNotIn('id="draftShell"', html)
@@ -28,15 +29,19 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("interface ConversationSummary", ts)
         self.assertIn("async function sendCurrentMessage()", ts)
         self.assertIn("async function loadDirectory(path: string)", ts)
-        self.assertIn("async function openFile(path: string)", ts)
+        self.assertIn("async function openFile(path: string, options:", ts)
         self.assertIn("function connectWebSocket()", ts)
         self.assertIn('turn_kind: "visible_chat"', ts)
+        self.assertIn("auto_approve_tool_permissions: true", ts)
+        self.assertIn('type: "permission_response"', ts)
+        self.assertIn("function syncShellLayout()", ts)
         self.assertNotIn("function showAbout()", ts)
         self.assertNotIn("function toggleTheme()", ts)
 
     def test_css_focuses_on_two_panel_chat_and_viewer_layout(self):
         css = (WEB_ROOT / "style.css").read_text(encoding="utf-8")
         self.assertIn(".main-grid", css)
+        self.assertIn(".shell-toggle", css)
         self.assertIn(".chat-messages", css)
         self.assertIn(".viewer-layout", css)
         self.assertIn(".file-preview-frame", css)
@@ -45,6 +50,7 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn(".status-badge.loading", css)
         self.assertIn(".composer {", css)
         self.assertIn("position: sticky;", css)
+        self.assertIn('body[data-viewer-open="false"] .viewer-panel', css)
 
 
 if __name__ == "__main__":
