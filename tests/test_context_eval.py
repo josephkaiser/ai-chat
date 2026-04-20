@@ -3,11 +3,13 @@ import tempfile
 import unittest
 import json
 
+from src.python.ai_chat import context_eval
 from src.python.ai_chat.context_eval import (
     CapturedContextEvalResult,
     DEFAULT_CONTEXT_EVAL_CASES,
     DEFAULT_CONTEXT_EVAL_CASES_PATH,
     list_promoted_context_eval_fixtures,
+    load_promoted_context_eval_fixture_detail,
     find_context_eval_capture_files,
     load_context_eval_cases,
     normalize_promoted_context_eval_case_payload,
@@ -148,6 +150,25 @@ class ContextEvalTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0]["review_status"], "superseded")
 
+    def test_load_promoted_fixture_detail_returns_payload_and_metadata(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        payload["capture"] = {"trigger": "retry", "phase": "plan", "conversation_id": "conv-1"}
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            target = write_promoted_context_eval_case(
+                payload,
+                fixture_name="Detail Case",
+                fixtures_dir=tempdir,
+            )
+            detail = load_promoted_context_eval_fixture_detail(target, fixtures_dir=tempdir)
+
+        self.assertEqual(detail["name"], "Detail Case")
+        self.assertEqual(detail["review_status"], "candidate")
+        self.assertEqual(detail["source_trigger"], "retry")
+        self.assertEqual(detail["source_conversation_id"], "conv-1")
+        self.assertIn("payload", detail)
+        self.assertEqual(detail["payload"]["name"], "Detail Case")
+
     def test_replay_captured_context_eval_files_from_workspace_dir(self):
         case = DEFAULT_CONTEXT_EVAL_CASES[0]
         payload = serialize_context_eval_case(case)
@@ -214,6 +235,58 @@ class ContextEvalTests(unittest.TestCase):
         self.assertIn("retry", top_bucket["trigger_counts"])
         self.assertIn("plan", top_bucket["phase_counts"])
         self.assertTrue(top_bucket["example_cases"])
+
+    def test_summarize_captured_context_eval_results_includes_fixture_coverage(self):
+        missing_workspace_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        missing_workspace_payload["capture"] = {"trigger": "retry", "phase": "plan"}
+        missing_workspace_payload["expectation"]["required_selected_keys"] = ["missing_key"]
+
+        fixture_payload = normalize_promoted_context_eval_case_payload(
+            missing_workspace_payload,
+            fixture_name="Accepted Missing Key Fixture",
+            review_status="accepted",
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            promoted_dir = pathlib.Path(tempdir)
+            (promoted_dir / "accepted_missing_key_fixture.json").write_text(
+                json.dumps(fixture_payload),
+                encoding="utf-8",
+            )
+            original_dir = context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR
+            context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR = promoted_dir
+            try:
+                results = [
+                    replay_captured_context_eval_payload(missing_workspace_payload, source_path="/tmp/one.json"),
+                ]
+                summary = summarize_captured_context_eval_results(results)
+            finally:
+                context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR = original_dir
+
+        top_bucket = summary["top_triage_buckets"][0]
+        self.assertEqual(top_bucket["key"], "missing_selected:missing_key")
+        self.assertEqual(top_bucket["fixture_coverage"]["accepted_count"], 1)
+        self.assertEqual(top_bucket["fixture_coverage"]["total_fixtures"], 1)
+
+    def test_summarize_captured_context_eval_results_adds_promotion_suggestion_for_repeated_uncovered_bucket(self):
+        repeated_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        repeated_payload["capture"] = {"trigger": "thumbs_down", "phase": "verify"}
+        repeated_payload["expectation"]["required_selected_keys"] = ["verification_log"]
+
+        another_payload = json.loads(json.dumps(repeated_payload))
+        another_payload["name"] = f"{repeated_payload['name']}_retry"
+
+        results = [
+            replay_captured_context_eval_payload(repeated_payload, source_path="/tmp/verify-one.json"),
+            replay_captured_context_eval_payload(another_payload, source_path="/tmp/verify-two.json"),
+        ]
+        summary = summarize_captured_context_eval_results(results)
+
+        top_bucket = summary["top_triage_buckets"][0]
+        self.assertEqual(top_bucket["key"], "missing_selected:verification_log")
+        self.assertTrue(top_bucket["promotion_suggestion"]["should_suggest"])
+        self.assertEqual(top_bucket["promotion_suggestion"]["suggested_review_status"], "candidate")
+        self.assertIn("Repeated across 2 captured cases", top_bucket["promotion_suggestion"]["reason"])
 
 
 if __name__ == "__main__":

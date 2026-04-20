@@ -415,6 +415,44 @@ def list_promoted_context_eval_fixtures(
     return items
 
 
+def resolve_promoted_context_eval_fixture_path(
+    fixture_path: pathlib.Path | str,
+    *,
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """Validate and resolve one promoted fixture path."""
+    target = pathlib.Path(fixture_path).expanduser()
+    allowed_root = (pathlib.Path(fixtures_dir) if fixtures_dir is not None else DEFAULT_CONTEXT_EVAL_CASES_DIR).resolve()
+    resolved_target = target.resolve()
+    if allowed_root not in resolved_target.parents:
+        raise ValueError("Fixture path must be inside the promoted fixture directory")
+    if not resolved_target.exists() or not resolved_target.is_file():
+        raise ValueError("Fixture file not found")
+    return resolved_target
+
+
+def load_promoted_context_eval_fixture_detail(
+    fixture_path: pathlib.Path | str,
+    *,
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> Dict[str, object]:
+    """Load one promoted fixture with review metadata for detail surfaces."""
+    resolved_target = resolve_promoted_context_eval_fixture_path(fixture_path, fixtures_dir=fixtures_dir)
+    payload = load_context_eval_case_payload(resolved_target)
+    metadata = context_eval_fixture_metadata_from_payload(payload)
+    return {
+        "name": str(payload.get("name") or "").strip(),
+        "path": str(resolved_target),
+        "review_status": metadata.review_status,
+        "promoted_at": metadata.promoted_at,
+        "updated_at": metadata.updated_at,
+        "source_path": metadata.source_path,
+        "source_trigger": metadata.source_trigger,
+        "source_conversation_id": metadata.source_conversation_id,
+        "payload": payload,
+    }
+
+
 def update_promoted_context_eval_fixture_review_state(
     fixture_path: pathlib.Path | str,
     review_status: str,
@@ -423,13 +461,7 @@ def update_promoted_context_eval_fixture_review_state(
     updated_at: str = "",
 ) -> pathlib.Path:
     """Update the review state for one promoted fixture."""
-    target = pathlib.Path(fixture_path).expanduser()
-    allowed_root = (pathlib.Path(fixtures_dir) if fixtures_dir is not None else DEFAULT_CONTEXT_EVAL_CASES_DIR).resolve()
-    resolved_target = target.resolve()
-    if allowed_root not in resolved_target.parents:
-        raise ValueError("Fixture path must be inside the promoted fixture directory")
-    if not resolved_target.exists() or not resolved_target.is_file():
-        raise ValueError("Fixture file not found")
+    resolved_target = resolve_promoted_context_eval_fixture_path(fixture_path, fixtures_dir=fixtures_dir)
     payload = load_context_eval_case_payload(resolved_target)
     metadata = context_eval_fixture_metadata_from_payload(payload)
     payload["fixture_metadata"] = {
@@ -710,10 +742,72 @@ def _triage_bucket_for_failed_check(failed_check: str) -> Dict[str, object]:
     }
 
 
+def _bucket_keys_for_context_eval_case(case: ContextEvalCase) -> List[str]:
+    """Infer likely triage bucket keys covered by one promoted fixture."""
+    keys: List[str] = []
+    expectation = case.expectation
+    for key in expectation.required_selected_keys:
+        cleaned = str(key).strip()
+        if cleaned:
+            keys.append(f"missing_selected:{cleaned}")
+    for key in expectation.forbidden_selected_keys:
+        cleaned = str(key).strip()
+        if cleaned:
+            keys.append(f"forbidden_selected:{cleaned}")
+    return keys
+
+
+def promoted_fixture_bucket_coverage(
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> Dict[str, Dict[str, object]]:
+    """Return triage coverage metadata keyed by bucket key from promoted fixtures."""
+    coverage: Dict[str, Dict[str, object]] = {}
+    for fixture in list_promoted_context_eval_fixtures(fixtures_dir):
+        try:
+            detail = load_promoted_context_eval_fixture_detail(str(fixture.get("path") or ""), fixtures_dir=fixtures_dir)
+            payload = detail.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+            case = context_eval_case_from_dict(payload)
+            review_status = normalize_context_eval_review_status(str(detail.get("review_status") or "candidate"))
+            for bucket_key in _bucket_keys_for_context_eval_case(case):
+                entry = coverage.setdefault(
+                    bucket_key,
+                    {
+                        "bucket_key": bucket_key,
+                        "total_fixtures": 0,
+                        "candidate_count": 0,
+                        "accepted_count": 0,
+                        "superseded_count": 0,
+                        "fixtures": [],
+                    },
+                )
+                entry["total_fixtures"] = int(entry["total_fixtures"]) + 1
+                if review_status == "accepted":
+                    entry["accepted_count"] = int(entry["accepted_count"]) + 1
+                elif review_status == "superseded":
+                    entry["superseded_count"] = int(entry["superseded_count"]) + 1
+                else:
+                    entry["candidate_count"] = int(entry["candidate_count"]) + 1
+                fixtures = entry.get("fixtures")
+                if isinstance(fixtures, list) and len(fixtures) < 5:
+                    fixtures.append(
+                        {
+                            "name": str(detail.get("name") or ""),
+                            "path": str(detail.get("path") or ""),
+                            "review_status": review_status,
+                        }
+                    )
+        except Exception:
+            continue
+    return coverage
+
+
 def summarize_captured_context_eval_results(results: Sequence[CapturedContextEvalResult]) -> Dict[str, object]:
     """Aggregate replay results from captured workspace payloads."""
     materialized = list(results)
     eval_summary = summarize_context_eval_results([item.result for item in materialized])
+    fixture_coverage = promoted_fixture_bucket_coverage()
     failed_check_counts = Counter(
         failed_check
         for item in materialized
@@ -792,12 +886,51 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             ):
                 bucket["example_cases"].append(example_case)
 
+    def build_promotion_suggestion(
+        bucket: Dict[str, object],
+        coverage: Dict[str, object],
+        case_count: int,
+    ) -> Dict[str, object]:
+        accepted_count = int(coverage.get("accepted_count", 0) or 0)
+        candidate_count = int(coverage.get("candidate_count", 0) or 0)
+        failure_count = int(bucket["failure_count"])
+        severity = str(bucket["severity"])
+        should_suggest = (
+            accepted_count == 0
+            and candidate_count == 0
+            and (case_count >= 2 or failure_count >= 3 or severity == "high")
+        )
+        if case_count >= 2:
+            reason = f"Repeated across {case_count} captured cases without fixture coverage."
+        elif failure_count >= 3:
+            reason = f"Repeated {failure_count} times in replay without fixture coverage."
+        elif severity == "high":
+            reason = "High-severity failure pattern without accepted or candidate fixture coverage."
+        else:
+            reason = "No promotion suggestion yet."
+        return {
+            "should_suggest": should_suggest,
+            "reason": reason,
+            "suggested_review_status": "candidate",
+        }
+
     ranked_triage_buckets = []
     for bucket in triage_buckets.values():
         case_count = len(bucket["case_refs"])
         priority_score = round(
             float(bucket["failure_count"]) * float(bucket["severity_rank"]) + case_count * 0.25,
             4,
+        )
+        coverage = fixture_coverage.get(
+            bucket["key"],
+            {
+                "bucket_key": bucket["key"],
+                "total_fixtures": 0,
+                "candidate_count": 0,
+                "accepted_count": 0,
+                "superseded_count": 0,
+                "fixtures": [],
+            },
         )
         ranked_triage_buckets.append(
             {
@@ -813,6 +946,8 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
                 "phase_counts": dict(bucket["phase_counts"].most_common()),
                 "sample_failed_checks": list(bucket["sample_failed_checks"]),
                 "example_cases": list(bucket["example_cases"]),
+                "fixture_coverage": coverage,
+                "promotion_suggestion": build_promotion_suggestion(bucket, coverage, case_count),
             }
         )
     ranked_triage_buckets.sort(
