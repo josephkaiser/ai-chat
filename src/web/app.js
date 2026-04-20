@@ -15,9 +15,7 @@ const state = {
     activeAssistantIndex: -1,
     currentDirectoryPath: ".",
     fileItems: [],
-    selectedFilePath: "",
-    contextEvalReport: null,
-    contextEvalLoading: false
+    selectedFilePath: ""
 };
 function query(selector) {
     const element = document.querySelector(selector);
@@ -28,11 +26,10 @@ function query(selector) {
 }
 const workspaceSelect = query("#workspaceSelect");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
-const refreshContextEvalButton = query("#refreshContextEvalButton");
 const newChatButton = query("#newChatButton");
 const conversationList = query("#conversationList");
-const contextEvalReport = query("#contextEvalReport");
 const chatTitle = query("#chatTitle");
+const chatMeta = query("#chatMeta");
 const connectionBadge = query("#connectionBadge");
 const modelBadge = query("#modelBadge");
 const chatMessages = query("#chatMessages");
@@ -41,6 +38,7 @@ const composerInput = query("#composerInput");
 const composerHint = query("#composerHint");
 const sendButton = query("#sendButton");
 const viewerTitle = query("#viewerTitle");
+const viewerMeta = query("#viewerMeta");
 const upDirectoryButton = query("#upDirectoryButton");
 const directoryPath = query("#directoryPath");
 const fileList = query("#fileList");
@@ -85,11 +83,6 @@ function formatBytes(value) {
     }
     return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
-function dirname(path) {
-    const parts = path.split("/").filter(Boolean);
-    parts.pop();
-    return parts.length ? parts.join("/") : ".";
-}
 function parentDirectory(path) {
     if (!path || path === ".") return ".";
     const parts = path.split("/").filter(Boolean);
@@ -99,10 +92,31 @@ function parentDirectory(path) {
 function fileViewUrl(path) {
     return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
 }
+function currentWorkspaceName() {
+    return state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
+}
+function syncRuntimeSummary() {
+    if (state.connectionState === "offline") {
+        connectionBadge.className = "status-badge offline";
+        connectionBadge.textContent = "Offline";
+        return;
+    }
+    if (state.generating) {
+        connectionBadge.className = "status-badge streaming";
+        connectionBadge.textContent = "Streaming";
+        return;
+    }
+    if (!state.modelAvailable) {
+        connectionBadge.className = "status-badge loading";
+        connectionBadge.textContent = "Loading";
+        return;
+    }
+    connectionBadge.className = "status-badge online";
+    connectionBadge.textContent = "Ready";
+}
 function setConnectionState(nextState) {
     state.connectionState = nextState;
-    connectionBadge.className = `status-badge ${nextState}`;
-    connectionBadge.textContent = nextState === "online" ? "Connected" : nextState === "streaming" ? "Streaming" : "Offline";
+    syncRuntimeSummary();
 }
 function setGenerating(nextValue) {
     state.generating = nextValue;
@@ -120,6 +134,15 @@ function truncatePreview(value, limit = 88) {
 function titleFromMessage(content) {
     const firstLine = content.split("\n").map((line)=>line.trim()).find(Boolean) || "New chat";
     return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
+}
+function updateChatMeta() {
+    const workspaceName = currentWorkspaceName();
+    if (!state.messages.length) {
+        chatMeta.textContent = `Start a new conversation in ${workspaceName}.`;
+        return;
+    }
+    const countLabel = `${state.messages.length} message${state.messages.length === 1 ? "" : "s"}`;
+    chatMeta.textContent = `${countLabel} in ${workspaceName}.`;
 }
 function renderInlineMarkdown(text) {
     return text.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
@@ -162,6 +185,7 @@ function renderMessages() {
                 </div>
             </div>
         `;
+        updateChatMeta();
         return;
     }
     chatMessages.innerHTML = state.messages.map((message)=>{
@@ -178,6 +202,7 @@ function renderMessages() {
         `;
     }).join("");
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    updateChatMeta();
 }
 function renderConversations() {
     const items = [
@@ -231,79 +256,9 @@ function renderWorkspaceOptions() {
         workspaceSelect.value = state.currentWorkspaceId;
     }
 }
-function formatDecimal(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return "0.00";
-    return numeric.toFixed(2);
-}
-function renderContextEvalReport() {
-    if (state.contextEvalLoading) {
-        contextEvalReport.innerHTML = `
-            <div class="context-eval-card context-eval-empty">
-                <div class="empty-state-title">Loading report</div>
-                <p>Gathering replay captures and failure summaries.</p>
-            </div>
-        `;
-        return;
-    }
-    const report = state.contextEvalReport;
-    if (!report || !report.total_cases) {
-        contextEvalReport.innerHTML = `
-            <div class="context-eval-card context-eval-empty">
-                <div class="empty-state-title">${escapeHtml(report?.error ? "Report unavailable" : "No replay captures")}</div>
-                <p>${escapeHtml(report?.error || "Negative feedback, retries, and corrective follow-ups will start appearing here once the app captures them.")}</p>
-            </div>
-        `;
-        return;
-    }
-    const failedCheckItems = Object.entries(report.failed_check_counts || {}).slice(0, 4);
-    const recentFailures = (report.recent_failures || []).slice(0, 3);
-    const triggerSummary = Object.entries(report.trigger_counts || {}).map(([key, count])=>`${key}: ${count}`).join(" • ");
-    contextEvalReport.innerHTML = `
-        <div class="context-eval-card">
-            <div class="context-eval-stats">
-                <div class="context-eval-stat">
-                    <strong>${escapeHtml(String(report.total_cases || 0))}</strong>
-                    <span class="context-eval-label">Captured Cases</span>
-                </div>
-                <div class="context-eval-stat">
-                    <strong>${escapeHtml(String(report.failed_cases || 0))}</strong>
-                    <span class="context-eval-label">Failing Replays</span>
-                </div>
-                <div class="context-eval-stat">
-                    <strong>${escapeHtml(String(report.passed_cases || 0))}</strong>
-                    <span class="context-eval-label">Passing Replays</span>
-                </div>
-                <div class="context-eval-stat">
-                    <strong>${escapeHtml(formatDecimal(report.average_score || 0))}</strong>
-                    <span class="context-eval-label">Average Score</span>
-                </div>
-            </div>
-        </div>
-        <div class="context-eval-card">
-            <div class="conversation-title">Top Failure Checks</div>
-            ${failedCheckItems.length ? `
-                <ol class="context-eval-list">
-                    ${failedCheckItems.map(([label, count])=>`<li>${escapeHtml(label)} <strong>(${escapeHtml(String(count))})</strong></li>`).join("")}
-                </ol>
-            ` : `<p class="context-eval-meta">No failed checks in the current replay slice.</p>`}
-        </div>
-        <div class="context-eval-card">
-            <div class="conversation-title">Recent Failures</div>
-            ${recentFailures.length ? `
-                <ol class="context-eval-list">
-                    ${recentFailures.map((item)=>`<li>${escapeHtml(item.name || "Unnamed case")} <span class="context-eval-meta">(${escapeHtml(item.trigger || "unknown")} • score ${escapeHtml(formatDecimal(item.score || 0))})</span></li>`).join("")}
-                </ol>
-            ` : `<p class="context-eval-meta">No recent failures in this scope.</p>`}
-        </div>
-        <div class="context-eval-card">
-            <div class="conversation-title">Triggers</div>
-            <p class="context-eval-meta">${escapeHtml(triggerSummary || "No trigger data available.")}</p>
-        </div>
-    `;
-}
 function renderFileList() {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
+    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
     const buttons = [];
     if (state.currentDirectoryPath !== ".") {
         buttons.push(`
@@ -354,6 +309,8 @@ function renderFileList() {
     });
 }
 function renderPreviewEmpty(title, body) {
+    viewerTitle.textContent = title;
+    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
     filePreview.innerHTML = `
         <div class="empty-state">
             <div>
@@ -366,6 +323,7 @@ function renderPreviewEmpty(title, body) {
 function renderPreview(payload) {
     const contentKind = payload.content_kind || "text";
     viewerTitle.textContent = payload.path;
+    viewerMeta.textContent = `${contentKind.toUpperCase()} preview`;
     if (contentKind === "image") {
         filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}">`;
         return;
@@ -422,11 +380,12 @@ async function fetchHealth() {
     try {
         const health = await fetchJson("/health");
         state.modelAvailable = Boolean(health.model_available);
-        modelBadge.textContent = health.model_available ? `Model ready: ${health.model}` : health.message || "Model unavailable";
+        modelBadge.textContent = health.model_available ? `Model ready: ${health.model}` : `Model loading: ${health.model}`;
     } catch (error) {
         state.modelAvailable = false;
         modelBadge.textContent = error instanceof Error ? error.message : "Health check failed";
     }
+    syncRuntimeSummary();
 }
 async function loadWorkspaces(preferredId = "") {
     const payload = await fetchJson("/api/workspaces");
@@ -437,6 +396,7 @@ async function loadWorkspaces(preferredId = "") {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
     }
     renderWorkspaceOptions();
+    updateChatMeta();
     if (nextWorkspaceId) {
         await loadDirectory(".");
     } else {
@@ -454,35 +414,6 @@ async function loadConversations() {
     }
     renderConversations();
 }
-async function loadContextEvalReport() {
-    const params = new URLSearchParams();
-    const hasSavedConversation = state.currentConversationId && state.conversations.some((conversation)=>conversation.id === state.currentConversationId);
-    if (hasSavedConversation) {
-        params.set("conversation_id", state.currentConversationId);
-    } else if (state.currentWorkspaceId) {
-        params.set("workspace_id", state.currentWorkspaceId);
-    }
-    params.set("limit", "50");
-    state.contextEvalLoading = true;
-    renderContextEvalReport();
-    try {
-        state.contextEvalReport = await fetchJson(`/api/context-evals/report?${params.toString()}`);
-    } catch (error) {
-        state.contextEvalReport = {
-            total_cases: 0,
-            failed_cases: 0,
-            passed_cases: 0,
-            average_score: 0,
-            failed_check_counts: {},
-            recent_failures: [],
-            trigger_counts: {},
-            error: error instanceof Error ? error.message : "Could not load replay report."
-        };
-    } finally {
-        state.contextEvalLoading = false;
-        renderContextEvalReport();
-    }
-}
 async function loadConversation(id) {
     const payload = await fetchJson(`/api/conversation/${encodeURIComponent(id)}`);
     state.currentConversationId = id;
@@ -497,7 +428,6 @@ async function loadConversation(id) {
         renderConversations();
     }
     renderMessages();
-    void loadContextEvalReport();
 }
 function startNewChat() {
     state.currentConversationId = generateId();
@@ -507,7 +437,6 @@ function startNewChat() {
     chatTitle.textContent = state.currentConversationTitle;
     renderMessages();
     renderConversations();
-    void loadContextEvalReport();
 }
 function ensureAssistantMessage() {
     const existing = state.messages[state.activeAssistantIndex];
@@ -696,18 +625,15 @@ function attachEvents() {
         void loadDirectory(state.currentDirectoryPath);
         if (state.selectedFilePath) void openFile(state.selectedFilePath);
     });
-    refreshContextEvalButton.addEventListener("click", ()=>{
-        void loadContextEvalReport();
-    });
     workspaceSelect.addEventListener("change", async ()=>{
         const nextWorkspaceId = workspaceSelect.value;
         if (!nextWorkspaceId || nextWorkspaceId === state.currentWorkspaceId) return;
         state.currentWorkspaceId = nextWorkspaceId;
+        state.selectedFilePath = "";
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
         startNewChat();
         await loadDirectory(".");
         renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
-        await loadContextEvalReport();
     });
     upDirectoryButton.addEventListener("click", ()=>{
         void loadDirectory(parentDirectory(state.currentDirectoryPath));
@@ -727,13 +653,11 @@ async function bootstrap() {
     attachEvents();
     renderMessages();
     renderConversations();
-    renderContextEvalReport();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     connectWebSocket();
     await fetchHealth();
     await loadWorkspaces();
     await loadConversations();
-    await loadContextEvalReport();
     if (state.conversations.length) {
         await loadConversation(state.conversations[0].id);
     } else {

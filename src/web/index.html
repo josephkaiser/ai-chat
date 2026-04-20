@@ -13,7 +13,7 @@
             <div class="sidebar-brand">
                 <div class="sidebar-eyebrow">Local Workspace</div>
                 <h1>{{ app_title }}</h1>
-                <p>Fresh chat app plus file viewer.</p>
+                <p>Chat on the left. Open files on the right.</p>
             </div>
 
             <section class="sidebar-panel">
@@ -24,33 +24,26 @@
                 </div>
             </section>
 
-            <section class="sidebar-panel">
+            <section class="sidebar-panel sidebar-panel-fill">
                 <div class="sidebar-panel-header">
                     <span>Chats</span>
                     <button id="newChatButton" type="button">New Chat</button>
                 </div>
                 <div id="conversationList" class="conversation-list"></div>
             </section>
-
-            <section class="sidebar-panel">
-                <div class="sidebar-panel-header">
-                    <span>Replay Report</span>
-                    <button id="refreshContextEvalButton" type="button">Refresh Report</button>
-                </div>
-                <div id="contextEvalReport" class="context-eval-report"></div>
-            </section>
         </aside>
 
         <main class="main-grid">
             <section class="panel chat-panel">
                 <header class="panel-header">
-                    <div>
-                        <div class="panel-eyebrow">Chat</div>
+                    <div class="header-copy">
+                        <div class="panel-eyebrow">Conversation</div>
                         <h2 id="chatTitle">New chat</h2>
+                        <p id="chatMeta" class="panel-subtitle">Start a new conversation in the current workspace.</p>
                     </div>
                     <div class="status-stack">
                         <span id="connectionBadge" class="status-badge offline">Offline</span>
-                        <span id="modelBadge" class="status-note">Checking model…</span>
+                        <span id="modelBadge" class="status-note">Checking runtime…</span>
                     </div>
                 </header>
 
@@ -72,9 +65,10 @@
 
             <section class="panel viewer-panel">
                 <header class="panel-header viewer-header">
-                    <div>
-                        <div class="panel-eyebrow">Files</div>
+                    <div class="header-copy">
+                        <div class="panel-eyebrow">Selected File</div>
                         <h2 id="viewerTitle">Workspace viewer</h2>
+                        <p id="viewerMeta" class="panel-subtitle">Browse the workspace and preview a file here.</p>
                     </div>
                     <button id="upDirectoryButton" type="button">Up One Level</button>
                 </header>

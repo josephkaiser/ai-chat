@@ -89,6 +89,7 @@ const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton
 const newChatButton = query<HTMLButtonElement>("#newChatButton");
 const conversationList = query<HTMLDivElement>("#conversationList");
 const chatTitle = query<HTMLHeadingElement>("#chatTitle");
+const chatMeta = query<HTMLParagraphElement>("#chatMeta");
 const connectionBadge = query<HTMLSpanElement>("#connectionBadge");
 const modelBadge = query<HTMLSpanElement>("#modelBadge");
 const chatMessages = query<HTMLDivElement>("#chatMessages");
@@ -97,6 +98,7 @@ const composerInput = query<HTMLTextAreaElement>("#composerInput");
 const composerHint = query<HTMLSpanElement>("#composerHint");
 const sendButton = query<HTMLButtonElement>("#sendButton");
 const viewerTitle = query<HTMLHeadingElement>("#viewerTitle");
+const viewerMeta = query<HTMLParagraphElement>("#viewerMeta");
 const upDirectoryButton = query<HTMLButtonElement>("#upDirectoryButton");
 const directoryPath = query<HTMLDivElement>("#directoryPath");
 const fileList = query<HTMLDivElement>("#fileList");
@@ -144,12 +146,6 @@ function formatBytes(value?: number | null): string {
     return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-function dirname(path: string): string {
-    const parts = path.split("/").filter(Boolean);
-    parts.pop();
-    return parts.length ? parts.join("/") : ".";
-}
-
 function parentDirectory(path: string): string {
     if (!path || path === ".") return ".";
     const parts = path.split("/").filter(Boolean);
@@ -161,12 +157,36 @@ function fileViewUrl(path: string): string {
     return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
 }
 
+function currentWorkspaceName(): string {
+    return state.workspaces.find((workspace) => workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
+}
+
+function syncRuntimeSummary(): void {
+    if (state.connectionState === "offline") {
+        connectionBadge.className = "status-badge offline";
+        connectionBadge.textContent = "Offline";
+        return;
+    }
+
+    if (state.generating) {
+        connectionBadge.className = "status-badge streaming";
+        connectionBadge.textContent = "Streaming";
+        return;
+    }
+
+    if (!state.modelAvailable) {
+        connectionBadge.className = "status-badge loading";
+        connectionBadge.textContent = "Loading";
+        return;
+    }
+
+    connectionBadge.className = "status-badge online";
+    connectionBadge.textContent = "Ready";
+}
+
 function setConnectionState(nextState: ConnectionState): void {
     state.connectionState = nextState;
-    connectionBadge.className = `status-badge ${nextState}`;
-    connectionBadge.textContent = nextState === "online"
-        ? "Connected"
-        : (nextState === "streaming" ? "Streaming" : "Offline");
+    syncRuntimeSummary();
 }
 
 function setGenerating(nextValue: boolean): void {
@@ -188,6 +208,17 @@ function truncatePreview(value: string, limit = 88): string {
 function titleFromMessage(content: string): string {
     const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "New chat";
     return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
+}
+
+function updateChatMeta(): void {
+    const workspaceName = currentWorkspaceName();
+    if (!state.messages.length) {
+        chatMeta.textContent = `Start a new conversation in ${workspaceName}.`;
+        return;
+    }
+
+    const countLabel = `${state.messages.length} message${state.messages.length === 1 ? "" : "s"}`;
+    chatMeta.textContent = `${countLabel} in ${workspaceName}.`;
 }
 
 function renderInlineMarkdown(text: string): string {
@@ -249,6 +280,7 @@ function renderMessages(): void {
                 </div>
             </div>
         `;
+        updateChatMeta();
         return;
     }
 
@@ -268,6 +300,7 @@ function renderMessages(): void {
     }).join("");
 
     chatMessages.scrollTop = chatMessages.scrollHeight;
+    updateChatMeta();
 }
 
 function renderConversations(): void {
@@ -330,6 +363,7 @@ function renderWorkspaceOptions(): void {
 
 function renderFileList(): void {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
+    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
 
     const buttons: string[] = [];
     if (state.currentDirectoryPath !== ".") {
@@ -382,6 +416,8 @@ function renderFileList(): void {
 }
 
 function renderPreviewEmpty(title: string, body: string): void {
+    viewerTitle.textContent = title;
+    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
     filePreview.innerHTML = `
         <div class="empty-state">
             <div>
@@ -395,6 +431,7 @@ function renderPreviewEmpty(title: string, body: string): void {
 function renderPreview(payload: WorkspaceFilePayload): void {
     const contentKind = payload.content_kind || "text";
     viewerTitle.textContent = payload.path;
+    viewerMeta.textContent = `${contentKind.toUpperCase()} preview`;
 
     if (contentKind === "image") {
         filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}">`;
@@ -472,11 +509,13 @@ async function fetchHealth(): Promise<void> {
         state.modelAvailable = Boolean(health.model_available);
         modelBadge.textContent = health.model_available
             ? `Model ready: ${health.model}`
-            : (health.message || "Model unavailable");
+            : `Model loading: ${health.model}`;
     } catch (error) {
         state.modelAvailable = false;
         modelBadge.textContent = error instanceof Error ? error.message : "Health check failed";
     }
+
+    syncRuntimeSummary();
 }
 
 async function loadWorkspaces(preferredId = ""): Promise<void> {
@@ -498,6 +537,7 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
     }
 
     renderWorkspaceOptions();
+    updateChatMeta();
     if (nextWorkspaceId) {
         await loadDirectory(".");
     } else {
@@ -777,6 +817,7 @@ function attachEvents(): void {
         const nextWorkspaceId = workspaceSelect.value;
         if (!nextWorkspaceId || nextWorkspaceId === state.currentWorkspaceId) return;
         state.currentWorkspaceId = nextWorkspaceId;
+        state.selectedFilePath = "";
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
         startNewChat();
         await loadDirectory(".");
