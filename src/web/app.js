@@ -31,7 +31,9 @@ const state = {
     compareFixturePath: "",
     selectedFixtureDetail: null,
     compareFixtureDetail: null,
-    fixtureDetailLoading: false
+    fixtureDetailLoading: false,
+    stickChatToBottom: true,
+    handledArtifactKeys: new Set()
 };
 function query(selector) {
     const element = document.querySelector(selector);
@@ -47,8 +49,10 @@ const workspaceSettingsButton = query("#workspaceSettingsButton");
 const refreshContextEvalButton = query("#refreshContextEvalButton");
 const newChatButton = query("#newChatButton");
 const conversationList = query("#conversationList");
+const workspaceName = query("#workspaceName");
 const connectionBadge = query("#connectionBadge");
 const chatMessages = query("#chatMessages");
+const scrollToBottomButton = query("#scrollToBottomButton");
 const composerForm = query("#composerForm");
 const composerInput = query("#composerInput");
 const composerHint = query("#composerHint");
@@ -344,7 +348,22 @@ function fileViewUrl(path) {
     return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
 }
 function currentWorkspaceName() {
-    return state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
+    const workspace = state.workspaces.find((entry)=>entry.id === state.currentWorkspaceId);
+    if (!workspace) return "";
+    const displayName = String(workspace.display_name || "").trim();
+    const genericNames = new Set([
+        "workspace",
+        "project",
+        "root"
+    ]);
+    if (displayName && !genericNames.has(displayName.toLowerCase())) {
+        return displayName;
+    }
+    const rootPath = String(workspace.root_path || "").trim().replace(/\/+$/, "");
+    if (!rootPath) return "";
+    const segments = rootPath.split("/").filter(Boolean);
+    const leafName = segments.at(-1) || rootPath;
+    return genericNames.has(leafName.toLowerCase()) ? "" : leafName;
 }
 function defaultComposerStatus() {
     if (state.connectionState === "offline") {
@@ -362,22 +381,30 @@ function setViewerMode(nextMode) {
 function syncShellLayout() {
     document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
     document.body.dataset.viewerMode = state.viewerMode;
-    const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
+    const sidebarToggleLabel = state.leftSidebarOpen ? "Close sidebar" : "Open sidebar";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
-    sidebarToggle.setAttribute("title", sidebarToggleLabel);
-    const viewerToggleTitle = state.viewerMode === "closed" ? "Open files" : "Close files";
+    sidebarToggle.dataset.tooltip = sidebarToggleLabel;
+    const viewerToggleTitle = state.viewerMode === "closed" ? "Open file browser" : "Close file browser";
     viewerToggle.setAttribute("aria-label", viewerToggleTitle);
-    viewerToggle.setAttribute("title", viewerToggleTitle);
+    viewerToggle.dataset.tooltip = viewerToggleTitle;
     viewerToggle.disabled = !state.currentWorkspaceId;
     refreshWorkspaceButton.hidden = state.viewerMode === "closed";
     refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
     const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode !== "closed";
     viewerModeButton.hidden = !showModeButton;
     if (showModeButton) {
-        viewerModeButton.textContent = state.viewerMode === "file" ? "Show Files" : "Open File";
+        const viewerModeLabel = state.viewerMode === "file" ? "Show file list" : "Open selected file";
+        viewerModeButton.setAttribute("aria-label", viewerModeLabel);
+        viewerModeButton.dataset.tooltip = viewerModeLabel;
     }
     upDirectoryButton.hidden = state.viewerMode !== "tree";
     viewerCloseButton.hidden = state.viewerMode === "closed";
+    window.requestAnimationFrame(()=>{
+        if (state.stickChatToBottom) {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        syncScrollJumpButton();
+    });
 }
 function syncRuntimeSummary() {
     if (state.connectionState === "offline") {
@@ -415,9 +442,198 @@ function truncatePreview(value, limit = 88) {
     if (flattened.length <= limit) return flattened;
     return `${flattened.slice(0, limit - 1)}…`;
 }
+const ARTIFACT_HELPER_TEXT_PATTERNS = [
+    /^\s*(?:you can )?(?:open|view|inspect|see|read|preview|find)\b[^.!?]*?(?:here|below)?[:.]?\s*$/i,
+    /^\s*(?:saved plan(?: and notes)?|saved progress|task board|feedback digest|full feedback digest|artifact|artifacts?)[:.]?\s*$/i
+];
+const MATERIALIZABLE_ARTIFACT_EXTENSIONS = new Set([
+    "md",
+    "txt",
+    "py",
+    "js",
+    "ts",
+    "tsx",
+    "jsx",
+    "json",
+    "html",
+    "css",
+    "sql",
+    "sh",
+    "bash",
+    "zsh",
+    "yaml",
+    "yml",
+    "toml",
+    "csv",
+    "xml",
+    "svg",
+    "c",
+    "h",
+    "cpp",
+    "hpp",
+    "java",
+    "rs",
+    "go",
+    "rb",
+    "php"
+]);
 function titleFromMessage(content) {
     const firstLine = content.split("\n").map((line)=>line.trim()).find(Boolean) || "New chat";
     return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
+}
+function isNearBottom(element, threshold = 72) {
+    return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+function syncScrollJumpButton() {
+    scrollToBottomButton.hidden = !state.messages.length || state.stickChatToBottom;
+}
+function scrollChatToBottom(behavior = "auto") {
+    chatMessages.scrollTo({
+        top: chatMessages.scrollHeight,
+        behavior
+    });
+    state.stickChatToBottom = true;
+    syncScrollJumpButton();
+}
+function extractArtifactReferences(message) {
+    const refs = [];
+    for (const match of String(message || "").matchAll(/\[\[artifact:([^\]]+)\]\]/gi)){
+        const cleaned = String(match[1] || "").trim();
+        if (cleaned && !refs.includes(cleaned)) {
+            refs.push(cleaned);
+        }
+    }
+    return refs;
+}
+function resolveArtifactReferencePath(path) {
+    return String(path || "").trim().replace(/^`|`$/g, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+}
+function artifactFileExtension(path) {
+    const fileName = resolveArtifactReferencePath(path).split("/").pop() || "";
+    const match = fileName.match(/\.([A-Za-z0-9]+)$/);
+    return String(match?.[1] || "").toLowerCase();
+}
+function unwrapSingleFence(raw) {
+    const trimmed = String(raw || "").trim();
+    const match = trimmed.match(/^```([^\n`]*)\n([\s\S]*)\n```$/);
+    if (!match) return null;
+    return {
+        language: normalizeCodeLanguage(match[1] || ""),
+        body: String(match[2] || "").replace(/\r\n?/g, "\n")
+    };
+}
+function stripArtifactHelperLines(text) {
+    return String(text || "").split(/\r?\n/).filter((line)=>!ARTIFACT_HELPER_TEXT_PATTERNS.some((pattern)=>pattern.test(line.trim()))).join("\n");
+}
+function parseArtifactMessage(raw) {
+    const cleaned = stripArtifactHelperLines(raw);
+    const artifactMatch = cleaned.match(/\[\[artifact:([^\]]+)\]\]/i);
+    const artifactPaths = extractArtifactReferences(cleaned).map(resolveArtifactReferencePath);
+    if (!artifactMatch) {
+        return {
+            artifactPaths,
+            displayContent: cleaned,
+            materializedBody: ""
+        };
+    }
+    const before = cleaned.slice(0, artifactMatch.index || 0).trim();
+    const after = cleaned.slice((artifactMatch.index || 0) + artifactMatch[0].length).trim();
+    const displayParts = [
+        before
+    ];
+    if (!after) {
+        displayParts.push(cleaned.replace(/\[\[artifact:[^\]]+\]\]/gi, "").trim());
+    }
+    return {
+        artifactPaths,
+        displayContent: displayParts.filter(Boolean).join("\n\n").trim(),
+        materializedBody: after
+    };
+}
+function shouldMaterializeArtifact(path, body) {
+    if (!resolveArtifactReferencePath(path) || !String(body || "").trim()) return false;
+    const extension = artifactFileExtension(path);
+    return !extension || MATERIALIZABLE_ARTIFACT_EXTENSIONS.has(extension);
+}
+function normalizeArtifactBodyForWrite(path, raw) {
+    const trimmed = String(raw || "").trim();
+    const fence = unwrapSingleFence(trimmed);
+    if (!fence) return trimmed;
+    const extension = artifactFileExtension(path);
+    if (!extension) return fence.body;
+    if (extension === "md" && [
+        "markdown",
+        "md",
+        "text"
+    ].includes(fence.language)) {
+        return fence.body;
+    }
+    if (extension === fence.language) {
+        return fence.body;
+    }
+    if (extension === "py" && fence.language === "python") return fence.body;
+    if (extension === "js" && fence.language === "javascript") return fence.body;
+    if (extension === "ts" && fence.language === "javascript") return fence.body;
+    if (extension === "sh" && fence.language === "bash") return fence.body;
+    return trimmed;
+}
+async function materializeArtifactFromAssistant(path, content) {
+    if (!state.currentWorkspaceId) return;
+    await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            path,
+            content: normalizeArtifactBodyForWrite(path, content)
+        })
+    });
+    await loadDirectory(parentDirectory(path));
+    await openFile(path);
+}
+function renderArtifactReferences(paths) {
+    if (!paths.length) return "";
+    return `
+        <div class="artifact-ref-list">
+            ${paths.map((path)=>`
+                <button
+                    type="button"
+                    class="artifact-ref"
+                    data-artifact-path="${escapeHtml(path)}"
+                    title="${escapeHtml(path)}"
+                >
+                    ${escapeHtml(path)}
+                </button>
+            `).join("")}
+        </div>
+    `;
+}
+function maybeHandleAssistantArtifacts(message, index) {
+    if (message.role !== "assistant" || !state.currentWorkspaceId) return;
+    if (state.generating && index === state.activeAssistantIndex) return;
+    const parsed = parseArtifactMessage(message.content || "");
+    if (!parsed.artifactPaths.length) return;
+    const primaryPath = parsed.artifactPaths[0];
+    const artifactKey = [
+        state.currentConversationId,
+        primaryPath,
+        parsed.materializedBody.length,
+        parsed.materializedBody.slice(0, 120)
+    ].join(":");
+    if (state.handledArtifactKeys.has(artifactKey)) return;
+    state.handledArtifactKeys.add(artifactKey);
+    void (async ()=>{
+        try {
+            if (shouldMaterializeArtifact(primaryPath, parsed.materializedBody)) {
+                await materializeArtifactFromAssistant(primaryPath, parsed.materializedBody);
+                return;
+            }
+            await openFile(primaryPath);
+        } catch (_error) {
+            state.handledArtifactKeys.delete(artifactKey);
+        }
+    })();
 }
 function renderInlineMarkdown(text) {
     return text.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
@@ -497,6 +713,13 @@ function highlightCode(rawCode, language) {
     return highlighted.replace(/@@CODETOKEN_(\d+)@@/g, (_match, index)=>placeholders[Number(index)] || "");
 }
 function renderRichText(raw) {
+    const singleFence = unwrapSingleFence(raw);
+    if (singleFence && [
+        "markdown",
+        "md"
+    ].includes(singleFence.language)) {
+        return renderRichText(singleFence.body);
+    }
     const codeBlocks = [];
     const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code)=>{
         const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
@@ -533,19 +756,28 @@ function renderRichText(raw) {
     return blocks.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index)=>codeBlocks[Number(index)] || "");
 }
 function renderMessages() {
+    const previousScrollTop = chatMessages.scrollTop;
+    const shouldStickToBottom = state.stickChatToBottom;
     if (!state.messages.length) {
         chatMessages.innerHTML = `
             <div class="empty-state">
                 <div>
                     <div class="empty-state-title">Start a conversation</div>
-                    <p>Ask the assistant to inspect code, make a change, or explain something in the current workspace.</p>
+                    <p>Ask the assistant to inspect code, make a change, or explain something here.</p>
                 </div>
             </div>
         `;
+        state.stickChatToBottom = true;
+        syncScrollJumpButton();
         return;
     }
     chatMessages.innerHTML = state.messages.map((message)=>{
         const role = message.error ? "assistant error" : message.role;
+        const parsedArtifacts = message.role === "assistant" ? parseArtifactMessage(message.content || "") : {
+            artifactPaths: [],
+            displayContent: message.content || "",
+            materializedBody: ""
+        };
         const meta = [
             message.role === "user" ? "You" : message.role === "assistant" ? "Assistant" : "System",
             formatRelativeTime(message.timestamp)
@@ -553,11 +785,27 @@ function renderMessages() {
         return `
             <article class="message ${role}">
                 <div class="message-role">${escapeHtml(meta)}</div>
-                <div class="message-content">${renderRichText(message.content || "")}</div>
+                ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
+                <div class="message-content">${renderRichText(parsedArtifacts.displayContent || "")}</div>
             </article>
         `;
     }).join("");
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    chatMessages.querySelectorAll(".artifact-ref").forEach((button)=>{
+        button.addEventListener("click", ()=>{
+            const path = resolveArtifactReferencePath(button.dataset.artifactPath || "");
+            if (!path) return;
+            void openFile(path);
+        });
+    });
+    state.messages.forEach((message, index)=>{
+        maybeHandleAssistantArtifacts(message, index);
+    });
+    if (shouldStickToBottom) {
+        scrollChatToBottom("auto");
+    } else {
+        chatMessages.scrollTop = previousScrollTop;
+        syncScrollJumpButton();
+    }
 }
 function renderConversations() {
     const items = [
@@ -591,9 +839,11 @@ function renderConversations() {
                 class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
                 data-conversation-id="${escapeHtml(conversation.id)}"
             >
-                <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
+                <div class="conversation-head">
+                    <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
+                    <div class="conversation-time">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
+                </div>
                 <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
-                <div class="conversation-preview">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
             </button>
             <div class="conversation-actions">
                 <button type="button" class="conversation-action-button" data-action="rename" data-conversation-id="${escapeHtml(conversation.id)}" data-title="${escapeHtml(conversation.title || "Untitled chat")}">Rename</button>
@@ -625,13 +875,18 @@ function renderConversations() {
 }
 function renderWorkspaceSummary() {
     workspaceSettingsButton.disabled = false;
+    const label = currentWorkspaceName();
+    workspaceName.textContent = label;
+    workspaceName.hidden = !label;
     syncShellLayout();
 }
 function renderFileList() {
+    const previousScrollTop = fileList.scrollTop;
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
     if (state.viewerMode !== "file") {
-        viewerTitle.textContent = "Workspace files";
-        viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
+        viewerTitle.textContent = "Files";
+        viewerMeta.textContent = "";
+        viewerMeta.hidden = true;
     }
     const buttons = [];
     if (state.currentDirectoryPath !== ".") {
@@ -666,6 +921,7 @@ function renderFileList() {
             </div>
         </div>
     `;
+    fileList.scrollTop = previousScrollTop;
     fileList.querySelectorAll(".file-item").forEach((button)=>{
         button.addEventListener("click", ()=>{
             const path = button.dataset.path || "";
@@ -1049,7 +1305,8 @@ function closeSettings() {
 }
 function renderPreviewEmpty(title, body) {
     viewerTitle.textContent = title;
-    viewerMeta.textContent = state.viewerMode === "file" ? "Selected file preview" : `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
+    viewerMeta.textContent = state.viewerMode === "file" ? "Preview" : "";
+    viewerMeta.hidden = !viewerMeta.textContent;
     filePreview.innerHTML = `
         <div class="empty-state">
             <div>
@@ -1063,6 +1320,7 @@ function renderPreview(payload) {
     const contentKind = payload.content_kind || "text";
     viewerTitle.textContent = payload.path;
     viewerMeta.textContent = `${contentKind.toUpperCase()} preview`;
+    viewerMeta.hidden = false;
     if (contentKind === "image") {
         filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}">`;
         return;
@@ -1271,6 +1529,7 @@ async function loadConversation(id) {
     const payload = await fetchJson(`/api/conversation/${encodeURIComponent(id)}`);
     state.currentConversationId = id;
     state.messages = payload.messages || [];
+    state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
@@ -1289,6 +1548,7 @@ function startNewChat() {
     state.currentConversationId = generateId();
     state.currentConversationTitle = "New chat";
     state.messages = [];
+    state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
@@ -1421,6 +1681,7 @@ async function sendCurrentMessage() {
         content: message,
         timestamp: new Date().toISOString()
     });
+    state.stickChatToBottom = true;
     if (state.currentConversationTitle === "New chat") {
         state.currentConversationTitle = titleFromMessage(message);
     }
@@ -1480,6 +1741,7 @@ async function resetAppData() {
     state.currentConversationId = "";
     state.currentConversationTitle = "New chat";
     state.messages = [];
+    state.stickChatToBottom = true;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
     renderMessages();
@@ -1502,6 +1764,8 @@ async function loadDirectory(path) {
 }
 async function openFile(path) {
     if (!state.currentWorkspaceId) return;
+    const samePath = state.selectedFilePath === path;
+    const previousPreviewScrollTop = samePath ? filePreview.scrollTop : 0;
     state.selectedFilePath = path;
     state.viewerMode = "file";
     syncShellLayout();
@@ -1509,6 +1773,7 @@ async function openFile(path) {
     try {
         const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
         renderPreview(payload);
+        filePreview.scrollTop = previousPreviewScrollTop;
     } catch (error) {
         renderPreviewEmpty("Preview unavailable", error instanceof Error ? error.message : "Could not open that file.");
     }
@@ -1560,6 +1825,13 @@ function attachEvents() {
     });
     settingsOverlay.addEventListener("click", (event)=>{
         if (event.target === settingsOverlay) closeSettings();
+    });
+    chatMessages.addEventListener("scroll", ()=>{
+        state.stickChatToBottom = isNearBottom(chatMessages);
+        syncScrollJumpButton();
+    });
+    scrollToBottomButton.addEventListener("click", ()=>{
+        scrollChatToBottom("smooth");
     });
     refreshContextEvalButton.addEventListener("click", ()=>{
         void loadContextEvalReport();

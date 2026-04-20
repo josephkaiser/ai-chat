@@ -12,8 +12,8 @@
         id="sidebarToggle"
         class="shell-toggle shell-toggle-left"
         type="button"
-        aria-label="Open workspace"
-        title="Open workspace"
+        aria-label="Open sidebar"
+        data-tooltip="Open sidebar"
     >
         <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
             <rect x="2" y="3" width="16" height="14" rx="3"></rect>
@@ -28,8 +28,8 @@
         id="viewerToggle"
         class="shell-toggle shell-toggle-right"
         type="button"
-        aria-label="Open files"
-        title="Open files"
+        aria-label="Open file browser"
+        data-tooltip="Open file browser"
     >
         <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
             <path d="M6 2.5h5.5L16 7v10.5H6z"></path>
@@ -41,38 +41,57 @@
     </button>
     <div class="app-shell">
         <aside class="sidebar">
-            <div class="sidebar-brand">
-                <div class="sidebar-eyebrow">Local Workspace</div>
-                <h1>{{ app_title }}</h1>
+            <div class="sidebar-rail">
+                <button id="newChatButton" class="rail-button" type="button" aria-label="New chat" data-tooltip="New chat">
+                    <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M10 4.5v11"></path>
+                        <path d="M4.5 10h11"></path>
+                    </svg>
+                </button>
+                <button id="workspaceSettingsButton" class="rail-button" type="button" aria-label="Settings" data-tooltip="Settings">
+                    <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M10 4.25 11.5 3l1.75.75 1 .25.75 1.75L16.75 7 16 8.75l.25 1 .75 1.75L15.25 13l-1 .25L12.5 14l-1.5 1.25L9 14l-1-.75-1-.25L5.25 13l-.75-1.75.25-1L4 8.75 4.75 7l1.75-1 .25-1L7.5 3 9 4.25z"></path>
+                        <circle cx="10" cy="10" r="2.5"></circle>
+                    </svg>
+                </button>
             </div>
+            <div class="sidebar-content">
+                <div class="sidebar-brand">
+                    <h1>{{ app_title }}</h1>
+                </div>
+                <div id="workspaceName" class="sidebar-workspace-name">Loading workspace…</div>
 
-            <section class="sidebar-panel">
-                <div class="sidebar-panel-header">
-                    <span class="sidebar-panel-label">Workspace</span>
-                </div>
-                <div class="workspace-toolbar workspace-toolbar-single">
-                    <button id="workspaceSettingsButton" type="button">Settings</button>
-                </div>
-            </section>
-
-            <section class="sidebar-panel sidebar-panel-fill">
-                <div class="sidebar-panel-header">
-                    <span>Chats</span>
-                    <button id="newChatButton" type="button">New Chat</button>
-                </div>
-                <div id="conversationList" class="conversation-list"></div>
-            </section>
+                <section class="sidebar-panel sidebar-panel-fill">
+                    <div class="sidebar-panel-header">
+                        <span>Chats</span>
+                    </div>
+                    <div id="conversationList" class="conversation-list"></div>
+                </section>
+            </div>
         </aside>
 
         <main class="main-grid">
             <section class="panel chat-panel">
                 <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
+                <button
+                    id="scrollToBottomButton"
+                    class="scroll-jump"
+                    type="button"
+                    aria-label="Scroll to newest message"
+                    title="Scroll to newest message"
+                    hidden
+                >
+                    <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M10 4.5v11"></path>
+                        <path d="M5.5 11.5 10 16l4.5-4.5"></path>
+                    </svg>
+                </button>
 
                 <form id="composerForm" class="composer" autocomplete="off">
                     <textarea
                         id="composerInput"
                         rows="2"
-                        placeholder="Ask about the project, request a change, or inspect a file in the workspace."
+                        placeholder="Ask about the project, request a change, or inspect a file here."
                     ></textarea>
                     <div class="composer-actions">
                         <div class="composer-runtime">
@@ -87,15 +106,41 @@
             <section class="panel viewer-panel">
                 <header class="panel-header viewer-header">
                     <div class="header-copy">
-                        <div class="panel-eyebrow">Workspace Overlay</div>
-                        <h2 id="viewerTitle">Workspace files</h2>
+                        <h2 id="viewerTitle">Files</h2>
                         <p id="viewerMeta" class="panel-subtitle">Open the file tree or preview the selected file here.</p>
                     </div>
                     <div class="viewer-actions">
-                        <button id="refreshWorkspaceButton" type="button">Refresh</button>
-                        <button id="viewerModeButton" type="button" hidden>Open File</button>
-                        <button id="upDirectoryButton" type="button">Parent</button>
-                        <button id="viewerCloseButton" type="button">Close</button>
+                        <button id="refreshWorkspaceButton" class="icon-button" type="button" aria-label="Refresh files" data-tooltip="Refresh files">
+                            <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M15.5 7.5A6 6 0 1 0 16 11"></path>
+                                <path d="M15.5 3.75v3.75h-3.75"></path>
+                            </svg>
+                            <span class="sr-only">Refresh files</span>
+                        </button>
+                        <button id="viewerModeButton" class="icon-button" type="button" hidden aria-label="Open selected file" data-tooltip="Open selected file">
+                            <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M6 2.5h5.5L16 7v10.5H6z"></path>
+                                <path d="M11.5 2.5V7H16"></path>
+                                <path d="M8.5 10h5"></path>
+                                <path d="M8.5 12.75h5"></path>
+                                <path d="M8.5 15.5h3.5"></path>
+                            </svg>
+                            <span class="sr-only">Open selected file</span>
+                        </button>
+                        <button id="upDirectoryButton" class="icon-button" type="button" aria-label="Up one level" data-tooltip="Up one level">
+                            <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M10 15.5v-11"></path>
+                                <path d="M5.5 9 10 4.5 14.5 9"></path>
+                            </svg>
+                            <span class="sr-only">Up one level</span>
+                        </button>
+                        <button id="viewerCloseButton" class="icon-button" type="button" aria-label="Close file browser" data-tooltip="Close file browser">
+                            <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M5.5 5.5 14.5 14.5"></path>
+                                <path d="M14.5 5.5 5.5 14.5"></path>
+                            </svg>
+                            <span class="sr-only">Close files</span>
+                        </button>
                     </div>
                 </header>
 
