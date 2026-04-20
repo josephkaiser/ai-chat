@@ -69,9 +69,13 @@ from src.python.ai_chat.context_eval import (
     ContextEvalCase,
     ContextEvalExpectation,
     find_context_eval_capture_files,
+    list_promoted_context_eval_fixtures,
+    load_context_eval_case_payload,
     replay_captured_context_eval_files,
     serialize_context_eval_case,
     summarize_captured_context_eval_results,
+    update_promoted_context_eval_fixture_review_state,
+    write_promoted_context_eval_case,
 )
 from src.python.ai_chat.context_policy_program import ContextPolicyInputs
 from src.python.ai_chat.context_selection_program import ContextCandidate
@@ -8487,6 +8491,17 @@ class FeedbackRequest(BaseModel):
     feedback: Optional[str] = None
 
 
+class ContextEvalPromotionRequest(BaseModel):
+    source_path: str
+    fixture_name: Optional[str] = None
+    review_status: str = "candidate"
+
+
+class ContextEvalFixtureReviewRequest(BaseModel):
+    fixture_path: str
+    review_status: str
+
+
 class WorkspaceFileUpdateRequest(BaseModel):
     path: str
     content: str
@@ -9798,6 +9813,80 @@ async def get_context_eval_report(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Error building context eval replay report: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/context-evals/promote")
+async def promote_context_eval_capture(request: ContextEvalPromotionRequest):
+    try:
+        source_path = pathlib.Path(str(request.source_path or "").strip()).expanduser()
+        if not source_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Capture source_path must be absolute")
+        normalized_source = str(source_path).replace("\\", "/")
+        if "/.ai/context-evals/" not in normalized_source or source_path.suffix.lower() != ".json":
+            raise HTTPException(status_code=400, detail="Capture source_path must reference one replay capture JSON file")
+        if not source_path.exists() or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="Capture file not found")
+
+        payload = load_context_eval_case_payload(source_path)
+        now = utcnow_iso()
+        payload["source_path"] = str(source_path)
+        payload["promoted_at"] = now
+        fixture_name = str(request.fixture_name or "").strip()
+        target = write_promoted_context_eval_case(
+            payload,
+            fixture_name=fixture_name,
+            review_status=str(request.review_status or "candidate"),
+        )
+        normalized_payload = load_context_eval_case_payload(target)
+        return {
+            "status": "success",
+            "fixture_name": str(normalized_payload.get("name") or ""),
+            "fixture_path": str(target),
+            "source_path": str(source_path),
+            "review_status": str(
+                dict(normalized_payload.get("fixture_metadata", {})).get("review_status") or "candidate"
+            ),
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error promoting context eval capture: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/context-evals/fixtures")
+async def list_context_eval_fixtures():
+    try:
+        return {
+            "fixtures": list_promoted_context_eval_fixtures(),
+        }
+    except Exception as exc:
+        logger.error("Error listing context eval fixtures: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/context-evals/fixtures/review")
+async def update_context_eval_fixture_review(request: ContextEvalFixtureReviewRequest):
+    try:
+        target = update_promoted_context_eval_fixture_review_state(
+            request.fixture_path,
+            request.review_status,
+            updated_at=utcnow_iso(),
+        )
+        payload = load_context_eval_case_payload(target)
+        return {
+            "status": "success",
+            "fixture_name": str(payload.get("name") or ""),
+            "fixture_path": str(target),
+            "review_status": str(dict(payload.get("fixture_metadata", {})).get("review_status") or "candidate"),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error updating context eval fixture review state: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 @app.get("/api/files/list")
@@ -14653,7 +14742,7 @@ def should_upgrade_to_workspace_execution(
         return False
 
     name = str(call.get("name", "")).strip()
-    if name in {"workspace.patch_file", "workspace.render"}:
+    if name == "workspace.patch_file":
         return bool(features.workspace_write)
     if name == "workspace.run_command":
         return bool(features.workspace_write and features.workspace_run_commands)
@@ -16215,6 +16304,11 @@ async def deep_answer_directly(session: DeepSession) -> str:
         tool_name for tool_name in allowed_tools
         if tool_name not in {"workspace.patch_file", "workspace.run_command"}
     ]
+    if not message_requests_workspace_render(session.message):
+        allowed_tools = [
+            tool_name for tool_name in allowed_tools
+            if tool_name != "workspace.render"
+        ]
     direct_bundle = await assemble_direct_answer_context_async(
         session,
         retrieval_adapters=build_context_retrieval_adapters(),

@@ -512,6 +512,17 @@ class RuntimePermissionTests(unittest.TestCase):
             )
         )
 
+    def test_render_request_does_not_upgrade_respond_phase_into_execution(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+
+        self.assertFalse(
+            app.should_upgrade_to_workspace_execution(
+                {"name": "workspace.render"},
+                features,
+                "respond",
+            )
+        )
+
     def test_workspace_download_uses_clean_filename(self):
         with tempfile.TemporaryDirectory() as tempdir:
             workspace = pathlib.Path(tempdir)

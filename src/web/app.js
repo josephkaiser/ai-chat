@@ -108,6 +108,14 @@ function workspaceRelativeCapturePath(sourcePath) {
     if (markerIndex === -1) return "";
     return `.ai/context-evals/${normalized.slice(markerIndex + marker.length)}`;
 }
+function suggestContextEvalFixtureName(bucket, exampleCase) {
+    const segments = [
+        exampleCase.phase || "capture",
+        bucket.category || "context_eval",
+        bucket.key || exampleCase.name || "case"
+    ];
+    return segments.join("_").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "captured_context_eval_case";
+}
 function parentDirectory(path) {
     if (!path || path === ".") return ".";
     const parts = path.split("/").filter(Boolean);
@@ -132,7 +140,9 @@ function defaultComposerStatus() {
 function syncShellLayout() {
     document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
     document.body.dataset.viewerOpen = String(state.viewerOpen && Boolean(state.selectedFilePath));
-    sidebarToggle.textContent = state.leftSidebarOpen ? "Close Workspace" : "Workspace";
+    const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
+    sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
+    sidebarToggle.setAttribute("title", sidebarToggleLabel);
     viewerToggle.hidden = !state.selectedFilePath;
     viewerToggle.textContent = state.viewerOpen ? "Hide File" : "Selected File";
 }
@@ -179,11 +189,93 @@ function titleFromMessage(content) {
 function renderInlineMarkdown(text) {
     return text.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
+function normalizeCodeLanguage(language) {
+    const normalized = String(language || "").trim().toLowerCase();
+    if (!normalized) return "text";
+    if ([
+        "py",
+        "python"
+    ].includes(normalized)) return "python";
+    if ([
+        "js",
+        "jsx",
+        "javascript",
+        "ts",
+        "tsx",
+        "typescript"
+    ].includes(normalized)) return "javascript";
+    if ([
+        "sh",
+        "shell",
+        "bash",
+        "zsh"
+    ].includes(normalized)) return "bash";
+    if ([
+        "c",
+        "h",
+        "cpp",
+        "cxx",
+        "hpp"
+    ].includes(normalized)) return "c";
+    if ([
+        "json"
+    ].includes(normalized)) return "json";
+    return normalized;
+}
+function keywordPatternForLanguage(language) {
+    const patterns = {
+        python: String.raw`\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b`,
+        javascript: String.raw`\b(?:async|await|break|case|catch|class|const|continue|default|delete|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|switch|throw|true|try|typeof|var|while|yield)\b`,
+        bash: String.raw`\b(?:if|then|else|elif|fi|for|do|done|case|esac|while|in|function|return|local|export)\b`,
+        c: String.raw`\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b`,
+        json: String.raw`\b(?:true|false|null)\b`
+    };
+    const pattern = patterns[language];
+    return pattern ? new RegExp(pattern, "g") : null;
+}
+function commentPatternForLanguage(language) {
+    if (language === "python" || language === "bash") return /#.*$/gm;
+    if (language === "javascript" || language === "c") return /\/\/.*$|\/\*[\s\S]*?\*\//gm;
+    return null;
+}
+function highlightCode(rawCode, language) {
+    const normalizedLanguage = normalizeCodeLanguage(language);
+    const placeholders = [];
+    const stash = (text, pattern, className)=>{
+        return text.replace(pattern, (match)=>{
+            const token = `@@CODETOKEN_${placeholders.length}@@`;
+            placeholders.push(`<span class="${className}">${escapeHtml(match)}</span>`);
+            return token;
+        });
+    };
+    let highlighted = rawCode.replace(/\r\n?/g, "\n");
+    highlighted = stash(highlighted, /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, "tok-string");
+    const commentPattern = commentPatternForLanguage(normalizedLanguage);
+    if (commentPattern) {
+        highlighted = stash(highlighted, commentPattern, "tok-comment");
+    }
+    highlighted = escapeHtml(highlighted);
+    const keywordPattern = keywordPatternForLanguage(normalizedLanguage);
+    if (keywordPattern) {
+        highlighted = highlighted.replace(keywordPattern, '<span class="tok-keyword">$&</span>');
+    }
+    highlighted = highlighted.replace(/\b([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()/g, '<span class="tok-function">$1</span>');
+    highlighted = highlighted.replace(/\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
+    return highlighted.replace(/@@CODETOKEN_(\d+)@@/g, (_match, index)=>placeholders[Number(index)] || "");
+}
 function renderRichText(raw) {
     const codeBlocks = [];
-    const fenced = raw.replace(/```([\s\S]*?)```/g, (_match, code)=>{
+    const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code)=>{
         const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
-        codeBlocks.push(`<pre><code>${escapeHtml(code.trim())}</code></pre>`);
+        const normalizedLanguage = normalizeCodeLanguage(language);
+        const displayLanguage = normalizedLanguage === "text" ? "text" : normalizedLanguage;
+        const cleanCode = code.replace(/^\n+|\n+$/g, "");
+        codeBlocks.push(`
+            <div class="message-code-block">
+                <div class="message-code-header">${escapeHtml(displayLanguage)}</div>
+                <pre><code class="language-${escapeHtml(normalizedLanguage)}">${highlightCode(cleanCode, normalizedLanguage)}</code></pre>
+            </div>
+        `.trim());
         return token;
     });
     const blocks = fenced.split(/\n{2,}/).map((block)=>block.trim()).filter(Boolean).map((block)=>{
@@ -493,6 +585,13 @@ function renderContextEvalReport() {
                     >
                         Open Capture File
                     </button>
+                    <button
+                        type="button"
+                        class="context-eval-button"
+                        data-context-eval-promote-capture="true"
+                    >
+                        Promote to Fixture
+                    </button>
                 </div>
                 <div class="context-eval-drill-grid">
                     <div class="context-eval-drill-panel">
@@ -559,6 +658,32 @@ function renderContextEvalReport() {
             void openFile(selectedCapturePath, {
                 reveal: true
             });
+        });
+    });
+    contextEvalReport.querySelectorAll("[data-context-eval-promote-capture]").forEach((button)=>{
+        button.addEventListener("click", async ()=>{
+            if (!selectedExample?.source_path) return;
+            const suggestedName = selectedBucket ? suggestContextEvalFixtureName(selectedBucket, selectedExample) : selectedExample.name;
+            const fixtureName = window.prompt("Fixture name", suggestedName);
+            if (!fixtureName || !fixtureName.trim()) return;
+            const reviewStatus = window.prompt("Review status (candidate, accepted, superseded)", "candidate");
+            if (!reviewStatus || !reviewStatus.trim()) return;
+            try {
+                const response = await fetchJson("/api/context-evals/promote", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        source_path: selectedExample.source_path,
+                        fixture_name: fixtureName.trim(),
+                        review_status: reviewStatus.trim().toLowerCase()
+                    })
+                });
+                setComposerHint(`Promoted replay case as ${response.fixture_name} (${response.review_status}).`);
+            } catch (error) {
+                setComposerHint(error instanceof Error ? error.message : "Could not promote replay case.");
+            }
         });
     });
 }
