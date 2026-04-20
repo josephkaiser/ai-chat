@@ -1,17 +1,23 @@
 import pathlib
 import tempfile
 import unittest
+import json
 
 from src.python.ai_chat.context_eval import (
     CapturedContextEvalResult,
     DEFAULT_CONTEXT_EVAL_CASES,
     DEFAULT_CONTEXT_EVAL_CASES_PATH,
+    list_promoted_context_eval_fixtures,
     find_context_eval_capture_files,
     load_context_eval_cases,
+    normalize_promoted_context_eval_case_payload,
+    promoted_context_eval_case_path,
     replay_captured_context_eval_files,
     replay_captured_context_eval_payload,
     evaluate_context_case,
     serialize_context_eval_case,
+    update_promoted_context_eval_fixture_review_state,
+    write_promoted_context_eval_case,
     summarize_captured_context_eval_results,
     summarize_context_eval_results,
 )
@@ -64,6 +70,83 @@ class ContextEvalTests(unittest.TestCase):
         self.assertEqual(payload["name"], case.name)
         self.assertEqual(loaded.name, case.name)
         self.assertEqual(loaded.selection_max_sections, case.selection_max_sections)
+
+    def test_load_context_eval_cases_supports_promoted_fixture_directory(self):
+        case = DEFAULT_CONTEXT_EVAL_CASES[0]
+        payload = serialize_context_eval_case(case)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = pathlib.Path(tempdir)
+            base_path = root / "context_eval_cases.json"
+            base_path.write_text(__import__("json").dumps([payload]), encoding="utf-8")
+            promoted_dir = root / "context_eval_cases.d"
+            promoted_dir.mkdir(parents=True, exist_ok=True)
+            (promoted_dir / "captured.json").write_text(
+                json.dumps(normalize_promoted_context_eval_case_payload(payload, fixture_name="captured_verify_case")),
+                encoding="utf-8",
+            )
+            (promoted_dir / "superseded.json").write_text(
+                json.dumps(
+                    normalize_promoted_context_eval_case_payload(
+                        payload,
+                        fixture_name="superseded_verify_case",
+                        review_status="superseded",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            loaded_base = load_context_eval_cases(base_path)
+            loaded_promoted = load_context_eval_cases(promoted_dir)
+
+        self.assertEqual(len(loaded_base), 1)
+        self.assertEqual(loaded_base[0].name, case.name)
+        self.assertEqual(len(loaded_promoted), 1)
+        self.assertEqual(loaded_promoted[0].name, "captured_verify_case")
+
+    def test_write_promoted_context_eval_case_persists_normalized_fixture(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        payload["capture"] = {"trigger": "retry", "phase": "plan"}
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            target = write_promoted_context_eval_case(
+                payload,
+                fixture_name="Plan Missing Workspace Evidence",
+                review_status="accepted",
+                fixtures_dir=tempdir,
+            )
+            written = json.loads(pathlib.Path(target).read_text(encoding="utf-8"))
+
+        self.assertEqual(target.name, "plan_missing_workspace_evidence.json")
+        self.assertEqual(written["name"], "Plan Missing Workspace Evidence")
+        self.assertNotIn("capture", written)
+        self.assertIn("policy_inputs", written)
+        self.assertIn("expectation", written)
+        self.assertEqual(written["fixture_metadata"]["review_status"], "accepted")
+
+    def test_update_promoted_fixture_review_state_and_list_metadata(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            target = write_promoted_context_eval_case(
+                payload,
+                fixture_name="Review Queue Case",
+                fixtures_dir=tempdir,
+            )
+            updated = update_promoted_context_eval_fixture_review_state(
+                target,
+                "superseded",
+                fixtures_dir=tempdir,
+                updated_at="2026-04-19T12:00:00+00:00",
+            )
+            listed = list_promoted_context_eval_fixtures(tempdir)
+            written = json.loads(pathlib.Path(updated).read_text(encoding="utf-8"))
+
+        self.assertEqual(pathlib.Path(updated).resolve(), pathlib.Path(target).resolve())
+        self.assertEqual(written["fixture_metadata"]["review_status"], "superseded")
+        self.assertEqual(written["fixture_metadata"]["updated_at"], "2026-04-19T12:00:00+00:00")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["review_status"], "superseded")
 
     def test_replay_captured_context_eval_files_from_workspace_dir(self):
         case = DEFAULT_CONTEXT_EVAL_CASES[0]

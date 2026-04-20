@@ -8,7 +8,22 @@
     <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
 </head>
 <body data-app-title="{{ app_title }}" data-left-sidebar-open="false" data-viewer-open="false">
-    <button id="sidebarToggle" class="shell-toggle shell-toggle-left" type="button">Workspace</button>
+    <button
+        id="sidebarToggle"
+        class="shell-toggle shell-toggle-left"
+        type="button"
+        aria-label="Open workspace"
+        title="Open workspace"
+    >
+        <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <rect x="2" y="3" width="16" height="14" rx="3"></rect>
+            <path d="M7 4.5v11"></path>
+            <path d="M9.5 7h5"></path>
+            <path d="M9.5 10h5"></path>
+            <path d="M9.5 13h3.5"></path>
+        </svg>
+        <span class="sr-only">Toggle workspace</span>
+    </button>
     <button id="viewerToggle" class="shell-toggle shell-toggle-right" type="button" hidden>Selected File</button>
     <div class="app-shell">
         <aside class="sidebar">

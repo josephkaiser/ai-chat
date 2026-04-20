@@ -20,6 +20,7 @@
     --font-sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
     --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     --font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+    --sidebar-width: 248px;
 }
 
 *,
@@ -78,30 +79,61 @@ button:disabled {
 
 .shell-toggle {
     position: fixed;
-    top: 8px;
+    top: 10px;
     z-index: 20;
-    min-height: 28px;
-    padding: 0 9px;
+    min-height: 34px;
+    min-width: 34px;
+    padding: 0;
     border-radius: 999px;
     border: 1px solid var(--line);
     background: rgba(255, 253, 248, 0.94);
     font-size: 0.78rem;
     box-shadow: 0 8px 20px rgba(17, 30, 33, 0.08);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: left 180ms ease, right 180ms ease, transform 140ms ease, border-color 140ms ease, background 140ms ease;
 }
 
 .shell-toggle-left {
     left: 10px;
 }
 
+body[data-left-sidebar-open="true"] .shell-toggle-left {
+    left: calc(var(--sidebar-width) - 17px);
+}
+
 .shell-toggle-right {
     right: 10px;
+}
+
+.shell-toggle-icon {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .app-shell {
     height: 100vh;
     padding: 0;
     display: grid;
-    grid-template-columns: 248px minmax(0, 1fr);
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
     gap: 0;
 }
 
@@ -561,7 +593,7 @@ body[data-viewer-open="false"] .viewer-panel {
 }
 
 .message {
-    padding: 6px 8px;
+    padding: 5px 7px;
     border-radius: 10px;
     max-width: min(760px, 100%);
     white-space: normal;
@@ -572,6 +604,7 @@ body[data-viewer-open="false"] .viewer-panel {
     align-self: flex-end;
     background: var(--user-bubble);
     color: var(--user-text);
+    max-width: min(900px, 92%);
 }
 
 .message.assistant,
@@ -579,6 +612,8 @@ body[data-viewer-open="false"] .viewer-panel {
     align-self: flex-start;
     background: var(--assistant-bubble);
     border: 1px solid rgba(19, 34, 38, 0.08);
+    width: min(1180px, 100%);
+    max-width: 100%;
 }
 
 .message.error {
@@ -587,9 +622,19 @@ body[data-viewer-open="false"] .viewer-panel {
 }
 
 .message-content {
-    margin-top: 2px;
-    line-height: 1.36;
+    margin-top: 1px;
+    line-height: 1.28;
     overflow-wrap: anywhere;
+}
+
+.message-content p,
+.message-content ul,
+.message-content ol,
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content pre {
+    margin: 0;
 }
 
 .message-content pre,
@@ -602,16 +647,77 @@ body[data-viewer-open="false"] .viewer-panel {
     background: #122126;
     color: #eff8f8;
     border-radius: var(--radius-md);
-    padding: 9px;
+    padding: 8px;
     font-size: 0.78rem;
+}
+
+.message-code-block {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid rgba(19, 34, 38, 0.08);
+    background: #122126;
+}
+
+.message-code-header {
+    padding: 6px 8px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: rgba(239, 248, 248, 0.82);
+    background: rgba(239, 248, 248, 0.06);
+    border-bottom: 1px solid rgba(239, 248, 248, 0.08);
+}
+
+.message-code-block pre {
+    border: 0;
+    border-radius: 0;
 }
 
 .message-content code {
     font-family: var(--font-mono);
 }
 
+.message-content .tok-keyword {
+    color: #f4b98b;
+}
+
+.message-content .tok-string {
+    color: #8fd2b9;
+}
+
+.message-content .tok-comment {
+    color: #7e9793;
+}
+
+.message-content .tok-function {
+    color: #8cc2ff;
+}
+
+.message-content .tok-number {
+    color: #f0d48a;
+}
+
 .message-content p + p {
-    margin-top: 0.6em;
+    margin-top: 0.3em;
+}
+
+.message-content ul,
+.message-content ol {
+    padding-left: 1.1rem;
+}
+
+.message-content ul + p,
+.message-content ol + p,
+.message-content p + ul,
+.message-content p + ol,
+.message-content pre + p,
+.message-content p + pre,
+.message-content ul + pre,
+.message-content ol + pre,
+.message-content pre + ul,
+.message-content pre + ol {
+    margin-top: 0.35em;
 }
 
 .composer {

@@ -7,7 +7,7 @@ import pathlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from src.python.ai_chat.context_policy_program import (
     DEFAULT_CONTEXT_POLICY_PROGRAM,
@@ -71,6 +71,50 @@ class CapturedContextEvalResult:
 DEFAULT_CONTEXT_EVAL_CASES_PATH = (
     pathlib.Path(__file__).resolve().parent / "fixtures" / "context_eval_cases.json"
 )
+DEFAULT_CONTEXT_EVAL_CASES_DIR = (
+    pathlib.Path(__file__).resolve().parent / "fixtures" / "context_eval_cases.d"
+)
+ACTIVE_CONTEXT_EVAL_REVIEW_STATUSES = ("", "candidate", "accepted")
+
+
+@dataclass(frozen=True)
+class ContextEvalFixtureMetadata:
+    """Review metadata for one promoted context-eval fixture."""
+
+    review_status: str = "candidate"
+    promoted_at: str = ""
+    updated_at: str = ""
+    source_path: str = ""
+    source_trigger: str = ""
+    source_conversation_id: str = ""
+
+
+def normalize_context_eval_review_status(value: str) -> str:
+    """Normalize one fixture review status."""
+    normalized = str(value or "").strip().lower()
+    if normalized in {"candidate", "accepted", "superseded"}:
+        return normalized
+    return "candidate"
+
+
+def context_eval_fixture_metadata_from_dict(payload: Dict[str, object]) -> ContextEvalFixtureMetadata:
+    """Normalize review metadata embedded in one fixture payload."""
+    return ContextEvalFixtureMetadata(
+        review_status=normalize_context_eval_review_status(str(payload.get("review_status", "candidate"))),
+        promoted_at=str(payload.get("promoted_at", "")).strip(),
+        updated_at=str(payload.get("updated_at", "")).strip(),
+        source_path=str(payload.get("source_path", "")).strip(),
+        source_trigger=str(payload.get("source_trigger", "")).strip(),
+        source_conversation_id=str(payload.get("source_conversation_id", "")).strip(),
+    )
+
+
+def context_eval_fixture_metadata_from_payload(payload: Dict[str, object]) -> ContextEvalFixtureMetadata:
+    """Extract fixture review metadata from one payload, if present."""
+    raw = payload.get("fixture_metadata", {})
+    if not isinstance(raw, dict):
+        return ContextEvalFixtureMetadata()
+    return context_eval_fixture_metadata_from_dict(raw)
 
 
 def context_eval_expectation_from_dict(payload: Dict[str, object]) -> ContextEvalExpectation:
@@ -195,13 +239,136 @@ def serialize_context_eval_case(case: ContextEvalCase) -> Dict[str, object]:
     }
 
 
-def load_context_eval_cases(path: pathlib.Path | str | None = None) -> List[ContextEvalCase]:
+def slugify_context_eval_case_name(name: str) -> str:
+    """Return one filesystem-safe case name."""
+    cleaned = re.sub(r"[^a-z0-9]+", "_", str(name or "").strip().lower()).strip("_")
+    return cleaned or "captured_context_eval_case"
+
+
+def promoted_context_eval_case_path(
+    case_name: str,
+    *,
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """Return the target path for one promoted context-eval fixture."""
+    target_dir = pathlib.Path(fixtures_dir) if fixtures_dir is not None else DEFAULT_CONTEXT_EVAL_CASES_DIR
+    return target_dir / f"{slugify_context_eval_case_name(case_name)}.json"
+
+
+def normalize_promoted_context_eval_case_payload(
+    payload: Dict[str, object],
+    *,
+    fixture_name: str = "",
+    review_status: str = "candidate",
+) -> Dict[str, object]:
+    """Normalize one captured replay payload into a fixture payload."""
+    case = context_eval_case_from_dict(payload)
+    normalized_name = str(fixture_name or case.name).strip() or case.name
+    normalized_case = ContextEvalCase(
+        name=normalized_name,
+        policy_inputs=case.policy_inputs,
+        selection_candidates=case.selection_candidates,
+        selection_max_sections=case.selection_max_sections,
+        expectation=case.expectation,
+    )
+    capture = payload.get("capture", {})
+    capture_payload = dict(capture) if isinstance(capture, dict) else {}
+    normalized = serialize_context_eval_case(normalized_case)
+    normalized["fixture_metadata"] = {
+        "review_status": normalize_context_eval_review_status(review_status),
+        "promoted_at": str(payload.get("promoted_at") or "").strip(),
+        "updated_at": str(payload.get("promoted_at") or "").strip(),
+        "source_path": str(payload.get("source_path") or "").strip(),
+        "source_trigger": str(capture_payload.get("trigger", "")).strip(),
+        "source_conversation_id": str(capture_payload.get("conversation_id", "")).strip(),
+    }
+    return normalized
+
+
+def write_promoted_context_eval_case(
+    payload: Dict[str, object],
+    *,
+    fixture_name: str = "",
+    review_status: str = "candidate",
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """Persist one normalized replay case into the promoted fixture directory."""
+    normalized = normalize_promoted_context_eval_case_payload(
+        payload,
+        fixture_name=fixture_name,
+        review_status=review_status,
+    )
+    target = promoted_context_eval_case_path(str(normalized.get("name", "")), fixtures_dir=fixtures_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target
+
+
+def _load_context_eval_case_items_from_file(
+    path: pathlib.Path,
+    *,
+    include_review_statuses: Optional[Sequence[str]] = ACTIVE_CONTEXT_EVAL_REVIEW_STATUSES,
+) -> List[ContextEvalCase]:
+    """Load one or many replay cases from a JSON file."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    allowed_statuses = None if include_review_statuses is None else {
+        normalize_context_eval_review_status(status) if status else ""
+        for status in include_review_statuses
+    }
+
+    def include_payload(item: Dict[str, object]) -> bool:
+        metadata = context_eval_fixture_metadata_from_payload(item)
+        review_status = metadata.review_status if str(item.get("fixture_metadata") or "").strip() else ""
+        if allowed_statuses is None:
+            return True
+        return review_status in allowed_statuses
+
+    if isinstance(raw, list):
+        return [
+            context_eval_case_from_dict(item)
+            for item in raw
+            if isinstance(item, dict) and include_payload(item)
+        ]
+    if isinstance(raw, dict):
+        if not include_payload(raw):
+            return []
+        return [context_eval_case_from_dict(raw)]
+    raise ValueError("context eval fixture must be an object or list")
+
+
+def load_context_eval_cases(
+    path: pathlib.Path | str | None = None,
+    *,
+    include_review_statuses: Optional[Sequence[str]] = ACTIVE_CONTEXT_EVAL_REVIEW_STATUSES,
+) -> List[ContextEvalCase]:
     """Load replay cases from a JSON fixture file."""
-    target = pathlib.Path(path) if path is not None else DEFAULT_CONTEXT_EVAL_CASES_PATH
-    raw = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ValueError("context eval fixture must be a list")
-    return [context_eval_case_from_dict(item) for item in raw if isinstance(item, dict)]
+    if path is None:
+        items = _load_context_eval_case_items_from_file(
+            DEFAULT_CONTEXT_EVAL_CASES_PATH,
+            include_review_statuses=include_review_statuses,
+        )
+        if DEFAULT_CONTEXT_EVAL_CASES_DIR.exists():
+            for target in sorted(DEFAULT_CONTEXT_EVAL_CASES_DIR.glob("*.json")):
+                items.extend(
+                    _load_context_eval_case_items_from_file(
+                        target,
+                        include_review_statuses=include_review_statuses,
+                    )
+                )
+        return items
+
+    target = pathlib.Path(path)
+    if target.is_dir():
+        items: List[ContextEvalCase] = []
+        for child in sorted(target.glob("*.json")):
+            items.extend(
+                _load_context_eval_case_items_from_file(
+                    child,
+                    include_review_statuses=include_review_statuses,
+                )
+            )
+        return items
+    return _load_context_eval_case_items_from_file(target, include_review_statuses=include_review_statuses)
 
 
 def load_context_eval_case_payload(path: pathlib.Path | str) -> Dict[str, object]:
@@ -211,6 +378,70 @@ def load_context_eval_case_payload(path: pathlib.Path | str) -> Dict[str, object
     if not isinstance(raw, dict):
         raise ValueError("context eval payload must be an object")
     return raw
+
+
+def list_promoted_context_eval_fixtures(
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> List[Dict[str, object]]:
+    """Return promoted fixture metadata for review surfaces."""
+    root = pathlib.Path(fixtures_dir) if fixtures_dir is not None else DEFAULT_CONTEXT_EVAL_CASES_DIR
+    if not root.exists() or not root.is_dir():
+        return []
+    items: List[Dict[str, object]] = []
+    for target in sorted(root.glob("*.json")):
+        try:
+            payload = load_context_eval_case_payload(target)
+            metadata = context_eval_fixture_metadata_from_payload(payload)
+            items.append({
+                "name": str(payload.get("name") or "").strip(),
+                "path": str(target),
+                "review_status": metadata.review_status,
+                "promoted_at": metadata.promoted_at,
+                "updated_at": metadata.updated_at,
+                "source_path": metadata.source_path,
+                "source_trigger": metadata.source_trigger,
+                "source_conversation_id": metadata.source_conversation_id,
+            })
+        except Exception:
+            continue
+    items.sort(
+        key=lambda item: (
+            str(item.get("review_status") or ""),
+            str(item.get("updated_at") or item.get("promoted_at") or ""),
+            str(item.get("name") or ""),
+        ),
+        reverse=True,
+    )
+    return items
+
+
+def update_promoted_context_eval_fixture_review_state(
+    fixture_path: pathlib.Path | str,
+    review_status: str,
+    *,
+    fixtures_dir: pathlib.Path | str | None = None,
+    updated_at: str = "",
+) -> pathlib.Path:
+    """Update the review state for one promoted fixture."""
+    target = pathlib.Path(fixture_path).expanduser()
+    allowed_root = (pathlib.Path(fixtures_dir) if fixtures_dir is not None else DEFAULT_CONTEXT_EVAL_CASES_DIR).resolve()
+    resolved_target = target.resolve()
+    if allowed_root not in resolved_target.parents:
+        raise ValueError("Fixture path must be inside the promoted fixture directory")
+    if not resolved_target.exists() or not resolved_target.is_file():
+        raise ValueError("Fixture file not found")
+    payload = load_context_eval_case_payload(resolved_target)
+    metadata = context_eval_fixture_metadata_from_payload(payload)
+    payload["fixture_metadata"] = {
+        "review_status": normalize_context_eval_review_status(review_status),
+        "promoted_at": metadata.promoted_at,
+        "updated_at": str(updated_at or metadata.updated_at or metadata.promoted_at).strip(),
+        "source_path": metadata.source_path,
+        "source_trigger": metadata.source_trigger,
+        "source_conversation_id": metadata.source_conversation_id,
+    }
+    resolved_target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return resolved_target
 
 
 def evaluate_context_case(case: ContextEvalCase) -> ContextEvalResult:
