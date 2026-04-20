@@ -24,6 +24,7 @@ let chatToolAutoApproveSettings = loadStoredObject('chatToolAutoApproveSettings'
 let conversationTurnFeatureMemory = loadStoredObject('conversationTurnFeatures', {});
 let websocketConnected = false;
 let currentTurnTransport = null;
+let currentTurnKind = 'visible_chat';
 let httpTurnAbortController = null;
 let workspaceEntries = [];
 let workspaceTree = null;
@@ -2244,6 +2245,7 @@ async function dispatchChatPayload(payload, options = {}) {
         ...payload,
         file_path: payload?.file_path || (activeDraftPath ? normalizeDraftFilename(activeDraftPath) : null),
     };
+    currentTurnKind = nextPayload.turn_kind === 'runtime_file' ? 'runtime_file' : 'visible_chat';
     if (canUseWebsocketTransport()) {
         currentTurnTransport = 'ws';
         ws.send(JSON.stringify(nextPayload));
@@ -2645,7 +2647,9 @@ function toggleDeepMode() {
     syncReasoningSelector();
 }
 
-function focusInput() {
+function focusInput(options = {}) {
+    const position = String(options.position || 'preserve');
+    const preventScroll = Boolean(options.preventScroll);
     if (DOCUMENT_CENTERED_MODE) {
         const editor = ensureDraftEditor();
         if (editor) {
@@ -2660,7 +2664,18 @@ function focusInput() {
     }
     const input = document.getElementById('input');
     if (input) {
-        input.focus();
+        const hasValue = typeof input.value === 'string' && input.value.length > 0;
+        const selectionStart = Number.isFinite(input.selectionStart) ? input.selectionStart : (hasValue ? input.value.length : 0);
+        const selectionEnd = Number.isFinite(input.selectionEnd) ? input.selectionEnd : selectionStart;
+        input.focus({ preventScroll });
+        if (position === 'start') {
+            input.setSelectionRange(0, 0);
+        } else if (position === 'end') {
+            const end = input.value.length;
+            input.setSelectionRange(end, end);
+        } else {
+            input.setSelectionRange(selectionStart, selectionEnd);
+        }
         syncMobileViewportState();
     }
 }
@@ -2672,8 +2687,8 @@ function focusInputAtStart() {
     }
     const input = document.getElementById('input');
     if (!input) return;
-    input.focus();
-    input.setSelectionRange(0, 0);
+    const hasDraft = Boolean(String(input.value || ''));
+    focusInput({ position: hasDraft ? 'preserve' : 'start' });
 }
 
 function normalizeExecutionPlanSteps(steps) {
@@ -4196,6 +4211,7 @@ function approveExecutionPlan() {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,
+        turn_kind: currentTurnKind === 'runtime_file' ? 'runtime_file' : 'visible_chat',
         plan_override_steps: builderSteps,
         slash_command: null,
     }, {
@@ -5052,6 +5068,161 @@ function draftSpecInterestTags(specContent) {
     return tags;
 }
 
+function draftSpecRepoDirectory(specContent, fallback = 'content') {
+    const text = String(specContent || '');
+    for (const pattern of [
+        /['"]([A-Za-z0-9._/-]+\/?)['"]/,
+        /\b(?:in|under|inside)\s+([A-Za-z0-9._-]+\/)\b/i,
+    ]) {
+        const match = text.match(pattern);
+        const candidate = String(match?.[1] || '').trim().replace(/^\/+|\/+$/g, '');
+        if (candidate && !candidate.startsWith('.')) return candidate;
+    }
+    return fallback;
+}
+
+function draftRequestsMarkdownSiteGenerator(specContent) {
+    const text = String(specContent || '').toLowerCase();
+    return (
+        (text.includes('markdown') || text.includes('.md')) &&
+        /\b(static site|site generator|generate[s]?\s+a?\s*static site|articles?)\b/.test(text) &&
+        /\b(generate|generator|build|compile)\b/.test(text)
+    );
+}
+
+function buildImmediateMarkdownSiteGeneratorDraftPreview(specContent, path, typed = true) {
+    const contentRoot = draftSpecRepoDirectory(specContent, 'content');
+    const outputRoot = 'dist';
+    const sourceHint = normalizeDraftSentence(summarizeDraftSpec(specContent, draftFallbackTitleFromPath(path)));
+    return [
+        'import { promises as fs } from "node:fs";',
+        'import path from "node:path";',
+        '',
+        `${typed ? 'type' : '/** @typedef'} Article${typed ? ' = {' : ' {'}`,
+        ...(typed ? [
+            '  slug: string;',
+            '  title: string;',
+            '  sourcePath: string;',
+            '  markdown: string;',
+            '  html: string;',
+        ] : [
+            ' *   slug: string,',
+            ' *   title: string,',
+            ' *   sourcePath: string,',
+            ' *   markdown: string,',
+            ' *   html: string,',
+        ]),
+        `${typed ? '};' : ' * } Article */'}`,
+        '',
+        `const CONTENT_ROOT = path.join(process.cwd(), ${JSON.stringify(contentRoot)});`,
+        `const OUTPUT_ROOT = path.join(process.cwd(), ${JSON.stringify(outputRoot)});`,
+        '',
+        `async function main${typed ? '(): Promise<void>' : '()'} {`,
+        '  const articles = await loadArticles(CONTENT_ROOT);',
+        '  await fs.rm(OUTPUT_ROOT, { recursive: true, force: true });',
+        '  await fs.mkdir(OUTPUT_ROOT, { recursive: true });',
+        '  await Promise.all(articles.map(writeArticle));',
+        '  await writeIndex(articles);',
+        '}',
+        '',
+        `async function loadArticles(contentRoot${typed ? ': string' : ''})${typed ? ': Promise<Article[]>' : ''} {`,
+        '  const entries = await walkMarkdownFiles(contentRoot);',
+        '  return Promise.all(entries.map(async (sourcePath) => {',
+        '    const markdown = await fs.readFile(sourcePath, "utf8");',
+        '    const slug = slugify(path.basename(sourcePath, path.extname(sourcePath)));',
+        '    return {',
+        '      slug,',
+        '      title: readTitle(markdown, slug),',
+        '      sourcePath,',
+        '      markdown,',
+        '      html: renderMarkdown(markdown),',
+        '    };',
+        '  }));',
+        '}',
+        '',
+        `async function walkMarkdownFiles(root${typed ? ': string' : ''})${typed ? ': Promise<string[]>' : ''} {`,
+        '  const directoryEntries = await fs.readdir(root, { withFileTypes: true });',
+        '  const files = await Promise.all(directoryEntries.map(async (entry) => {',
+        '    const fullPath = path.join(root, entry.name);',
+        '    if (entry.isDirectory()) return walkMarkdownFiles(fullPath);',
+        '    return /\\.md$/i.test(entry.name) ? [fullPath] : [];',
+        '  }));',
+        '  return files.flat();',
+        '}',
+        '',
+        `function readTitle(markdown${typed ? ': string' : ''}, fallback${typed ? ': string' : ''})${typed ? ': string' : ''} {`,
+        '  const headingMatch = markdown.match(/^#\\s+(.+)$/m);',
+        '  return headingMatch ? headingMatch[1].trim() : fallback;',
+        '}',
+        '',
+        `function slugify(value${typed ? ': string' : ''})${typed ? ': string' : ''} {`,
+        '  return value',
+        '    .toLowerCase()',
+        "    .replace(/[^a-z0-9]+/g, '-')",
+        "    .replace(/^-+|-+$/g, '') || 'article';",
+        '}',
+        '',
+        `function renderMarkdown(markdown${typed ? ': string' : ''})${typed ? ': string' : ''} {`,
+        '  return markdown',
+        '    .replace(/^###\\s+(.+)$/gm, "<h3>$1</h3>")',
+        '    .replace(/^##\\s+(.+)$/gm, "<h2>$1</h2>")',
+        '    .replace(/^#\\s+(.+)$/gm, "<h1>$1</h1>")',
+        '    .replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>")',
+        '    .replace(/\\*(.+?)\\*/g, "<em>$1</em>")',
+        '    .split(/\\n\\s*\\n/)',
+        '    .map((block) => block.trim())',
+        '    .filter(Boolean)',
+        '    .map((block) => (/^<h[1-3]>/.test(block) ? block : `<p>${block.replace(/\\n/g, "<br />")}</p>`))',
+        '    .join("\\n");',
+        '}',
+        '',
+        `function renderDocument(title${typed ? ': string' : ''}, body${typed ? ': string' : ''})${typed ? ': string' : ''} {`,
+        '  return [',
+        '    "<!DOCTYPE html>",',
+        '    "<html lang=\\"en\\">",',
+        '    "  <head>",',
+        '    "    <meta charset=\\"UTF-8\\" />",',
+        '    "    <meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1.0\\" />",',
+        '    `    <title>${title}</title>`,',
+        '    "    <link rel=\\"stylesheet\\" href=\\"./styles.css\\" />",',
+        '    "  </head>",',
+        '    "  <body>",',
+        '    "    <main class=\\"page\\">",',
+        '    "      <a href=\\"./index.html\\">Back to index</a>",',
+        '    "      <article>",',
+        '    `        <h1>${title}</h1>`,',
+        '    `        ${body}`,',
+        '    "      </article>",',
+        '    "    </main>",',
+        '    "  </body>",',
+        '    "</html>",',
+        '  ].join("\\n");',
+        '}',
+        '',
+        `async function writeArticle(article${typed ? ': Article' : ''})${typed ? ': Promise<void>' : ''} {`,
+        '  const filePath = path.join(OUTPUT_ROOT, `${article.slug}.html`);',
+        '  await fs.writeFile(filePath, renderDocument(article.title, article.html), "utf8");',
+        '}',
+        '',
+        `async function writeIndex(articles${typed ? ': Article[]' : ''})${typed ? ': Promise<void>' : ''} {`,
+        '  const links = articles.map((article) => `<li><a href="./${article.slug}.html">${article.title}</a></li>`).join("\\n");',
+        `  const body = [${JSON.stringify(`<p>${sourceHint}</p>`)}, "<ul>", links, "</ul>"].join("\\n");`,
+        '  await fs.writeFile(path.join(OUTPUT_ROOT, "index.html"), renderDocument("Articles", body), "utf8");',
+        '  await fs.writeFile(',
+        '    path.join(OUTPUT_ROOT, "styles.css"),',
+        '    "body { font-family: system-ui, sans-serif; margin: 0; background: #f7f5f2; color: #1f2937; }\\n.page { width: min(760px, calc(100vw - 32px)); margin: 0 auto; padding: 48px 0 72px; }\\na { color: #0f766e; }\\narticle { line-height: 1.7; }",',
+        '    "utf8",',
+        '  );',
+        '}',
+        '',
+        'void main().catch((error) => {',
+        '  console.error(error);',
+        '  process.exitCode = 1;',
+        '});',
+        '',
+    ].join('\n');
+}
+
 function buildImmediateHtmlDraftPreview(specContent, path) {
     const normalizedPath = normalizeDraftFilename(path || activeDraftPath || DEFAULT_DRAFT_FILENAME);
     const fallbackTitle = draftFallbackTitleFromPath(normalizedPath);
@@ -5335,15 +5506,12 @@ function buildImmediateCodeDraftPreview(specContent, path, profileKey) {
     if (suffix === '.js' || suffix === '.jsx' || suffix === '.ts' || suffix === '.tsx') {
         const typed = suffix === '.ts' || suffix === '.tsx';
         const consoleMessage = quotedPhrase || `${fallbackTitle} is taking shape.`;
+        if (draftRequestsMarkdownSiteGenerator(specContent)) {
+            return buildImmediateMarkdownSiteGeneratorDraftPreview(specContent, path, typed);
+        }
         if (looksLikeHtmlBuild) {
             const htmlTitle = fallbackTitle;
             return [
-                '/**',
-                ' * Live scaffold generated from the current draft spec.',
-                ` * Goal: ${normalizeDraftSentence(summary)}`,
-                ...lines.map(line => ` * Cue: ${normalizeDraftSentence(line)}`),
-                ' */',
-                '',
                 `${typed ? 'export ' : ''}function renderApp${typed ? '(): string' : '()'} {`,
                 '  return [',
                 "    '<!DOCTYPE html>',",
@@ -5369,17 +5537,12 @@ function buildImmediateCodeDraftPreview(specContent, path, profileKey) {
             ].join('\n');
         }
         return [
-            '/**',
-            ' * Live scaffold generated from the current draft spec.',
-            ` * Goal: ${normalizeDraftSentence(summary)}`,
-            ...lines.map(line => ` * Cue: ${normalizeDraftSentence(line)}`),
-            ' */',
-            '',
             `${typed ? 'export ' : ''}function main${typed ? '(): void' : '()'} {`,
-            `  console.log(${JSON.stringify(consoleMessage)});`,
+            `  const message${typed ? ': string' : ''} = ${JSON.stringify(consoleMessage)};`,
+            '  process.stdout.write(`${message}\\n`);',
             '}',
             '',
-            'main();',
+            'void main();',
             '',
         ].join('\n');
     }
@@ -6124,6 +6287,7 @@ async function requestDraftRealization(options = {}) {
             system_prompt: localStorage.getItem('customSystemPrompt') || null,
             mode: BASE_REASONING_MODE,
             features: turnFeatures,
+            turn_kind: 'runtime_file',
             slash_command: null,
         }, {
             fallbackStatusText: 'Generating the file from the active draft...',
@@ -7407,14 +7571,14 @@ async function sendMessage() {
         alert(`Draft save failed: ${error.message}`);
         return;
     }
-    const outboundMessage = `${message}${buildActiveDraftContextForTurn()}`;
+    const runtimeContext = buildActiveDraftContextForTurn();
 
     document.querySelector('.welcome')?.remove();
     exitWelcomeMode();
     addMessage(buildDisplayedMessageText(displayText, pendingAttachments) || message, 'user', null, { forceScroll: true });
     input.value = '';
     pastedBlocks = [];
-    const turnFeatures = resolveTurnFeatures(outboundMessage, attachmentPaths, slashCommand);
+    const turnFeatures = resolveTurnFeatures(message, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     clearPendingPermissionRequest();
@@ -7431,7 +7595,8 @@ async function sendMessage() {
     syncSendButton();
     const clientTurnId = beginClientTurn();
     dispatchChatPayload({
-        message: outboundMessage,
+        message,
+        runtime_context: runtimeContext,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         workspace_id: currentWorkspaceId || null,
@@ -7439,6 +7604,7 @@ async function sendMessage() {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,
+        turn_kind: 'visible_chat',
         slash_command: slashCommand ? {
             name: slashCommand.name,
             raw_name: slashCommand.rawName,
@@ -7459,8 +7625,8 @@ async function sendInterruptMessage(messageText) {
         alert(`Draft save failed: ${error.message}`);
         return;
     }
-    const fullOutboundText = `${outboundText}${buildActiveDraftContextForTurn()}`;
-    const turnFeatures = resolveTurnFeatures(fullOutboundText, attachmentPaths, slashCommand);
+    const runtimeContext = buildActiveDraftContextForTurn();
+    const turnFeatures = resolveTurnFeatures(outboundText, attachmentPaths, slashCommand);
     rememberTurnFeatures(currentConvId, turnFeatures);
     dismissExecutionPlan();
     clearPendingPermissionRequest();
@@ -7470,9 +7636,11 @@ async function sendInterruptMessage(messageText) {
     exitWelcomeMode();
     recordWorkspaceActivity('Interrupt', outboundText);
     const clientTurnId = beginClientTurn();
+    currentTurnKind = 'visible_chat';
     ws.send(JSON.stringify({
         type: 'interrupt',
-        message: fullOutboundText,
+        message: outboundText,
+        runtime_context: runtimeContext,
         attachments: attachmentPaths,
         conversation_id: currentConvId,
         workspace_id: currentWorkspaceId || null,
@@ -7480,6 +7648,7 @@ async function sendInterruptMessage(messageText) {
         system_prompt: localStorage.getItem('customSystemPrompt') || null,
         mode: BASE_REASONING_MODE,
         features: turnFeatures,
+        turn_kind: 'visible_chat',
         slash_command: slashCommand ? {
             name: slashCommand.name,
             raw_name: slashCommand.rawName,
