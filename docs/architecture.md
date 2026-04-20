@@ -11,9 +11,10 @@ ai-chat/
 ├── src/python/ai_chat/turn_strategy.py     # Turn assessment and top-level routing decisions
 ├── src/python/ai_chat/deep_flow.py         # Deep-mode routing decisions
 ├── chat                 # CLI to start/stop the stack
-├── static/
+├── src/web/
 │   ├── index.html       # Web UI template
-│   ├── app.js           # Frontend runtime
+│   ├── app.ts           # Frontend source
+│   ├── app.js           # Generated browser runtime
 │   └── style.css        # Layout and components
 ├── docker-compose.yml   # vLLM + chat-app services
 ├── Dockerfile           # Chat app image
@@ -31,14 +32,14 @@ ai-chat/
 - `src/python/ai_chat/deep_runtime.py` owns deep-session state plus the bootstrap/preview/execute orchestration lifecycle, so the harness no longer carries the full deep-mode state machine inline.
 - `src/python/ai_chat/deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
 - `src/python/ai_chat/prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
-- `src/python/ai_chat/thinking_stream.py` parses model output into thinking and visible-answer streams. Its tag pairs must stay aligned with `THINK_TAG_PAIRS` in `src/web/app.js`.
-- `src/python/ai_chat/themes.py` defines named palettes that expand into the CSS variables expected by `src/web/style.css`.
-- `src/web/app.js` manages the client runtime: streaming chat events, slash commands, plan approval, workspace activity, file viewing/editing, attachments, and voice playback/recording.
+- `src/python/ai_chat/thinking_stream.py` parses model output into thinking and visible-answer streams for the backend streaming pipeline.
+- `src/python/ai_chat/themes.py` still houses theme definitions consumed by the web surface.
+- `src/web/app.ts` is the frontend source for the simplified chat runtime and workspace file viewer. `src/web/app.js` is the generated browser bundle served by FastAPI.
 
 ## Tech stack
 
 - Backend: Python 3.11, FastAPI, Uvicorn, httpx
-- Frontend: Vanilla JS, Marked.js, highlight.js, CodeMirror
+- Frontend: TypeScript-first browser client with a generated ES module bundle
 - LLM runtime: vLLM via an OpenAI-compatible API
 - Database: SQLite for conversations, messages, workspace catalog rows, runs, summaries, and assistant feedback
 - Recent corrective user replies can also be mined from SQLite as implicit failure signals during feedback-driven repo-improvement passes.

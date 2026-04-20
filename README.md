@@ -1,12 +1,12 @@
 # AI Chat with vLLM
 
-A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small FastAPI + vanilla JS front end.
+A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small FastAPI backend and a TypeScript-first chat-plus-file-viewer frontend.
 
 ## Source Layout
 
 - `src/python/harness.py` — main backend harness (FastAPI + WS + tool loop)
 - `src/python/ai_chat/` — backend helper modules (prompts, routing, themes, readers)
-- `src/web/` — frontend web app (`index.html`, `app.js`, `style.css`, `assets/`)
+- `src/web/` — frontend web app (`index.html`, `app.ts`, generated `app.js`, `style.css`)
 - `app.py` — compatibility entrypoint used by Docker and `./chat`
 
 ## Features
@@ -17,7 +17,7 @@ A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small
 - **Unified Skill Loop** — Each turn now gets an explicit RAG/search/file/code/plan/review assessment before the app chooses a one-shot skill, tool loop, or full inspect/plan/execute/verify run
 - **Agent Harness** — Shared tool loop plus deep-mode orchestration for inspect/plan/execute/verify flows
 - **Workspace Tools** — Per-turn file reads, patches, command execution, spreadsheet inspection, local RAG, and optional web search
-- **Workspace UI** — Activity timeline, workspace browser, inline file viewer/editor, and downloads
+- **Workspace UI** — Workspace browser plus inline file previews alongside chat
 - **Attachments** — Upload files into the conversation workspace and reuse them across turns
 - **Voice** — Browser-recorded audio attachments plus server-side reply playback when native TTS is available; optional STT API remains available for direct clients
 - **Markdown** — Full rendering with syntax highlighting
@@ -25,6 +25,16 @@ A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small
 - **Model Controls** — Reasoning effort toggle and model availability/status feedback
 - **Light/Dark Mode** — Theme support
 - **Message Feedback** — Good/Bad response feedback with neutral clearing, used for context ranking
+
+## Frontend build
+
+The served browser bundle lives at `src/web/app.js`, generated from `src/web/app.ts`.
+
+```bash
+npm run build:frontend
+```
+
+`./chat install`, `./chat start`, and local `npm start` now rebuild that bundle automatically when the TypeScript source is newer than the generated browser file.
 
 ## System Requirements
 
@@ -51,6 +61,7 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 ```
 
 This pulls the vLLM image and builds the chat app container.
+It also rebuilds the TypeScript frontend bundle first so the generated `src/web/app.js` is baked into the image.
 
 ## Security defaults
 
@@ -106,6 +117,8 @@ export RUNS_ROOT=./runs
 export WORKSPACE_ROOT=./workspaces
 python3 app.py
 ```
+
+You can also use `npm start`, which rebuilds the frontend bundle and then launches `python3 app.py`.
 
 Notes:
 

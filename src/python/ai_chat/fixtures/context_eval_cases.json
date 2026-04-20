@@ -1,0 +1,223 @@
+[
+  {
+    "name": "plan_keeps_workspace_grounding",
+    "policy_inputs": {
+      "phase": "plan",
+      "request_text": "improve the chat interaction using app.js and current code flow",
+      "changed_files": [
+        "src/web/app.js"
+      ],
+      "workspace_sample_paths": [
+        "src/web/app.js",
+        "src/python/harness.py"
+      ],
+      "has_task_board": true,
+      "has_recent_feedback": true,
+      "has_scope_gaps": false,
+      "has_step_reports": false
+    },
+    "selection_candidates": [
+      {
+        "key": "user_query",
+        "title": "User's new query",
+        "content": "improve the chat interaction using app.js and current code flow",
+        "priority": 10,
+        "required": true,
+        "tags": [],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "workspace_facts",
+        "title": "Observed workspace facts",
+        "content": "Found app.js and harness.py",
+        "priority": 20,
+        "required": true,
+        "tags": [
+          "workspace",
+          "facts"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "retrieved_memory",
+        "title": "Retrieved chat memory",
+        "content": "1. user: chat-first editing is the better UX",
+        "priority": 45,
+        "required": false,
+        "tags": [
+          "history",
+          "retrieval",
+          "conversation"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "workspace_excerpts",
+        "title": "Relevant workspace excerpts",
+        "content": "[src/web/app.js]\nfunction sendMessage() { return true; }",
+        "priority": 55,
+        "required": true,
+        "tags": [
+          "workspace",
+          "files",
+          "artifacts"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "conversation_context",
+        "title": "Conversation context",
+        "content": "user: hi\nassistant: hello",
+        "priority": 20,
+        "required": false,
+        "tags": [
+          "conversation",
+          "history"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      }
+    ],
+    "selection_max_sections": 6,
+    "expectation": {
+      "retrieve_memory": true,
+      "retrieve_workspace_previews": true,
+      "min_memory_limit": 1,
+      "min_workspace_preview_limit": 1,
+      "required_selected_keys": [
+        "user_query",
+        "workspace_facts",
+        "workspace_excerpts"
+      ],
+      "forbidden_selected_keys": []
+    }
+  },
+  {
+    "name": "verify_prefers_file_and_step_evidence",
+    "policy_inputs": {
+      "phase": "verify",
+      "request_text": "verify the file changes and confirm the behavior",
+      "changed_files": [
+        "src/web/app.js",
+        "src/python/harness.py"
+      ],
+      "workspace_sample_paths": [],
+      "has_task_board": true,
+      "has_recent_feedback": false,
+      "has_scope_gaps": true,
+      "has_step_reports": true
+    },
+    "selection_candidates": [
+      {
+        "key": "user_request",
+        "title": "User request",
+        "content": "verify the file changes and confirm the behavior",
+        "priority": 10,
+        "required": true,
+        "tags": [],
+        "phase_hints": [
+          "verify"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "verifier_checks",
+        "title": "Verifier checks",
+        "content": "1. Confirm hidden turns stay hidden",
+        "priority": 60,
+        "required": true,
+        "tags": [
+          "verification",
+          "plan"
+        ],
+        "phase_hints": [
+          "verify"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "workspace_excerpts",
+        "title": "Relevant workspace excerpts",
+        "content": "[src/web/app.js]\nfunction rerankContext() { return 'better'; }",
+        "priority": 55,
+        "required": true,
+        "tags": [
+          "workspace",
+          "files",
+          "artifacts"
+        ],
+        "phase_hints": [
+          "verify"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "step_evidence",
+        "title": "Recent execution evidence",
+        "content": "1. Step 1: Patched app.js and verified hidden turns.",
+        "priority": 85,
+        "required": false,
+        "tags": [
+          "progress",
+          "verification",
+          "workspace"
+        ],
+        "phase_hints": [
+          "verify"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "conversation_context",
+        "title": "Conversation context",
+        "content": "user: thanks",
+        "priority": 20,
+        "required": false,
+        "tags": [
+          "conversation",
+          "history"
+        ],
+        "phase_hints": [
+          "verify"
+        ],
+        "metadata": {}
+      }
+    ],
+    "selection_max_sections": 4,
+    "expectation": {
+      "retrieve_memory": false,
+      "retrieve_workspace_previews": true,
+      "min_memory_limit": 0,
+      "min_workspace_preview_limit": 1,
+      "required_selected_keys": [
+        "user_request",
+        "verifier_checks",
+        "workspace_excerpts",
+        "step_evidence"
+      ],
+      "forbidden_selected_keys": [
+        "conversation_context"
+      ]
+    }
+  }
+]

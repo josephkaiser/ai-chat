@@ -48,15 +48,33 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from src.python.ai_chat.context_assembler import (
+    ContextRetrievalAdapters,
     assemble_build_substep_context,
+    assemble_build_substep_context_async,
     assemble_direct_answer_context,
+    assemble_direct_answer_context_async,
     assemble_inspect_context,
+    assemble_inspect_context_async,
     assemble_plan_context,
+    assemble_plan_context_async,
     assemble_step_subtask_context,
+    assemble_step_subtask_context_async,
     assemble_synthesis_context,
+    assemble_synthesis_context_async,
     assemble_verify_context,
+    assemble_verify_context_async,
     build_recent_context as build_recent_context_bundle,
 )
+from src.python.ai_chat.context_eval import (
+    ContextEvalCase,
+    ContextEvalExpectation,
+    find_context_eval_capture_files,
+    replay_captured_context_eval_files,
+    serialize_context_eval_case,
+    summarize_captured_context_eval_results,
+)
+from src.python.ai_chat.context_policy_program import ContextPolicyInputs
+from src.python.ai_chat.context_selection_program import ContextCandidate
 from src.python.ai_chat.deep_runtime import (
     DeepRuntimeCallbacks,
     DeepSession,
@@ -8696,10 +8714,17 @@ def apply_implicit_feedback_from_user_reply(
         conversation_id,
         signal.get("category", "general_failure"),
     )
+    capture_path = capture_context_eval_case_for_assistant_message(
+        conversation_id,
+        assistant_message_id,
+        trigger="implicit_feedback",
+        corrective_message=content,
+    )
     return {
         **signal,
         "assistant_message_id": str(assistant_message_id),
         "assistant_excerpt": truncate_output(str(row[1] or ""), limit=180),
+        "context_eval_capture_path": capture_path,
     }
 
 
@@ -9334,6 +9359,10 @@ app.add_middleware(
 
 _repo_root = pathlib.Path(__file__).resolve().parents[2]
 _web_root = _repo_root / "src" / "web"
+_frontend_source_path = _web_root / "app.ts"
+_frontend_bundle_path = _web_root / "app.js"
+_frontend_build_script_path = _repo_root / "scripts" / "build_frontend.mjs"
+_frontend_package_path = _repo_root / "package.json"
 
 
 def compute_static_asset_version(web_root: pathlib.Path) -> str:
@@ -9349,6 +9378,58 @@ def compute_static_asset_version(web_root: pathlib.Path) -> str:
         hasher.update(str(int(stat.st_mtime_ns)).encode("utf-8"))
     digest = hasher.hexdigest()[:12]
     return digest or str(int(time.time()))
+
+
+def frontend_bundle_is_stale() -> bool:
+    """Return True when the generated browser bundle should be rebuilt."""
+    try:
+        bundle_stat = _frontend_bundle_path.stat()
+    except OSError:
+        return True
+    for candidate in (_frontend_source_path, _frontend_build_script_path, _frontend_package_path):
+        try:
+            if candidate.stat().st_mtime_ns > bundle_stat.st_mtime_ns:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def ensure_frontend_bundle() -> bool:
+    """Build the generated frontend bundle when local sources are newer."""
+    if not frontend_bundle_is_stale():
+        return False
+
+    node_bin = shutil.which("node")
+    if not node_bin:
+        if _frontend_bundle_path.is_file():
+            logger.warning(
+                "Frontend sources are newer than %s, but node is unavailable; serving the existing bundle.",
+                _frontend_bundle_path,
+            )
+            return False
+        raise RuntimeError(
+            "Frontend bundle is missing and node is unavailable. Run `npm run build:frontend` first."
+        )
+
+    command = [node_bin, str(_frontend_build_script_path)]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(_repo_root),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        detail = stderr or stdout or str(exc)
+        raise RuntimeError(f"Frontend build failed: {detail}") from exc
+
+    build_output = (result.stdout or "").strip()
+    logger.info(build_output or "Built frontend bundle from %s", _frontend_source_path)
+    return True
 
 
 app.mount("/static", StaticFiles(directory=str(_web_root)), name="static")
@@ -9554,7 +9635,19 @@ async def submit_feedback(message_id: int, request: FeedbackRequest):
             raise HTTPException(status_code=400, detail="Feedback can only be recorded for visible assistant messages")
         update_message_feedback(message_id, feedback)
         sync_workflow_feedback_for_message(message_id, feedback)
-        return {"status": "success", "message": f"Feedback recorded: {feedback}", "feedback": feedback}
+        capture_path = ""
+        if feedback == "negative":
+            capture_path = capture_context_eval_case_for_assistant_message(
+                str(message.get("conversation_id") or "").strip(),
+                int(message_id),
+                trigger="explicit_feedback",
+            )
+        return {
+            "status": "success",
+            "message": f"Feedback recorded: {feedback}",
+            "feedback": feedback,
+            "context_eval_capture_path": capture_path,
+        }
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
@@ -9585,11 +9678,17 @@ async def retry_message(message_id: int, request: dict):
         if not user_row:
             raise HTTPException(status_code=404, detail="Original user message not found")
 
+        capture_path = capture_context_eval_case_for_assistant_message(
+            str(message.get("conversation_id") or "").strip(),
+            int(message_id),
+            trigger="retry",
+        )
         return {
             "status": "ready",
             "conversation_id": message['conversation_id'],
             "prompt": user_row[1],
-            "message": "Ready to retry. Send this prompt again."
+            "message": "Ready to retry. Send this prompt again.",
+            "context_eval_capture_path": capture_path,
         }
     except HTTPException:
         raise
@@ -9671,6 +9770,25 @@ async def search_chats(query: str):
         return {'results': results, 'count': len(results)}
     except Exception as e:
         return {'results': [], 'count': 0}
+
+
+@app.get("/api/context-evals/report")
+async def get_context_eval_report(
+    conversation_id: str = "",
+    workspace_id: str = "",
+    limit: int = 100,
+):
+    try:
+        return build_context_eval_replay_report(
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error building context eval replay report: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 @app.get("/api/files/list")
 async def list_files(path: str = "."):
@@ -14125,6 +14243,366 @@ def build_recent_context(history: List[Dict[str, str]], limit: int = 6) -> str:
     return build_recent_context_bundle(history, limit=limit)
 
 
+def build_context_retrieval_adapters() -> ContextRetrievalAdapters:
+    """Provide retrieval hooks for runtime context assembly."""
+    return ContextRetrievalAdapters(
+        conversation_search=conversation_search_history_result,
+        read_workspace_text=read_workspace_text,
+        truncate_output=truncate_output,
+    )
+
+
+def context_eval_capture_dir_path() -> str:
+    """Return the workspace-relative directory used for captured context replay cases."""
+    return ".ai/context-evals"
+
+
+def context_eval_capture_path(
+    trigger: str,
+    assistant_message_id: int,
+    *,
+    timestamp: Optional[datetime] = None,
+) -> str:
+    """Return one timestamped path for a captured context replay case."""
+    safe_trigger = re.sub(r"[^a-z0-9_-]+", "-", str(trigger or "feedback").strip().lower()).strip("-") or "feedback"
+    stamp = (timestamp or datetime.utcnow()).strftime("%Y%m%dT%H%M%S")
+    return f"{context_eval_capture_dir_path()}/{stamp}-{safe_trigger}-msg{max(1, int(assistant_message_id))}.json"
+
+
+def get_previous_visible_user_message(conversation_id: str, assistant_message_id: int) -> Optional[Dict[str, Any]]:
+    """Return the immediately preceding visible user message for one assistant message."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        '''SELECT id, content, timestamp
+           FROM messages
+           WHERE conversation_id = ? AND role = 'user' AND id < ?
+             AND ''' + visible_message_kind_sql() + '''
+           ORDER BY id DESC
+           LIMIT 1''',
+        (conversation_id, assistant_message_id),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]),
+        "content": str(row[1] or ""),
+        "timestamp": str(row[2] or ""),
+    }
+
+
+def build_recent_visible_history_context(
+    conversation_id: str,
+    *,
+    up_to_message_id: Optional[int] = None,
+    limit: int = 4,
+) -> str:
+    """Render a compact history block for captured replay cases."""
+    safe_limit = max(1, min(int(limit or 4), 8))
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    query = (
+        '''SELECT role, content
+           FROM messages
+           WHERE conversation_id = ?
+             AND ''' + visible_message_kind_sql()
+    )
+    params: List[Any] = [conversation_id]
+    if up_to_message_id is not None:
+        query += ' AND id <= ?'
+        params.append(int(up_to_message_id))
+    query += ' ORDER BY id DESC LIMIT ?'
+    params.append(safe_limit)
+    cursor.execute(query, tuple(params))
+    rows = list(reversed(cursor.fetchall()))
+    conn.close()
+    if not rows:
+        return ""
+    return "\n".join(
+        f"{str(role or '').strip()}: {truncate_output(str(content or '').strip(), limit=220)}"
+        for role, content in rows
+    )
+
+
+def detect_context_eval_phase(
+    request_text: str,
+    assistant_text: str,
+    workspace_snapshot: Dict[str, Any],
+) -> str:
+    """Choose a coarse replay phase for one captured failed turn."""
+    combined = "\n".join(part for part in (request_text, assistant_text) if str(part or "").strip())
+    has_workspace_refs = bool(extract_artifact_references(combined) or extract_workspace_path_references(combined))
+    if has_workspace_refs or not workspace_is_effectively_empty(workspace_snapshot):
+        return "verify"
+    return "plan"
+
+
+def captured_context_eval_candidate_paths(
+    request_text: str,
+    assistant_text: str,
+    workspace_snapshot: Dict[str, Any],
+) -> List[str]:
+    """Collect likely relevant workspace paths for one captured replay case."""
+    refs: List[str] = []
+    for candidate in extract_artifact_references(assistant_text):
+        cleaned = str(candidate).strip()
+        if cleaned and cleaned not in refs:
+            refs.append(cleaned)
+    for candidate in extract_workspace_path_references("\n".join([request_text, assistant_text])):
+        cleaned = str(candidate).strip()
+        if cleaned and cleaned not in refs:
+            refs.append(cleaned)
+    sample_paths = workspace_snapshot.get("sample_paths", []) if isinstance(workspace_snapshot, dict) else []
+    if isinstance(sample_paths, list):
+        for candidate in sample_paths[:3]:
+            cleaned = str(candidate).strip()
+            if cleaned and cleaned not in refs:
+                refs.append(cleaned)
+    return refs[:4]
+
+
+def build_context_eval_workspace_excerpt(
+    conversation_id: str,
+    request_text: str,
+    assistant_text: str,
+    workspace_snapshot: Dict[str, Any],
+) -> str:
+    """Read a few likely relevant workspace files into a bounded replay candidate."""
+    blocks: List[str] = []
+    for rel_path in captured_context_eval_candidate_paths(request_text, assistant_text, workspace_snapshot):
+        raw = read_workspace_text(conversation_id, rel_path)
+        cleaned = str(raw or "").strip()
+        if not cleaned:
+            continue
+        blocks.append(f"[{rel_path}]\n{truncate_output(cleaned, limit=700)}")
+        if len(blocks) >= 3:
+            break
+    return "\n\n".join(blocks)
+
+
+def capture_context_eval_case_for_assistant_message(
+    conversation_id: str,
+    assistant_message_id: int,
+    *,
+    trigger: str,
+    corrective_message: str = "",
+) -> str:
+    """Persist one replayable context-eval case for a failed assistant turn."""
+    assistant_message = get_message_by_id(assistant_message_id)
+    if not assistant_message or assistant_message.get("role") != "assistant":
+        return ""
+    previous_user = get_previous_visible_user_message(conversation_id, assistant_message_id)
+    request_text = str((previous_user or {}).get("content") or "").strip()
+    if not request_text:
+        return ""
+
+    assistant_text = str(assistant_message.get("content") or "").strip()
+    conversation = get_conversation_record(conversation_id) or {}
+    workspace_snapshot = capture_workspace_snapshot(conversation_id)
+    phase = detect_context_eval_phase(request_text, assistant_text, workspace_snapshot)
+    workspace_excerpt = build_context_eval_workspace_excerpt(
+        conversation_id,
+        request_text,
+        assistant_text,
+        workspace_snapshot,
+    )
+    recent_history = build_recent_visible_history_context(
+        conversation_id,
+        up_to_message_id=assistant_message_id,
+        limit=4,
+    )
+    corrective_excerpt = truncate_output(str(corrective_message or "").strip(), limit=260)
+    snapshot_summary = format_workspace_snapshot(workspace_snapshot)
+
+    candidates: List[ContextCandidate] = [
+        ContextCandidate(
+            key="user_request",
+            title="User request",
+            content=request_text,
+            priority=10,
+            required=True,
+            phase_hints=(phase,),
+        ),
+        ContextCandidate(
+            key="conversation_context",
+            title="Conversation context",
+            content=recent_history,
+            priority=20,
+            tags=("conversation", "history"),
+            phase_hints=(phase,),
+        ),
+        ContextCandidate(
+            key="workspace_facts",
+            title="Observed workspace facts",
+            content=snapshot_summary,
+            priority=25,
+            required=not workspace_is_effectively_empty(workspace_snapshot),
+            tags=("workspace", "facts"),
+            phase_hints=(phase,),
+        ),
+        ContextCandidate(
+            key="workspace_excerpts",
+            title="Relevant workspace excerpts",
+            content=workspace_excerpt,
+            priority=55,
+            required=bool(workspace_excerpt),
+            tags=("workspace", "files", "artifacts"),
+            phase_hints=(phase,),
+            metadata={"sticky": "true"},
+        ),
+    ]
+    if corrective_excerpt:
+        candidates.append(
+            ContextCandidate(
+                key="retrieved_memory",
+                title="Retrieved chat memory",
+                content=f"1. user: {corrective_excerpt}",
+                priority=45,
+                tags=("history", "retrieval", "conversation"),
+                phase_hints=(phase,),
+                metadata={"sticky": "true"},
+            )
+        )
+
+    expectation = ContextEvalExpectation(
+        retrieve_memory=(True if corrective_excerpt else None),
+        retrieve_workspace_previews=(True if workspace_excerpt else None),
+        min_memory_limit=(1 if corrective_excerpt else 0),
+        min_workspace_preview_limit=(1 if workspace_excerpt else 0),
+        required_selected_keys=tuple(
+            key
+            for key, present in (
+                ("user_request", True),
+                ("workspace_excerpts", bool(workspace_excerpt)),
+                ("retrieved_memory", bool(corrective_excerpt)),
+            )
+            if present
+        ),
+    )
+    case = ContextEvalCase(
+        name=f"captured_{str(trigger or 'feedback').strip().lower()}_{assistant_message_id}",
+        policy_inputs=ContextPolicyInputs(
+            phase=phase,
+            request_text=request_text,
+            changed_files=tuple(captured_context_eval_candidate_paths(request_text, assistant_text, workspace_snapshot)),
+            workspace_sample_paths=tuple(
+                str(path).strip()
+                for path in workspace_snapshot.get("sample_paths", [])
+                if str(path).strip()
+            )[:3] if isinstance(workspace_snapshot.get("sample_paths", []), list) else tuple(),
+            has_task_board=bool(read_workspace_text(conversation_id, ".ai/task-board.md")),
+            has_recent_feedback=bool(corrective_excerpt),
+            has_scope_gaps=False,
+            has_step_reports=False,
+        ),
+        selection_candidates=tuple(candidate for candidate in candidates if str(candidate.content or "").strip()),
+        selection_max_sections=5,
+        expectation=expectation,
+    )
+    payload = serialize_context_eval_case(case)
+    payload["capture"] = {
+        "trigger": str(trigger or "").strip(),
+        "conversation_id": conversation_id,
+        "assistant_message_id": int(assistant_message_id),
+        "assistant_feedback": str(assistant_message.get("feedback") or "").strip(),
+        "conversation_title": str(conversation.get("title") or "").strip(),
+        "corrective_message": corrective_excerpt,
+    }
+    rel_path = context_eval_capture_path(trigger, assistant_message_id)
+    try:
+        write_workspace_text(
+            conversation_id,
+            rel_path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist captured context eval case for message %s in conversation %s: %s",
+            assistant_message_id,
+            conversation_id,
+            exc,
+        )
+        return ""
+    logger.info(
+        "Captured context eval case for conversation %s assistant message %s at %s",
+        conversation_id,
+        assistant_message_id,
+        rel_path,
+    )
+    return rel_path
+
+
+def build_context_eval_replay_report(
+    *,
+    conversation_id: str = "",
+    workspace_id: str = "",
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """Replay captured context-eval payloads and summarize failures."""
+    safe_limit = max(1, min(int(limit or 100), 500))
+    workspace_roots: List[pathlib.Path] = []
+    metadata: List[Dict[str, Any]] = []
+
+    if str(conversation_id or "").strip():
+        root = get_workspace_path(str(conversation_id).strip(), create=False)
+        workspace_roots.append(root)
+        metadata.append({
+            "conversation_id": str(conversation_id).strip(),
+            "workspace_id": get_workspace_id_for_conversation(str(conversation_id).strip(), create=False) or "",
+            "workspace_root": str(root),
+        })
+    elif str(workspace_id or "").strip():
+        workspace = get_workspace_record(str(workspace_id).strip())
+        if not workspace:
+            raise ValueError("Workspace not found")
+        root = canonicalize_workspace_root_path(str(workspace.get("root_path") or ""), create=False)
+        workspace_roots.append(root)
+        metadata.append({
+            "conversation_id": "",
+            "workspace_id": str(workspace_id).strip(),
+            "workspace_root": str(root),
+        })
+    else:
+        for workspace in list_workspace_records(ensure_default=False):
+            root_path = str(workspace.get("root_path") or "").strip()
+            if not root_path:
+                continue
+            try:
+                root = canonicalize_workspace_root_path(root_path, create=False)
+            except Exception:
+                continue
+            workspace_roots.append(root)
+            metadata.append({
+                "conversation_id": "",
+                "workspace_id": str(workspace.get("id") or "").strip(),
+                "workspace_root": str(root),
+            })
+
+    seen_roots: set[str] = set()
+    capture_paths: List[pathlib.Path] = []
+    filtered_metadata: List[Dict[str, Any]] = []
+    for item, root in zip(metadata, workspace_roots):
+        root_key = str(root)
+        if root_key in seen_roots:
+            continue
+        seen_roots.add(root_key)
+        filtered_metadata.append(item)
+        capture_paths.extend(find_context_eval_capture_files(root, limit=safe_limit))
+
+    capture_paths = sorted(
+        capture_paths,
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )[:safe_limit]
+    replay_results = replay_captured_context_eval_files(capture_paths)
+    summary = summarize_captured_context_eval_results(replay_results)
+    summary["captures_scanned"] = len(capture_paths)
+    summary["workspaces_scanned"] = filtered_metadata
+    return summary
+
+
 def classify_workspace_intent(message: str) -> str:
     """Classify whether a workspace request is read-only, focused edit, or broad exploration."""
     text = (message or "").strip().lower()
@@ -15125,9 +15603,10 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         "Inspect",
         "Inspecting the workspace to ground planning in observed files and artifacts.",
     )
-    inspect_bundle = assemble_inspect_context(
+    inspect_bundle = await assemble_inspect_context_async(
         session,
         workspace_snapshot_formatter=format_workspace_snapshot,
+        retrieval_adapters=build_context_retrieval_adapters(),
     )
     inspect_history = session.history_messages() + [{
         "role": "user",
@@ -15212,12 +15691,13 @@ async def deep_plan_step_subtasks(
     if is_fast_profile_active():
         subplan = build_heuristic_step_subplan(session, step, step_index, total_steps)
     else:
-        subtask_bundle = assemble_step_subtask_context(
+        subtask_bundle = await assemble_step_subtask_context_async(
             session,
             step=step,
             step_index=step_index,
             total_steps=total_steps,
             workspace_snapshot_formatter=format_workspace_snapshot,
+            retrieval_adapters=build_context_retrieval_adapters(),
         )
         messages = [
             {"role": "system", "content": STEP_DECOMPOSE_SYSTEM_PROMPT},
@@ -15383,7 +15863,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 active_substep_index=sub_idx,
             )
 
-            build_bundle = assemble_build_substep_context(
+            build_bundle = await assemble_build_substep_context_async(
                 session,
                 step=step,
                 step_index=idx,
@@ -15400,6 +15880,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                     active_substep_index=sub_idx,
                     prefix=f"{idx + 1}.",
                 ),
+                retrieval_adapters=build_context_retrieval_adapters(),
             )
             build_history = session.history_messages() + [{
                 "role": "user",
@@ -15661,7 +16142,10 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     if is_fast_profile_active():
         session.plan = build_heuristic_deep_plan(session)
     else:
-        plan_bundle = assemble_plan_context(session)
+        plan_bundle = await assemble_plan_context_async(
+            session,
+            retrieval_adapters=build_context_retrieval_adapters(),
+        )
         decompose_messages = [
             {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
             {"role": "user", "content": plan_bundle.render()},
@@ -15721,7 +16205,10 @@ async def deep_answer_directly(session: DeepSession) -> str:
         tool_name for tool_name in allowed_tools
         if tool_name not in {"workspace.patch_file", "workspace.run_command"}
     ]
-    direct_bundle = assemble_direct_answer_context(session)
+    direct_bundle = await assemble_direct_answer_context_async(
+        session,
+        retrieval_adapters=build_context_retrieval_adapters(),
+    )
     direct_history = session.history_messages() + [{
         "role": "user",
         "content": direct_bundle.render(),
@@ -15798,7 +16285,10 @@ async def deep_verify(session: DeepSession) -> str:
         "Verify",
         "Checking the result against the workspace.",
     )
-    verify_bundle = assemble_verify_context(session)
+    verify_bundle = await assemble_verify_context_async(
+        session,
+        retrieval_adapters=build_context_retrieval_adapters(),
+    )
     verify_history = session.history_messages() + [{
         "role": "user",
         "content": verify_bundle.render(),
@@ -15846,7 +16336,10 @@ async def deep_review(session: DeepSession) -> str:
         "Synthesize",
         "Preparing the final answer from verified artifacts.",
     )
-    synth_bundle = assemble_synthesis_context(session)
+    synth_bundle = await assemble_synthesis_context_async(
+        session,
+        retrieval_adapters=build_context_retrieval_adapters(),
+    )
     synth_history = session.history_messages() + [{
         "role": "user",
         "content": synth_bundle.render(),
@@ -17384,6 +17877,7 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
 async def startup_event():
     global ACTIVE_MODEL_LOCK, FILE_SESSION_BACKGROUND_WORKER_TASK
     ACTIVE_MODEL_LOCK = asyncio.Lock()
+    ensure_frontend_bundle()
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
     logger.info(f"Selected model profile: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
