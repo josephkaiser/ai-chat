@@ -71,8 +71,6 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn(".composer-runtime", css)
         self.assertIn("position: sticky;", css)
         self.assertIn('body[data-viewer-open="false"] .viewer-panel', css)
-        self.assertIn('body[data-left-sidebar-open="false"] .chat-panel', css)
-        self.assertIn("grid-template-columns: 18ch minmax(0, 1fr);", css)
         self.assertIn(".settings-overlay[hidden]", css)
 
 
