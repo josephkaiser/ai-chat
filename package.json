@@ -1,0 +1,9 @@
+{
+  "name": "ai-chat-frontend",
+  "private": true,
+  "scripts": {
+    "build:frontend": "node ./scripts/build_frontend.mjs",
+    "postinstall": "npm run build:frontend",
+    "start": "npm run build:frontend && python3 app.py"
+  }
+}

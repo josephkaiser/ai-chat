@@ -106,6 +106,7 @@ Document mode hides approval affordances and routes the visible draft through th
 ## Related files
 
 - `src/web/index.html` — UI structure
-- `src/web/app.js` — client runtime, activity rendering, workspace tools, slash commands, and voice
+- `src/web/app.ts` — client runtime source for chat and workspace file viewing
+- `src/web/app.js` — generated browser bundle
 - `src/web/style.css` — layout and component styling
 - `app.py` — chat, workspace, and voice APIs

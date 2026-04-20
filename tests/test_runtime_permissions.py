@@ -236,12 +236,14 @@ class RuntimePermissionTests(unittest.TestCase):
     def test_save_message_marks_previous_assistant_negative_after_corrective_user_reply(self):
         original_db_path = app.DB_PATH
         original_runs_root = app.RUNS_ROOT_PATH
+        original_workspace_root = app.WORKSPACE_ROOT
         try:
             with tempfile.TemporaryDirectory() as tempdir:
                 temp_root = pathlib.Path(tempdir)
                 db_path = temp_root / "chat.db"
                 app.DB_PATH = str(db_path)
                 app.RUNS_ROOT_PATH = temp_root / "runs"
+                app.WORKSPACE_ROOT = str(temp_root / "workspaces")
                 app.RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
 
                 conn = sqlite3.connect(db_path)
@@ -276,12 +278,19 @@ class RuntimePermissionTests(unittest.TestCase):
 
                 app.save_message("conv-feedback", "user", "the plot doesn't show!")
                 assistant = app.get_message_by_id(1)
+                capture_dir = pathlib.Path(app.get_workspace_path("conv-feedback")) / ".ai" / "context-evals"
+                capture_files = sorted(capture_dir.glob("*.json"))
         finally:
             app.DB_PATH = original_db_path
             app.RUNS_ROOT_PATH = original_runs_root
+            app.WORKSPACE_ROOT = original_workspace_root
 
         self.assertIsNotNone(assistant)
         self.assertEqual(assistant["feedback"], "negative")
+        self.assertEqual(len(capture_files), 1)
+        payload = __import__("json").loads(capture_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(payload["capture"]["trigger"], "implicit_feedback")
+        self.assertIn("retrieved_memory", payload["expectation"]["required_selected_keys"])
 
     def test_collect_recent_product_feedback_entries_returns_recent_corrective_replies(self):
         original_db_path = app.DB_PATH
@@ -337,6 +346,58 @@ class RuntimePermissionTests(unittest.TestCase):
                 "Review this repo for the top 3 bugs and patch the top 2."
             )
         )
+
+    def test_capture_context_eval_case_for_assistant_message_writes_replay_case(self):
+        original_db_path = app.DB_PATH
+        original_workspace_root = app.WORKSPACE_ROOT
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                temp_root = pathlib.Path(tempdir)
+                db_path = temp_root / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.WORKSPACE_ROOT = str(temp_root / "workspaces")
+
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    '''CREATE TABLE conversations
+                       (id TEXT PRIMARY KEY, title TEXT, created_at TEXT, updated_at TEXT, run_id TEXT, workspace_id TEXT)'''
+                )
+                conn.execute(
+                    '''CREATE TABLE messages
+                       (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT, role TEXT, content TEXT, timestamp TEXT, kind TEXT, feedback TEXT)'''
+                )
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at, run_id, workspace_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-capture", "Capture", "2026-04-10T00:00:00", "2026-04-10T00:00:00", None, ""),
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("conv-capture", "user", "please verify the app.js change", "2026-04-10T00:00:01", "visible_chat", None),
+                        ("conv-capture", "assistant", "I updated [[artifact:src/web/app.js]]", "2026-04-10T00:00:02", "visible_chat", "negative"),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                workspace = pathlib.Path(app.get_workspace_path("conv-capture"))
+                (workspace / "src" / "web").mkdir(parents=True, exist_ok=True)
+                (workspace / "src" / "web" / "app.js").write_text("function sendMessage() { return true; }\n", encoding="utf-8")
+
+                rel_path = app.capture_context_eval_case_for_assistant_message(
+                    "conv-capture",
+                    2,
+                    trigger="explicit_feedback",
+                )
+                payload = __import__("json").loads((workspace / rel_path).read_text(encoding="utf-8"))
+        finally:
+            app.DB_PATH = original_db_path
+            app.WORKSPACE_ROOT = original_workspace_root
+
+        self.assertTrue(rel_path.endswith(".json"))
+        self.assertEqual(payload["capture"]["trigger"], "explicit_feedback")
+        self.assertEqual(payload["policy_inputs"]["phase"], "verify")
+        self.assertIn("workspace_excerpts", [item["key"] for item in payload["selection_candidates"]])
 
     def test_tool_loop_step_limit_gives_focused_write_more_room(self):
         steps = app.tool_loop_step_limit_for_request(
