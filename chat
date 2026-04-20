@@ -123,42 +123,6 @@ list_installed_model_profiles() {
     done
 }
 
-choose_model_profile() {
-    local prompt="$1"
-    local default_profile="$2"
-    shift 2
-    local -a profiles=("$@")
-    local count="${#profiles[@]}"
-    local i key choice
-
-    if [[ "$count" -eq 0 ]]; then
-        return 1
-    fi
-
-    echo "$prompt" >&2
-    for ((i = 0; i < count; i += 1)); do
-        key="${profiles[$i]}"
-        printf '  %s) %s — %s\n' "$((i + 1))" "$(model_profile_label "$key")" "$(model_profile_name "$key")" >&2
-    done
-
-    while true; do
-        local default_index="1"
-        for ((i = 0; i < count; i += 1)); do
-            if [[ "${profiles[$i]}" == "$default_profile" ]]; then
-                default_index="$((i + 1))"
-                break
-            fi
-        done
-        read -r -p "Choose a model [$default_index]: " choice
-        choice="${choice:-$default_index}"
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
-            printf '%s\n' "${profiles[$((choice - 1))]}"
-            return 0
-        fi
-        echo "Enter a number between 1 and $count." >&2
-    done
-}
-
 download_model_profile() {
     local profile="$1"
     local model_name
@@ -404,12 +368,11 @@ open_url_in_browser() {
 }
 
 usage() {
-    echo "Usage: ./chat {install|kickstart|start|stop|restart|status|logs|open}"
+    echo "Usage: ./chat {install|start|stop|restart|status|logs|open}..."
     echo ""
     echo "Commands:"
     echo "  install   Build images, pull dependencies, and download the default model"
-    echo "  kickstart Clean rebuild for an rsync'd repo, then start services"
-    echo "  start     Start all services (idempotent)"
+    echo "  start     Start all services with the installed/default model (idempotent)"
     echo "  stop      Stop all services and clean up (idempotent)"
     echo "  restart   Stop then start"
     echo "  status    Show running containers"
@@ -537,40 +500,6 @@ do_install() {
     echo "Install complete. Run './chat start' to launch."
 }
 
-do_kickstart() {
-    ensure_data_dirs
-    ensure_stack_stopped "resetting services for kickstart"
-    build_frontend_bundle
-
-    echo ""
-    echo "Pulling vLLM image..."
-    docker_compose pull vllm
-    echo ""
-    echo "Rebuilding chat-app image from the current repo snapshot..."
-    docker_compose build --no-cache chat-app
-    echo ""
-
-    local selected_profile
-    selected_profile="$(install_target_profile)"
-    write_runtime_env_file "$selected_profile"
-    echo "Ensuring $(model_profile_label "$selected_profile") is available..."
-    download_model_profile "$selected_profile"
-
-    echo ""
-    echo "Starting services..."
-    docker_compose up -d
-
-    ensure_tailscale_https || true
-
-    echo ""
-    echo "Kickstart complete."
-    print_access_urls
-    echo ""
-    echo "Running $(model_profile_label "$selected_profile") after clean rebuild."
-    echo "Note: vLLM may take a few minutes to load the selected model on first run."
-    echo "Run './chat logs' to watch progress."
-}
-
 do_start() {
     ensure_data_dirs
     build_frontend_bundle
@@ -580,10 +509,9 @@ do_start() {
         exit 1
     fi
 
-    local default_profile current_profile selected_profile
+    local current_profile selected_profile
     current_profile="$(current_runtime_profile)"
-    default_profile="${current_profile:-${installed_profiles[0]}}"
-    selected_profile="$(choose_model_profile "Which downloaded model should run for this session?" "$default_profile" "${installed_profiles[@]}")"
+    selected_profile="$(resolve_installed_profile_noninteractive "$current_profile" "${installed_profiles[@]}")"
     write_runtime_env_file "$selected_profile"
 
     # Check if already fully running
@@ -655,14 +583,24 @@ do_open() {
     open_url_in_browser "$url"
 }
 
-case "${1:-}" in
-    install)  do_install ;;
-    kickstart) do_kickstart ;;
-    start)    do_start ;;
-    stop)     do_stop ;;
-    restart)  do_stop; echo ""; do_start ;;
-    status)   do_status ;;
-    logs)     docker_compose logs -f ;;
-    open)     do_open ;;
-    *)        usage; exit 1 ;;
-esac
+if [[ "$#" -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        install)  do_install ;;
+        start)    do_start ;;
+        stop)     do_stop ;;
+        restart)  do_stop; echo ""; do_start ;;
+        status)   do_status ;;
+        logs)     docker_compose logs -f ;;
+        open)     do_open ;;
+        *)        usage; exit 1 ;;
+    esac
+    shift
+    if [[ "$#" -gt 0 ]]; then
+        echo ""
+    fi
+done

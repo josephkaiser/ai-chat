@@ -943,6 +943,10 @@ body[data-left-sidebar-open="false"] .chat-panel #sendButton:hover {
     background: rgba(19, 34, 38, 0.18);
 }
 
+.settings-overlay[hidden] {
+    display: none;
+}
+
 .settings-dialog {
     width: min(360px, calc(100vw - 24px));
     padding: 14px;

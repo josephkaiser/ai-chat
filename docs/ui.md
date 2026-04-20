@@ -1,112 +1,83 @@
 # UI Features
 
-The UI is a compact workspace-oriented chat surface: shared workspaces, chat, progress, files, attachments, plan approval, and voice controls all live in one place.
+The shipped frontend is now a slimmer workspace shell. It focuses on four things: choosing a workspace, reviewing replay-triage signals, chatting with the backend, and previewing workspace files.
 
-## Main surface
+## Main layout
 
-The composer supports:
+`src/web/index.html` renders a three-part shell:
 
-- reasoning effort switching (`Low` / `High`)
-- attachments uploaded into the conversation workspace
-- browser-recorded audio attachments from the mic button
-- a per-chat **Tools** toggle for ask-first vs auto-approve tool and command use
-- slash commands for common coding tasks
-- send-or-interrupt behavior from the primary action button
+- a left sidebar for workspace selection, replay triage, and chat history
+- a central chat panel with the message stream and composer
+- a right-side viewer panel for browsing and previewing workspace files
 
-The client preserves a handful of browser preferences in `localStorage`, including speech playback settings, theme choice, the last active `workspace_id`, and per-chat tool approval preferences.
+The mobile/compact layout can toggle the workspace sidebar and file viewer independently.
 
-## Workspace catalog
+## Current chat flow
 
-The main menu now includes a shared workspace catalog.
+The bundled frontend is intentionally light:
 
-- users can create a managed workspace under the server workspace root
-- users can register an existing absolute folder path as a workspace
-- renaming a workspace only changes the display label, not the root path
-- selecting a different workspace starts a fresh chat so the existing transcript stays attached to its original workspace
+- the composer is a plain textarea plus send/stop button
+- messages stream over `/ws/chat`
+- the client sends turns with `mode: "deep"` and `auto_approve_tool_permissions: true`
+- runtime progress is mostly shown as short status text in the composer hint area
 
-## Settings and About
+The current browser client does not expose the older voice, slash-command, or plan-editor surfaces described in earlier docs.
 
-The Settings panel exposes:
+## Workspace selector and chat list
 
-- **Auto-Speak Replies** — queue fresh assistant replies through server TTS when available
-- **Speech Speed** — adjust playback speed for generated audio
-- **Appearance** and **System Prompt** controls
-- **Reset App Data** danger zone
+The sidebar includes:
 
-Tool approvals are no longer managed from Settings. The main menu now keeps **About** separate for the author note and project intent, while plan approval and runtime permission approval happen inline near the composer when needed.
+- a workspace selector
+- a workspace refresh button
+- a settings button
+- a conversation list with rename/delete actions
+- a `New Chat` button
 
-## Workspace panel
+The only browser preference currently persisted in `localStorage` is `lastWorkspaceId`.
 
-When agent tools are enabled, the workspace area shows:
+## Replay Triage panel
 
-- an **Activity Log** with harness phases, tool calls, plan events, and finalization markers
-- a **Recent Artifacts** rail for files the assistant just created or touched
-- an **All Files** tree for files created, uploaded, or edited during the conversation
-- refresh and download actions for the current workspace
-- shared file access across conversations attached to the same workspace
+One newer UI surface is the **Replay Triage** panel.
 
-The activity timeline is populated from `activity`, `tool_start`, `tool_result`, `assistant_note`, and `plan_ready` events.
-Dot-prefixed paths stay hidden in the browser view unless the user explicitly targets a hidden path.
+It shows:
 
-## File viewer and editor
+- replay capture counts and failure counts
+- a recommended next fix
+- top triage buckets
+- recent failure samples
+- a drill-down into one captured replay case
 
-Selecting a workspace file opens the inline viewer/editor in the workspace area.
+If a replay capture file lives inside the workspace under `.ai/context-evals/`, the panel can jump straight to that file in the viewer.
 
-Current capabilities include:
+## File browser and previewer
 
-- editable text files
-- markdown preview
-- HTML preview
-- image preview for files such as PNG, JPG, GIF, SVG, and WebP
-- delimited file previews
-- spreadsheet summaries with sheet switching
-- PDF preview
-- save-back into the current conversation workspace
+The viewer panel lets the user browse the active workspace and preview files inline.
 
-When the assistant uses `workspace.render`, the UI automatically opens the generated HTML file. Previewable artifacts detected after `workspace.run_command`, especially plots and other generated images, can also auto-open in the inline viewer so the user sees more of what happened during execution.
+Current preview types include:
 
-## Attachments and workspace artifacts
+- plain text and code
+- Markdown
+- HTML
+- images
+- PDFs
+- CSV tables
+- archive entry listings
 
-Files are uploaded before send and stored in the active workspace. The composer shows them as removable chips until the request is sent.
+Spreadsheet previews are served by the backend through the workspace API, even though the current frontend keeps the presentation simple.
 
-That means attachments are first-class workspace inputs:
+When the backend reports `tool_result.payload.open_path`, the frontend automatically opens that file in the viewer. This is how rendered HTML, plots, and other generated artifacts can pop into view after a tool run.
 
-- the assistant sees summarized attachment context
-- uploaded files appear in the workspace tree
-- follow-up turns can keep working with those artifacts
+## Settings
 
-Recorded audio follows the same path. If the user records audio without typing text, the client sends a small prompt asking the assistant to review the attached recording.
+The current settings overlay is intentionally small. It shows a lightweight runtime summary and exposes a single destructive action:
 
-## Slash commands
+- `Reset App Data`
 
-The composer has a slash menu for common workflows:
-
-- `/search`
-- `/grep`
-- `/plan`
-- `/code`
-- `/pip`
-
-These commands take a structured execution path instead of only inserting prompt text.
-
-## Deep-mode UX
-
-Deep mode is an explicit inspect/plan/execute/verify flow rather than just “think harder.”
-
-The UI surfaces:
-
-- a reasoning-effort control
-- streaming activity updates across phases
-- structured build-step progress
-- plan previews with editable build steps
-- direct approval of an execution plan from the composer
-
-Document mode hides approval affordances and routes the visible draft through the background agent flow automatically.
+That reset clears chats, workspaces, and related runtime state through `/api/reset-all`.
 
 ## Related files
 
-- `src/web/index.html` — UI structure
-- `src/web/app.ts` — client runtime source for chat and workspace file viewing
-- `src/web/app.js` — generated browser bundle
-- `src/web/style.css` — layout and component styling
-- `app.py` — chat, workspace, and voice APIs
+- `src/web/index.html` — shell structure
+- `src/web/app.ts` — client runtime and event handling
+- `src/web/style.css` — responsive layout and visual system
+- `src/python/harness.py` — APIs and WebSocket events consumed by the client

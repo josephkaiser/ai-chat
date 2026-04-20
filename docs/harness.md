@@ -1,84 +1,84 @@
 # Harness And Tools
 
-This app is no longer just a plain chat frontend over vLLM. It now has a server-side harness that can inspect the workspace, choose a scoped tool set, run tool calls in a controlled loop, and surface progress back to the UI.
+This app now has a fairly opinionated server-side harness. The frontend is intentionally thin; most routing, tool execution, persistence, and background work happen in `src/python/harness.py` plus the orchestration modules under `src/python/ai_chat/`.
 
 ## Mental model
 
-There are two main execution paths per turn:
+Each visible turn can follow one of three paths:
 
-- **Normal mode** keeps the interaction lightweight. The server decides whether to answer directly or expose a small tool list for the current request.
-- **Deep mode** uses a more explicit orchestration flow: inspect, plan, build, verify, audit, and synthesize.
+- **Direct answer** for simple questions
+- **Scoped tool loop** for targeted reads, patches, commands, or web lookups
+- **Deep execution** for inspect/plan/execute/verify style repo work
 
-In both modes, the browser streams structured progress so the user can see what the assistant is doing instead of waiting on a silent response.
+Separately, a turn can also bind itself to a **file session**, which lets the backend keep working on one file across visible turns.
 
-## Normal-turn harness
+## Main entry points
 
-`process_chat_turn()` in `app.py` is the entry point for `/ws/chat`.
+- `process_chat_turn()` in `src/python/harness.py` is the main request handler for both `/ws/chat` and `/api/chat`.
+- `routing_program.py` and `turn_strategy.py` decide the top-level path.
+- `runtime_layers.py` builds model-only context that should not be stored as visible transcript text.
+- `deep_runtime.py` owns the deep-session lifecycle and callback seam.
+- `task_engine.py` runs typed structured plans for newer task-style flows.
 
-For each request the server:
+## Scoped tool loop
 
-1. Saves the user message and optional attachment context.
-   Hidden runtime-file turns are now stored separately from visible chat turns so transcript search, summaries, retry, and feedback stay grounded in actual user interaction.
-2. Parses per-turn feature flags from the UI.
-3. Classifies workspace intent.
-4. Composes runtime layers so model-only context such as the active draft can be passed to the model without being persisted as visible transcript text.
-5. Chooses a small allowed tool set with `select_enabled_tools(...)`.
-6. Either streams a direct answer, enters `run_tool_loop(...)`, or auto-upgrades broad approved write requests into the deeper inspect/plan/build/verify flow.
+`run_tool_loop(...)` is still the core lightweight execution loop:
 
-`src/python/ai_chat/routing_program.py` now owns the router seam. Today it still delegates to the heuristic turn strategy, but it is the intended integration point for a future DSPy-style routing program.
-
-`src/python/ai_chat/deep_runtime.py` now owns deep-session state plus the bootstrap/plan-preview/execute orchestration lifecycle. The remaining build, verify, and synthesis phases still call back into harness-local implementations, but the state machine boundary is now explicit.
-
-`run_tool_loop(...)` is intentionally small:
-
-- The model receives a tool-use system prompt plus the allowed tool names.
-- The model may emit a single `<tool_call>{...}</tool_call>` block.
-- The server validates the tool name and arguments.
-- The server executes the tool and appends a structured `<tool_result>` message.
-- After a successful patch, the server can infer one focused auto-verify command and run it immediately when command access is available.
-- The loop repeats until the model returns plain text or the step budget is exhausted.
+1. Build a prompt limited to the allowed tool set for this request.
+2. Let the model emit one tool call.
+3. Validate the tool name and JSON arguments.
+4. Execute the tool and append a structured tool result.
+5. Repeat until the model returns plain text or the step budget is exhausted.
 
 Important guardrails:
 
-- Tool access is **scoped per request**, not globally.
-- The server can restrict the prompt to a subset of tools with `build_filtered_tool_system_prompt(...)`.
-- Tool budgets are capped by `tool_loop_step_limit_for_request(...)`.
-- Token budgets are reduced for tool-oriented turns by `tool_loop_token_budget(...)`.
-- `workspace.run_command` takes an argv array, not a shell string.
-- Python capability setup uses a server-managed workspace environment outside the workspace, so installs do not flood the workspace tree or exports and can persist across fresh chats in the same workspace.
-- `workspace.patch_file` uses exact-match edits so changes stay narrow and predictable.
-- `workspace.render` is only exposed when the prompt strongly implies “render/preview/display this HTML”.
-- `workspace.run_command` now snapshots workspace files before and after execution so the harness can surface newly created artifacts such as plots, reports, and exports.
-- Final answer text is post-processed to strip unsupported claims that a file was created or updated when no successful workspace write happened.
-- Direct answers get one recovery pass if the model incorrectly claims an available tool capability is missing.
-- Direct answers also get a recovery pass when the model incorrectly hands execution back to the user with “run this locally” instructions even though command or render tools were available.
-- Broad “build me an app/project/repo” requests with approved workspace edits can bypass the lightweight loop and run through the full workspace execution path automatically.
+- tools are scoped per request, not globally enabled
+- `workspace.run_command` takes argv arrays rather than shell strings
+- command execution snapshots workspace files before and after the run so new artifacts can be surfaced
+- patching stays narrow and exact-match oriented
+- direct-answer fallback logic tries to recover from incorrect “I can’t do that here” or “run this locally” model behavior
 
-## Deep-mode harness
+## Deep execution path
 
-Deep mode uses a richer workflow in `orchestrated_chat(...)`.
+The deeper flow is now split across the harness and `src/python/ai_chat/deep_runtime.py`.
 
-Typical flow:
+Typical phases are:
 
-1. `evaluate` picks workspace-assisted or text-first deep mode.
-2. `inspect` gathers repo facts, attachments, conversation context, and when the request is feedback-driven repo improvement, a recent corrective-feedback digest from `chat.db`.
-3. `plan` builds a normalized execution plan.
-4. `execute` carries out plan steps, usually with workspace tools enabled.
-5. `verify` checks results and can run focused validations.
-6. `audit` compares requested scope with verified evidence.
-7. `synthesize` prepares the final response.
+1. `evaluate`
+2. `inspect`
+3. `plan`
+4. `execute`
+5. `verify`
+6. `audit`
+7. `synthesize`
 
-Two user-facing behaviors matter here:
+The backend can still emit richer structured events such as `plan_ready`, `build_steps`, and scope-audit updates even though the bundled frontend currently uses a simpler chat-and-hint experience.
 
-- Some deep requests return a **plan preview** first via `plan_ready`, so the UI can offer approval-first execution without overwriting the user's composer draft.
-- Explicit or auto-executed workspace build requests can proceed through the full inspect/build/verify path and stream step-by-step activity while work is happening.
-- When a repo-improvement request explicitly mentions feedback, recent chats, `chat.db`, or the dev loop, deep mode can save a `.ai/recent-feedback.md` artifact and treat those corrective user replies as failure signals for the current pass.
+## File sessions and background work
+
+One of the biggest refactors is the file-session runtime.
+
+- A file session is keyed by workspace plus normalized target path.
+- Hidden artifacts for that file live under `.ai-chat/`, including drafts/specs, candidate outputs, evaluations, and versions.
+- Foreground and background work are stored as durable `file_session_jobs` rows.
+- One file per workspace can own the background-polish loop at a time.
+- The background worker resumes queued jobs on startup and keeps iterating until work completes, is superseded, or loses focus.
+
+This lets the backend treat “improve this file over time” as something more durable than one chat completion.
+
+## Replay triage and failure signals
+
+Another refactor is the replay/context-eval loop:
+
+- explicit negative feedback can capture a replay case
+- retries can also capture a replay case
+- corrective user replies can be summarized into recent failure signals during deeper repo-improvement passes
+- the workspace can expose these captures under `.ai/context-evals/`
+- `/api/context-evals/report` builds a triage summary that the frontend renders in the Replay Triage sidebar
 
 ## Tool surface
 
-The current tool protocol is defined by `build_tool_system_prompt(...)` and executed by `execute_tool_call(...)`.
-
-Available tools today:
+The backend tool surface includes:
 
 - `workspace.list_files`
 - `workspace.grep`
@@ -91,105 +91,24 @@ Available tools today:
 - `web.search`
 - `web.fetch_page`
 
-Current search-specific behavior:
+`workspace.render` and command-generated artifact detection can open HTML, image, Markdown, CSV, spreadsheet, and PDF outputs directly in the viewer.
 
-- `workspace.grep` is the preferred read-only repo search tool for code and text questions.
-- `conversation.search_history` is for recall within the active conversation.
-- `web.search` returns ordered results plus normalized domain metadata, and by default checks general web results alongside Wikipedia and Reddit result sets.
-- For some topics, `web.search` also adds curated authoritative domains; philosophy queries now include Stanford Encyclopedia of Philosophy and Internet Encyclopedia of Philosophy result sets.
-- Curated authoritative domains are fail-open and can be temporarily disabled automatically if they start failing repeatedly.
-- `web.fetch_page` returns cleaned page text plus normalized source metadata so final answers can cite fetched pages.
+## Approvals and the shipped frontend
 
-How tools are exposed:
+The backend still supports blocking approval events for tools and commands via `permission_required`.
 
-- **Workspace read tools** are available when the request clearly needs local files.
-- **Workspace render** is added for HTML preview/display requests so the model can materialize a preview file directly in the viewer.
-- **Write access** is exposed for write-oriented requests, then paused behind an inline approval card the first time the model tries to edit files.
-- **Command execution** is exposed for run/verify-oriented requests, then paused behind an inline approval card for each executable such as `git` or `python3`.
-- **Python dependency setup** is routed through the same command runner, but uses more specific approvals for `python -m venv` and `pip install`.
-- **Conversation search** stays available for recall-style prompts.
-- **Web search** stays available for freshness-sensitive prompts, then pauses behind an inline approval card the first time live web access is used.
+The current bundled frontend takes a simpler path:
 
-When a command creates or modifies visible files in the workspace, the tool result can now carry detected artifact metadata. Previewable outputs such as images, HTML, markdown, CSV, spreadsheets, and PDFs can be surfaced directly in the workspace viewer.
+- it sends turns in deep mode by default
+- it opts into `auto_approve_tool_permissions: true`
+- when the backend still emits `permission_required`, the frontend auto-responds with approval and continues
 
-`allowed_workspace_tools(...)` is the core permission gate for file and command tools.
-
-### Python capability pattern
-
-For Python-heavy turns, the intended flow is:
-
-1. Research packages or docs with `web.search` / `web.fetch_page` when package choice is uncertain.
-2. Create or reuse the managed Python environment for the workspace when package work is needed.
-   That environment is server-owned and stored outside the workspace root so workspace syncs stay lighter.
-3. Install packages with pip into that managed environment.
-4. Write scripts or artifacts into the workspace.
-5. Verify with a focused command from the same environment.
-
-## Runtime approvals
-
-Tool enablement is no longer buried in settings. `resolveTurnFeatures(...)` in `src/web/app.js` now sends the server the relevant tool surface plus any remembered per-chat approvals, and the harness pauses only when a gated capability is actually used.
-
-Current inline approval buckets are:
-
-- workspace inspection
-- workspace grep
-- workspace edits / render writes
-- web search / fetch
-- per-executable commands such as `git`, `bash`, or `python3`
-- scoped Python setup actions such as `python -m venv` and `pip install`
-
-If the user denies one of those requests, the task pauses at that approval boundary and waits for the user to approve it and resume.
-That denial is treated as a real block, not as optional context for the model to work around. The current task should resume only after the user approves it for this chat and says `continue`.
-
-Plan approval is handled separately from per-tool approval. The composer’s tool auto-approve control can auto-approve tool and command requests for the current chat, but execution plans still require an explicit plan approval step in the UI.
-
-Install-like Python setup commands are exempt from the short command timeout. They run until completion unless they fail or the user presses Stop / Interrupt, in which case the server cancels the subprocess cleanly.
-
-## Workspace model
-
-Workspaces are first-class catalog entries and conversations attach to them. The harness uses the attached workspace for:
-
-- uploaded attachments
-- generated artifacts
-- patched files
-- command execution cwd
-- downloadable zip exports
-
-The browser can inspect the same workspace through the activity rail, artifact list, file tree, and inline viewer, so tool output is visible outside the model transcript.
-Deleting a conversation no longer deletes the attached workspace by default.
-Dot-prefixed entries stay hidden in the browser workspace view unless a hidden path is targeted explicitly.
-Previewable artifacts from `workspace.render` and from command-generated files can auto-open in the inline viewer to make execution feel more like live pair programming.
-
-## Activity events
-
-The harness reports structured progress through WebSocket `activity` events.
-
-Common phases:
-
-- `evaluate`
-- `inspect`
-- `plan`
-- `execute`
-- `verify`
-- `audit`
-- `synthesize`
-- `respond`
-- `error`
-- `blocked`
-
-The UI also receives:
-
-- `tool_start`
-- `tool_result`
-- `assistant_note`
-- `plan_ready`
-- `build_steps`
-
-Those events drive the workspace activity timeline, build-step checklist, and loading text.
+That means the protocol still supports explicit approval gates, but the shipped UI is currently optimized for a smoother local-workspace workflow.
 
 ## Related files
 
-- `app.py` — orchestration, tool execution, workspace APIs, and voice APIs
-- `src/python/ai_chat/prompts.py` — base prompts plus tool-use instructions
-- `src/web/app.js` — feature toggles, per-turn approvals, activity rendering, workspace UI
-- `docs/api.md` — endpoint and WebSocket payload reference
+- `src/python/harness.py` — orchestration, routes, tool runtime, file-session worker
+- `src/python/ai_chat/deep_runtime.py` — deep-session lifecycle
+- `src/python/ai_chat/context_eval.py` — replay capture and report logic
+- `src/web/app.ts` — current thin client
+- `docs/api.md` — route and event reference
