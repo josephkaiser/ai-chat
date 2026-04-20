@@ -70,6 +70,11 @@ The built-in voice stack has two paths:
 
 The bundled Docker path no longer installs server voice tooling. The launcher chooses one local model profile per install and one downloaded profile per session.
 
+Launcher notes:
+
+- `./chat install` is non-interactive and prepares the current runtime profile or `DEFAULT_MODEL_PROFILE` (falling back to `14b`).
+- `./chat kickstart` performs a clean stop, rebuilds the frontend and chat image from the current repo snapshot, ensures that default profile is downloaded, and starts the stack in one command.
+
 ## GPU configurations
 
 24GB-class GPUs: the default config is the intended target.

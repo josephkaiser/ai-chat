@@ -62,6 +62,15 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 
 This pulls the vLLM image and builds the chat app container.
 It also rebuilds the TypeScript frontend bundle first so the generated `src/web/app.js` is baked into the image.
+`./chat install` is now non-interactive and prepares the current/default model profile automatically.
+
+For a prod box that just received an `rsync` of the repo, use:
+
+```bash
+./chat kickstart
+```
+
+That performs a clean stop, rebuilds the frontend and Docker image from the current repo snapshot, ensures the default model is present, and starts the stack.
 
 ## Security defaults
 
@@ -76,6 +85,7 @@ The app keeps the runtime surface fairly small:
 
 ```bash
 ./chat start     # Start the app (idempotent)
+./chat kickstart # Clean rebuild from current repo, then start
 ./chat stop      # Stop the app (idempotent)
 ./chat restart   # Stop then start
 ./chat status    # Check what's running
@@ -124,7 +134,7 @@ Notes:
 
 - `fastembed` runs on CPU, so semantic retrieval works fine on a Mac without CUDA.
 - The checked-in `docker-compose.yml` is mainly for the bundled local `vllm` + app stack and assumes NVIDIA GPU support for the `vllm` service.
-- `./chat install` now downloads only the model you choose instead of pulling both local presets.
+- `./chat install` now downloads the current/default model profile automatically instead of prompting.
 - `./chat start` prompts for which downloaded model to run for the current session.
 
 ## Documentation
