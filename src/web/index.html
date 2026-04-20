@@ -15,14 +15,19 @@
             <div class="sidebar-brand">
                 <div class="sidebar-eyebrow">Local Workspace</div>
                 <h1>{{ app_title }}</h1>
-                <p>Chat on the left. Open files on the right.</p>
             </div>
 
             <section class="sidebar-panel">
-                <div class="sidebar-panel-label">Workspace</div>
+                <div class="sidebar-panel-header">
+                    <span class="sidebar-panel-label">Workspace</span>
+                    <button id="settingsButton" type="button">Settings</button>
+                </div>
                 <div class="workspace-controls">
                     <select id="workspaceSelect" aria-label="Workspace"></select>
-                    <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
+                    <div class="workspace-toolbar">
+                        <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
+                        <button id="workspaceSettingsButton" type="button">Settings</button>
+                    </div>
                 </div>
             </section>
 
@@ -47,29 +52,19 @@
 
         <main class="main-grid">
             <section class="panel chat-panel">
-                <header class="panel-header">
-                    <div class="header-copy">
-                        <div class="panel-eyebrow">Conversation</div>
-                        <h2 id="chatTitle">New chat</h2>
-                        <p id="chatMeta" class="panel-subtitle">Start a new conversation in the current workspace.</p>
-                    </div>
-                    <div class="status-stack">
-                        <span id="connectionBadge" class="status-badge offline">Offline</span>
-                        <span id="modelBadge" class="status-note">Checking runtime…</span>
-                    </div>
-                </header>
-
                 <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
 
                 <form id="composerForm" class="composer" autocomplete="off">
-                    <label class="composer-label" for="composerInput">Message</label>
                     <textarea
                         id="composerInput"
-                        rows="4"
+                        rows="3"
                         placeholder="Ask about the project, request a change, or inspect a file in the workspace."
                     ></textarea>
                     <div class="composer-actions">
-                        <span id="composerHint" class="composer-hint">Enter sends. Shift+Enter adds a line break.</span>
+                        <div class="composer-runtime">
+                            <span id="connectionBadge" class="status-badge offline">Offline</span>
+                            <span id="composerHint" class="composer-hint">Checking runtime…</span>
+                        </div>
                         <button id="sendButton" type="submit">Send</button>
                     </div>
                 </form>
@@ -99,6 +94,17 @@
                 </div>
             </section>
         </main>
+    </div>
+
+    <div id="settingsOverlay" class="settings-overlay" hidden>
+        <div class="settings-dialog">
+            <div class="settings-dialog-header">
+                <strong>Settings</strong>
+                <button id="closeSettingsButton" type="button">Close</button>
+            </div>
+            <div id="settingsSummary" class="settings-summary"></div>
+            <button id="resetAppButton" class="settings-danger-button" type="button">Reset App Data</button>
+        </div>
     </div>
 
     <script type="module" src="/static/app.js?v={{ static_asset_version }}"></script>

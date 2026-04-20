@@ -542,7 +542,7 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
                     "severity_rank": bucket_meta["severity_rank"],
                     "recommendation": bucket_meta["recommendation"],
                     "failure_count": 0,
-                    "case_names": set(),
+                    "case_refs": set(),
                     "trigger_counts": Counter(),
                     "phase_counts": Counter(),
                     "sample_failed_checks": [],
@@ -550,7 +550,7 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
                 },
             )
             bucket["failure_count"] = int(bucket["failure_count"]) + 1
-            bucket["case_names"].add(item.result.name)
+            bucket["case_refs"].add((item.source_path, item.result.name))
             bucket["trigger_counts"][trigger] += 1
             bucket["phase_counts"][phase] += 1
             if failed_check not in bucket["sample_failed_checks"] and len(bucket["sample_failed_checks"]) < 3:
@@ -563,7 +563,7 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
 
     ranked_triage_buckets = []
     for bucket in triage_buckets.values():
-        case_count = len(bucket["case_names"])
+        case_count = len(bucket["case_refs"])
         priority_score = round(
             float(bucket["failure_count"]) * float(bucket["severity_rank"]) + case_count * 0.25,
             4,

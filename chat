@@ -404,16 +404,71 @@ open_url_in_browser() {
 }
 
 usage() {
-    echo "Usage: ./chat {install|start|stop|restart|status|logs|open}"
+    echo "Usage: ./chat {install|kickstart|start|stop|restart|status|logs|open}"
     echo ""
     echo "Commands:"
-    echo "  install   Build images and pull dependencies"
+    echo "  install   Build images, pull dependencies, and download the default model"
+    echo "  kickstart Clean rebuild for an rsync'd repo, then start services"
     echo "  start     Start all services (idempotent)"
     echo "  stop      Stop all services and clean up (idempotent)"
     echo "  restart   Stop then start"
     echo "  status    Show running containers"
     echo "  logs      Tail logs from all services"
     echo "  open      Open the preferred browser URL"
+}
+
+default_model_profile() {
+    local profile="${DEFAULT_MODEL_PROFILE:-}"
+    case "$profile" in
+        14b|8b)
+            printf '%s\n' "$profile"
+            ;;
+        *)
+            printf '%s\n' "14b"
+            ;;
+    esac
+}
+
+install_target_profile() {
+    local current_profile
+    current_profile="$(current_runtime_profile)"
+    if [[ -n "$current_profile" ]]; then
+        case "$current_profile" in
+            14b|8b)
+                printf '%s\n' "$current_profile"
+                return 0
+                ;;
+        esac
+    fi
+    default_model_profile
+}
+
+resolve_installed_profile_noninteractive() {
+    local preferred="$1"
+    shift || true
+    local -a profiles=("$@")
+    local profile
+
+    for profile in "${profiles[@]}"; do
+        if [[ "$profile" == "$preferred" ]]; then
+            printf '%s\n' "$profile"
+            return 0
+        fi
+    done
+
+    for profile in "${profiles[@]}"; do
+        if [[ "$profile" == "$(default_model_profile)" ]]; then
+            printf '%s\n' "$profile"
+            return 0
+        fi
+    done
+
+    if [[ "${#profiles[@]}" -gt 0 ]]; then
+        printf '%s\n' "${profiles[0]}"
+        return 0
+    fi
+
+    return 1
 }
 
 ensure_data_dirs() {
@@ -474,13 +529,46 @@ do_install() {
     docker_compose build chat-app
     echo ""
     local selected_profile
-    local -a install_profiles
-    mapfile -t install_profiles < <(model_profile_keys)
-    selected_profile="$(choose_model_profile "Which model should install download?" "14b" "${install_profiles[@]}")"
+    selected_profile="$(install_target_profile)"
     write_runtime_env_file "$selected_profile"
+    echo "Preparing $(model_profile_label "$selected_profile") as the default downloaded model..."
     download_model_profile "$selected_profile"
     echo ""
     echo "Install complete. Run './chat start' to launch."
+}
+
+do_kickstart() {
+    ensure_data_dirs
+    ensure_stack_stopped "resetting services for kickstart"
+    build_frontend_bundle
+
+    echo ""
+    echo "Pulling vLLM image..."
+    docker_compose pull vllm
+    echo ""
+    echo "Rebuilding chat-app image from the current repo snapshot..."
+    docker_compose build --no-cache chat-app
+    echo ""
+
+    local selected_profile
+    selected_profile="$(install_target_profile)"
+    write_runtime_env_file "$selected_profile"
+    echo "Ensuring $(model_profile_label "$selected_profile") is available..."
+    download_model_profile "$selected_profile"
+
+    echo ""
+    echo "Starting services..."
+    docker_compose up -d
+
+    ensure_tailscale_https || true
+
+    echo ""
+    echo "Kickstart complete."
+    print_access_urls
+    echo ""
+    echo "Running $(model_profile_label "$selected_profile") after clean rebuild."
+    echo "Note: vLLM may take a few minutes to load the selected model on first run."
+    echo "Run './chat logs' to watch progress."
 }
 
 do_start() {
@@ -569,6 +657,7 @@ do_open() {
 
 case "${1:-}" in
     install)  do_install ;;
+    kickstart) do_kickstart ;;
     start)    do_start ;;
     stop)     do_stop ;;
     restart)  do_stop; echo ""; do_start ;;

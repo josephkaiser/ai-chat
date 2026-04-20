@@ -59,6 +59,53 @@ interface ChatEvent {
     };
 }
 
+interface ContextEvalRecentFailure {
+    source_path: string;
+    name: string;
+    score: number;
+    trigger: string;
+    failed_checks: string[];
+    selected_keys: string[];
+}
+
+interface ContextEvalExampleCase {
+    name: string;
+    source_path: string;
+    trigger: string;
+    phase: string;
+    failed_checks: string[];
+    selected_keys: string[];
+}
+
+interface ContextEvalTriageBucket {
+    key: string;
+    category: string;
+    title: string;
+    severity: "high" | "medium" | "low" | string;
+    recommendation: string;
+    failure_count: number;
+    case_count: number;
+    priority_score: number;
+    trigger_counts: Record<string, number>;
+    phase_counts: Record<string, number>;
+    sample_failed_checks: string[];
+    example_cases: ContextEvalExampleCase[];
+}
+
+interface ContextEvalReport {
+    total_cases: number;
+    passed_cases: number;
+    failed_cases: number;
+    average_score: number;
+    failed_check_counts: Record<string, number>;
+    trigger_counts: Record<string, number>;
+    phase_counts: Record<string, number>;
+    recent_failures: ContextEvalRecentFailure[];
+    triage_bucket_count: number;
+    top_triage_buckets: ContextEvalTriageBucket[];
+    recommended_fix?: ContextEvalTriageBucket | null;
+}
+
 type ConnectionState = "offline" | "online" | "streaming";
 
 const state = {
@@ -80,6 +127,11 @@ const state = {
     selectedFilePath: "",
     leftSidebarOpen: false,
     viewerOpen: false,
+    contextEvalReport: null as ContextEvalReport | null,
+    contextEvalLoading: false,
+    contextEvalError: "",
+    selectedContextEvalBucketKey: "",
+    selectedContextEvalExampleIndex: 0,
 };
 
 function query<T extends Element>(selector: string): T {
@@ -94,12 +146,12 @@ const workspaceSelect = query<HTMLSelectElement>("#workspaceSelect");
 const sidebarToggle = query<HTMLButtonElement>("#sidebarToggle");
 const viewerToggle = query<HTMLButtonElement>("#viewerToggle");
 const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton");
+const settingsButton = query<HTMLButtonElement>("#settingsButton");
+const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButton");
+const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
 const newChatButton = query<HTMLButtonElement>("#newChatButton");
 const conversationList = query<HTMLDivElement>("#conversationList");
-const chatTitle = query<HTMLHeadingElement>("#chatTitle");
-const chatMeta = query<HTMLParagraphElement>("#chatMeta");
 const connectionBadge = query<HTMLSpanElement>("#connectionBadge");
-const modelBadge = query<HTMLSpanElement>("#modelBadge");
 const chatMessages = query<HTMLDivElement>("#chatMessages");
 const composerForm = query<HTMLFormElement>("#composerForm");
 const composerInput = query<HTMLTextAreaElement>("#composerInput");
@@ -111,6 +163,11 @@ const upDirectoryButton = query<HTMLButtonElement>("#upDirectoryButton");
 const directoryPath = query<HTMLDivElement>("#directoryPath");
 const fileList = query<HTMLDivElement>("#fileList");
 const filePreview = query<HTMLDivElement>("#filePreview");
+const contextEvalReport = query<HTMLDivElement>("#contextEvalReport");
+const settingsOverlay = query<HTMLDivElement>("#settingsOverlay");
+const closeSettingsButton = query<HTMLButtonElement>("#closeSettingsButton");
+const settingsSummary = query<HTMLDivElement>("#settingsSummary");
+const resetAppButton = query<HTMLButtonElement>("#resetAppButton");
 
 function generateId(): string {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -154,6 +211,19 @@ function formatBytes(value?: number | null): string {
     return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+function formatDecimal(value?: number | null, digits = 2): string {
+    if (typeof value !== "number" || Number.isNaN(value)) return "0";
+    return value.toFixed(digits);
+}
+
+function workspaceRelativeCapturePath(sourcePath: string): string {
+    const normalized = String(sourcePath || "").replace(/\\/g, "/");
+    const marker = "/.ai/context-evals/";
+    const markerIndex = normalized.lastIndexOf(marker);
+    if (markerIndex === -1) return "";
+    return `.ai/context-evals/${normalized.slice(markerIndex + marker.length)}`;
+}
+
 function parentDirectory(path: string): string {
     if (!path || path === ".") return ".";
     const parts = path.split("/").filter(Boolean);
@@ -167,6 +237,16 @@ function fileViewUrl(path: string): string {
 
 function currentWorkspaceName(): string {
     return state.workspaces.find((workspace) => workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
+}
+
+function defaultComposerStatus(): string {
+    if (state.connectionState === "offline") {
+        return "Runtime offline.";
+    }
+    if (!state.modelAvailable) {
+        return "Model loading…";
+    }
+    return "Model ready.";
 }
 
 function syncShellLayout(): void {
@@ -224,17 +304,6 @@ function truncatePreview(value: string, limit = 88): string {
 function titleFromMessage(content: string): string {
     const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "New chat";
     return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
-}
-
-function updateChatMeta(): void {
-    const workspaceName = currentWorkspaceName();
-    if (!state.messages.length) {
-        chatMeta.textContent = `Start a new conversation in ${workspaceName}.`;
-        return;
-    }
-
-    const countLabel = `${state.messages.length} message${state.messages.length === 1 ? "" : "s"}`;
-    chatMeta.textContent = `${countLabel} in ${workspaceName}.`;
 }
 
 function renderInlineMarkdown(text: string): string {
@@ -296,7 +365,6 @@ function renderMessages(): void {
                 </div>
             </div>
         `;
-        updateChatMeta();
         return;
     }
 
@@ -316,7 +384,6 @@ function renderMessages(): void {
     }).join("");
 
     chatMessages.scrollTop = chatMessages.scrollHeight;
-    updateChatMeta();
 }
 
 function renderConversations(): void {
@@ -347,15 +414,21 @@ function renderConversations(): void {
     }
 
     conversationList.innerHTML = items.map((conversation) => `
-        <button
-            type="button"
-            class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
-            data-conversation-id="${escapeHtml(conversation.id)}"
-        >
-            <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
-            <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
-            <div class="conversation-preview">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
-        </button>
+        <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
+            <button
+                type="button"
+                class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
+                data-conversation-id="${escapeHtml(conversation.id)}"
+            >
+                <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
+                <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
+                <div class="conversation-preview">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
+            </button>
+            <div class="conversation-actions">
+                <button type="button" class="conversation-action-button" data-action="rename" data-conversation-id="${escapeHtml(conversation.id)}" data-title="${escapeHtml(conversation.title || "Untitled chat")}">Rename</button>
+                <button type="button" class="conversation-action-button conversation-action-danger" data-action="delete" data-conversation-id="${escapeHtml(conversation.id)}">Delete</button>
+            </div>
+        </div>
     `).join("");
 
     conversationList.querySelectorAll<HTMLButtonElement>(".conversation-item").forEach((button) => {
@@ -363,6 +436,21 @@ function renderConversations(): void {
             const id = button.dataset.conversationId || "";
             if (!id) return;
             void loadConversation(id);
+        });
+    });
+
+    conversationList.querySelectorAll<HTMLButtonElement>(".conversation-action-button").forEach((button) => {
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const id = button.dataset.conversationId || "";
+            if (!id) return;
+            if (button.dataset.action === "rename") {
+                void renameConversation(id, button.dataset.title || "");
+                return;
+            }
+            if (button.dataset.action === "delete") {
+                void deleteConversation(id);
+            }
         });
     });
 }
@@ -429,6 +517,235 @@ function renderFileList(): void {
             void openFile(path);
         });
     });
+}
+
+function renderContextEvalReport(): void {
+    if (state.contextEvalLoading) {
+        contextEvalReport.innerHTML = `<div class="context-eval-empty">Loading replay report…</div>`;
+        return;
+    }
+
+    if (state.contextEvalError) {
+        contextEvalReport.innerHTML = `<div class="context-eval-empty">${escapeHtml(state.contextEvalError)}</div>`;
+        return;
+    }
+
+    const report = state.contextEvalReport;
+    if (!report || !report.total_cases) {
+        contextEvalReport.innerHTML = `
+            <div class="context-eval-empty">
+                No captured replay cases yet. Negative feedback, retries, and corrective follow-ups will appear here.
+            </div>
+        `;
+        return;
+    }
+
+    const recommended = report.recommended_fix;
+    const topBuckets = report.top_triage_buckets || [];
+    const recentFailures = report.recent_failures || [];
+    const selectedBucket = topBuckets.find((bucket) => bucket.key === state.selectedContextEvalBucketKey)
+        || recommended
+        || topBuckets[0]
+        || null;
+    const exampleCases = selectedBucket?.example_cases || [];
+    const selectedExample = exampleCases[
+        Math.min(Math.max(state.selectedContextEvalExampleIndex, 0), Math.max(exampleCases.length - 1, 0))
+    ] || null;
+    const selectedCapturePath = selectedExample ? workspaceRelativeCapturePath(selectedExample.source_path) : "";
+    contextEvalReport.innerHTML = `
+        <div class="context-eval-card">
+            <div class="context-eval-label">Current Signal</div>
+            <div class="context-eval-stats">
+                <div class="context-eval-stat">
+                    <strong>${escapeHtml(String(report.total_cases))}</strong>
+                    <span>captures</span>
+                </div>
+                <div class="context-eval-stat">
+                    <strong>${escapeHtml(String(report.failed_cases))}</strong>
+                    <span>failing</span>
+                </div>
+                <div class="context-eval-stat">
+                    <strong>${escapeHtml(formatDecimal(report.average_score))}</strong>
+                    <span>avg score</span>
+                </div>
+            </div>
+        </div>
+        ${recommended ? `
+            <div class="context-eval-card">
+                <div class="context-eval-label">Recommended Next Fix</div>
+                <div class="context-eval-focus">
+                    <strong>${escapeHtml(recommended.title)}</strong>
+                    <span class="context-eval-severity ${escapeHtml(recommended.severity)}">${escapeHtml(recommended.severity)}</span>
+                </div>
+                <p>${escapeHtml(recommended.recommendation)}</p>
+                <div class="context-eval-meta">
+                    <span>${escapeHtml(String(recommended.failure_count))} failures</span>
+                    <span>${escapeHtml(String(recommended.case_count))} cases</span>
+                    <span>score ${escapeHtml(formatDecimal(recommended.priority_score))}</span>
+                </div>
+            </div>
+        ` : ""}
+        <div class="context-eval-card">
+            <div class="context-eval-label">Top Fixes</div>
+            ${topBuckets.length ? `
+                <div class="context-eval-list">
+                    ${topBuckets.slice(0, 4).map((bucket) => `
+                        <article class="context-eval-item${selectedBucket?.key === bucket.key ? " active" : ""}">
+                            <div class="context-eval-focus">
+                                <strong>${escapeHtml(bucket.title)}</strong>
+                                <span class="context-eval-severity ${escapeHtml(bucket.severity)}">${escapeHtml(bucket.severity)}</span>
+                            </div>
+                            <div class="context-eval-meta">
+                                <span>${escapeHtml(String(bucket.failure_count))} failures</span>
+                                <span>${escapeHtml(String(bucket.case_count))} cases</span>
+                            </div>
+                            <p>${escapeHtml(bucket.recommendation)}</p>
+                            <div class="context-eval-actions">
+                                <button
+                                    type="button"
+                                    class="context-eval-button"
+                                    data-context-eval-bucket="${escapeHtml(bucket.key)}"
+                                >
+                                    ${selectedBucket?.key === bucket.key ? "Viewing example" : "Open example"}
+                                </button>
+                            </div>
+                            ${bucket.example_cases[0] ? `
+                                <div class="context-eval-example">
+                                    <div class="context-eval-label">Example</div>
+                                    <div>${escapeHtml(bucket.example_cases[0].name)}</div>
+                                    <div class="context-eval-meta">
+                                        <span>${escapeHtml(bucket.example_cases[0].phase)}</span>
+                                        <span>${escapeHtml(bucket.example_cases[0].trigger)}</span>
+                                    </div>
+                                </div>
+                            ` : ""}
+                        </article>
+                    `).join("")}
+                </div>
+            ` : `<div class="context-eval-empty">No triage buckets yet.</div>`}
+        </div>
+        ${selectedBucket && selectedExample ? `
+            <div class="context-eval-card">
+                <div class="context-eval-label">Capture Drill-Down</div>
+                <div class="context-eval-focus">
+                    <strong>${escapeHtml(selectedBucket.title)}</strong>
+                    <span class="context-eval-severity ${escapeHtml(selectedBucket.severity)}">${escapeHtml(selectedBucket.severity)}</span>
+                </div>
+                <div class="context-eval-meta">
+                    <span>${escapeHtml(selectedExample.name)}</span>
+                    <span>${escapeHtml(selectedExample.phase)}</span>
+                    <span>${escapeHtml(selectedExample.trigger)}</span>
+                </div>
+                ${exampleCases.length > 1 ? `
+                    <div class="context-eval-actions">
+                        ${exampleCases.map((exampleCase, index) => `
+                            <button
+                                type="button"
+                                class="context-eval-button${selectedExample === exampleCase ? " active" : ""}"
+                                data-context-eval-bucket-example="${escapeHtml(String(index))}"
+                            >
+                                Example ${escapeHtml(String(index + 1))}
+                            </button>
+                        `).join("")}
+                    </div>
+                ` : ""}
+                <div class="context-eval-kv">
+                    <span class="context-eval-kv-label">Replay file</span>
+                    <code>${escapeHtml(selectedCapturePath || selectedExample.source_path)}</code>
+                </div>
+                <div class="context-eval-actions">
+                    <button
+                        type="button"
+                        class="context-eval-button"
+                        data-context-eval-open-capture="true"
+                        ${selectedCapturePath ? "" : "disabled"}
+                    >
+                        Open Capture File
+                    </button>
+                </div>
+                <div class="context-eval-drill-grid">
+                    <div class="context-eval-drill-panel">
+                        <div class="context-eval-label">Failed Checks</div>
+                        ${(selectedExample.failed_checks || []).length ? `
+                            <ul class="context-eval-detail-list">
+                                ${(selectedExample.failed_checks || []).map((failedCheck) => `
+                                    <li>${escapeHtml(failedCheck)}</li>
+                                `).join("")}
+                            </ul>
+                        ` : `<div class="context-eval-empty">No failed checks recorded.</div>`}
+                    </div>
+                    <div class="context-eval-drill-panel">
+                        <div class="context-eval-label">Selected Keys</div>
+                        ${(selectedExample.selected_keys || []).length ? `
+                            <ul class="context-eval-detail-list">
+                                ${(selectedExample.selected_keys || []).map((selectedKey) => `
+                                    <li><code>${escapeHtml(selectedKey)}</code></li>
+                                `).join("")}
+                            </ul>
+                        ` : `<div class="context-eval-empty">No selected keys recorded.</div>`}
+                    </div>
+                </div>
+            </div>
+        ` : ""}
+        <div class="context-eval-card">
+            <div class="context-eval-label">Recent Failures</div>
+            ${recentFailures.length ? `
+                <div class="context-eval-list">
+                    ${recentFailures.slice(0, 3).map((failure) => `
+                        <article class="context-eval-item">
+                            <strong>${escapeHtml(failure.name)}</strong>
+                            <div class="context-eval-meta">
+                                <span>${escapeHtml(failure.trigger || "unknown")}</span>
+                                <span>score ${escapeHtml(formatDecimal(failure.score))}</span>
+                            </div>
+                            <p>${escapeHtml((failure.failed_checks || []).slice(0, 2).join(" | "))}</p>
+                        </article>
+                    `).join("")}
+                </div>
+            ` : `<div class="context-eval-empty">No recent failures.</div>`}
+        </div>
+    `;
+
+    contextEvalReport.querySelectorAll<HTMLButtonElement>("[data-context-eval-bucket]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const bucketKey = button.dataset.contextEvalBucket || "";
+            if (!bucketKey) return;
+            state.selectedContextEvalBucketKey = bucketKey;
+            state.selectedContextEvalExampleIndex = 0;
+            renderContextEvalReport();
+        });
+    });
+    contextEvalReport.querySelectorAll<HTMLButtonElement>("[data-context-eval-bucket-example]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const rawIndex = button.dataset.contextEvalBucketExample || "0";
+            const nextIndex = Number.parseInt(rawIndex, 10);
+            state.selectedContextEvalExampleIndex = Number.isFinite(nextIndex) ? Math.max(0, nextIndex) : 0;
+            renderContextEvalReport();
+        });
+    });
+    contextEvalReport.querySelectorAll<HTMLButtonElement>("[data-context-eval-open-capture]").forEach((button) => {
+        button.addEventListener("click", () => {
+            if (!selectedCapturePath) return;
+            void openFile(selectedCapturePath, { reveal: true });
+        });
+    });
+}
+
+function renderSettingsSummary(): void {
+    settingsSummary.innerHTML = `
+        <div><strong>Workspace:</strong> ${escapeHtml(currentWorkspaceName())}</div>
+        <div><strong>Conversation:</strong> ${escapeHtml(state.currentConversationTitle || "New chat")}</div>
+        <div><strong>Runtime:</strong> ${escapeHtml(defaultComposerStatus())}</div>
+    `;
+}
+
+function showSettings(): void {
+    renderSettingsSummary();
+    settingsOverlay.hidden = false;
+}
+
+function closeSettings(): void {
+    settingsOverlay.hidden = true;
 }
 
 function renderPreviewEmpty(title: string, body: string): void {
@@ -534,15 +851,15 @@ async function fetchHealth(): Promise<void> {
             message: string;
         }>("/health");
         state.modelAvailable = Boolean(health.model_available);
-        modelBadge.textContent = health.model_available
-            ? `Model ready: ${health.model}`
-            : `Model loading: ${health.model}`;
     } catch (error) {
         state.modelAvailable = false;
-        modelBadge.textContent = error instanceof Error ? error.message : "Health check failed";
+        setComposerHint(error instanceof Error ? error.message : "Health check failed");
     }
 
     syncRuntimeSummary();
+    if (!state.generating) {
+        setComposerHint(defaultComposerStatus());
+    }
 }
 
 async function loadWorkspaces(preferredId = ""): Promise<void> {
@@ -564,13 +881,13 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
     }
 
     renderWorkspaceOptions();
-    updateChatMeta();
     if (nextWorkspaceId) {
         await loadDirectory(".");
     } else {
         state.fileItems = [];
         renderFileList();
     }
+    await loadContextEvalReport();
 }
 
 async function loadConversations(): Promise<void> {
@@ -580,10 +897,51 @@ async function loadConversations(): Promise<void> {
     const active = state.conversations.find((conversation) => conversation.id === state.currentConversationId);
     if (active) {
         state.currentConversationTitle = active.title || state.currentConversationTitle;
-        chatTitle.textContent = state.currentConversationTitle;
     }
 
     renderConversations();
+}
+
+async function loadContextEvalReport(): Promise<void> {
+    if (!state.currentWorkspaceId) {
+        state.contextEvalReport = null;
+        state.contextEvalError = "";
+        state.contextEvalLoading = false;
+        renderContextEvalReport();
+        return;
+    }
+
+    state.contextEvalLoading = true;
+    state.contextEvalError = "";
+    renderContextEvalReport();
+
+    const conversationId = state.conversations.some((conversation) => conversation.id === state.currentConversationId)
+        ? state.currentConversationId
+        : "";
+    const params = new URLSearchParams({
+        limit: "100",
+        ...(conversationId ? { conversation_id: conversationId } : { workspace_id: state.currentWorkspaceId }),
+    });
+
+    try {
+        state.contextEvalReport = await fetchJson<ContextEvalReport>(`/api/context-evals/report?${params.toString()}`);
+        const topBucket = state.contextEvalReport.top_triage_buckets?.[0];
+        const selectedStillExists = state.contextEvalReport.top_triage_buckets?.some(
+            (bucket) => bucket.key === state.selectedContextEvalBucketKey
+        );
+        state.selectedContextEvalBucketKey = selectedStillExists
+            ? state.selectedContextEvalBucketKey
+            : (topBucket?.key || "");
+        state.selectedContextEvalExampleIndex = 0;
+    } catch (error) {
+        state.contextEvalReport = null;
+        state.contextEvalError = error instanceof Error ? error.message : "Could not load replay report.";
+        state.selectedContextEvalBucketKey = "";
+        state.selectedContextEvalExampleIndex = 0;
+    } finally {
+        state.contextEvalLoading = false;
+        renderContextEvalReport();
+    }
 }
 
 async function loadConversation(id: string): Promise<void> {
@@ -600,7 +958,6 @@ async function loadConversation(id: string): Promise<void> {
 
     const matchingConversation = state.conversations.find((conversation) => conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
-    chatTitle.textContent = state.currentConversationTitle;
 
     if (payload.workspace_id && payload.workspace_id !== state.currentWorkspaceId) {
         await loadWorkspaces(payload.workspace_id);
@@ -610,6 +967,7 @@ async function loadConversation(id: string): Promise<void> {
 
     renderMessages();
     syncShellLayout();
+    await loadContextEvalReport();
 }
 
 function startNewChat(): void {
@@ -619,10 +977,10 @@ function startNewChat(): void {
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
     state.viewerOpen = false;
-    chatTitle.textContent = state.currentConversationTitle;
     renderMessages();
     renderConversations();
     syncShellLayout();
+    void loadContextEvalReport();
 }
 
 function ensureAssistantMessage(): ChatMessage {
@@ -645,9 +1003,10 @@ function ensureAssistantMessage(): ChatMessage {
 function finishGeneration(): void {
     state.activeAssistantIndex = -1;
     setGenerating(false);
-    setComposerHint("Enter sends. Shift+Enter adds a line break.");
+    setComposerHint(defaultComposerStatus());
     void loadConversations();
     void loadDirectory(state.currentDirectoryPath);
+    void loadContextEvalReport();
 }
 
 function pushSystemMessage(content: string, error = false): void {
@@ -765,7 +1124,6 @@ async function sendCurrentMessage(): Promise<void> {
 
     if (state.currentConversationTitle === "New chat") {
         state.currentConversationTitle = titleFromMessage(message);
-        chatTitle.textContent = state.currentConversationTitle;
     }
 
     composerInput.value = "";
@@ -789,6 +1147,46 @@ async function sendCurrentMessage(): Promise<void> {
         pushSystemMessage(error instanceof Error ? error.message : "Message send failed", true);
         finishGeneration();
     }
+}
+
+async function renameConversation(conversationId: string, currentTitle: string): Promise<void> {
+    const nextTitle = String(prompt("Rename chat", currentTitle) || "").trim();
+    if (!nextTitle) return;
+    await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle }),
+    });
+    if (conversationId === state.currentConversationId) {
+        state.currentConversationTitle = nextTitle;
+    }
+    await loadConversations();
+}
+
+async function deleteConversation(conversationId: string): Promise<void> {
+    if (!confirm("Delete this chat?")) return;
+    await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE",
+    });
+    if (conversationId === state.currentConversationId) {
+        startNewChat();
+    }
+    await loadConversations();
+}
+
+async function resetAppData(): Promise<void> {
+    if (!confirm("Reset all app data? This deletes chats, workspaces, and related runtime state.")) return;
+    await fetchJson("/api/reset-all", { method: "POST" });
+    closeSettings();
+    state.currentConversationId = "";
+    state.currentConversationTitle = "New chat";
+    state.messages = [];
+    state.selectedFilePath = "";
+    state.viewerOpen = false;
+    renderMessages();
+    renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
+    await loadWorkspaces();
+    await loadConversations();
 }
 
 async function loadDirectory(path: string): Promise<void> {
@@ -863,6 +1261,18 @@ function connectWebSocket(): void {
 
 function attachEvents(): void {
     newChatButton.addEventListener("click", () => startNewChat());
+    settingsButton.addEventListener("click", () => showSettings());
+    workspaceSettingsButton.addEventListener("click", () => showSettings());
+    closeSettingsButton.addEventListener("click", () => closeSettings());
+    resetAppButton.addEventListener("click", () => {
+        void resetAppData();
+    });
+    settingsOverlay.addEventListener("click", (event) => {
+        if (event.target === settingsOverlay) closeSettings();
+    });
+    refreshContextEvalButton.addEventListener("click", () => {
+        void loadContextEvalReport();
+    });
 
     refreshWorkspaceButton.addEventListener("click", () => {
         void loadDirectory(state.currentDirectoryPath);
@@ -916,6 +1326,7 @@ async function bootstrap(): Promise<void> {
     syncShellLayout();
     renderMessages();
     renderConversations();
+    renderContextEvalReport();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     connectWebSocket();
     await fetchHealth();

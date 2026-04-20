@@ -34,7 +34,7 @@ import venv
 import zipfile
 from html import escape, unescape
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
@@ -499,7 +499,7 @@ def persist_model_state():
         "custom_model_name": ACTIVE_CUSTOM_MODEL_NAME,
         "load_history": MODEL_LOAD_HISTORY,
         "loading": MODEL_LOADING_STATUS,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": utcnow_iso(),
     }
     with open(MODEL_STATE_PATH, "w", encoding="utf-8") as fh:
         json.dump(payload, fh)
@@ -669,7 +669,12 @@ def sanitize_relative_workspace_path(path_value: str, fallback: str = "snippet.t
 
 def utcnow_iso() -> str:
     """Return a stable timestamp string for persisted records."""
-    return datetime.now().isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def timestamp_to_iso(timestamp: float) -> str:
+    """Convert a POSIX timestamp into a stable UTC ISO string."""
+    return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
 
 
 def workspace_display_name_from_path(path: pathlib.Path) -> str:
@@ -1409,10 +1414,11 @@ def list_file_session_version_rows(workspace_id: str, target_path: str) -> List[
         reverse=True,
     ):
         modified_at = str(item.get("modified_at") or "").strip()
-        try:
-            title = datetime.fromisoformat(modified_at).astimezone().strftime("%Y-%m-%d %I:%M %p")
-        except ValueError:
+        parsed_modified_at = _parse_iso_datetime(modified_at)
+        if parsed_modified_at is None:
             title = modified_at or str(item.get("name") or "Snapshot")
+        else:
+            title = parsed_modified_at.astimezone().strftime("%Y-%m-%d %I:%M %p")
         rows.append({
             "title": title,
             "path": str(item.get("path") or ""),
@@ -3482,7 +3488,7 @@ def build_workspace_listing_item(path: pathlib.Path, workspace: pathlib.Path) ->
         "path": rel_path,
         "type": "directory" if path.is_dir() else "file",
         "size": stat.st_size if path.is_file() else None,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        "modified_at": timestamp_to_iso(stat.st_mtime),
         "content_kind": content_kind,
         "kind": classify_workspace_file_kind(rel_path),
     }
@@ -3555,7 +3561,10 @@ def detect_workspace_artifact_changes(
     changes.sort(
         key=lambda item: (
             preview_priority_for_workspace_kind(item.get("content_kind", "")),
-            -(datetime.fromisoformat(item.get("modified_at", "")).timestamp() if item.get("modified_at") else 0.0),
+            -(
+                (_parse_iso_datetime(str(item.get("modified_at") or "")).timestamp())
+                if _parse_iso_datetime(str(item.get("modified_at") or "")) else 0.0
+            ),
             str(item.get("path", "")).lower(),
         )
     )
@@ -4277,7 +4286,7 @@ def store_document_index(
             rel_path,
             fingerprint,
             int(target.stat().st_size),
-            datetime.fromtimestamp(target.stat().st_mtime).isoformat(),
+            timestamp_to_iso(target.stat().st_mtime),
             str(payload.get("file_type") or "file"),
             str(payload.get("extractor") or ""),
             payload.get("page_count"),
@@ -4450,7 +4459,7 @@ def ensure_document_index(conversation_id: str, rel_path: str) -> Dict[str, Any]
         "path": rel_file_path,
         "fingerprint": fingerprint,
         "file_size": int(target.stat().st_size),
-        "modified_at": datetime.fromtimestamp(target.stat().st_mtime).isoformat(),
+        "modified_at": timestamp_to_iso(target.stat().st_mtime),
         "file_type": payload.get("file_type") or "file",
         "extractor": payload.get("extractor") or "",
         "page_count": payload.get("page_count"),
@@ -9170,9 +9179,10 @@ def save_message(
 
     normalized_kind = normalize_turn_kind(kind)
     stored_feedback = "neutral" if role == "assistant" else None
+    now = utcnow_iso()
     c.execute('''INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback)
                  VALUES (?, ?, ?, ?, ?, ?)''',
-              (conv_id, role, content, datetime.now().isoformat(), normalized_kind, stored_feedback))
+              (conv_id, role, content, now, normalized_kind, stored_feedback))
 
     message_id = c.lastrowid
 
@@ -9180,7 +9190,7 @@ def save_message(
         apply_implicit_feedback_from_user_reply(conn, conv_id, message_id, content)
 
     c.execute('UPDATE conversations SET updated_at = ? WHERE id = ?',
-              (datetime.now().isoformat(), conv_id))
+              (now, conv_id))
 
     conn.commit()
     conn.close()
@@ -9237,7 +9247,7 @@ async def refresh_conversation_summary(conv_id: str):
              summary = excluded.summary,
              source_message_count = excluded.source_message_count,
              updated_at = excluded.updated_at''',
-        (conv_id, summary, len(source_rows), datetime.now().isoformat()),
+        (conv_id, summary, len(source_rows), utcnow_iso()),
     )
     conn.commit()
     conn.close()
@@ -17745,7 +17755,7 @@ async def health():
         message = f"Model {runtime['selected_profile']['name']} is loading or unavailable"
     return {
         "status": "healthy" if runtime["model_ok"] else "unhealthy",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": utcnow_iso(),
         "model": runtime["loaded_model_name"],
         "model_available": runtime["model_ok"],
         "model_profile": runtime["active_profile"]["key"],
@@ -17758,7 +17768,10 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.astimezone()
+        return parsed
     except Exception:
         return None
 
@@ -17788,7 +17801,7 @@ def model_load_history_summary(model_name: str) -> Dict[str, Any]:
 def mark_model_load_started(model_name: str, reason: str, profile_key: Optional[str] = None):
     """Record that a model load has started so the UI can estimate progress."""
     global MODEL_LOADING_STATUS
-    now = datetime.now().isoformat()
+    now = utcnow_iso()
     MODEL_LOADING_STATUS = {
         "status": "loading",
         "phase": "restarting" if reason in {"switch", "activate", "redownload", "restart", "rollback"} else "loading",
@@ -17804,7 +17817,7 @@ def mark_model_load_started(model_name: str, reason: str, profile_key: Optional[
 def mark_model_load_completed(model_name: str):
     """Record a successful model load and update historical timing."""
     global MODEL_LOADING_STATUS, MODEL_LOAD_HISTORY
-    now_dt = datetime.now()
+    now_dt = datetime.now(timezone.utc)
     loading = MODEL_LOADING_STATUS if isinstance(MODEL_LOADING_STATUS, dict) else {}
     started_at = _parse_iso_datetime(loading.get("started_at"))
     duration = None

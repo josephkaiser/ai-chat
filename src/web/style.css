@@ -222,6 +222,199 @@ body[data-left-sidebar-open="false"] .sidebar {
     overflow: auto;
 }
 
+.context-eval-report {
+    min-height: 0;
+    max-height: 420px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.context-eval-card {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.72);
+    padding: 10px;
+    border-radius: var(--radius-md);
+}
+
+.context-eval-card p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    line-height: 1.45;
+}
+
+.context-eval-stats,
+.context-eval-meta,
+.context-eval-focus {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.context-eval-stats {
+    margin-top: 8px;
+}
+
+.context-eval-stat {
+    min-width: 0;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(19, 34, 38, 0.05);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.context-eval-stat strong,
+.context-eval-item strong {
+    font-size: 0.92rem;
+}
+
+.context-eval-stat span,
+.context-eval-meta {
+    color: var(--muted);
+    font-size: 0.76rem;
+}
+
+.context-eval-label {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.62rem;
+    font-weight: 700;
+    color: var(--muted);
+}
+
+.context-eval-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.context-eval-item {
+    padding-top: 8px;
+    border-top: 1px solid rgba(19, 34, 38, 0.08);
+}
+
+.context-eval-item.active {
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(13, 122, 122, 0.2);
+    background: rgba(13, 122, 122, 0.06);
+}
+
+.context-eval-item:first-child {
+    padding-top: 0;
+    border-top: 0;
+}
+
+.context-eval-severity {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border: 1px solid transparent;
+}
+
+.context-eval-severity.high {
+    background: rgba(166, 57, 41, 0.1);
+    color: #8c3427;
+}
+
+.context-eval-severity.medium {
+    background: rgba(181, 121, 65, 0.14);
+    color: #8e5d28;
+}
+
+.context-eval-severity.low {
+    background: rgba(13, 122, 122, 0.12);
+    color: var(--accent-strong);
+}
+
+.context-eval-example {
+    margin-top: 8px;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(19, 34, 38, 0.04);
+}
+
+.context-eval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.context-eval-button {
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.85);
+    font-size: 0.78rem;
+}
+
+.context-eval-button.active {
+    background: var(--accent-soft);
+    border-color: rgba(13, 122, 122, 0.3);
+}
+
+.context-eval-kv {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.context-eval-kv-label {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.context-eval-kv code,
+.context-eval-detail-list code {
+    font-family: var(--font-mono);
+}
+
+.context-eval-drill-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.context-eval-drill-panel {
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(19, 34, 38, 0.04);
+}
+
+.context-eval-detail-list {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    color: var(--text);
+}
+
+.context-eval-detail-list li + li {
+    margin-top: 6px;
+}
+
+.context-eval-empty {
+    padding: 12px;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-md);
+    color: var(--muted);
+    line-height: 1.45;
+    background: rgba(255, 255, 255, 0.5);
+}
+
 .conversation-list {
     display: flex;
     flex-direction: column;
@@ -582,6 +775,10 @@ body[data-viewer-open="false"] .viewer-panel {
     .panel {
         padding: 12px;
         border-radius: 0;
+    }
+
+    .context-eval-drill-grid {
+        grid-template-columns: 1fr;
     }
 
     .shell-toggle {
