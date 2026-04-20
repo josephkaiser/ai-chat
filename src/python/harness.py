@@ -71,6 +71,7 @@ from src.python.ai_chat.context_eval import (
     find_context_eval_capture_files,
     list_promoted_context_eval_fixtures,
     load_context_eval_case_payload,
+    load_promoted_context_eval_fixture_detail,
     replay_captured_context_eval_files,
     serialize_context_eval_case,
     summarize_captured_context_eval_results,
@@ -9865,6 +9866,17 @@ async def list_context_eval_fixtures():
         }
     except Exception as exc:
         logger.error("Error listing context eval fixtures: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/context-evals/fixtures/detail")
+async def get_context_eval_fixture_detail(fixture_path: str):
+    try:
+        return load_promoted_context_eval_fixture_detail(fixture_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error loading context eval fixture detail: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
