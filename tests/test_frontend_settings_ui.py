@@ -13,9 +13,12 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('id="conversationList"', html)
         self.assertIn('id="chatMessages"', html)
         self.assertIn('id="composerInput"', html)
+        self.assertIn('id="chatMeta"', html)
         self.assertIn('id="fileList"', html)
         self.assertIn('id="filePreview"', html)
+        self.assertIn('id="viewerMeta"', html)
         self.assertIn('type="module" src="/static/app.js', html)
+        self.assertNotIn('id="contextEvalReport"', html)
         self.assertNotIn('id="settingsOverlay"', html)
         self.assertNotIn('id="aboutOverlay"', html)
         self.assertNotIn('id="draftShell"', html)
@@ -39,6 +42,9 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn(".file-preview-frame", css)
         self.assertIn(".conversation-item.active", css)
         self.assertIn(".status-badge.streaming", css)
+        self.assertIn(".status-badge.loading", css)
+        self.assertIn(".composer {", css)
+        self.assertIn("position: sticky;", css)
 
 
 if __name__ == "__main__":
