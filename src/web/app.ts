@@ -207,11 +207,8 @@ function query<T extends Element>(selector: string): T {
     return element;
 }
 
-const workspaceCurrent = query<HTMLDivElement>("#workspaceCurrent");
-const workspaceRoutingMeta = query<HTMLParagraphElement>("#workspaceRoutingMeta");
 const sidebarToggle = query<HTMLButtonElement>("#sidebarToggle");
 const viewerToggle = query<HTMLButtonElement>("#viewerToggle");
-const viewerToggleLabel = query<HTMLSpanElement>("#viewerToggleLabel");
 const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton");
 const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButton");
 const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
@@ -580,13 +577,13 @@ function syncShellLayout(): void {
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.setAttribute("title", sidebarToggleLabel);
 
-    const viewerToggleText = state.viewerMode === "closed" ? "Files" : "Close";
     const viewerToggleTitle = state.viewerMode === "closed" ? "Open files" : "Close files";
     viewerToggle.setAttribute("aria-label", viewerToggleTitle);
     viewerToggle.setAttribute("title", viewerToggleTitle);
-    viewerToggleLabel.textContent = viewerToggleText;
     viewerToggle.disabled = !state.currentWorkspaceId;
 
+    refreshWorkspaceButton.hidden = state.viewerMode === "closed";
+    refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
     const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode !== "closed";
     viewerModeButton.hidden = !showModeButton;
     if (showModeButton) {
@@ -865,21 +862,8 @@ function renderConversations(): void {
 }
 
 function renderWorkspaceSummary(): void {
-    const currentWorkspace = state.workspaces.find((workspace) => workspace.id === state.currentWorkspaceId) || null;
-    const workspaceCount = state.workspaces.length;
-
-    workspaceCurrent.textContent = currentWorkspace?.display_name || "No workspace";
-    if (!workspaceCount) {
-        workspaceRoutingMeta.textContent = "Connect a workspace to browse files and ground the assistant.";
-        return;
-    }
-
-    if (workspaceCount === 1) {
-        workspaceRoutingMeta.textContent = "The app keeps this chat routed to the active workspace automatically.";
-        return;
-    }
-
-    workspaceRoutingMeta.textContent = `The app follows the active chat automatically. Connected workspaces: ${workspaceCount}.`;
+    workspaceSettingsButton.disabled = false;
+    syncShellLayout();
 }
 
 function renderFileList(): void {

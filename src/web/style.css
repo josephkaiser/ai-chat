@@ -111,10 +111,9 @@ body[data-left-sidebar-open="true"] .shell-toggle-left {
     right: 12px;
 }
 
-.shell-toggle-labeled {
-    gap: 8px;
-    padding: 0 12px;
-    min-width: 90px;
+body[data-viewer-mode="tree"] .shell-toggle-right,
+body[data-viewer-mode="file"] .shell-toggle-right {
+    right: calc(var(--viewer-width) + 12px);
 }
 
 .shell-toggle-icon {
@@ -239,48 +238,14 @@ body[data-left-sidebar-open="false"] .sidebar {
     min-height: 18px;
 }
 
-.workspace-controls {
-    display: grid;
-    gap: 3px;
-}
-
-.workspace-current-wrap {
-    display: grid;
-    gap: 2px;
-}
-
-.workspace-inline-label {
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-}
-
-.workspace-current {
-    min-height: 24px;
-    padding: 5px 8px;
-    border: 1px solid rgba(19, 34, 38, 0.08);
-    border-radius: var(--radius-md);
-    background: rgba(255, 255, 255, 0.58);
-    font-size: 0.74rem;
-    font-weight: 600;
-    line-height: 1.2;
-    display: flex;
-    align-items: center;
-}
-
-.workspace-routing-meta {
-    margin: 0;
-    font-size: 0.68rem;
-    line-height: 1.35;
-    color: var(--muted);
-}
-
 .workspace-toolbar {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 3px;
+}
+
+.workspace-toolbar-single {
+    grid-template-columns: 1fr;
 }
 
 #refreshWorkspaceButton,
@@ -1166,6 +1131,11 @@ body[data-viewer-mode="file"] .viewer-panel {
 
     .viewer-panel {
         width: 100vw;
+    }
+
+    body[data-viewer-mode="tree"] .shell-toggle-right,
+    body[data-viewer-mode="file"] .shell-toggle-right {
+        right: 12px;
     }
 
     body[data-viewer-mode="tree"] .chat-panel,
