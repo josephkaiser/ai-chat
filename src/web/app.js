@@ -18,7 +18,6 @@ const state = {
     fileItems: [],
     selectedFilePath: "",
     leftSidebarOpen: false,
-    viewerOpen: false,
     contextEvalReport: null,
     contextEvalLoading: false,
     contextEvalError: "",
@@ -40,10 +39,9 @@ function query(selector) {
     }
     return element;
 }
-const workspaceSelect = query("#workspaceSelect");
 const workspaceCurrent = query("#workspaceCurrent");
+const workspaceRoutingMeta = query("#workspaceRoutingMeta");
 const sidebarToggle = query("#sidebarToggle");
-const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
 const workspaceSettingsButton = query("#workspaceSettingsButton");
 const refreshContextEvalButton = query("#refreshContextEvalButton");
@@ -203,9 +201,7 @@ function renderFixtureReviewList() {
         button.addEventListener("click", ()=>{
             const path = button.dataset.fixtureOpen || "";
             if (!path || path.startsWith("/")) return;
-            void openFile(path, {
-                reveal: true
-            });
+            void openFile(path);
         });
     });
     fixtureReviewList.querySelectorAll("[data-fixture-status]").forEach((button)=>{
@@ -359,14 +355,9 @@ function defaultComposerStatus() {
 }
 function syncShellLayout() {
     document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
-    document.body.dataset.viewerOpen = String(state.viewerOpen && Boolean(state.selectedFilePath));
     const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.setAttribute("title", sidebarToggleLabel);
-    const viewerToggleLabel = state.viewerOpen ? "Hide selected file" : "Open selected file";
-    viewerToggle.setAttribute("aria-label", viewerToggleLabel);
-    viewerToggle.setAttribute("title", viewerToggleLabel);
-    viewerToggle.hidden = !state.selectedFilePath;
 }
 function syncRuntimeSummary() {
     if (state.connectionState === "offline") {
@@ -612,23 +603,19 @@ function renderConversations() {
         });
     });
 }
-function renderWorkspaceOptions() {
+function renderWorkspaceSummary() {
     const currentWorkspace = state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId) || null;
-    const alternateWorkspaces = state.workspaces.filter((workspace)=>workspace.id !== state.currentWorkspaceId);
+    const workspaceCount = state.workspaces.length;
     workspaceCurrent.textContent = currentWorkspace?.display_name || "No workspace";
-    if (!alternateWorkspaces.length) {
-        workspaceSelect.hidden = true;
-        workspaceSelect.innerHTML = "";
+    if (!workspaceCount) {
+        workspaceRoutingMeta.textContent = "Connect a workspace to browse files and ground the assistant.";
         return;
     }
-    workspaceSelect.hidden = false;
-    workspaceSelect.innerHTML = `
-        <option value="" selected>Switch workspace…</option>
-        ${alternateWorkspaces.map((workspace)=>`
-            <option value="${escapeHtml(workspace.id)}">${escapeHtml(workspace.display_name)}</option>
-        `).join("")}
-    `;
-    workspaceSelect.value = "";
+    if (workspaceCount === 1) {
+        workspaceRoutingMeta.textContent = "The app keeps this chat routed to the active workspace automatically.";
+        return;
+    }
+    workspaceRoutingMeta.textContent = `The app follows the active chat automatically. Connected workspaces: ${workspaceCount}.`;
 }
 function renderFileList() {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
@@ -951,9 +938,7 @@ function renderContextEvalReport() {
     contextEvalReport.querySelectorAll("[data-context-eval-open-capture]").forEach((button)=>{
         button.addEventListener("click", ()=>{
             if (!selectedCapturePath) return;
-            void openFile(selectedCapturePath, {
-                reveal: true
-            });
+            void openFile(selectedCapturePath);
         });
     });
     contextEvalReport.querySelectorAll("[data-context-eval-promote-capture]").forEach((button)=>{
@@ -1039,8 +1024,10 @@ function renderSettingsSummary() {
 }
 function showSettings() {
     renderSettingsSummary();
+    renderContextEvalReport();
     renderFixtureReviewList();
     renderFixtureReviewDetail();
+    void loadContextEvalReport();
     void loadContextEvalFixtures();
     settingsOverlay.hidden = false;
 }
@@ -1106,15 +1093,6 @@ function renderPreview(payload) {
     }
     filePreview.innerHTML = `<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
 }
-function closeViewer() {
-    state.viewerOpen = false;
-    syncShellLayout();
-}
-function openViewer() {
-    if (!state.selectedFilePath) return;
-    state.viewerOpen = true;
-    syncShellLayout();
-}
 async function fetchJson(url, init) {
     const response = await fetch(url, init);
     const data = await response.json().catch(()=>({}));
@@ -1147,7 +1125,7 @@ async function loadWorkspaces(preferredId = "") {
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
     }
-    renderWorkspaceOptions();
+    renderWorkspaceSummary();
     if (nextWorkspaceId) {
         await loadDirectory(".");
     } else {
@@ -1271,7 +1249,6 @@ async function loadConversation(id) {
     state.messages = payload.messages || [];
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
-    state.viewerOpen = false;
     const matchingConversation = state.conversations.find((conversation)=>conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
     if (payload.workspace_id && payload.workspace_id !== state.currentWorkspaceId) {
@@ -1289,7 +1266,6 @@ function startNewChat() {
     state.messages = [];
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
-    state.viewerOpen = false;
     renderMessages();
     renderConversations();
     syncShellLayout();
@@ -1352,9 +1328,7 @@ function handleChatEvent(event) {
         return;
     }
     if (event.type === "tool_result" && event.payload?.open_path) {
-        void openFile(event.payload.open_path, {
-            reveal: true
-        });
+        void openFile(event.payload.open_path);
         return;
     }
     if (event.type === "permission_required") {
@@ -1481,7 +1455,6 @@ async function resetAppData() {
     state.currentConversationTitle = "New chat";
     state.messages = [];
     state.selectedFilePath = "";
-    state.viewerOpen = false;
     renderMessages();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     await loadWorkspaces();
@@ -1497,12 +1470,9 @@ async function loadDirectory(path) {
     state.fileItems = payload.items || [];
     renderFileList();
 }
-async function openFile(path, options = {}) {
+async function openFile(path) {
     if (!state.currentWorkspaceId) return;
     state.selectedFilePath = path;
-    if (options.reveal !== false) {
-        state.viewerOpen = true;
-    }
     syncShellLayout();
     renderFileList();
     try {
@@ -1565,31 +1535,11 @@ function attachEvents() {
     });
     refreshWorkspaceButton.addEventListener("click", ()=>{
         void loadDirectory(state.currentDirectoryPath);
-        if (state.selectedFilePath) void openFile(state.selectedFilePath, {
-            reveal: state.viewerOpen
-        });
+        if (state.selectedFilePath) void openFile(state.selectedFilePath);
     });
     sidebarToggle.addEventListener("click", ()=>{
         state.leftSidebarOpen = !state.leftSidebarOpen;
         syncShellLayout();
-    });
-    viewerToggle.addEventListener("click", ()=>{
-        if (!state.selectedFilePath) return;
-        if (state.viewerOpen) {
-            closeViewer();
-            return;
-        }
-        openViewer();
-    });
-    workspaceSelect.addEventListener("change", async ()=>{
-        const nextWorkspaceId = workspaceSelect.value;
-        if (!nextWorkspaceId || nextWorkspaceId === state.currentWorkspaceId) return;
-        state.currentWorkspaceId = nextWorkspaceId;
-        state.selectedFilePath = "";
-        localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
-        startNewChat();
-        await loadDirectory(".");
-        renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     });
     upDirectoryButton.addEventListener("click", ()=>{
         void loadDirectory(parentDirectory(state.currentDirectoryPath));

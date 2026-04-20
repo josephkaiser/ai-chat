@@ -106,10 +106,6 @@ body[data-left-sidebar-open="true"] .shell-toggle-left {
     left: calc(var(--sidebar-width) - 17px);
 }
 
-.shell-toggle-right {
-    right: 10px;
-}
-
 .shell-toggle-icon {
     width: 16px;
     height: 16px;
@@ -263,13 +259,19 @@ body[data-left-sidebar-open="false"] .sidebar {
     align-items: center;
 }
 
+.workspace-routing-meta {
+    margin: 0;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    color: var(--muted);
+}
+
 .workspace-toolbar {
     display: grid;
-    grid-template-columns: 1fr 84px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 3px;
 }
 
-#workspaceSelect,
 #refreshWorkspaceButton,
 #workspaceSettingsButton,
 #newChatButton,
@@ -278,15 +280,6 @@ body[data-left-sidebar-open="false"] .sidebar {
     min-height: 24px;
     padding: 0 8px;
     font-size: 0.74rem;
-}
-
-#workspaceSelect {
-    width: 100%;
-    appearance: none;
-}
-
-#workspaceSelect[hidden] {
-    display: none;
 }
 
 #sendButton {
@@ -699,14 +692,6 @@ body[data-left-sidebar-open="false"] .sidebar {
     gap: 0;
 }
 
-body[data-viewer-open="false"] .main-grid {
-    grid-template-columns: minmax(0, 1fr);
-}
-
-body[data-viewer-open="false"] .viewer-panel {
-    display: none;
-}
-
 .panel {
     min-height: 0;
     height: 100vh;
@@ -1066,8 +1051,14 @@ body[data-viewer-open="false"] .viewer-panel {
     display: none;
 }
 
+.settings-scroll-section {
+    max-height: 320px;
+}
+
 .settings-dialog {
-    width: min(360px, calc(100vw - 24px));
+    width: min(760px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
     padding: 14px;
     border-radius: 14px;
     background: rgba(255, 253, 248, 0.98);
@@ -1155,7 +1146,6 @@ body[data-viewer-open="false"] .viewer-panel {
         flex-direction: column;
     }
 
-    #workspaceSelect,
     #refreshWorkspaceButton,
     #workspaceSettingsButton,
     #newChatButton,

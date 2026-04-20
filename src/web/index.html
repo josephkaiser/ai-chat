@@ -7,7 +7,7 @@
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
 </head>
-<body data-app-title="{{ app_title }}" data-left-sidebar-open="false" data-viewer-open="false">
+<body data-app-title="{{ app_title }}" data-left-sidebar-open="false">
     <button
         id="sidebarToggle"
         class="shell-toggle shell-toggle-left"
@@ -24,23 +24,6 @@
         </svg>
         <span class="sr-only">Toggle workspace</span>
     </button>
-    <button
-        id="viewerToggle"
-        class="shell-toggle shell-toggle-right"
-        type="button"
-        aria-label="Open selected file"
-        title="Open selected file"
-        hidden
-    >
-        <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
-            <path d="M6 2.5h5.5L16 7v10.5H6z"></path>
-            <path d="M11.5 2.5V7H16"></path>
-            <path d="M8.5 10h5"></path>
-            <path d="M8.5 12.75h5"></path>
-            <path d="M8.5 15.5h3.5"></path>
-        </svg>
-        <span class="sr-only">Toggle selected file</span>
-    </button>
     <div class="app-shell">
         <aside class="sidebar">
             <div class="sidebar-brand">
@@ -54,24 +37,16 @@
                 </div>
                 <div class="workspace-controls">
                     <div class="workspace-current-wrap">
-                        <div class="workspace-inline-label">Current</div>
+                        <div class="workspace-inline-label">Automatic Routing</div>
                         <div id="workspaceCurrent" class="workspace-current">No workspace</div>
+                        <p id="workspaceRoutingMeta" class="workspace-routing-meta">
+                            The app chooses workspace context from the active chat.
+                        </p>
                     </div>
-                    <select id="workspaceSelect" aria-label="Switch workspace"></select>
                     <div class="workspace-toolbar">
                         <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
                         <button id="workspaceSettingsButton" type="button">Settings</button>
                     </div>
-                </div>
-            </section>
-
-            <section class="sidebar-panel">
-                <div class="sidebar-panel-header">
-                    <span>Replay Triage</span>
-                    <button id="refreshContextEvalButton" type="button">Refresh</button>
-                </div>
-                <div id="contextEvalReport" class="context-eval-report">
-                    <div class="context-eval-empty">No replay report loaded yet.</div>
                 </div>
             </section>
 
@@ -137,6 +112,15 @@
                 <button id="closeSettingsButton" type="button">Close</button>
             </div>
             <div id="settingsSummary" class="settings-summary"></div>
+            <section class="settings-section">
+                <div class="settings-section-header">
+                    <strong>Replay Triage</strong>
+                    <button id="refreshContextEvalButton" type="button">Refresh</button>
+                </div>
+                <div id="contextEvalReport" class="context-eval-report settings-scroll-section">
+                    <div class="context-eval-empty">No replay report loaded yet.</div>
+                </div>
+            </section>
             <section class="settings-section">
                 <div class="settings-section-header">
                     <strong>Fixture Review</strong>
