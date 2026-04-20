@@ -7,7 +7,7 @@
     <title>{{ app_title }}</title>
     <link rel="stylesheet" href="/static/style.css?v={{ static_asset_version }}">
 </head>
-<body data-app-title="{{ app_title }}" data-left-sidebar-open="false">
+<body data-app-title="{{ app_title }}" data-left-sidebar-open="false" data-viewer-mode="closed">
     <button
         id="sidebarToggle"
         class="shell-toggle shell-toggle-left"
@@ -23,6 +23,22 @@
             <path d="M9.5 13h3.5"></path>
         </svg>
         <span class="sr-only">Toggle workspace</span>
+    </button>
+    <button
+        id="viewerToggle"
+        class="shell-toggle shell-toggle-right shell-toggle-labeled"
+        type="button"
+        aria-label="Open files"
+        title="Open files"
+    >
+        <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M6 2.5h5.5L16 7v10.5H6z"></path>
+            <path d="M11.5 2.5V7H16"></path>
+            <path d="M8.5 10h5"></path>
+            <path d="M8.5 12.75h5"></path>
+            <path d="M8.5 15.5h3.5"></path>
+        </svg>
+        <span id="viewerToggleLabel">Files</span>
     </button>
     <div class="app-shell">
         <aside class="sidebar">
@@ -82,11 +98,15 @@
             <section class="panel viewer-panel">
                 <header class="panel-header viewer-header">
                     <div class="header-copy">
-                        <div class="panel-eyebrow">Selected File</div>
-                        <h2 id="viewerTitle">Workspace viewer</h2>
-                        <p id="viewerMeta" class="panel-subtitle">Browse the workspace and preview a file here.</p>
+                        <div class="panel-eyebrow">Workspace Overlay</div>
+                        <h2 id="viewerTitle">Workspace files</h2>
+                        <p id="viewerMeta" class="panel-subtitle">Open the file tree or preview the selected file here.</p>
                     </div>
-                    <button id="upDirectoryButton" type="button">Up One Level</button>
+                    <div class="viewer-actions">
+                        <button id="viewerModeButton" type="button" hidden>Open File</button>
+                        <button id="upDirectoryButton" type="button">Up One Level</button>
+                        <button id="viewerCloseButton" type="button">Close</button>
+                    </div>
                 </header>
 
                 <div class="viewer-layout">
