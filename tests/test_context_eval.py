@@ -8,6 +8,7 @@ from src.python.ai_chat.context_eval import (
     CapturedContextEvalResult,
     DEFAULT_CONTEXT_EVAL_CASES,
     DEFAULT_CONTEXT_EVAL_CASES_PATH,
+    ensure_suggested_context_eval_case,
     list_promoted_context_eval_fixtures,
     load_promoted_context_eval_fixture_detail,
     find_context_eval_capture_files,
@@ -87,6 +88,16 @@ class ContextEvalTests(unittest.TestCase):
                 json.dumps(normalize_promoted_context_eval_case_payload(payload, fixture_name="captured_verify_case")),
                 encoding="utf-8",
             )
+            (promoted_dir / "suggested.json").write_text(
+                json.dumps(
+                    normalize_promoted_context_eval_case_payload(
+                        payload,
+                        fixture_name="suggested_verify_case",
+                        review_status="suggested",
+                    )
+                ),
+                encoding="utf-8",
+            )
             (promoted_dir / "superseded.json").write_text(
                 json.dumps(
                     normalize_promoted_context_eval_case_payload(
@@ -105,6 +116,29 @@ class ContextEvalTests(unittest.TestCase):
         self.assertEqual(loaded_base[0].name, case.name)
         self.assertEqual(len(loaded_promoted), 1)
         self.assertEqual(loaded_promoted[0].name, "captured_verify_case")
+
+    def test_ensure_suggested_context_eval_case_is_idempotent(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        payload["capture"] = {"trigger": "retry", "phase": "plan"}
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            first_target, first_created = ensure_suggested_context_eval_case(
+                payload,
+                bucket_key="missing_selected:workspace_excerpt",
+                fixtures_dir=tempdir,
+            )
+            second_target, second_created = ensure_suggested_context_eval_case(
+                payload,
+                bucket_key="missing_selected:workspace_excerpt",
+                fixtures_dir=tempdir,
+            )
+
+            detail = load_promoted_context_eval_fixture_detail(first_target, fixtures_dir=tempdir)
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_target, second_target)
+        self.assertEqual(detail["review_status"], "suggested")
 
     def test_write_promoted_context_eval_case_persists_normalized_fixture(self):
         payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
@@ -287,6 +321,37 @@ class ContextEvalTests(unittest.TestCase):
         self.assertTrue(top_bucket["promotion_suggestion"]["should_suggest"])
         self.assertEqual(top_bucket["promotion_suggestion"]["suggested_review_status"], "candidate")
         self.assertIn("Repeated across 2 captured cases", top_bucket["promotion_suggestion"]["reason"])
+
+    def test_summarize_captured_context_eval_results_counts_suggested_fixture_coverage(self):
+        missing_workspace_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        missing_workspace_payload["capture"] = {"trigger": "retry", "phase": "plan"}
+        missing_workspace_payload["expectation"]["required_selected_keys"] = ["missing_key"]
+
+        fixture_payload = normalize_promoted_context_eval_case_payload(
+            missing_workspace_payload,
+            fixture_name="Suggested Missing Key Fixture",
+            review_status="suggested",
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            promoted_dir = pathlib.Path(tempdir)
+            (promoted_dir / "suggested_missing_key_fixture.json").write_text(
+                json.dumps(fixture_payload),
+                encoding="utf-8",
+            )
+            original_dir = context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR
+            context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR = promoted_dir
+            try:
+                results = [
+                    replay_captured_context_eval_payload(missing_workspace_payload, source_path="/tmp/one.json"),
+                ]
+                summary = summarize_captured_context_eval_results(results)
+            finally:
+                context_eval.DEFAULT_CONTEXT_EVAL_CASES_DIR = original_dir
+
+        top_bucket = summary["top_triage_buckets"][0]
+        self.assertEqual(top_bucket["fixture_coverage"]["suggested_count"], 1)
+        self.assertFalse(top_bucket["promotion_suggestion"]["should_suggest"])
 
 
 if __name__ == "__main__":

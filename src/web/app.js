@@ -129,6 +129,12 @@ function suggestContextEvalFixtureName(bucket, exampleCase) {
     ];
     return segments.join("_").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "captured_context_eval_case";
 }
+function describeFixtureCoverage(coverage) {
+    if (coverage?.accepted_count) return "covered by accepted fixture";
+    if (coverage?.candidate_count) return "candidate fixture exists";
+    if (coverage?.suggested_count) return "suggested fixture queued";
+    return "needs promotion";
+}
 function renderFixtureReviewList() {
     if (state.fixtureReviewLoading) {
         fixtureReviewList.innerHTML = `<div class="context-eval-empty">Loading fixtures…</div>`;
@@ -163,6 +169,9 @@ function renderFixtureReviewList() {
                     </button>
                     <button type="button" class="context-eval-button" data-fixture-open="${escapeHtml(fixturePath)}">
                         Open
+                    </button>
+                    <button type="button" class="context-eval-button" data-fixture-status="suggested" data-fixture-path="${escapeHtml(fixture.path)}">
+                        Suggested
                     </button>
                     <button type="button" class="context-eval-button" data-fixture-status="candidate" data-fixture-path="${escapeHtml(fixture.path)}">
                         Candidate
@@ -698,7 +707,7 @@ function renderContextEvalReport() {
     const exampleCases = selectedBucket?.example_cases || [];
     const selectedExample = exampleCases[Math.min(Math.max(state.selectedContextEvalExampleIndex, 0), Math.max(exampleCases.length - 1, 0))] || null;
     const selectedCapturePath = selectedExample ? workspaceRelativeCapturePath(selectedExample.source_path) : "";
-    const needsPromotion = Boolean(selectedBucket && !selectedBucket.fixture_coverage?.accepted_count && !selectedBucket.fixture_coverage?.candidate_count);
+    const needsPromotion = Boolean(selectedBucket && !selectedBucket.fixture_coverage?.accepted_count && !selectedBucket.fixture_coverage?.suggested_count && !selectedBucket.fixture_coverage?.candidate_count);
     const suggestedFixtureName = selectedBucket && selectedExample ? suggestContextEvalFixtureName(selectedBucket, selectedExample) : "";
     const promotionSuggestion = selectedBucket?.promotion_suggestion || null;
     contextEvalReport.innerHTML = `
@@ -753,7 +762,7 @@ function renderContextEvalReport() {
                             <div class="context-eval-meta">
                                 <span>${escapeHtml(String(bucket.failure_count))} failures</span>
                                 <span>${escapeHtml(String(bucket.case_count))} cases</span>
-                                <span>${bucket.fixture_coverage?.accepted_count ? "covered by accepted fixture" : bucket.fixture_coverage?.candidate_count ? "candidate fixture exists" : "needs promotion"}</span>
+                                <span>${describeFixtureCoverage(bucket.fixture_coverage)}</span>
                                 ${bucket.promotion_suggestion?.should_suggest ? "<span>suggested candidate fixture</span>" : ""}
                             </div>
                             <p>${escapeHtml(bucket.recommendation)}</p>
@@ -795,6 +804,7 @@ function renderContextEvalReport() {
                 </div>
                 <div class="context-eval-meta">
                     <span>${selectedBucket.fixture_coverage?.accepted_count ? "Accepted fixture exists" : "No accepted fixture yet"}</span>
+                    ${selectedBucket.fixture_coverage?.suggested_count ? `<span>${escapeHtml(String(selectedBucket.fixture_coverage.suggested_count))} suggested fixture(s)</span>` : ""}
                     ${selectedBucket.fixture_coverage?.candidate_count ? `<span>${escapeHtml(String(selectedBucket.fixture_coverage.candidate_count))} candidate fixture(s)</span>` : ""}
                     ${selectedBucket.fixture_coverage?.superseded_count ? `<span>${escapeHtml(String(selectedBucket.fixture_coverage.superseded_count))} superseded</span>` : ""}
                 </div>
@@ -952,7 +962,7 @@ function renderContextEvalReport() {
             const suggestedName = selectedBucket ? suggestContextEvalFixtureName(selectedBucket, selectedExample) : selectedExample.name;
             const fixtureName = window.prompt("Fixture name", suggestedName);
             if (!fixtureName || !fixtureName.trim()) return;
-            const reviewStatus = window.prompt("Review status (candidate, accepted, superseded)", "candidate");
+            const reviewStatus = window.prompt("Review status (suggested, candidate, accepted, superseded)", "candidate");
             if (!reviewStatus || !reviewStatus.trim()) return;
             try {
                 const response = await promoteContextEvalCapture(selectedExample.source_path, fixtureName.trim(), reviewStatus.trim().toLowerCase());
@@ -999,6 +1009,19 @@ async function promoteContextEvalCapture(sourcePath, fixtureName, reviewStatus) 
     await loadSelectedFixtureDetails();
     await loadContextEvalReport();
     return response;
+}
+async function autoDraftContextEvalFixture(sourcePath, bucketKey, fixtureName) {
+    return fetchJson("/api/context-evals/auto-draft", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            source_path: sourcePath,
+            bucket_key: bucketKey,
+            fixture_name: fixtureName
+        })
+    });
 }
 async function inspectFixtureFromTriage(fixturePath) {
     state.selectedFixturePath = fixturePath;
@@ -1162,8 +1185,24 @@ async function loadContextEvalReport() {
             workspace_id: state.currentWorkspaceId
         }
     });
+    const reportUrl = `/api/context-evals/report?${params.toString()}`;
     try {
-        state.contextEvalReport = await fetchJson(`/api/context-evals/report?${params.toString()}`);
+        let report = await fetchJson(reportUrl);
+        const suggestionTargets = (report.top_triage_buckets || []).filter((bucket)=>bucket.promotion_suggestion?.should_suggest && !bucket.fixture_coverage?.accepted_count && !bucket.fixture_coverage?.suggested_count && !bucket.fixture_coverage?.candidate_count).slice(0, 3);
+        let createdAnySuggestions = false;
+        for (const bucket of suggestionTargets){
+            const exampleCase = bucket.example_cases?.[0];
+            if (!exampleCase?.source_path) continue;
+            const response = await autoDraftContextEvalFixture(exampleCase.source_path, bucket.key, "");
+            createdAnySuggestions = Boolean(response.created) || createdAnySuggestions;
+        }
+        if (createdAnySuggestions) {
+            report = await fetchJson(reportUrl);
+            if (!settingsOverlay.hidden) {
+                await loadContextEvalFixtures();
+            }
+        }
+        state.contextEvalReport = report;
         const topBucket = state.contextEvalReport.top_triage_buckets?.[0];
         const selectedStillExists = state.contextEvalReport.top_triage_buckets?.some((bucket)=>bucket.key === state.selectedContextEvalBucketKey);
         state.selectedContextEvalBucketKey = selectedStillExists ? state.selectedContextEvalBucketKey : topBucket?.key || "";

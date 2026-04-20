@@ -92,7 +92,7 @@ class ContextEvalFixtureMetadata:
 def normalize_context_eval_review_status(value: str) -> str:
     """Normalize one fixture review status."""
     normalized = str(value or "").strip().lower()
-    if normalized in {"candidate", "accepted", "superseded"}:
+    if normalized in {"suggested", "candidate", "accepted", "superseded"}:
         return normalized
     return "candidate"
 
@@ -304,6 +304,45 @@ def write_promoted_context_eval_case(
     return target
 
 
+def suggested_context_eval_case_name(bucket_key: str, *, phase: str = "") -> str:
+    """Return one deterministic name for an auto-drafted replay fixture."""
+    segments = ["suggested"]
+    cleaned_bucket = str(bucket_key or "").strip().lower()
+    if cleaned_bucket:
+        segments.append(cleaned_bucket)
+    return "_".join(segments)
+
+
+def ensure_suggested_context_eval_case(
+    payload: Dict[str, object],
+    *,
+    bucket_key: str,
+    fixture_name: str = "",
+    fixtures_dir: pathlib.Path | str | None = None,
+) -> tuple[pathlib.Path, bool]:
+    """Create one suggested replay fixture if it does not already exist."""
+    capture = payload.get("capture", {})
+    capture_payload = dict(capture) if isinstance(capture, dict) else {}
+    target_name = (
+        str(fixture_name or "").strip()
+        or suggested_context_eval_case_name(
+            bucket_key,
+            phase=str(capture_payload.get("phase", "")).strip(),
+        )
+    )
+    target = promoted_context_eval_case_path(target_name, fixtures_dir=fixtures_dir)
+    if target.exists():
+        return target, False
+    normalized = normalize_promoted_context_eval_case_payload(
+        payload,
+        fixture_name=target_name,
+        review_status="suggested",
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return target, True
+
+
 def _load_context_eval_case_items_from_file(
     path: pathlib.Path,
     *,
@@ -388,6 +427,7 @@ def list_promoted_context_eval_fixtures(
     if not root.exists() or not root.is_dir():
         return []
     items: List[Dict[str, object]] = []
+    status_rank = {"suggested": 0, "candidate": 1, "accepted": 2, "superseded": 3}
     for target in sorted(root.glob("*.json")):
         try:
             payload = load_context_eval_case_payload(target)
@@ -406,7 +446,7 @@ def list_promoted_context_eval_fixtures(
             continue
     items.sort(
         key=lambda item: (
-            str(item.get("review_status") or ""),
+            -int(status_rank.get(str(item.get("review_status") or ""), 99)),
             str(item.get("updated_at") or item.get("promoted_at") or ""),
             str(item.get("name") or ""),
         ),
@@ -776,6 +816,7 @@ def promoted_fixture_bucket_coverage(
                     {
                         "bucket_key": bucket_key,
                         "total_fixtures": 0,
+                        "suggested_count": 0,
                         "candidate_count": 0,
                         "accepted_count": 0,
                         "superseded_count": 0,
@@ -785,6 +826,8 @@ def promoted_fixture_bucket_coverage(
                 entry["total_fixtures"] = int(entry["total_fixtures"]) + 1
                 if review_status == "accepted":
                     entry["accepted_count"] = int(entry["accepted_count"]) + 1
+                elif review_status == "suggested":
+                    entry["suggested_count"] = int(entry["suggested_count"]) + 1
                 elif review_status == "superseded":
                     entry["superseded_count"] = int(entry["superseded_count"]) + 1
                 else:
@@ -892,11 +935,13 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
         case_count: int,
     ) -> Dict[str, object]:
         accepted_count = int(coverage.get("accepted_count", 0) or 0)
+        suggested_count = int(coverage.get("suggested_count", 0) or 0)
         candidate_count = int(coverage.get("candidate_count", 0) or 0)
         failure_count = int(bucket["failure_count"])
         severity = str(bucket["severity"])
         should_suggest = (
             accepted_count == 0
+            and suggested_count == 0
             and candidate_count == 0
             and (case_count >= 2 or failure_count >= 3 or severity == "high")
         )
@@ -926,6 +971,7 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             {
                 "bucket_key": bucket["key"],
                 "total_fixtures": 0,
+                "suggested_count": 0,
                 "candidate_count": 0,
                 "accepted_count": 0,
                 "superseded_count": 0,

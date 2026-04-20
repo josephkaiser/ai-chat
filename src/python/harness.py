@@ -68,6 +68,7 @@ from src.python.ai_chat.context_assembler import (
 from src.python.ai_chat.context_eval import (
     ContextEvalCase,
     ContextEvalExpectation,
+    ensure_suggested_context_eval_case,
     find_context_eval_capture_files,
     list_promoted_context_eval_fixtures,
     load_context_eval_case_payload,
@@ -8498,6 +8499,12 @@ class ContextEvalPromotionRequest(BaseModel):
     review_status: str = "candidate"
 
 
+class ContextEvalAutoDraftRequest(BaseModel):
+    source_path: str
+    bucket_key: str
+    fixture_name: Optional[str] = None
+
+
 class ContextEvalFixtureReviewRequest(BaseModel):
     fixture_path: str
     review_status: str
@@ -9855,6 +9862,49 @@ async def promote_context_eval_capture(request: ContextEvalPromotionRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Error promoting context eval capture: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/context-evals/auto-draft")
+async def auto_draft_context_eval_capture(request: ContextEvalAutoDraftRequest):
+    try:
+        source_path = pathlib.Path(str(request.source_path or "").strip()).expanduser()
+        if not source_path.is_absolute():
+            raise HTTPException(status_code=400, detail="Capture source_path must be absolute")
+        normalized_source = str(source_path).replace("\\", "/")
+        if "/.ai/context-evals/" not in normalized_source or source_path.suffix.lower() != ".json":
+            raise HTTPException(status_code=400, detail="Capture source_path must reference one replay capture JSON file")
+        if not source_path.exists() or not source_path.is_file():
+            raise HTTPException(status_code=404, detail="Capture file not found")
+        bucket_key = str(request.bucket_key or "").strip()
+        if not bucket_key:
+            raise HTTPException(status_code=400, detail="bucket_key is required")
+
+        payload = load_context_eval_case_payload(source_path)
+        payload["source_path"] = str(source_path)
+        payload["promoted_at"] = utcnow_iso()
+        target, created = ensure_suggested_context_eval_case(
+            payload,
+            bucket_key=bucket_key,
+            fixture_name=str(request.fixture_name or "").strip(),
+        )
+        normalized_payload = load_context_eval_case_payload(target)
+        return {
+            "status": "success",
+            "created": created,
+            "fixture_name": str(normalized_payload.get("name") or ""),
+            "fixture_path": str(target),
+            "source_path": str(source_path),
+            "review_status": str(
+                dict(normalized_payload.get("fixture_metadata", {})).get("review_status") or "suggested"
+            ),
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Error auto-drafting context eval capture: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
