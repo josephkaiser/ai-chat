@@ -420,6 +420,26 @@ body[data-left-sidebar-open="false"] .sidebar {
     color: var(--accent-strong);
 }
 
+.context-eval-severity.suggested {
+    background: rgba(181, 121, 65, 0.14);
+    color: #8e5d28;
+}
+
+.context-eval-severity.candidate {
+    background: rgba(13, 122, 122, 0.12);
+    color: var(--accent-strong);
+}
+
+.context-eval-severity.accepted {
+    background: rgba(40, 112, 69, 0.14);
+    color: #2b6b40;
+}
+
+.context-eval-severity.superseded {
+    background: rgba(19, 34, 38, 0.08);
+    color: var(--muted);
+}
+
 .context-eval-example {
     margin-top: 8px;
     padding: 8px;
@@ -763,7 +783,8 @@ body[data-viewer-open="false"] .viewer-panel {
     align-self: flex-end;
     background: var(--user-bubble);
     color: var(--user-text);
-    width: min(920px, 92%);
+    width: min(980px, 100%);
+    max-width: 100%;
 }
 
 .message.assistant,
