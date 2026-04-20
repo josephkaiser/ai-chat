@@ -18,10 +18,16 @@ In both modes, the browser streams structured progress so the user can see what 
 For each request the server:
 
 1. Saves the user message and optional attachment context.
+   Hidden runtime-file turns are now stored separately from visible chat turns so transcript search, summaries, retry, and feedback stay grounded in actual user interaction.
 2. Parses per-turn feature flags from the UI.
 3. Classifies workspace intent.
-4. Chooses a small allowed tool set with `select_enabled_tools(...)`.
-5. Either streams a direct answer, enters `run_tool_loop(...)`, or auto-upgrades broad approved write requests into the deeper inspect/plan/build/verify flow.
+4. Composes runtime layers so model-only context such as the active draft can be passed to the model without being persisted as visible transcript text.
+5. Chooses a small allowed tool set with `select_enabled_tools(...)`.
+6. Either streams a direct answer, enters `run_tool_loop(...)`, or auto-upgrades broad approved write requests into the deeper inspect/plan/build/verify flow.
+
+`src/python/ai_chat/routing_program.py` now owns the router seam. Today it still delegates to the heuristic turn strategy, but it is the intended integration point for a future DSPy-style routing program.
+
+`src/python/ai_chat/deep_runtime.py` now owns deep-session state plus the bootstrap/plan-preview/execute orchestration lifecycle. The remaining build, verify, and synthesis phases still call back into harness-local implementations, but the state machine boundary is now explicit.
 
 `run_tool_loop(...)` is intentionally small:
 

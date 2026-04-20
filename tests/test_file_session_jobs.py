@@ -289,6 +289,25 @@ class FileSessionJobSummaryTests(unittest.TestCase):
         self.assertIn("function renderApp", refreshed)
         self.assertNotIn("\nApp\n\n", refreshed)
 
+    def test_bootstrap_content_for_markdown_site_generator_looks_like_real_capability(self):
+        content = app.build_file_session_bootstrap_content(
+            "root/generator.ts",
+            (
+                "create a typescript file that generates a static site based on markdown articles in the repo next to it.\n"
+                "Assume this file lives in repository 'root/'\n"
+                "then the .md files that will comprise the basis of the articles are assumed to be in the 'root/' directory. "
+                "the generator.ts file is run from the root directory using an npm build command"
+            ),
+        )
+
+        self.assertIn('import { promises as fs } from "node:fs";', content)
+        self.assertIn('const CONTENT_ROOT = path.join(process.cwd(), "root");', content)
+        self.assertIn("async function loadArticles(contentRoot: string): Promise<Article[]> {", content)
+        self.assertIn("function renderMarkdown(markdown: string): string {", content)
+        self.assertIn("await fs.writeFile(path.join(OUTPUT_ROOT, \"index.html\"), renderDocument(\"Articles\", body), \"utf8\");", content)
+        self.assertNotIn("Live scaffold generated from the current draft spec.", content)
+        self.assertNotIn("function renderApp", content)
+
     def test_extract_workspace_archive_safely_expands_zip_into_workspace(self):
         archive_path = self.workspace_root / "uploads" / "bundle.zip"
         archive_path.parent.mkdir(parents=True, exist_ok=True)

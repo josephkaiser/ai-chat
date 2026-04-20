@@ -26,6 +26,9 @@ ai-chat/
 
 - `app.py` is the entrypoint. It mounts static files, renders `index.html`, and implements REST and WebSocket handlers. It owns the chat harness, workspace catalog APIs, voice pipeline, tool execution loop, and workspace-backed chat routing.
 - `src/python/ai_chat/turn_strategy.py` evaluates each user turn against the app’s main skill loop: local RAG, web search, file creation, coding mode, planning mode, execution mode, and verification needs.
+- `src/python/ai_chat/routing_program.py` is the top-level routing-program seam. It currently runs the heuristic router, but gives the app a cleaner insertion point for a future DSPy-backed policy.
+- `src/python/ai_chat/runtime_layers.py` composes visible chat text, attachment context, and model-only runtime layers such as active draft metadata without polluting user-facing transcript storage.
+- `src/python/ai_chat/deep_runtime.py` owns deep-session state plus the bootstrap/preview/execute orchestration lifecycle, so the harness no longer carries the full deep-mode state machine inline.
 - `src/python/ai_chat/deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
 - `src/python/ai_chat/prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
 - `src/python/ai_chat/thinking_stream.py` parses model output into thinking and visible-answer streams. Its tag pairs must stay aligned with `THINK_TAG_PAIRS` in `src/web/app.js`.

@@ -47,7 +47,25 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from src.python.ai_chat.deep_flow import DeepRouteRequest, decide_deep_route
+from src.python.ai_chat.context_assembler import (
+    assemble_build_substep_context,
+    assemble_direct_answer_context,
+    assemble_inspect_context,
+    assemble_plan_context,
+    assemble_step_subtask_context,
+    assemble_synthesis_context,
+    assemble_verify_context,
+    build_recent_context as build_recent_context_bundle,
+)
+from src.python.ai_chat.deep_runtime import (
+    DeepRuntimeCallbacks,
+    DeepSession,
+    bootstrap_deep_session,
+    create_deep_session,
+    orchestrate_deep_session,
+    run_deep_execution_flow,
+    run_deep_plan_preview_flow,
+)
 from src.python.ai_chat.task_engine import run_task as run_structured_task
 from src.python.ai_chat.task_planner import (
     build_heuristic_task_plan,
@@ -79,11 +97,18 @@ from src.python.ai_chat.prompts import (
     STEP_DECOMPOSE_SYSTEM_PROMPT,
     TOOL_USE_SYSTEM_PROMPT,
 )
+from src.python.ai_chat.routing_program import DEFAULT_ROUTE_PROGRAM, RouteProgramInputs
+from src.python.ai_chat.runtime_layers import (
+    TURN_KIND_VISIBLE_CHAT,
+    build_model_history,
+    compose_runtime_turn,
+    normalize_turn_kind,
+    visible_message_kind_sql,
+)
 from src.python.ai_chat.themes import COLORS_DARK, COLORS_LIGHT
 from src.python.ai_chat.thinking_stream import ThinkingStreamSplitter, strip_stream_special_tokens
 from src.python.ai_chat.turn_strategy import (
     TurnAssessment,
-    build_turn_assessment,
     format_turn_assessment_summary,
     infer_explicit_planning_request,
 )
@@ -4473,6 +4498,7 @@ def ensure_message_embeddings(conversation_id: str) -> int:
             '''SELECT id, role, content
                FROM messages
                WHERE conversation_id = ?
+                 AND ''' + visible_message_kind_sql() + '''
                  AND TRIM(COALESCE(content, '')) != ''
                  AND (embedding IS NULL OR COALESCE(embedding_model, '') != ?)
                ORDER BY id ASC''',
@@ -4550,6 +4576,7 @@ def fetch_semantic_message_candidates(
             '''SELECT id, role, content, timestamp, feedback, embedding
                FROM messages
                WHERE conversation_id = ?
+                 AND ''' + visible_message_kind_sql() + '''
                  AND embedding IS NOT NULL
                  AND COALESCE(embedding_model, '') = ?''',
             (conversation_id, active_model),
@@ -5332,52 +5359,6 @@ def build_effective_system_prompt(base_system_prompt: str, user_message: str) ->
 
 
 @dataclass
-class DeepSession:
-    """Shared state for a deep-mode request."""
-    websocket: WebSocket
-    conversation_id: str
-    message: str
-    history: List[Dict[str, str]]
-    system_prompt: str
-    max_tokens: int
-    features: "FeatureFlags"
-    task_request: str = ""
-    context: str = ""
-    workspace_enabled: bool = False
-    workspace_facts: str = ""
-    workspace_snapshot: Dict[str, Any] = field(default_factory=dict)
-    recent_product_feedback_entries: List[Dict[str, Any]] = field(default_factory=list)
-    recent_product_feedback_summary: str = ""
-    recent_product_feedback_artifact_path: str = ".ai/recent-feedback.md"
-    plan: Dict[str, Any] = field(default_factory=dict)
-    plan_preview_pending: bool = False
-    task_board_path: str = ".ai/task-board.md"
-    task_state_path: str = ".ai/task-state.json"
-    build_step_summaries: List[str] = field(default_factory=list)
-    step_subplans: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    step_substep_summaries: Dict[str, List[str]] = field(default_factory=dict)
-    step_substep_reports: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    step_reports: List[Dict[str, Any]] = field(default_factory=list)
-    build_summary: str = ""
-    changed_files: List[str] = field(default_factory=list)
-    agent_outputs: Dict[str, str] = field(default_factory=dict)
-    verification_summary: str = ""
-    scope_audit: Dict[str, Any] = field(default_factory=dict)
-    scope_audit_summary: str = ""
-    draft_response: str = ""
-    final_response: str = ""
-    execution_requested: bool = False
-    auto_execute: bool = False
-    plan_override_builder_steps: List[str] = field(default_factory=list)
-    resumed: bool = False
-    pause_reason: str = ""
-    workflow_execution: Optional[WorkflowExecutionContext] = None
-
-    def history_messages(self) -> List[Dict[str, str]]:
-        return [{"role": msg["role"], "content": msg["content"]} for msg in self.history]
-
-
-@dataclass
 class ToolLoopOutcome:
     """Result of a server-side tool loop."""
     final_text: str
@@ -5536,10 +5517,13 @@ class PreparedTurnRequest:
     """Normalized routing state for one user turn before execution starts."""
     conversation_id: str
     active_file_path: str
+    turn_kind: str
     user_message_id: int
     saved_user_message: str
     effective_message: str
+    model_message: str
     history: List[Dict[str, str]]
+    model_history: List[Dict[str, str]]
     system_prompt: str
     requested_mode: str
     resolved_mode: str
@@ -7804,11 +7788,17 @@ async def complete_successful_turn(
     final_outcome: str = "completed_direct",
     active_file_path: str = "",
     queue_background_optimize: bool = False,
+    turn_kind: str = TURN_KIND_VISIBLE_CHAT,
 ) -> Optional[int]:
     """Persist assistant output best-effort, then close the turn without surfacing bookkeeping errors."""
     assistant_message_id: Optional[int] = None
     try:
-        assistant_message_id = save_message(conversation_id, 'assistant', full_response)
+        assistant_message_id = save_message(
+            conversation_id,
+            'assistant',
+            full_response,
+            kind=turn_kind,
+        )
     except Exception as exc:
         logger.warning("Failed to persist assistant message for %s: %s", conversation_id, exc)
 
@@ -7840,7 +7830,7 @@ async def complete_successful_turn(
         except Exception as exc:
             logger.warning("Failed to queue background optimize job for %s:%s: %s", conversation_id, active_file_path, exc)
 
-    if assistant_message_id is not None:
+    if assistant_message_id is not None and normalize_turn_kind(turn_kind) == TURN_KIND_VISIBLE_CHAT:
         await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
     await websocket.send_json({'type': 'done'})
     return assistant_message_id
@@ -8178,6 +8168,7 @@ def init_db():
                       role TEXT,
                       content TEXT,
                       timestamp TEXT,
+                      kind TEXT NOT NULL DEFAULT 'visible_chat',
                       feedback TEXT,
                       embedding BLOB,
                       embedding_model TEXT,
@@ -8233,9 +8224,21 @@ def init_db():
                       FOREIGN KEY(file_session_id) REFERENCES file_sessions(id))''')
 
         try:
+            c.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'visible_chat'")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             c.execute('ALTER TABLE messages ADD COLUMN feedback TEXT')
         except sqlite3.OperationalError:
             pass
+
+        c.execute(
+            "UPDATE messages "
+            "SET kind = ? "
+            "WHERE kind IS NULL OR TRIM(COALESCE(kind, '')) = ''",
+            (TURN_KIND_VISIBLE_CHAT,),
+        )
 
         c.execute(
             '''UPDATE messages
@@ -8676,6 +8679,7 @@ def apply_implicit_feedback_from_user_reply(
         '''SELECT id, content
            FROM messages
            WHERE conversation_id = ? AND role = 'assistant' AND id < ?
+             AND ''' + visible_message_kind_sql() + '''
            ORDER BY id DESC
            LIMIT 1''',
         (conversation_id, user_message_id),
@@ -8725,10 +8729,13 @@ def collect_recent_product_feedback_entries(
                SELECT p.id
                FROM messages p
                WHERE p.conversation_id = m.conversation_id AND p.id < m.id
+                 AND ''' + visible_message_kind_sql("p.kind") + '''
                ORDER BY p.id DESC
                LIMIT 1
            )
            WHERE m.role = 'user' AND prev.role = 'assistant'
+             AND ''' + visible_message_kind_sql("m.kind") + '''
+             AND ''' + visible_message_kind_sql("prev.kind") + '''
            ORDER BY c.updated_at DESC, m.id DESC
            LIMIT ?''',
         (max(safe_limit * 12, 48),),
@@ -8953,7 +8960,7 @@ def get_conversation_messages_for_ui(conv_id: str, limit: int = 100) -> List[Dic
            FROM (
                SELECT id, role, content, timestamp, feedback
                FROM messages
-               WHERE conversation_id = ?
+               WHERE conversation_id = ? AND ''' + visible_message_kind_sql() + '''
                ORDER BY timestamp DESC, id DESC
                LIMIT ?
            )
@@ -8984,7 +8991,7 @@ def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = 
     c = conn.cursor()
 
     c.execute('''SELECT id, role, content, timestamp, feedback FROM messages
-                 WHERE conversation_id = ?
+                 WHERE conversation_id = ? AND ''' + visible_message_kind_sql() + '''
                  ORDER BY timestamp ASC''', (conv_id,))
 
     all_messages = []
@@ -9082,6 +9089,7 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
                       JOIN messages m ON m.id = f.rowid
                       LEFT JOIN conversations c ON m.conversation_id = c.id
                       WHERE {FTS_TABLE} MATCH ?
+                        AND {visible_message_kind_sql("m.kind")}
                       ORDER BY bm25({FTS_TABLE}), m.timestamp DESC
                       LIMIT ?''', (fts_query, max(safe_limit * 4, 20)))
         fetched_rows = [
@@ -9099,6 +9107,7 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
                      FROM messages m
                      LEFT JOIN conversations c ON m.conversation_id = c.id
                      WHERE m.content LIKE ?
+                       AND ''' + visible_message_kind_sql("m.kind") + '''
                      ORDER BY m.timestamp DESC
                      LIMIT ?''', (search_term, safe_limit))
         results = []
@@ -9111,7 +9120,14 @@ def search_messages(query: str, limit: int = 20) -> List[Dict]:
     conn.close()
     return results
 
-def save_message(conv_id: str, role: str, content: str, workspace_id: Optional[str] = None) -> int:
+def save_message(
+    conv_id: str,
+    role: str,
+    content: str,
+    workspace_id: Optional[str] = None,
+    *,
+    kind: str = TURN_KIND_VISIBLE_CHAT,
+) -> int:
     """Save message to database and return message ID"""
     title = content[:50] + "..." if len(content) > 50 else content
     ensure_run_for_conversation(conv_id, title=title, workspace_id=workspace_id)
@@ -9127,14 +9143,15 @@ def save_message(conv_id: str, role: str, content: str, workspace_id: Optional[s
         except sqlite3.OperationalError:
             pass
 
+    normalized_kind = normalize_turn_kind(kind)
     stored_feedback = "neutral" if role == "assistant" else None
-    c.execute('''INSERT INTO messages (conversation_id, role, content, timestamp, feedback)
-                 VALUES (?, ?, ?, ?, ?)''',
-              (conv_id, role, content, datetime.now().isoformat(), stored_feedback))
+    c.execute('''INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback)
+                 VALUES (?, ?, ?, ?, ?, ?)''',
+              (conv_id, role, content, datetime.now().isoformat(), normalized_kind, stored_feedback))
 
     message_id = c.lastrowid
 
-    if role == 'user':
+    if role == 'user' and normalized_kind == TURN_KIND_VISIBLE_CHAT:
         apply_implicit_feedback_from_user_reply(conn, conv_id, message_id, content)
 
     c.execute('UPDATE conversations SET updated_at = ? WHERE id = ?',
@@ -9153,6 +9170,7 @@ async def refresh_conversation_summary(conv_id: str):
         '''SELECT role, content, timestamp
            FROM messages
            WHERE conversation_id = ?
+             AND ''' + visible_message_kind_sql() + '''
            ORDER BY timestamp ASC''',
         (conv_id,),
     )
@@ -9289,7 +9307,7 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
     """Get a message by its ID"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''SELECT id, conversation_id, role, content, timestamp, feedback
+    c.execute('''SELECT id, conversation_id, role, content, timestamp, kind, feedback
                  FROM messages WHERE id = ?''', (message_id,))
     row = c.fetchone()
     conn.close()
@@ -9297,7 +9315,8 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
     if row:
         return {
             'id': row[0], 'conversation_id': row[1], 'role': row[2],
-            'content': row[3], 'timestamp': row[4], 'feedback': message_feedback_value(row[2], row[5])
+            'content': row[3], 'timestamp': row[4], 'kind': normalize_turn_kind(row[5]),
+            'feedback': message_feedback_value(row[2], row[6]),
         }
     return None
 
@@ -9496,6 +9515,7 @@ async def get_conversations():
                          SELECT conversation_id, content, timestamp,
                                 ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY timestamp DESC) as rn
                          FROM messages
+                         WHERE ''' + visible_message_kind_sql() + '''
                      ) m ON c.id = m.conversation_id AND m.rn = 1
                      ORDER BY c.updated_at DESC''')
 
@@ -9530,6 +9550,8 @@ async def submit_feedback(message_id: int, request: FeedbackRequest):
             raise HTTPException(status_code=404, detail="Message not found")
         if message.get("role") != "assistant":
             raise HTTPException(status_code=400, detail="Feedback can only be recorded for assistant messages")
+        if message.get("kind") != TURN_KIND_VISIBLE_CHAT:
+            raise HTTPException(status_code=400, detail="Feedback can only be recorded for visible assistant messages")
         update_message_feedback(message_id, feedback)
         sync_workflow_feedback_for_message(message_id, feedback)
         return {"status": "success", "message": f"Feedback recorded: {feedback}", "feedback": feedback}
@@ -9547,11 +9569,14 @@ async def retry_message(message_id: int, request: dict):
 
         if message['role'] != 'assistant':
             raise HTTPException(status_code=400, detail="Can only retry assistant messages")
+        if message.get('kind') != TURN_KIND_VISIBLE_CHAT:
+            raise HTTPException(status_code=400, detail="Can only retry visible assistant messages")
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''SELECT id, content FROM messages
                      WHERE conversation_id = ? AND role = 'user' AND id < ?
+                       AND ''' + visible_message_kind_sql() + '''
                      ORDER BY id DESC LIMIT 1''',
                   (message['conversation_id'], message_id))
         user_row = c.fetchone()
@@ -10160,6 +10185,180 @@ def supporting_file_session_spec_lines(spec_content: str, summary: str, *, limit
     return cues[:limit]
 
 
+def file_session_spec_repo_directory(spec_content: str, default: str = "content") -> str:
+    """Extract a likely repository-relative content directory from one draft spec."""
+    text = str(spec_content or "")
+    for pattern in (
+        r"['\"]([A-Za-z0-9._/-]+/?)['\"]",
+        r"\b(?:in|under|inside)\s+([A-Za-z0-9._-]+/)\b",
+    ):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        candidate = str(match.group(1) or "").strip().strip("/")
+        if candidate and not candidate.startswith("."):
+            return candidate
+    return default
+
+
+def file_session_requests_markdown_site_generator(spec_content: str) -> bool:
+    """Return whether the draft spec is asking for a markdown-driven site generator."""
+    text = str(spec_content or "").lower()
+    return (
+        ("markdown" in text or ".md" in text)
+        and bool(re.search(r"\b(static site|site generator|generate[s]?\s+a?\s*static site|articles?)\b", text))
+        and bool(re.search(r"\b(generate|generator|build|compile)\b", text))
+    )
+
+
+def build_file_session_bootstrap_markdown_site_generator(
+    path: str,
+    spec_content: str,
+    *,
+    typed: bool,
+) -> str:
+    """Generate a real first-pass JS/TS markdown site generator scaffold."""
+    content_root = file_session_spec_repo_directory(spec_content, default="content")
+    output_root = "dist"
+    source_hint = normalize_file_session_sentence(summarize_file_session_spec(spec_content, file_session_bootstrap_title(path)))
+    source_hint_markup = json.dumps(f"<p>{source_hint}</p>")
+    article_type = "type Article = {" if typed else "/** @typedef {{"
+    article_fields = [
+        "  slug: string;",
+        "  title: string;",
+        "  sourcePath: string;",
+        "  markdown: string;",
+        "  html: string;",
+    ] if typed else [
+        " *   slug: string,",
+        " *   title: string,",
+        " *   sourcePath: string,",
+        " *   markdown: string,",
+        " *   html: string,",
+    ]
+    article_close = "};" if typed else " * }} Article */"
+    promises_type = ": Promise<void>" if typed else ""
+    string_type = ": string" if typed else ""
+    article_array_type = ": Promise<Article[]>" if typed else ""
+    article_param = "article: Article" if typed else "article"
+    articles_param = "articles: Article[]" if typed else "articles"
+    return "\n".join([
+        'import { promises as fs } from "node:fs";',
+        'import path from "node:path";',
+        "",
+        article_type,
+        *article_fields,
+        article_close,
+        "",
+        f'const CONTENT_ROOT = path.join(process.cwd(), {json.dumps(content_root)});',
+        f'const OUTPUT_ROOT = path.join(process.cwd(), {json.dumps(output_root)});',
+        "",
+        f"async function main(){promises_type} {{",
+        "  const articles = await loadArticles(CONTENT_ROOT);",
+        "  await fs.rm(OUTPUT_ROOT, { recursive: true, force: true });",
+        "  await fs.mkdir(OUTPUT_ROOT, { recursive: true });",
+        "  await Promise.all(articles.map(writeArticle));",
+        "  await writeIndex(articles);",
+        "}",
+        "",
+        f"async function loadArticles(contentRoot{string_type}){article_array_type} {{",
+        "  const entries = await walkMarkdownFiles(contentRoot);",
+        "  return Promise.all(entries.map(async (sourcePath) => {",
+        '    const markdown = await fs.readFile(sourcePath, "utf8");',
+        "    const slug = slugify(path.basename(sourcePath, path.extname(sourcePath)));",
+        "    return {",
+        "      slug,",
+        "      title: readTitle(markdown, slug),",
+        "      sourcePath,",
+        "      markdown,",
+        "      html: renderMarkdown(markdown),",
+        "    };",
+        "  }));",
+        "}",
+        "",
+        f"async function walkMarkdownFiles(root{string_type}){': Promise<string[]>' if typed else ''} {{",
+        '  const directoryEntries = await fs.readdir(root, { withFileTypes: true });',
+        "  const files = await Promise.all(directoryEntries.map(async (entry) => {",
+        "    const fullPath = path.join(root, entry.name);",
+        "    if (entry.isDirectory()) return walkMarkdownFiles(fullPath);",
+        '    return /\\.md$/i.test(entry.name) ? [fullPath] : [];',
+        "  }));",
+        "  return files.flat();",
+        "}",
+        "",
+        f"function readTitle(markdown{string_type}, fallback{string_type}){string_type} {{",
+        "  const headingMatch = markdown.match(/^#\\s+(.+)$/m);",
+        "  return headingMatch ? headingMatch[1].trim() : fallback;",
+        "}",
+        "",
+        f"function slugify(value{string_type}){string_type} {{",
+        "  return value",
+        "    .toLowerCase()",
+        "    .replace(/[^a-z0-9]+/g, '-')",
+        "    .replace(/^-+|-+$/g, '') || 'article';",
+        "}",
+        "",
+        f"function renderMarkdown(markdown{string_type}){string_type} {{",
+        "  return markdown",
+        '    .replace(/^###\\s+(.+)$/gm, "<h3>$1</h3>")',
+        '    .replace(/^##\\s+(.+)$/gm, "<h2>$1</h2>")',
+        '    .replace(/^#\\s+(.+)$/gm, "<h1>$1</h1>")',
+        '    .replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>")',
+        '    .replace(/\\*(.+?)\\*/g, "<em>$1</em>")',
+        '    .split(/\\n\\s*\\n/)',
+        "    .map((block) => block.trim())",
+        "    .filter(Boolean)",
+        '    .map((block) => (/^<h[1-3]>/.test(block) ? block : `<p>${block.replace(/\\n/g, "<br />")}</p>`))',
+        '    .join("\\n");',
+        "}",
+        "",
+        f"function renderDocument(title{string_type}, body{string_type}){string_type} {{",
+        "  return [",
+        '    "<!DOCTYPE html>",',
+        '    "<html lang=\\"en\\">",',
+        '    "  <head>",',
+        '    "    <meta charset=\\"UTF-8\\" />",',
+        '    "    <meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1.0\\" />",',
+        '    `    <title>${title}</title>`,',
+        '    "    <link rel=\\"stylesheet\\" href=\\"./styles.css\\" />",',
+        '    "  </head>",',
+        '    "  <body>",',
+        '    "    <main class=\\"page\\">",',
+        '    "      <a href=\\"./index.html\\">Back to index</a>",',
+        '    "      <article>",',
+        '    `        <h1>${title}</h1>`,',
+        '    `        ${body}`,' ,
+        '    "      </article>",',
+        '    "    </main>",',
+        '    "  </body>",',
+        '    "</html>",',
+        '  ].join("\\n");',
+        "}",
+        "",
+        f"async function writeArticle({article_param}){promises_type} {{",
+        "  const filePath = path.join(OUTPUT_ROOT, `${article.slug}.html`);",
+        '  await fs.writeFile(filePath, renderDocument(article.title, article.html), "utf8");',
+        "}",
+        "",
+        f"async function writeIndex({articles_param}){promises_type} {{",
+        '  const links = articles.map((article) => `<li><a href="./${article.slug}.html">${article.title}</a></li>`).join("\\n");',
+        f'  const body = [{source_hint_markup}, "<ul>", links, "</ul>"].join("\\n");',
+        '  await fs.writeFile(path.join(OUTPUT_ROOT, "index.html"), renderDocument("Articles", body), "utf8");',
+        '  await fs.writeFile(',
+        '    path.join(OUTPUT_ROOT, "styles.css"),',
+        '    "body { font-family: system-ui, sans-serif; margin: 0; background: #f7f5f2; color: #1f2937; }\\n.page { width: min(760px, calc(100vw - 32px)); margin: 0 auto; padding: 48px 0 72px; }\\na { color: #0f766e; }\\narticle { line-height: 1.7; }",',
+        '    "utf8",',
+        "  );",
+        "}",
+        "",
+        "void main().catch((error) => {",
+        "  console.error(error);",
+        "  process.exitCode = 1;",
+        "});",
+        "",
+    ])
+
+
 def looks_like_current_file_session_bootstrap_content(path: str, content: str) -> bool:
     """Return whether the visible output still looks like one of our provisional bootstrap scaffolds."""
     safe_path = normalize_file_session_path(path)
@@ -10492,19 +10691,13 @@ def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
     if suffix in {".js", ".jsx", ".ts", ".tsx"}:
         typed = suffix in {".ts", ".tsx"}
         quoted = file_session_spec_quoted_phrase(spec_content) or f"{fallback_title} is taking shape."
+        if file_session_requests_markdown_site_generator(spec_content):
+            return build_file_session_bootstrap_markdown_site_generator(safe_path, spec_content, typed=typed)
         looks_like_html_build = bool(re.search(r"\b(html|web ?page|website|landing page|site)\b", str(spec_content or ""), flags=re.IGNORECASE))
-        comment_lines = [
-            "/**",
-            " * Live scaffold generated from the current draft spec.",
-            f" * Goal: {normalize_file_session_sentence(summary)}",
-            *(f" * Cue: {normalize_file_session_sentence(line)}" for line in lines[:4]),
-            " */",
-            "",
-        ]
         if looks_like_html_build:
             html_title = fallback_title
             html_summary = normalize_file_session_sentence(summary)
-            return "\n".join(comment_lines + [
+            return "\n".join([
                 f"{'export ' if typed else ''}function renderApp{'(): string' if typed else '()'} {{",
                 "  return [",
                 "    '<!DOCTYPE html>',",
@@ -10528,12 +10721,13 @@ def build_file_session_bootstrap_content(path: str, spec_content: str) -> str:
                 "main();",
                 "",
             ])
-        return "\n".join(comment_lines + [
+        return "\n".join([
             f"{'export ' if typed else ''}function main{'(): void' if typed else '()'} {{",
-            f"  console.log({json.dumps(quoted)});",
+            f"  const message{' : string' if typed else ''} = {json.dumps(quoted)};",
+            "  process.stdout.write(`${message}\\n`);",
             "}",
             "",
-            "main();",
+            "void main();",
             "",
         ])
     if suffix == ".json":
@@ -11900,6 +12094,7 @@ def conversation_search_history_result(
                 FROM {FTS_TABLE} f
                 JOIN messages m ON m.id = f.rowid
                 WHERE {FTS_TABLE} MATCH ? AND m.conversation_id = ?
+                  AND {visible_message_kind_sql("m.kind")}
                 ORDER BY bm25({FTS_TABLE}), m.timestamp DESC
                 LIMIT ?''',
             (fts_query, conversation_id, max(safe_limit * 4, 12)),
@@ -11921,6 +12116,7 @@ def conversation_search_history_result(
             '''SELECT id, role, content, timestamp
                FROM messages
                WHERE conversation_id = ? AND content LIKE ?
+                 AND ''' + visible_message_kind_sql() + '''
                ORDER BY timestamp DESC
                LIMIT ?''',
             (conversation_id, search_term, safe_limit),
@@ -12000,6 +12196,7 @@ def conversation_search_history_result(
                 '''SELECT role, content
                    FROM messages
                    WHERE conversation_id = ? AND id < ?
+                     AND ''' + visible_message_kind_sql() + '''
                    ORDER BY id DESC
                    LIMIT 1''',
                 (conversation_id, message_id),
@@ -12008,6 +12205,7 @@ def conversation_search_history_result(
                 '''SELECT role, content
                    FROM messages
                    WHERE conversation_id = ? AND id > ?
+                     AND ''' + visible_message_kind_sql() + '''
                    ORDER BY id ASC
                    LIMIT 1''',
                 (conversation_id, message_id),
@@ -13924,10 +14122,7 @@ async def run_tool_loop(
 
 def build_recent_context(history: List[Dict[str, str]], limit: int = 6) -> str:
     """Format recent history into a compact context block."""
-    if not history:
-        return ""
-    recent = history[-limit:]
-    return "\n".join(f"{m['role']}: {m['content'][:500]}" for m in recent)
+    return build_recent_context_bundle(history, limit=limit)
 
 
 def classify_workspace_intent(message: str) -> str:
@@ -14930,23 +15125,13 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         "Inspect",
         "Inspecting the workspace to ground planning in observed files and artifacts.",
     )
-    recent_feedback_block = ""
-    if session.recent_product_feedback_summary:
-        recent_feedback_block = (
-            "Recent product feedback to treat as failure signals for this pass:\n"
-            f"{session.recent_product_feedback_summary}\n\n"
-            f"Feedback digest artifact:\n[[artifact:{session.recent_product_feedback_artifact_path}]]\n\n"
-        )
+    inspect_bundle = assemble_inspect_context(
+        session,
+        workspace_snapshot_formatter=format_workspace_snapshot,
+    )
     inspect_history = session.history_messages() + [{
         "role": "user",
-        "content": (
-            f"Conversation context:\n{session.context or '(none)'}\n\n"
-            f"{recent_feedback_block}"
-            f"Deterministic workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
-            f"User request:\n{session.task_request or session.message}\n\n"
-            "Inspect the workspace and gather the most relevant facts before planning. "
-            "Use tools when needed, then return a concise fact summary."
-        ),
+        "content": inspect_bundle.render(),
     }]
     inspect_tools = allowed_workspace_tools(session.features, include_write=False)
     outcome = await run_resumable_tool_loop(
@@ -15027,21 +15212,16 @@ async def deep_plan_step_subtasks(
     if is_fast_profile_active():
         subplan = build_heuristic_step_subplan(session, step, step_index, total_steps)
     else:
+        subtask_bundle = assemble_step_subtask_context(
+            session,
+            step=step,
+            step_index=step_index,
+            total_steps=total_steps,
+            workspace_snapshot_formatter=format_workspace_snapshot,
+        )
         messages = [
             {"role": "system", "content": STEP_DECOMPOSE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"User request:\n{session.task_request or session.message}\n\n"
-                    f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                    f"Workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
-                    f"Top-level plan strategy:\n{session.plan.get('strategy', '(none)')}\n\n"
-                    "Completed top-level build notes:\n"
-                    + ("\n".join(f"{idx + 1}. {summary}" for idx, summary in enumerate(session.build_step_summaries)) or "(none)")
-                    + "\n\n"
-                    f"Current build step ({step_index + 1}/{total_steps}):\n{step}"
-                ),
-            },
+            {"role": "user", "content": subtask_bundle.render()},
         ]
         raw = await vllm_chat_complete(messages, max_tokens=384, temperature=0.1)
         try:
@@ -15203,36 +15383,27 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 active_substep_index=sub_idx,
             )
 
+            build_bundle = assemble_build_substep_context(
+                session,
+                step=step,
+                step_index=idx,
+                total_steps=len(steps),
+                step_subplan=step_subplan,
+                completed_substeps=completed_substeps,
+                current_substep=current_substep,
+                substep_index=sub_idx,
+                substep_count=len(substeps),
+                workspace_snapshot_formatter=format_workspace_snapshot,
+                subplan_progress_formatter=lambda current_subplan, summaries: format_step_subplan_progress(
+                    current_subplan,
+                    summaries,
+                    active_substep_index=sub_idx,
+                    prefix=f"{idx + 1}.",
+                ),
+            )
             build_history = session.history_messages() + [{
                 "role": "user",
-                "content": (
-                    f"Conversation context:\n{session.context or '(none)'}\n\n"
-                    f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                    f"Current workspace snapshot:\n{format_workspace_snapshot(session.workspace_snapshot)}\n\n"
-                    f"User request:\n{session.task_request or session.message}\n\n"
-                    f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
-                    f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
-                    "Completed build step notes:\n"
-                    + ("\n".join(f"{i + 1}. {summary}" for i, summary in enumerate(session.build_step_summaries)) or "(none)")
-                    + "\n\n"
-                    f"Current build step ({idx + 1}/{len(steps)}):\n{step}\n\n"
-                    "Nested step plan:\n"
-                    + format_step_subplan_progress(
-                        step_subplan,
-                        completed_substeps,
-                        active_substep_index=sub_idx,
-                        prefix=f"{idx + 1}.",
-                    )
-                    + "\n\n"
-                    f"Current substep ({sub_idx + 1}/{len(substeps)}):\n{current_substep}\n\n"
-                    f"Build role: {agent_a.get('role', 'builder')}\n"
-                    f"Build task:\n{agent_a.get('prompt', '')}\n\n"
-                    "Focus on the current substep only. Treat any later substeps as future work inside this same top-level build step. "
-                    "Use the task board as external memory instead of trying to carry the whole plan in-context. "
-                    "On each loop, either gather missing evidence, update a durable artifact, or verify the current substep. "
-                    "Use tools to inspect, patch, and validate as needed for this substep. "
-                    "When done, return a concise substep result covering what changed, any artifact paths, and caveats that matter for later verification."
-                ),
+                "content": build_bundle.render(),
             }]
             outcome = await run_resumable_tool_loop(
                 session.websocket,
@@ -15490,16 +15661,10 @@ async def deep_decompose(session: DeepSession, preview_only: bool = False) -> Di
     if is_fast_profile_active():
         session.plan = build_heuristic_deep_plan(session)
     else:
+        plan_bundle = assemble_plan_context(session)
         decompose_messages = [
             {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Conversation context:\n{session.context or '(none)'}\n\n"
-                    f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-                    f"User's new query:\n{session.task_request or session.message}"
-                ),
-            },
+            {"role": "user", "content": plan_bundle.render()},
         ]
         raw = await vllm_chat_complete(decompose_messages, max_tokens=768, temperature=0.1)
         try:
@@ -15556,15 +15721,10 @@ async def deep_answer_directly(session: DeepSession) -> str:
         tool_name for tool_name in allowed_tools
         if tool_name not in {"workspace.patch_file", "workspace.run_command"}
     ]
+    direct_bundle = assemble_direct_answer_context(session)
     direct_history = session.history_messages() + [{
         "role": "user",
-        "content": (
-            f"Conversation context:\n{session.context or '(none)'}\n\n"
-            f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-            f"User request:\n{session.task_request or session.message}\n\n"
-            "Answer directly unless execution is clearly required. "
-            "Use read-only tools if they materially improve the answer."
-        ),
+        "content": direct_bundle.render(),
     }]
     if allowed_tools:
         outcome = await run_resumable_tool_loop(
@@ -15596,7 +15756,11 @@ async def deep_answer_directly(session: DeepSession) -> str:
                 session.workspace_enabled = True
                 await deep_inspect_workspace(session)
             session.auto_execute = True
-            return await run_deep_execution_flow(session, requires_existing_plan=False)
+            return await run_deep_execution_flow(
+                session,
+                build_deep_runtime_callbacks(),
+                requires_existing_plan=False,
+            )
         if outcome.blocked_on_permission:
             session.pause_reason = PAUSE_REASON_COMMAND_APPROVAL
             session.draft_response = outcome.final_text
@@ -15634,30 +15798,10 @@ async def deep_verify(session: DeepSession) -> str:
         "Verify",
         "Checking the result against the workspace.",
     )
+    verify_bundle = assemble_verify_context(session)
     verify_history = session.history_messages() + [{
         "role": "user",
-        "content": (
-            f"User request:\n{session.task_request or session.message}\n\n"
-            f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-            + (
-                f"Recent product feedback to verify against:\n{session.recent_product_feedback_summary}\n\n"
-                if session.recent_product_feedback_summary else ""
-            )
-            +
-            f"Task board artifact:\n[[artifact:{session.task_board_path}]]\n\n"
-            f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
-            "Verifier checks:\n"
-            + "\n".join(f"{idx}. {step}" for idx, step in enumerate(session.plan.get("verifier_checks", []), start=1))
-            + "\n\n"
-            f"Build summary:\n{session.build_summary or '(none)'}\n\n"
-            f"Files changed:\n{', '.join(session.changed_files) if session.changed_files else '(none)'}\n\n"
-            f"Proposed solution A ({session.agent_outputs.get('agent_a_role', 'builder')}):\n"
-            f"{session.agent_outputs.get('output_a', '')}\n\n"
-            f"Proposed solution B ({session.agent_outputs.get('agent_b_role', 'verifier')}):\n"
-            f"{session.agent_outputs.get('output_b', '')}\n\n"
-            "Use read-only tools and commands to verify likely assumptions. "
-            "Return a concise verification summary."
-        ),
+        "content": verify_bundle.render(),
     }]
     verify_tools = allowed_workspace_tools(session.features, include_write=False)
     outcome = await run_resumable_tool_loop(
@@ -15702,30 +15846,10 @@ async def deep_review(session: DeepSession) -> str:
         "Synthesize",
         "Preparing the final answer from verified artifacts.",
     )
-    artifact_refs = [f"[[artifact:{session.task_board_path}]]"]
-    if session.recent_product_feedback_summary:
-        artifact_refs.append(f"[[artifact:{session.recent_product_feedback_artifact_path}]]")
-    artifact_refs.extend(f"[[artifact:{path}]]" for path in session.changed_files[:8])
+    synth_bundle = assemble_synthesis_context(session)
     synth_history = session.history_messages() + [{
         "role": "user",
-        "content": (
-            f"User's question:\n{session.task_request or session.message}\n\n"
-            f"Observed workspace facts:\n{session.workspace_facts or '(none)'}\n\n"
-            + (
-                f"Recent product feedback:\n{session.recent_product_feedback_summary}\n\n"
-                if session.recent_product_feedback_summary else ""
-            )
-            +
-            f"Planned deliverable:\n{session.plan.get('deliverable', '(none)')}\n\n"
-            f"Artifacts to inspect:\n" + "\n".join(artifact_refs) + "\n\n"
-            f"Build summary:\n{session.build_summary or '(none)'}\n\n"
-            f"Verification summary:\n{session.verification_summary or '(none)'}\n\n"
-            f"Scope audit:\n{session.scope_audit_summary or '(none)'}\n\n"
-            f"Implementation pass ({session.agent_outputs.get('agent_a_role', 'builder')}):\n{session.agent_outputs.get('output_a', '')}\n\n"
-            f"Review pass ({session.agent_outputs.get('agent_b_role', 'verifier')}):\n{session.agent_outputs.get('output_b', '')}\n\n"
-            "Read the task board and the most relevant built artifacts before answering. "
-            "Base the final answer on what the workspace actually contains, what verification established, and which scope gaps remain."
-        ),
+        "content": synth_bundle.render(),
     }]
     synth_tools = allowed_workspace_tools(session.features, include_write=False)
     outcome = await run_resumable_tool_loop(
@@ -15755,41 +15879,6 @@ async def deep_review(session: DeepSession) -> str:
     session.draft_response = outcome.final_text
     await persist_task_state(session)
     return session.draft_response
-
-
-def create_deep_session(
-    *,
-    websocket: WebSocket,
-    conversation_id: str,
-    message: str,
-    history: List[Dict[str, str]],
-    system_prompt: str,
-    max_tokens: int,
-    features: FeatureFlags,
-    workspace_enabled: bool,
-    task_request: Optional[str] = None,
-    execution_requested: bool = False,
-    auto_execute: bool = False,
-    plan_override_builder_steps: Optional[List[str]] = None,
-    workflow_execution: Optional[WorkflowExecutionContext] = None,
-) -> DeepSession:
-    """Create a deep-session object with the shared defaults used across entry points."""
-    return DeepSession(
-        websocket=websocket,
-        conversation_id=conversation_id,
-        message=message,
-        task_request=task_request or message,
-        history=history,
-        system_prompt=system_prompt,
-        max_tokens=max_tokens,
-        features=features,
-        context=build_recent_context(history),
-        workspace_enabled=workspace_enabled,
-        execution_requested=execution_requested,
-        auto_execute=auto_execute,
-        plan_override_builder_steps=normalize_plan_override_steps(plan_override_builder_steps),
-        workflow_execution=workflow_execution,
-    )
 
 
 async def collect_recent_product_feedback_for_session(session: DeepSession) -> str:
@@ -15843,98 +15932,6 @@ async def apply_deep_session_plan_override(session: DeepSession) -> bool:
     return False
 
 
-async def bootstrap_deep_session(
-    session: DeepSession,
-    *,
-    resume_task_state_allowed: bool = True,
-) -> bool:
-    """Run the shared confirmation/resume/inspect bootstrap for deep sessions."""
-    try:
-        await deep_confirm_understanding(session)
-    except Exception as exc:
-        logger.warning("Deep mode confirmation failed, continuing: %s", exc)
-
-    if resume_task_state_allowed:
-        try:
-            await maybe_resume_task_state(session)
-        except Exception as exc:
-            logger.warning("Deep mode resume failed, continuing fresh: %s", exc)
-
-    try:
-        await collect_recent_product_feedback_for_session(session)
-    except Exception as exc:
-        logger.warning("Recent product feedback collection failed, continuing: %s", exc)
-
-    await apply_deep_session_plan_override(session)
-    await deep_inspect_workspace(session)
-    return not (
-        session.pause_reason == PAUSE_REASON_COMMAND_APPROVAL
-        and bool(session.draft_response)
-    )
-
-
-async def run_deep_plan_preview_flow(session: DeepSession) -> str:
-    """Build and publish the current deep plan preview."""
-    await deep_decompose(session, preview_only=True)
-    await send_plan_ready(session.websocket, session.plan, format_deep_execution_prompt(session.plan))
-    return render_deep_plan_preview(session.plan)
-
-
-async def run_deep_execution_flow(
-    session: DeepSession,
-    *,
-    requires_existing_plan: bool = False,
-    missing_plan_message: str = "I couldn't find a saved plan to execute in this chat. Ask me to generate the plan again first.",
-    blocked_write_renderer: Optional[Callable[[DeepSession], str]] = None,
-) -> str:
-    """Run the shared deep plan/build/verify/review pipeline."""
-    decision = decide_deep_route(
-        DeepRouteRequest(
-            requires_existing_plan=requires_existing_plan,
-            has_plan=bool(session.plan),
-            should_preview_plan=False,
-            execution_requested=session.execution_requested,
-            auto_execute=session.auto_execute,
-            workspace_write=session.features.workspace_write,
-        )
-    )
-    if decision.action == "missing_plan":
-        return missing_plan_message
-
-    await deep_decompose(session)
-    logger.info("Deep mode execution strategy: %s", session.plan.get("strategy", "parallel subtasks"))
-
-    decision = decide_deep_route(
-        DeepRouteRequest(
-            requires_existing_plan=False,
-            has_plan=bool(session.plan),
-            should_preview_plan=False,
-            execution_requested=session.execution_requested,
-            auto_execute=session.auto_execute,
-            workspace_write=session.features.workspace_write,
-        )
-    )
-    if decision.action == "blocked_write":
-        session.pause_reason = PAUSE_REASON_WRITE_BLOCKED
-        await persist_task_state(session)
-        await send_plan_ready(session.websocket, session.plan, format_deep_execution_prompt(session.plan))
-        renderer = blocked_write_renderer or (lambda current_session: render_saved_plan_write_access_message(current_session.plan))
-        return renderer(session)
-
-    build_result = await deep_build_workspace(session)
-    if build_result.needs_user_confirmation:
-        session.pause_reason = normalize_pause_reason(build_result.pause_reason)
-        return build_result.summary
-    await deep_parallel_solve(session)
-    await deep_verify(session)
-    if session.pause_reason == PAUSE_REASON_HARD_LIMIT:
-        return session.verification_summary
-    final_review = await deep_review(session)
-    if session.pause_reason == PAUSE_REASON_HARD_LIMIT:
-        return session.draft_response
-    return final_review
-
-
 async def maybe_refine_deep_response(
     session: DeepSession,
     draft_response: str,
@@ -15984,6 +15981,32 @@ async def maybe_refine_deep_response(
     return refined_response
 
 
+def build_deep_runtime_callbacks() -> DeepRuntimeCallbacks:
+    """Assemble the current deep-runtime lifecycle from harness-local phase implementations."""
+    return DeepRuntimeCallbacks(
+        send_activity_event=send_activity_event,
+        deep_confirm_understanding=deep_confirm_understanding,
+        maybe_resume_task_state=maybe_resume_task_state,
+        collect_recent_product_feedback_for_session=collect_recent_product_feedback_for_session,
+        apply_deep_session_plan_override=apply_deep_session_plan_override,
+        deep_inspect_workspace=deep_inspect_workspace,
+        should_pause_for_workspace_clarification=should_pause_for_workspace_clarification,
+        should_preview_deep_plan=should_preview_deep_plan,
+        deep_decompose=deep_decompose,
+        send_plan_ready=send_plan_ready,
+        format_deep_execution_prompt=format_deep_execution_prompt,
+        render_deep_plan_preview=render_deep_plan_preview,
+        render_saved_plan_write_access_message=render_saved_plan_write_access_message,
+        deep_build_workspace=deep_build_workspace,
+        deep_parallel_solve=deep_parallel_solve,
+        deep_verify=deep_verify,
+        deep_review=deep_review,
+        persist_task_state=persist_task_state,
+        deep_answer_directly=deep_answer_directly,
+        maybe_refine_deep_response=maybe_refine_deep_response,
+    )
+
+
 # ==================== WebSocket Handlers ====================
 
 async def orchestrated_chat(
@@ -15999,7 +16022,8 @@ async def orchestrated_chat(
     workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Deep-mode pipeline using explicit shared session state."""
-    await send_activity_event(
+    callbacks = build_deep_runtime_callbacks()
+    await callbacks.send_activity_event(
         websocket,
         "analyze",
         "Analyze",
@@ -16019,65 +16043,14 @@ async def orchestrated_chat(
             or should_resume_saved_workspace_task(conversation_id, message, features)
             or should_use_workspace_tools(conversation_id, message, features)
         ),
+        context_builder=build_recent_context,
         execution_requested=is_explicit_plan_execution_request(message),
         auto_execute=auto_execute,
-        plan_override_builder_steps=normalize_plan_override_steps(plan_override_builder_steps),
+        plan_override_builder_steps=plan_override_builder_steps,
+        plan_override_normalizer=normalize_plan_override_steps,
         workflow_execution=workflow_execution,
     )
-
-    if session.workspace_enabled:
-        logger.info("Deep mode using workspace flow for conv %s", conversation_id)
-    else:
-        logger.info("Deep mode using text-only flow for conv %s", conversation_id)
-    await send_activity_event(
-        websocket,
-        "evaluate",
-        "Evaluate",
-        (
-            "Workspace path selected."
-            if session.workspace_enabled
-            else "Text path selected."
-        ),
-    )
-
-    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=True)
-    if not bootstrap_ready and session.draft_response:
-        return session.draft_response
-
-    clarification = should_pause_for_workspace_clarification(
-        session.task_request or session.message,
-        session.workspace_facts,
-        session.workspace_snapshot,
-        has_plan=bool(session.plan),
-        execution_requested=session.execution_requested,
-    )
-    if clarification:
-        session.draft_response = clarification
-        await persist_task_state(session)
-        return clarification
-
-    decision = decide_deep_route(
-        DeepRouteRequest(
-            requires_existing_plan=session.execution_requested,
-            has_plan=bool(session.plan),
-            should_preview_plan=should_preview_deep_plan(session),
-            execution_requested=session.execution_requested,
-            auto_execute=session.auto_execute,
-            workspace_write=session.features.workspace_write,
-        )
-    )
-
-    if decision.action == "preview_plan":
-        draft_response = await run_deep_plan_preview_flow(session)
-    elif decision.action in {"execute_plan", "blocked_write", "missing_plan"}:
-        draft_response = await run_deep_execution_flow(
-            session,
-            requires_existing_plan=session.execution_requested,
-        )
-    else:
-        draft_response = await deep_answer_directly(session)
-
-    return await maybe_refine_deep_response(session, draft_response)
+    return await orchestrate_deep_session(session, callbacks)
 
 
 def build_seeded_tool_history(
@@ -16243,6 +16216,7 @@ async def handle_direct_plan_command(
     if not cleaned_request:
         return "Use `/plan <task>` to generate an execution plan."
 
+    callbacks = build_deep_runtime_callbacks()
     command_features = replace(features, agent_tools=True)
     execution_attempt = is_explicit_plan_execution_request(cleaned_request) or is_plan_approval_reply(cleaned_request)
     if execution_attempt:
@@ -16261,20 +16235,23 @@ async def handle_direct_plan_command(
             max_tokens=max_tokens,
             features=command_features,
             workspace_enabled=True,
+            context_builder=build_recent_context,
             execution_requested=True,
+            plan_override_normalizer=normalize_plan_override_steps,
             workflow_execution=workflow_execution,
         )
-        await send_activity_event(
+        await callbacks.send_activity_event(
             websocket,
             "analyze",
             "Analyze",
             "Slash /plan is resuming the saved execution plan.",
         )
-        bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=True)
+        bootstrap_ready = await bootstrap_deep_session(session, callbacks, resume_task_state_allowed=True)
         if not bootstrap_ready and session.draft_response:
             return session.draft_response
         return await run_deep_execution_flow(
             session,
+            callbacks,
             requires_existing_plan=True,
             missing_plan_message="I couldn't find a saved plan to execute in this chat. Generate the plan again with `/plan <task>` first.",
         )
@@ -16288,19 +16265,21 @@ async def handle_direct_plan_command(
         max_tokens=max_tokens,
         features=command_features,
         workspace_enabled=True,
+        context_builder=build_recent_context,
         execution_requested=True,
+        plan_override_normalizer=normalize_plan_override_steps,
         workflow_execution=workflow_execution,
     )
-    await send_activity_event(
+    await callbacks.send_activity_event(
         websocket,
         "analyze",
         "Analyze",
         "Slash /plan selected the planning flow.",
     )
-    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    bootstrap_ready = await bootstrap_deep_session(session, callbacks, resume_task_state_allowed=False)
     if not bootstrap_ready and session.draft_response:
         return session.draft_response
-    return await run_deep_plan_preview_flow(session)
+    return await run_deep_plan_preview_flow(session, callbacks)
 
 
 async def handle_direct_code_command(
@@ -16318,6 +16297,7 @@ async def handle_direct_code_command(
     if not cleaned_request:
         return "Use `/code <task>` to inspect the workspace and implement a change."
 
+    callbacks = build_deep_runtime_callbacks()
     command_features = replace(features, agent_tools=True)
     session = create_deep_session(
         websocket=websocket,
@@ -16328,20 +16308,23 @@ async def handle_direct_code_command(
         max_tokens=max_tokens,
         features=command_features,
         workspace_enabled=True,
+        context_builder=build_recent_context,
         execution_requested=is_explicit_plan_execution_request(cleaned_request),
+        plan_override_normalizer=normalize_plan_override_steps,
         workflow_execution=workflow_execution,
     )
-    await send_activity_event(
+    await callbacks.send_activity_event(
         websocket,
         "analyze",
         "Analyze",
         "Slash /code selected the direct code workflow.",
     )
-    bootstrap_ready = await bootstrap_deep_session(session, resume_task_state_allowed=False)
+    bootstrap_ready = await bootstrap_deep_session(session, callbacks, resume_task_state_allowed=False)
     if not bootstrap_ready and session.draft_response:
         return session.draft_response
     return await run_deep_execution_flow(
         session,
+        callbacks,
         requires_existing_plan=False,
         blocked_write_renderer=lambda current_session: (
             "I planned the code change, but write access was not granted for this turn.\n\n"
@@ -16455,6 +16438,8 @@ def format_turn_route_activity(
 async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
+    runtime_context = str(data.get("runtime_context") or "").strip()
+    turn_kind = normalize_turn_kind(data.get("turn_kind"))
     conv_id = str(data.get('conversation_id') or '').strip()
     requested_workspace_id = str(data.get("workspace_id") or "").strip()
     active_file_path = normalize_file_session_path(str(data.get("file_path") or "").strip()) if data.get("file_path") else ""
@@ -16484,20 +16469,36 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     ensure_conversation_record(conv_id, title=conversation_title, workspace_id=requested_workspace_id or None)
 
     attachment_context = await build_attachment_context(conv_id, attachments, message)
-    saved_user_message = f"{message}\n\n{attachment_context}" if attachment_context else message
+    slash_request = ""
     if slash_command:
         slash_request = (
             f"{slash_command.get('args', '')}\n\n{attachment_context}".strip()
             if attachment_context else
             str(slash_command.get("args", "")).strip()
         )
-        history = get_conversation_history(conv_id, current_query=slash_request or saved_user_message)
-        user_message_id = save_message(conv_id, 'user', saved_user_message, workspace_id=requested_workspace_id or None)
-        effective_message = slash_request or saved_user_message
-    else:
-        effective_message = saved_user_message
-        user_message_id = save_message(conv_id, 'user', effective_message, workspace_id=requested_workspace_id or None)
-        history = get_conversation_history(conv_id, current_query=effective_message)
+    turn_envelope = compose_runtime_turn(
+        raw_message=message,
+        attachment_context=attachment_context,
+        runtime_context=runtime_context,
+        slash_request=slash_request,
+        turn_kind=turn_kind,
+    )
+    saved_user_message = turn_envelope.saved_user_message
+    effective_message = turn_envelope.effective_message
+    model_message = turn_envelope.model_message
+    user_message_id = save_message(
+        conv_id,
+        'user',
+        saved_user_message if slash_command else effective_message,
+        workspace_id=requested_workspace_id or None,
+        kind=turn_kind,
+    )
+    history = get_conversation_history(conv_id, current_query=effective_message)
+    model_history = build_model_history(
+        history,
+        effective_message=effective_message,
+        model_message=model_message,
+    )
 
     repo_bootstrap = maybe_bootstrap_workspace_from_current_repo(conv_id, effective_message)
     repo_bootstrapped = bool(repo_bootstrap)
@@ -16541,7 +16542,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     )
     local_rag_requested = should_offer_local_rag(effective_message, features)
     web_search_requested = should_offer_web_search(effective_message, features)
-    assessment = build_turn_assessment(
+    assessment = DEFAULT_ROUTE_PROGRAM.run(RouteProgramInputs(
         message=effective_message,
         requested_mode=requested_mode,
         resolved_mode=mode,
@@ -16556,7 +16557,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         resume_saved_workspace=resume_saved_workspace,
         execution_requested=is_explicit_plan_execution_request(effective_message),
         workspace_run_commands_enabled=features.workspace_run_commands,
-    )
+    )).assessment
     promoted_to_planning = False
     if (
         not slash_command
@@ -16566,7 +16567,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     ):
         mode = "deep"
         promoted_to_planning = True
-        assessment = build_turn_assessment(
+        assessment = DEFAULT_ROUTE_PROGRAM.run(RouteProgramInputs(
             message=effective_message,
             requested_mode=requested_mode,
             resolved_mode=mode,
@@ -16581,15 +16582,18 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
             resume_saved_workspace=resume_saved_workspace,
             execution_requested=is_explicit_plan_execution_request(effective_message),
             workspace_run_commands_enabled=features.workspace_run_commands,
-        )
+        )).assessment
 
     return PreparedTurnRequest(
         conversation_id=conv_id,
         active_file_path=active_file_path,
+        turn_kind=turn_kind,
         user_message_id=user_message_id,
         saved_user_message=saved_user_message,
         effective_message=effective_message,
+        model_message=model_message,
         history=history,
+        model_history=model_history,
         system_prompt=system_prompt,
         requested_mode=requested_mode,
         resolved_mode=mode,
@@ -16708,10 +16712,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         slash_command = prepared.slash_command
         features = prepared.features
         history = prepared.history
+        model_history = prepared.model_history
         system_prompt = prepared.system_prompt
         max_tokens = prepared.max_tokens
         enabled_tools = list(prepared.enabled_tools)
         effective_message = prepared.effective_message
+        model_message = prepared.model_message
         deep_succeeded = False
         if prepared.active_file_path and not background_job_id:
             conversation = get_conversation_record(conv_id) or {}
@@ -16764,7 +16770,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 websocket,
                 conv_id,
                 slash_command,
-                history,
+                model_history,
                 system_prompt,
                 max_tokens,
                 features,
@@ -16782,6 +16788,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 final_outcome="completed_slash",
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                turn_kind=prepared.turn_kind,
             )
             return
 
@@ -16793,8 +16800,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 full_response = await orchestrated_chat(
                     websocket,
                     conv_id,
-                    effective_message,
-                    history,
+                    model_message,
+                    model_history,
                     system_prompt,
                     max_tokens,
                     features,
@@ -16813,6 +16820,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     final_outcome="completed_deep",
                     active_file_path=prepared.active_file_path,
                     queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                    turn_kind=prepared.turn_kind,
                 )
                 deep_succeeded = True
             except Exception as e:
@@ -16865,6 +16873,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         ),
                         active_file_path=prepared.active_file_path,
                         queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                        turn_kind=prepared.turn_kind,
                     )
                     return
 
@@ -16904,7 +16913,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 tool_outcome = await run_resumable_tool_loop(
                     websocket,
                     conv_id,
-                    history,
+                    model_history,
                     system_prompt,
                     tool_max_tokens,
                     features=features,
@@ -16927,7 +16936,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 await send_final_replacement(websocket, full_response)
             else:
                 messages = [{'role': 'system', 'content': system_prompt}]
-                for msg in history:
+                for msg in model_history:
                     messages.append({'role': msg['role'], 'content': msg['content']})
                 mark_foreground_job("running")
                 full_response = await stream_chat_response(
@@ -16951,7 +16960,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         "Recover",
                         "The draft either refused a capability or handed the work back even though tools are available. Retrying with tools.",
                     )
-                    recovery_history = list(history)
+                    recovery_history = list(model_history)
                     recovery_history.append({
                         "role": "user",
                         "content": build_capability_recovery_message(full_response, recovery_tools),
@@ -16998,6 +17007,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 ),
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                turn_kind=prepared.turn_kind,
             )
 
     except asyncio.CancelledError:
@@ -17052,6 +17062,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 final_outcome="exception_fallback",
                 active_file_path="",
                 queue_background_optimize=False,
+                turn_kind=prepared.turn_kind if 'prepared' in locals() else TURN_KIND_VISIBLE_CHAT,
             )
         else:
             mark_foreground_job("failed", error_text=str(e))
