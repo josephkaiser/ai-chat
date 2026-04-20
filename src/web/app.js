@@ -6,6 +6,7 @@ const state = {
     connectionState: "offline",
     generating: false,
     modelAvailable: false,
+    modelName: "",
     workspaces: [],
     currentWorkspaceId: localStorage.getItem("lastWorkspaceId") || "",
     conversations: [],
@@ -35,13 +36,11 @@ const workspaceSelect = query("#workspaceSelect");
 const sidebarToggle = query("#sidebarToggle");
 const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
+const workspaceSettingsButton = query("#workspaceSettingsButton");
 const refreshContextEvalButton = query("#refreshContextEvalButton");
 const newChatButton = query("#newChatButton");
 const conversationList = query("#conversationList");
-const chatTitle = query("#chatTitle");
-const chatMeta = query("#chatMeta");
 const connectionBadge = query("#connectionBadge");
-const modelBadge = query("#modelBadge");
 const chatMessages = query("#chatMessages");
 const composerForm = query("#composerForm");
 const composerInput = query("#composerInput");
@@ -54,6 +53,10 @@ const directoryPath = query("#directoryPath");
 const fileList = query("#fileList");
 const filePreview = query("#filePreview");
 const contextEvalReport = query("#contextEvalReport");
+const settingsOverlay = query("#settingsOverlay");
+const closeSettingsButton = query("#closeSettingsButton");
+const settingsSummary = query("#settingsSummary");
+const resetAppButton = query("#resetAppButton");
 function generateId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
         return crypto.randomUUID();
@@ -117,6 +120,15 @@ function fileViewUrl(path) {
 function currentWorkspaceName() {
     return state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId)?.display_name || "workspace";
 }
+function defaultComposerStatus() {
+    if (state.connectionState === "offline") {
+        return "Runtime offline.";
+    }
+    if (!state.modelAvailable) {
+        return state.modelName ? `Model loading: ${state.modelName}` : "Model loading…";
+    }
+    return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+}
 function syncShellLayout() {
     document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
     document.body.dataset.viewerOpen = String(state.viewerOpen && Boolean(state.selectedFilePath));
@@ -164,15 +176,6 @@ function titleFromMessage(content) {
     const firstLine = content.split("\n").map((line)=>line.trim()).find(Boolean) || "New chat";
     return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
 }
-function updateChatMeta() {
-    const workspaceName = currentWorkspaceName();
-    if (!state.messages.length) {
-        chatMeta.textContent = `Start a new conversation in ${workspaceName}.`;
-        return;
-    }
-    const countLabel = `${state.messages.length} message${state.messages.length === 1 ? "" : "s"}`;
-    chatMeta.textContent = `${countLabel} in ${workspaceName}.`;
-}
 function renderInlineMarkdown(text) {
     return text.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
@@ -214,7 +217,6 @@ function renderMessages() {
                 </div>
             </div>
         `;
-        updateChatMeta();
         return;
     }
     chatMessages.innerHTML = state.messages.map((message)=>{
@@ -231,7 +233,6 @@ function renderMessages() {
         `;
     }).join("");
     chatMessages.scrollTop = chatMessages.scrollHeight;
-    updateChatMeta();
 }
 function renderConversations() {
     const items = [
@@ -259,21 +260,41 @@ function renderConversations() {
         return;
     }
     conversationList.innerHTML = items.map((conversation)=>`
-        <button
-            type="button"
-            class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
-            data-conversation-id="${escapeHtml(conversation.id)}"
-        >
-            <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
-            <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
-            <div class="conversation-preview">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
-        </button>
+        <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
+            <button
+                type="button"
+                class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
+                data-conversation-id="${escapeHtml(conversation.id)}"
+            >
+                <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
+                <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
+                <div class="conversation-preview">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
+            </button>
+            <div class="conversation-actions">
+                <button type="button" class="conversation-action-button" data-action="rename" data-conversation-id="${escapeHtml(conversation.id)}" data-title="${escapeHtml(conversation.title || "Untitled chat")}">Rename</button>
+                <button type="button" class="conversation-action-button conversation-action-danger" data-action="delete" data-conversation-id="${escapeHtml(conversation.id)}">Delete</button>
+            </div>
+        </div>
     `).join("");
     conversationList.querySelectorAll(".conversation-item").forEach((button)=>{
         button.addEventListener("click", ()=>{
             const id = button.dataset.conversationId || "";
             if (!id) return;
             void loadConversation(id);
+        });
+    });
+    conversationList.querySelectorAll(".conversation-action-button").forEach((button)=>{
+        button.addEventListener("click", (event)=>{
+            event.stopPropagation();
+            const id = button.dataset.conversationId || "";
+            if (!id) return;
+            if (button.dataset.action === "rename") {
+                void renameConversation(id, button.dataset.title || "");
+                return;
+            }
+            if (button.dataset.action === "delete") {
+                void deleteConversation(id);
+            }
         });
     });
 }
@@ -541,6 +562,20 @@ function renderContextEvalReport() {
         });
     });
 }
+function renderSettingsSummary() {
+    settingsSummary.innerHTML = `
+        <div><strong>Workspace:</strong> ${escapeHtml(currentWorkspaceName())}</div>
+        <div><strong>Conversation:</strong> ${escapeHtml(state.currentConversationTitle || "New chat")}</div>
+        <div><strong>Runtime:</strong> ${escapeHtml(defaultComposerStatus())}</div>
+    `;
+}
+function showSettings() {
+    renderSettingsSummary();
+    settingsOverlay.hidden = false;
+}
+function closeSettings() {
+    settingsOverlay.hidden = true;
+}
 function renderPreviewEmpty(title, body) {
     viewerTitle.textContent = title;
     viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
@@ -622,12 +657,16 @@ async function fetchHealth() {
     try {
         const health = await fetchJson("/health");
         state.modelAvailable = Boolean(health.model_available);
-        modelBadge.textContent = health.model_available ? `Model ready: ${health.model}` : `Model loading: ${health.model}`;
+        state.modelName = String(health.model || "").trim();
     } catch (error) {
         state.modelAvailable = false;
-        modelBadge.textContent = error instanceof Error ? error.message : "Health check failed";
+        state.modelName = "";
+        setComposerHint(error instanceof Error ? error.message : "Health check failed");
     }
     syncRuntimeSummary();
+    if (!state.generating) {
+        setComposerHint(defaultComposerStatus());
+    }
 }
 async function loadWorkspaces(preferredId = "") {
     const payload = await fetchJson("/api/workspaces");
@@ -638,7 +677,6 @@ async function loadWorkspaces(preferredId = "") {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
     }
     renderWorkspaceOptions();
-    updateChatMeta();
     if (nextWorkspaceId) {
         await loadDirectory(".");
     } else {
@@ -653,7 +691,6 @@ async function loadConversations() {
     const active = state.conversations.find((conversation)=>conversation.id === state.currentConversationId);
     if (active) {
         state.currentConversationTitle = active.title || state.currentConversationTitle;
-        chatTitle.textContent = state.currentConversationTitle;
     }
     renderConversations();
 }
@@ -702,7 +739,6 @@ async function loadConversation(id) {
     state.viewerOpen = false;
     const matchingConversation = state.conversations.find((conversation)=>conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
-    chatTitle.textContent = state.currentConversationTitle;
     if (payload.workspace_id && payload.workspace_id !== state.currentWorkspaceId) {
         await loadWorkspaces(payload.workspace_id);
     } else {
@@ -719,7 +755,6 @@ function startNewChat() {
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
     state.viewerOpen = false;
-    chatTitle.textContent = state.currentConversationTitle;
     renderMessages();
     renderConversations();
     syncShellLayout();
@@ -743,7 +778,7 @@ function ensureAssistantMessage() {
 function finishGeneration() {
     state.activeAssistantIndex = -1;
     setGenerating(false);
-    setComposerHint("Enter sends. Shift+Enter adds a line break.");
+    setComposerHint(defaultComposerStatus());
     void loadConversations();
     void loadDirectory(state.currentDirectoryPath);
     void loadContextEvalReport();
@@ -853,7 +888,6 @@ async function sendCurrentMessage() {
     });
     if (state.currentConversationTitle === "New chat") {
         state.currentConversationTitle = titleFromMessage(message);
-        chatTitle.textContent = state.currentConversationTitle;
     }
     composerInput.value = "";
     renderMessages();
@@ -874,6 +908,49 @@ async function sendCurrentMessage() {
         pushSystemMessage(error instanceof Error ? error.message : "Message send failed", true);
         finishGeneration();
     }
+}
+async function renameConversation(conversationId, currentTitle) {
+    const nextTitle = String(prompt("Rename chat", currentTitle) || "").trim();
+    if (!nextTitle) return;
+    await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}/rename`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            title: nextTitle
+        })
+    });
+    if (conversationId === state.currentConversationId) {
+        state.currentConversationTitle = nextTitle;
+    }
+    await loadConversations();
+}
+async function deleteConversation(conversationId) {
+    if (!confirm("Delete this chat?")) return;
+    await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE"
+    });
+    if (conversationId === state.currentConversationId) {
+        startNewChat();
+    }
+    await loadConversations();
+}
+async function resetAppData() {
+    if (!confirm("Reset all app data? This deletes chats, workspaces, and related runtime state.")) return;
+    await fetchJson("/api/reset-all", {
+        method: "POST"
+    });
+    closeSettings();
+    state.currentConversationId = "";
+    state.currentConversationTitle = "New chat";
+    state.messages = [];
+    state.selectedFilePath = "";
+    state.viewerOpen = false;
+    renderMessages();
+    renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
+    await loadWorkspaces();
+    await loadConversations();
 }
 async function loadDirectory(path) {
     if (!state.currentWorkspaceId) {
@@ -933,6 +1010,14 @@ function connectWebSocket() {
 }
 function attachEvents() {
     newChatButton.addEventListener("click", ()=>startNewChat());
+    workspaceSettingsButton.addEventListener("click", ()=>showSettings());
+    closeSettingsButton.addEventListener("click", ()=>closeSettings());
+    resetAppButton.addEventListener("click", ()=>{
+        void resetAppData();
+    });
+    settingsOverlay.addEventListener("click", (event)=>{
+        if (event.target === settingsOverlay) closeSettings();
+    });
     refreshContextEvalButton.addEventListener("click", ()=>{
         void loadContextEvalReport();
     });

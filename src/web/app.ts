@@ -115,6 +115,7 @@ const state = {
     connectionState: "offline" as ConnectionState,
     generating: false,
     modelAvailable: false,
+    modelName: "",
     workspaces: [] as WorkspaceSummary[],
     currentWorkspaceId: localStorage.getItem("lastWorkspaceId") || "",
     conversations: [] as ConversationSummary[],
@@ -146,7 +147,6 @@ const workspaceSelect = query<HTMLSelectElement>("#workspaceSelect");
 const sidebarToggle = query<HTMLButtonElement>("#sidebarToggle");
 const viewerToggle = query<HTMLButtonElement>("#viewerToggle");
 const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton");
-const settingsButton = query<HTMLButtonElement>("#settingsButton");
 const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButton");
 const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
 const newChatButton = query<HTMLButtonElement>("#newChatButton");
@@ -244,9 +244,9 @@ function defaultComposerStatus(): string {
         return "Runtime offline.";
     }
     if (!state.modelAvailable) {
-        return "Model loading…";
+        return state.modelName ? `Model loading: ${state.modelName}` : "Model loading…";
     }
-    return "Model ready.";
+    return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
 }
 
 function syncShellLayout(): void {
@@ -851,8 +851,10 @@ async function fetchHealth(): Promise<void> {
             message: string;
         }>("/health");
         state.modelAvailable = Boolean(health.model_available);
+        state.modelName = String(health.model || "").trim();
     } catch (error) {
         state.modelAvailable = false;
+        state.modelName = "";
         setComposerHint(error instanceof Error ? error.message : "Health check failed");
     }
 
@@ -1261,7 +1263,6 @@ function connectWebSocket(): void {
 
 function attachEvents(): void {
     newChatButton.addEventListener("click", () => startNewChat());
-    settingsButton.addEventListener("click", () => showSettings());
     workspaceSettingsButton.addEventListener("click", () => showSettings());
     closeSettingsButton.addEventListener("click", () => closeSettings());
     resetAppButton.addEventListener("click", () => {
