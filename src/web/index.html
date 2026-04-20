@@ -53,7 +53,11 @@
                     <span class="sidebar-panel-label">Workspace</span>
                 </div>
                 <div class="workspace-controls">
-                    <select id="workspaceSelect" aria-label="Workspace"></select>
+                    <div class="workspace-current-wrap">
+                        <div class="workspace-inline-label">Current</div>
+                        <div id="workspaceCurrent" class="workspace-current">No workspace</div>
+                    </div>
+                    <select id="workspaceSelect" aria-label="Switch workspace"></select>
                     <div class="workspace-toolbar">
                         <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
                         <button id="workspaceSettingsButton" type="button">Settings</button>

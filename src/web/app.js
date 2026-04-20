@@ -23,7 +23,10 @@ const state = {
     contextEvalLoading: false,
     contextEvalError: "",
     selectedContextEvalBucketKey: "",
-    selectedContextEvalExampleIndex: 0
+    selectedContextEvalExampleIndex: 0,
+    contextEvalFixtures: [],
+    fixtureReviewLoading: false,
+    fixtureReviewFilter: "all"
 };
 function query(selector) {
     const element = document.querySelector(selector);
@@ -33,6 +36,7 @@ function query(selector) {
     return element;
 }
 const workspaceSelect = query("#workspaceSelect");
+const workspaceCurrent = query("#workspaceCurrent");
 const sidebarToggle = query("#sidebarToggle");
 const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
@@ -56,6 +60,9 @@ const contextEvalReport = query("#contextEvalReport");
 const settingsOverlay = query("#settingsOverlay");
 const closeSettingsButton = query("#closeSettingsButton");
 const settingsSummary = query("#settingsSummary");
+const fixtureReviewFilter = query("#fixtureReviewFilter");
+const refreshFixtureReviewButton = query("#refreshFixtureReviewButton");
+const fixtureReviewList = query("#fixtureReviewList");
 const resetAppButton = query("#resetAppButton");
 function generateId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -115,6 +122,84 @@ function suggestContextEvalFixtureName(bucket, exampleCase) {
         bucket.key || exampleCase.name || "case"
     ];
     return segments.join("_").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "captured_context_eval_case";
+}
+function renderFixtureReviewList() {
+    if (state.fixtureReviewLoading) {
+        fixtureReviewList.innerHTML = `<div class="context-eval-empty">Loading fixtures…</div>`;
+        return;
+    }
+    const selectedFilter = state.fixtureReviewFilter || "all";
+    const fixtures = (state.contextEvalFixtures || []).filter((fixture)=>selectedFilter === "all" ? true : fixture.review_status === selectedFilter);
+    if (!fixtures.length) {
+        fixtureReviewList.innerHTML = `<div class="context-eval-empty">No fixtures for this filter yet.</div>`;
+        return;
+    }
+    fixtureReviewList.innerHTML = fixtures.map((fixture)=>{
+        const fixturePath = workspaceRelativeCapturePath(fixture.path) || fixture.path;
+        const sourcePath = workspaceRelativeCapturePath(fixture.source_path) || fixture.source_path;
+        return `
+            <article class="fixture-review-item">
+                <div class="context-eval-focus">
+                    <strong>${escapeHtml(fixture.name || "Unnamed fixture")}</strong>
+                    <span class="context-eval-severity ${escapeHtml(fixture.review_status || "candidate")}">${escapeHtml(fixture.review_status || "candidate")}</span>
+                </div>
+                <div class="context-eval-meta">
+                    <span>${escapeHtml(fixture.source_trigger || "unknown trigger")}</span>
+                    <span>${escapeHtml(fixture.updated_at || fixture.promoted_at || "")}</span>
+                </div>
+                <div class="fixture-review-paths">
+                    <code>${escapeHtml(fixturePath)}</code>
+                    ${sourcePath ? `<code>${escapeHtml(sourcePath)}</code>` : ""}
+                </div>
+                <div class="context-eval-actions">
+                    <button type="button" class="context-eval-button" data-fixture-open="${escapeHtml(fixturePath)}">
+                        Open
+                    </button>
+                    <button type="button" class="context-eval-button" data-fixture-status="candidate" data-fixture-path="${escapeHtml(fixture.path)}">
+                        Candidate
+                    </button>
+                    <button type="button" class="context-eval-button" data-fixture-status="accepted" data-fixture-path="${escapeHtml(fixture.path)}">
+                        Accepted
+                    </button>
+                    <button type="button" class="context-eval-button" data-fixture-status="superseded" data-fixture-path="${escapeHtml(fixture.path)}">
+                        Supersede
+                    </button>
+                </div>
+            </article>
+        `;
+    }).join("");
+    fixtureReviewList.querySelectorAll("[data-fixture-open]").forEach((button)=>{
+        button.addEventListener("click", ()=>{
+            const path = button.dataset.fixtureOpen || "";
+            if (!path || path.startsWith("/")) return;
+            void openFile(path, {
+                reveal: true
+            });
+        });
+    });
+    fixtureReviewList.querySelectorAll("[data-fixture-status]").forEach((button)=>{
+        button.addEventListener("click", async ()=>{
+            const fixturePath = button.dataset.fixturePath || "";
+            const reviewStatus = button.dataset.fixtureStatus || "";
+            if (!fixturePath || !reviewStatus) return;
+            try {
+                const response = await fetchJson("/api/context-evals/fixtures/review", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        fixture_path: fixturePath,
+                        review_status: reviewStatus
+                    })
+                });
+                setComposerHint(`Updated ${response.fixture_name} to ${response.review_status}.`);
+                await loadContextEvalFixtures();
+            } catch (error) {
+                setComposerHint(error instanceof Error ? error.message : "Could not update fixture review state.");
+            }
+        });
+    });
 }
 function parentDirectory(path) {
     if (!path || path === ".") return ".";
@@ -393,12 +478,22 @@ function renderConversations() {
     });
 }
 function renderWorkspaceOptions() {
-    workspaceSelect.innerHTML = state.workspaces.map((workspace)=>`
-        <option value="${escapeHtml(workspace.id)}">${escapeHtml(workspace.display_name)}</option>
-    `).join("");
-    if (state.currentWorkspaceId) {
-        workspaceSelect.value = state.currentWorkspaceId;
+    const currentWorkspace = state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId) || null;
+    const alternateWorkspaces = state.workspaces.filter((workspace)=>workspace.id !== state.currentWorkspaceId);
+    workspaceCurrent.textContent = currentWorkspace?.display_name || "No workspace";
+    if (!alternateWorkspaces.length) {
+        workspaceSelect.hidden = true;
+        workspaceSelect.innerHTML = "";
+        return;
     }
+    workspaceSelect.hidden = false;
+    workspaceSelect.innerHTML = `
+        <option value="" selected>Switch workspace…</option>
+        ${alternateWorkspaces.map((workspace)=>`
+            <option value="${escapeHtml(workspace.id)}">${escapeHtml(workspace.display_name)}</option>
+        `).join("")}
+    `;
+    workspaceSelect.value = "";
 }
 function renderFileList() {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
@@ -698,6 +793,8 @@ function renderSettingsSummary() {
 }
 function showSettings() {
     renderSettingsSummary();
+    renderFixtureReviewList();
+    void loadContextEvalFixtures();
     settingsOverlay.hidden = false;
 }
 function closeSettings() {
@@ -855,6 +952,20 @@ async function loadContextEvalReport() {
     } finally{
         state.contextEvalLoading = false;
         renderContextEvalReport();
+    }
+}
+async function loadContextEvalFixtures() {
+    state.fixtureReviewLoading = true;
+    renderFixtureReviewList();
+    try {
+        const payload = await fetchJson("/api/context-evals/fixtures");
+        state.contextEvalFixtures = payload.fixtures || [];
+    } catch (error) {
+        state.contextEvalFixtures = [];
+        setComposerHint(error instanceof Error ? error.message : "Could not load promoted fixtures.");
+    } finally{
+        state.fixtureReviewLoading = false;
+        renderFixtureReviewList();
     }
 }
 async function loadConversation(id) {
@@ -1139,6 +1250,13 @@ function attachEvents() {
     newChatButton.addEventListener("click", ()=>startNewChat());
     workspaceSettingsButton.addEventListener("click", ()=>showSettings());
     closeSettingsButton.addEventListener("click", ()=>closeSettings());
+    refreshFixtureReviewButton.addEventListener("click", ()=>{
+        void loadContextEvalFixtures();
+    });
+    fixtureReviewFilter.addEventListener("change", ()=>{
+        state.fixtureReviewFilter = fixtureReviewFilter.value || "all";
+        renderFixtureReviewList();
+    });
     resetAppButton.addEventListener("click", ()=>{
         void resetAppData();
     });
