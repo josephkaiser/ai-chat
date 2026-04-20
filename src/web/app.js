@@ -40,11 +40,8 @@ function query(selector) {
     }
     return element;
 }
-const workspaceCurrent = query("#workspaceCurrent");
-const workspaceRoutingMeta = query("#workspaceRoutingMeta");
 const sidebarToggle = query("#sidebarToggle");
 const viewerToggle = query("#viewerToggle");
-const viewerToggleLabel = query("#viewerToggleLabel");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
 const workspaceSettingsButton = query("#workspaceSettingsButton");
 const refreshContextEvalButton = query("#refreshContextEvalButton");
@@ -368,12 +365,12 @@ function syncShellLayout() {
     const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.setAttribute("title", sidebarToggleLabel);
-    const viewerToggleText = state.viewerMode === "closed" ? "Files" : "Close";
     const viewerToggleTitle = state.viewerMode === "closed" ? "Open files" : "Close files";
     viewerToggle.setAttribute("aria-label", viewerToggleTitle);
     viewerToggle.setAttribute("title", viewerToggleTitle);
-    viewerToggleLabel.textContent = viewerToggleText;
     viewerToggle.disabled = !state.currentWorkspaceId;
+    refreshWorkspaceButton.hidden = state.viewerMode === "closed";
+    refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
     const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode !== "closed";
     viewerModeButton.hidden = !showModeButton;
     if (showModeButton) {
@@ -627,18 +624,8 @@ function renderConversations() {
     });
 }
 function renderWorkspaceSummary() {
-    const currentWorkspace = state.workspaces.find((workspace)=>workspace.id === state.currentWorkspaceId) || null;
-    const workspaceCount = state.workspaces.length;
-    workspaceCurrent.textContent = currentWorkspace?.display_name || "No workspace";
-    if (!workspaceCount) {
-        workspaceRoutingMeta.textContent = "Connect a workspace to browse files and ground the assistant.";
-        return;
-    }
-    if (workspaceCount === 1) {
-        workspaceRoutingMeta.textContent = "The app keeps this chat routed to the active workspace automatically.";
-        return;
-    }
-    workspaceRoutingMeta.textContent = `The app follows the active chat automatically. Connected workspaces: ${workspaceCount}.`;
+    workspaceSettingsButton.disabled = false;
+    syncShellLayout();
 }
 function renderFileList() {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;

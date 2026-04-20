@@ -26,7 +26,7 @@
     </button>
     <button
         id="viewerToggle"
-        class="shell-toggle shell-toggle-right shell-toggle-labeled"
+        class="shell-toggle shell-toggle-right"
         type="button"
         aria-label="Open files"
         title="Open files"
@@ -38,7 +38,6 @@
             <path d="M8.5 12.75h5"></path>
             <path d="M8.5 15.5h3.5"></path>
         </svg>
-        <span id="viewerToggleLabel">Files</span>
     </button>
     <div class="app-shell">
         <aside class="sidebar">
@@ -51,18 +50,8 @@
                 <div class="sidebar-panel-header">
                     <span class="sidebar-panel-label">Workspace</span>
                 </div>
-                <div class="workspace-controls">
-                    <div class="workspace-current-wrap">
-                        <div class="workspace-inline-label">Automatic Routing</div>
-                        <div id="workspaceCurrent" class="workspace-current">No workspace</div>
-                        <p id="workspaceRoutingMeta" class="workspace-routing-meta">
-                            The app chooses workspace context from the active chat.
-                        </p>
-                    </div>
-                    <div class="workspace-toolbar">
-                        <button id="refreshWorkspaceButton" type="button">Refresh Files</button>
-                        <button id="workspaceSettingsButton" type="button">Settings</button>
-                    </div>
+                <div class="workspace-toolbar workspace-toolbar-single">
+                    <button id="workspaceSettingsButton" type="button">Settings</button>
                 </div>
             </section>
 
@@ -103,8 +92,9 @@
                         <p id="viewerMeta" class="panel-subtitle">Open the file tree or preview the selected file here.</p>
                     </div>
                     <div class="viewer-actions">
+                        <button id="refreshWorkspaceButton" type="button">Refresh</button>
                         <button id="viewerModeButton" type="button" hidden>Open File</button>
-                        <button id="upDirectoryButton" type="button">Up One Level</button>
+                        <button id="upDirectoryButton" type="button">Parent</button>
                         <button id="viewerCloseButton" type="button">Close</button>
                     </div>
                 </header>
