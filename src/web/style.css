@@ -24,6 +24,7 @@
     --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     --font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
     --sidebar-width: 248px;
+    --viewer-width: clamp(420px, 50vw, 960px);
 }
 
 *,
@@ -104,6 +105,16 @@ button:disabled {
 
 body[data-left-sidebar-open="true"] .shell-toggle-left {
     left: calc(var(--sidebar-width) - 17px);
+}
+
+.shell-toggle-right {
+    right: 12px;
+}
+
+.shell-toggle-labeled {
+    gap: 8px;
+    padding: 0 12px;
+    min-width: 90px;
 }
 
 .shell-toggle-icon {
@@ -686,10 +697,9 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .main-grid {
+    position: relative;
     min-width: 0;
-    display: grid;
-    grid-template-columns: minmax(420px, 0.88fr) minmax(520px, 1.12fr);
-    gap: 0;
+    display: block;
 }
 
 .panel {
@@ -701,6 +711,16 @@ body[data-left-sidebar-open="false"] .sidebar {
     gap: 4px;
     overflow: hidden;
     border-left: 1px solid var(--line);
+}
+
+.chat-panel {
+    border-left: 0;
+    transition: padding-right 180ms ease;
+}
+
+body[data-viewer-mode="tree"] .chat-panel,
+body[data-viewer-mode="file"] .chat-panel {
+    padding-right: calc(var(--viewer-width) + 12px);
 }
 
 .header-copy {
@@ -928,13 +948,13 @@ body[data-left-sidebar-open="false"] .sidebar {
 .viewer-layout {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(210px, 240px) minmax(0, 1fr);
-    gap: 0;
+    display: flex;
 }
 
 .file-browser,
 .file-preview {
+    flex: 1 1 auto;
+    min-height: 0;
     border: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.62);
 }
@@ -942,8 +962,12 @@ body[data-left-sidebar-open="false"] .sidebar {
 .file-browser {
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    border-right: 0;
+    overflow: hidden;
+}
+
+body[data-viewer-mode="tree"] .file-preview,
+body[data-viewer-mode="file"] .file-browser {
+    display: none;
 }
 
 .directory-path {
@@ -980,12 +1004,13 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .file-preview {
     padding: 10px;
+    overflow: auto;
 }
 
 .file-preview-frame,
 .file-preview-media {
     width: 100%;
-    min-height: 520px;
+    min-height: 100%;
     border: 0;
     border-radius: var(--radius-md);
     background: white;
@@ -1038,6 +1063,35 @@ body[data-left-sidebar-open="false"] .sidebar {
     margin-bottom: 6px;
 }
 
+.viewer-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 18;
+    width: var(--viewer-width);
+    max-width: 100vw;
+    transform: translateX(100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 180ms ease, opacity 180ms ease;
+    box-shadow: 0 18px 40px rgba(19, 34, 38, 0.08);
+}
+
+body[data-viewer-mode="tree"] .viewer-panel,
+body[data-viewer-mode="file"] .viewer-panel {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.viewer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
 .settings-overlay {
     position: fixed;
     inset: 0;
@@ -1087,10 +1141,8 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 @media (max-width: 1180px) {
-    .app-shell,
-    .main-grid,
-    .viewer-layout {
-        grid-template-columns: 1fr;
+    :root {
+        --viewer-width: 100vw;
     }
 
     .shell-toggle {
@@ -1110,6 +1162,15 @@ body[data-left-sidebar-open="false"] .sidebar {
     .panel {
         min-height: auto;
         height: auto;
+    }
+
+    .viewer-panel {
+        width: 100vw;
+    }
+
+    body[data-viewer-mode="tree"] .chat-panel,
+    body[data-viewer-mode="file"] .chat-panel {
+        padding-right: 6px;
     }
 
     .file-preview-frame,
@@ -1146,10 +1207,17 @@ body[data-left-sidebar-open="false"] .sidebar {
         flex-direction: column;
     }
 
+    .viewer-actions {
+        width: 100%;
+        justify-content: stretch;
+    }
+
     #refreshWorkspaceButton,
     #workspaceSettingsButton,
+    #viewerModeButton,
     #newChatButton,
     #upDirectoryButton,
+    #viewerCloseButton,
     #sendButton {
         width: 100%;
     }

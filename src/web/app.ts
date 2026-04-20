@@ -162,6 +162,7 @@ interface ContextEvalFixtureReviewResponse {
 }
 
 type ConnectionState = "offline" | "online" | "streaming";
+type ViewerMode = "closed" | "tree" | "file";
 
 const state = {
     appTitle: document.body.dataset.appTitle || "AI Chat",
@@ -182,6 +183,7 @@ const state = {
     fileItems: [] as WorkspaceItem[],
     selectedFilePath: "",
     leftSidebarOpen: false,
+    viewerMode: "closed" as ViewerMode,
     contextEvalReport: null as ContextEvalReport | null,
     contextEvalLoading: false,
     contextEvalError: "",
@@ -208,6 +210,8 @@ function query<T extends Element>(selector: string): T {
 const workspaceCurrent = query<HTMLDivElement>("#workspaceCurrent");
 const workspaceRoutingMeta = query<HTMLParagraphElement>("#workspaceRoutingMeta");
 const sidebarToggle = query<HTMLButtonElement>("#sidebarToggle");
+const viewerToggle = query<HTMLButtonElement>("#viewerToggle");
+const viewerToggleLabel = query<HTMLSpanElement>("#viewerToggleLabel");
 const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton");
 const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButton");
 const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
@@ -221,7 +225,9 @@ const composerHint = query<HTMLSpanElement>("#composerHint");
 const sendButton = query<HTMLButtonElement>("#sendButton");
 const viewerTitle = query<HTMLHeadingElement>("#viewerTitle");
 const viewerMeta = query<HTMLParagraphElement>("#viewerMeta");
+const viewerModeButton = query<HTMLButtonElement>("#viewerModeButton");
 const upDirectoryButton = query<HTMLButtonElement>("#upDirectoryButton");
+const viewerCloseButton = query<HTMLButtonElement>("#viewerCloseButton");
 const directoryPath = query<HTMLDivElement>("#directoryPath");
 const fileList = query<HTMLDivElement>("#fileList");
 const filePreview = query<HTMLDivElement>("#filePreview");
@@ -562,11 +568,33 @@ function defaultComposerStatus(): string {
     return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
 }
 
+function setViewerMode(nextMode: ViewerMode): void {
+    state.viewerMode = nextMode;
+    syncShellLayout();
+}
+
 function syncShellLayout(): void {
     document.body.dataset.leftSidebarOpen = String(state.leftSidebarOpen);
+    document.body.dataset.viewerMode = state.viewerMode;
     const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.setAttribute("title", sidebarToggleLabel);
+
+    const viewerToggleText = state.viewerMode === "closed" ? "Files" : "Close";
+    const viewerToggleTitle = state.viewerMode === "closed" ? "Open files" : "Close files";
+    viewerToggle.setAttribute("aria-label", viewerToggleTitle);
+    viewerToggle.setAttribute("title", viewerToggleTitle);
+    viewerToggleLabel.textContent = viewerToggleText;
+    viewerToggle.disabled = !state.currentWorkspaceId;
+
+    const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode !== "closed";
+    viewerModeButton.hidden = !showModeButton;
+    if (showModeButton) {
+        viewerModeButton.textContent = state.viewerMode === "file" ? "Show Files" : "Open File";
+    }
+
+    upDirectoryButton.hidden = state.viewerMode !== "tree";
+    viewerCloseButton.hidden = state.viewerMode === "closed";
 }
 
 function syncRuntimeSummary(): void {
@@ -856,7 +884,10 @@ function renderWorkspaceSummary(): void {
 
 function renderFileList(): void {
     directoryPath.textContent = state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`;
-    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
+    if (state.viewerMode !== "file") {
+        viewerTitle.textContent = "Workspace files";
+        viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
+    }
 
     const buttons: string[] = [];
     if (state.currentDirectoryPath !== ".") {
@@ -1312,7 +1343,9 @@ function closeSettings(): void {
 
 function renderPreviewEmpty(title: string, body: string): void {
     viewerTitle.textContent = title;
-    viewerMeta.textContent = `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
+    viewerMeta.textContent = state.viewerMode === "file"
+        ? "Selected file preview"
+        : `Browsing ${state.currentDirectoryPath === "." ? "/" : `/${state.currentDirectoryPath}`}`;
     filePreview.innerHTML = `
         <div class="empty-state">
             <div>
@@ -1384,6 +1417,16 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     filePreview.innerHTML = `<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
 }
 
+function closeViewer(): void {
+    setViewerMode("closed");
+}
+
+function openFileTree(): void {
+    if (!state.currentWorkspaceId) return;
+    setViewerMode("tree");
+    renderFileList();
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const response = await fetch(url, init);
     const data = await response.json().catch(() => ({}));
@@ -1431,6 +1474,9 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
     state.currentWorkspaceId = nextWorkspaceId;
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
+    } else {
+        state.selectedFilePath = "";
+        closeViewer();
     }
 
     renderWorkspaceSummary();
@@ -1589,6 +1635,7 @@ async function loadConversation(id: string): Promise<void> {
     state.messages = payload.messages || [];
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
+    state.viewerMode = "closed";
 
     const matchingConversation = state.conversations.find((conversation) => conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
@@ -1610,6 +1657,7 @@ function startNewChat(): void {
     state.messages = [];
     state.activeAssistantIndex = -1;
     state.selectedFilePath = "";
+    state.viewerMode = "closed";
     renderMessages();
     renderConversations();
     syncShellLayout();
@@ -1815,6 +1863,7 @@ async function resetAppData(): Promise<void> {
     state.currentConversationTitle = "New chat";
     state.messages = [];
     state.selectedFilePath = "";
+    state.viewerMode = "closed";
     renderMessages();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     await loadWorkspaces();
@@ -1823,6 +1872,9 @@ async function resetAppData(): Promise<void> {
 
 async function loadDirectory(path: string): Promise<void> {
     if (!state.currentWorkspaceId) {
+        state.selectedFilePath = "";
+        state.viewerMode = "closed";
+        syncShellLayout();
         renderPreviewEmpty("No workspace", "Create or select a workspace first.");
         return;
     }
@@ -1841,6 +1893,7 @@ async function openFile(path: string): Promise<void> {
     if (!state.currentWorkspaceId) return;
 
     state.selectedFilePath = path;
+    state.viewerMode = "file";
     syncShellLayout();
     renderFileList();
 
@@ -1911,12 +1964,33 @@ function attachEvents(): void {
 
     refreshWorkspaceButton.addEventListener("click", () => {
         void loadDirectory(state.currentDirectoryPath);
-        if (state.selectedFilePath) void openFile(state.selectedFilePath);
+        if (state.viewerMode === "file" && state.selectedFilePath) void openFile(state.selectedFilePath);
     });
 
     sidebarToggle.addEventListener("click", () => {
         state.leftSidebarOpen = !state.leftSidebarOpen;
         syncShellLayout();
+    });
+
+    viewerToggle.addEventListener("click", () => {
+        if (state.viewerMode === "closed") {
+            openFileTree();
+            return;
+        }
+        closeViewer();
+    });
+
+    viewerModeButton.addEventListener("click", () => {
+        if (!state.selectedFilePath) return;
+        if (state.viewerMode === "file") {
+            openFileTree();
+            return;
+        }
+        void openFile(state.selectedFilePath);
+    });
+
+    viewerCloseButton.addEventListener("click", () => {
+        closeViewer();
     });
 
     upDirectoryButton.addEventListener("click", () => {
