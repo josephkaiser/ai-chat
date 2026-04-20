@@ -9,9 +9,12 @@
     --accent: #0d7a7a;
     --accent-strong: #095e5e;
     --accent-soft: rgba(13, 122, 122, 0.12);
-    --user-bubble: #132226;
-    --user-text: #f8f7f2;
-    --assistant-bubble: #ffffff;
+    --user-bubble: rgba(13, 122, 122, 0.1);
+    --user-text: #132226;
+    --assistant-bubble: rgba(255, 255, 255, 0.92);
+    --code-bg: #f4f7f9;
+    --code-line: rgba(19, 34, 38, 0.08);
+    --chat-lane-width: 860px;
     --shadow: none;
     --radius-xl: 0px;
     --radius-lg: 0px;
@@ -773,7 +776,7 @@ body[data-viewer-open="false"] .viewer-panel {
 .message {
     padding: 7px 10px;
     border-radius: 10px;
-    width: min(980px, 100%);
+    width: min(var(--chat-lane-width), calc(100% - 28px));
     max-width: 100%;
     white-space: normal;
     font-size: 0.84rem;
@@ -783,8 +786,7 @@ body[data-viewer-open="false"] .viewer-panel {
     align-self: flex-end;
     background: var(--user-bubble);
     color: var(--user-text);
-    width: min(980px, 100%);
-    max-width: 100%;
+    border: 1px solid rgba(13, 122, 122, 0.12);
 }
 
 .message.assistant,
@@ -822,30 +824,31 @@ body[data-viewer-open="false"] .viewer-panel {
     white-space: pre-wrap;
     word-break: break-word;
     font-family: var(--font-mono);
-    background: #122126;
-    color: #eff8f8;
+    background: var(--code-bg);
+    color: #203038;
     border-radius: var(--radius-md);
     padding: 10px;
     font-size: 0.8rem;
+    border: 1px solid var(--code-line);
 }
 
 .message-code-block {
     border-radius: var(--radius-md);
     overflow: hidden;
-    border: 1px solid rgba(19, 34, 38, 0.08);
-    background: #122126;
+    border: 1px solid var(--code-line);
+    background: var(--code-bg);
 }
 
 .message-code-header {
-    padding: 2px 8px;
+    padding: 3px 8px;
     font-size: 0.54rem;
     font-weight: 700;
     text-transform: uppercase;
     line-height: 1.15;
     letter-spacing: 0.06em;
-    color: rgba(239, 248, 248, 0.82);
-    background: rgba(239, 248, 248, 0.06);
-    border-bottom: 1px solid rgba(239, 248, 248, 0.08);
+    color: #5b6c74;
+    background: rgba(255, 255, 255, 0.7);
+    border-bottom: 1px solid var(--code-line);
 }
 
 .message-code-block pre {
@@ -858,23 +861,23 @@ body[data-viewer-open="false"] .viewer-panel {
 }
 
 .message-content .tok-keyword {
-    color: #f4b98b;
+    color: #9d5f26;
 }
 
 .message-content .tok-string {
-    color: #8fd2b9;
+    color: #12795c;
 }
 
 .message-content .tok-comment {
-    color: #7e9793;
+    color: #7b8a92;
 }
 
 .message-content .tok-function {
-    color: #8cc2ff;
+    color: #2d6fa3;
 }
 
 .message-content .tok-number {
-    color: #f0d48a;
+    color: #8b6d12;
 }
 
 .message-content p + p {
@@ -912,7 +915,7 @@ body[data-viewer-open="false"] .viewer-panel {
     background:
         linear-gradient(180deg, rgba(255, 253, 248, 0.88), rgba(255, 253, 248, 0.96));
     box-shadow: none;
-    width: min(980px, 100%);
+    width: min(var(--chat-lane-width), calc(100% - 28px));
     max-width: 100%;
     margin: 0 auto;
 }
