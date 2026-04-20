@@ -12,13 +12,13 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('id="sidebarToggle"', html)
         self.assertIn('id="viewerToggle"', html)
         self.assertIn('id="workspaceSelect"', html)
-        self.assertIn('id="settingsButton"', html)
         self.assertIn('id="workspaceSettingsButton"', html)
         self.assertIn('id="refreshContextEvalButton"', html)
         self.assertIn('id="contextEvalReport"', html)
         self.assertIn('id="conversationList"', html)
         self.assertIn('id="chatMessages"', html)
         self.assertIn('id="composerInput"', html)
+        self.assertIn('rows="2"', html)
         self.assertIn('id="connectionBadge"', html)
         self.assertIn('id="composerHint"', html)
         self.assertIn('id="fileList"', html)
@@ -27,6 +27,7 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('type="module" src="/static/app.js', html)
         self.assertIn('id="settingsOverlay"', html)
         self.assertIn('id="resetAppButton"', html)
+        self.assertNotIn('id="chatTitle"', html)
         self.assertNotIn('id="aboutOverlay"', html)
         self.assertNotIn('id="draftShell"', html)
 
@@ -44,6 +45,11 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("auto_approve_tool_permissions: true", ts)
         self.assertIn('type: "permission_response"', ts)
         self.assertIn("function syncShellLayout()", ts)
+        self.assertIn("function renameConversation(", ts)
+        self.assertIn("function deleteConversation(", ts)
+        self.assertIn('data-action="rename"', ts)
+        self.assertIn('data-action="delete"', ts)
+        self.assertIn("modelName", ts)
         self.assertNotIn("function showAbout()", ts)
         self.assertNotIn("function toggleTheme()", ts)
 
@@ -62,8 +68,11 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn(".status-badge.streaming", css)
         self.assertIn(".status-badge.loading", css)
         self.assertIn(".composer {", css)
+        self.assertIn(".composer-runtime", css)
         self.assertIn("position: sticky;", css)
         self.assertIn('body[data-viewer-open="false"] .viewer-panel', css)
+        self.assertIn('body[data-left-sidebar-open="false"] .chat-panel', css)
+        self.assertIn("grid-template-columns: 18ch minmax(0, 1fr);", css)
 
 
 if __name__ == "__main__":

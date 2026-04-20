@@ -24,8 +24,29 @@ wheels/
 .installed.cfg
 *.egg
 
-# Node
+# Node / frontend
 node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.turbo/
+.parcel-cache/
+.next/
+.nuxt/
+.svelte-kit/
+.astro/
+.cache/
+coverage/
+storybook-static/
+.eslintcache
+vite.svg
+*.tsbuildinfo
+.vercel/
+.netlify/
 
 # Data
 data/
