@@ -277,8 +277,10 @@ function syncShellLayout(): void {
     const sidebarToggleLabel = state.leftSidebarOpen ? "Close workspace" : "Open workspace";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.setAttribute("title", sidebarToggleLabel);
+    const viewerToggleLabel = state.viewerOpen ? "Hide selected file" : "Open selected file";
+    viewerToggle.setAttribute("aria-label", viewerToggleLabel);
+    viewerToggle.setAttribute("title", viewerToggleLabel);
     viewerToggle.hidden = !state.selectedFilePath;
-    viewerToggle.textContent = state.viewerOpen ? "Hide File" : "Selected File";
 }
 
 function syncRuntimeSummary(): void {
