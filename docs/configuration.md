@@ -22,10 +22,10 @@ The checked-in Docker setup assumes a local host that can run GPU-backed vLLM:
 
 - Docker with the `docker compose` plugin
 - NVIDIA GPU support exposed to Docker
-- Enough disk for Docker images, the Hugging Face cache, and app data
+- enough disk for Docker images, the Hugging Face cache, and app data
 - `bash` and `curl` for the `./chat` helper script
 
-Workspace roots are now path-backed catalog entries. Managed workspace directories are typically bind-mounted under `./workspaces`, while legacy hosted runs may still exist under `./runs` after migration.
+Workspace roots are path-backed catalog entries. Managed workspace directories are typically bind-mounted under `./workspaces`, while legacy hosted runs may still exist under `./runs` after migration.
 
 ## Model profiles
 
@@ -48,8 +48,9 @@ environment:
 
 Code defaults and useful tunables:
 
+- `src/python/harness.py` — main backend runtime, routes, tool loop, workspace/file-session behavior
 - `src/python/ai_chat/prompts.py` — default system prompt and execution prompts
-- `src/python/ai_chat/themes.py` — light/dark UI palettes
+- `src/python/ai_chat/themes.py` — UI palettes
 - `src/python/ai_chat/thinking_stream.py` — thinking tag pairs, which must match `src/web/app.js`
 - `MAX_COMPLETION_TOKENS` — env-backed completion cap
 - `VLLM_HOST`, `DB_PATH`, `HF_CACHE_PATH` — core runtime paths/settings
@@ -62,18 +63,13 @@ Install/setup note:
 - Python capability setup commands such as `python -m venv` and `pip install` are exempt from `COMMAND_TIMEOUT_SECONDS` so package installs can finish naturally.
 - Those long-running commands are still stoppable from the UI via Stop / Interrupt.
 
-The Docker image copies `app.py`, `src/python/ai_chat/themes.py`, `src/python/ai_chat/prompts.py`, `src/python/ai_chat/thinking_stream.py`, `src/python/ai_chat/turn_strategy.py`, and `src/python/ai_chat/deep_flow.py`.
+The Docker image launches through `app.py`, which immediately hands off to `src/python/harness.py`. The frontend bundle is also checked at startup so stale `src/web/app.js` output is rebuilt when needed.
 
-## Server voice pipeline
-
-The built-in voice stack has two paths:
-
-The bundled Docker path no longer installs server voice tooling. The launcher chooses one local model profile per install and one downloaded profile per session.
-
-Launcher notes:
+## Launcher notes
 
 - `./chat install` is non-interactive and prepares the current runtime profile or `DEFAULT_MODEL_PROFILE` (falling back to `14b`).
-- `./chat kickstart` performs a clean stop, rebuilds the frontend and chat image from the current repo snapshot, ensures that default profile is downloaded, and starts the stack in one command.
+- `./chat start` is non-interactive and reuses the installed/default downloaded profile.
+- The launcher accepts chained commands in one invocation, so `./chat install start` and `./chat stop install start` run sequentially.
 
 ## GPU configurations
 
@@ -111,7 +107,7 @@ The compose file also mounts `./workspaces:/app/workspaces`, `./runs:/app/runs`,
 - New workspaces use direct root paths from the catalog instead of creating a fresh workspace per conversation.
 - Legacy `runs/` trees are not deleted automatically during migration.
 
-### Restarting individual services
+## Restarting individual services
 
 ```bash
 docker compose restart chat-app

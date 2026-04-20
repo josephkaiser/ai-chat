@@ -1,30 +1,33 @@
 # AI Chat with vLLM
 
-A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a small FastAPI backend and a TypeScript-first chat-plus-file-viewer frontend.
+A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a FastAPI backend, a small TypeScript workspace UI, and a deeper server-side harness for repo work.
 
 ## Source Layout
 
-- `src/python/harness.py` — main backend harness (FastAPI + WS + tool loop)
-- `src/python/ai_chat/` — backend helper modules (prompts, routing, themes, readers)
+- `src/python/harness.py` — main FastAPI app, WebSocket loop, workspace APIs, tool loop, and file-session runtime
+- `src/python/ai_chat/` — routing, deep-runtime orchestration, prompts, context selection, replay triage, and helpers
 - `src/web/` — frontend web app (`index.html`, `app.ts`, generated `app.js`, `style.css`)
 - `app.py` — compatibility entrypoint used by Docker and `./chat`
 
 ## Features
 
-- **Streaming Responses** — Real-time token streaming via WebSocket (including optional “thinking” regions for supported models)
-- **Context window** — History trimming with relevance scoring (tune model length in Compose / vLLM)
-- **Chat search** — Search past messages in SQLite
-- **Unified Skill Loop** — Each turn now gets an explicit RAG/search/file/code/plan/review assessment before the app chooses a one-shot skill, tool loop, or full inspect/plan/execute/verify run
-- **Agent Harness** — Shared tool loop plus deep-mode orchestration for inspect/plan/execute/verify flows
-- **Workspace Tools** — Per-turn file reads, patches, command execution, spreadsheet inspection, local RAG, and optional web search
-- **Workspace UI** — Workspace browser plus inline file previews alongside chat
-- **Attachments** — Upload files into the conversation workspace and reuse them across turns
-- **Voice** — Browser-recorded audio attachments plus server-side reply playback when native TTS is available; optional STT API remains available for direct clients
-- **Markdown** — Full rendering with syntax highlighting
-- **System Prompt** — Customizable per session
-- **Model Controls** — Reasoning effort toggle and model availability/status feedback
-- **Light/Dark Mode** — Theme support
-- **Message Feedback** — Good/Bad response feedback with neutral clearing, used for context ranking
+- **Streaming chat** — token-by-token assistant replies over WebSocket, with HTTP fallback for buffered clients
+- **Path-backed workspaces** — a shared workspace catalog keyed by real filesystem roots
+- **Workspace browser and previews** — browse files and preview text, Markdown, HTML, images, PDFs, CSV, archives, and spreadsheets
+- **Deep harness** — turn routing plus inspect/plan/execute/verify flows for repo work
+- **Tool execution** — scoped file reads, patches, commands, spreadsheet inspection, conversation recall, and optional web search
+- **Durable file sessions** — each target file can carry hidden draft/spec artifacts, versions, job summaries, and background polishing work
+- **Replay triage** — retries and negative feedback can capture context-eval cases, summarized in the sidebar replay report
+- **SQLite-backed memory** — conversations, feedback, workspace metadata, file sessions, and job state persist across restarts
+
+## Recent Refactors
+
+- **Backend split** — the real server now lives in `src/python/harness.py`; `app.py` is just a compatibility shim.
+- **Orchestration extraction** — deep planning and execution logic moved into `src/python/ai_chat/` modules such as `deep_runtime.py`, `deep_flow.py`, `routing_program.py`, and `task_engine.py`.
+- **Workspace identity cleanup** — workspaces are first-class catalog entries instead of being purely conversation-owned scratch directories.
+- **File-session runtime** — durable per-file state, hidden `.ai-chat/` artifacts, foreground/background job records, and a background polish worker now back the document-style flows.
+- **Replay report loop** — corrective feedback now feeds `.ai/context-evals/` captures and the in-app triage report for debugging routing/context failures.
+- **Frontend simplification** — the shipped UI is now a cleaner workspace/chat/file-viewer shell with replay triage, while the backend still supports richer structured events.
 
 ## Frontend build
 
@@ -34,25 +37,18 @@ The served browser bundle lives at `src/web/app.js`, generated from `src/web/app
 npm run build:frontend
 ```
 
-`./chat install`, `./chat start`, and local `npm start` now rebuild that bundle automatically when the TypeScript source is newer than the generated browser file.
+`./chat install`, `./chat start`, and local `npm start` rebuild that bundle automatically when the TypeScript source is newer than the generated browser file.
 
 ## System Requirements
 
 The default stack is aimed at a local machine that can run vLLM with an NVIDIA GPU.
 
-- **OS / runtime** — macOS, Linux, or another host that can run modern Docker and the `docker compose` plugin. The helper script also expects `bash` and `curl`.
-- **GPU** — NVIDIA GPU with CUDA support plus the NVIDIA container runtime/toolkit available to Docker.
-- **VRAM** — `24GB` recommended for the default `14B` profile in [`docker-compose.yml`](/Users/joe/dev/ai-chat/docker-compose.yml). `12GB` can work if you switch to the lighter `8B` profile described in [docs/configuration.md](/Users/joe/dev/ai-chat/docs/configuration.md).
-- **System RAM** — enough to comfortably run Docker, the chat app, and model-loading overhead alongside your desktop workload. More headroom helps when downloading models and working with larger workspaces.
-- **Disk** — enough free SSD space for Docker images, the Hugging Face model cache, and app data. Plan for tens of GB rather than a minimal install.
-- **Network** — internet access is needed for first-time image pulls, model downloads, and optional web search.
-- **Browser** — a current Chromium, Firefox, or Safari-class browser for the web UI.
-
-## Prerequisites
-
-- Docker with `docker compose`
-- NVIDIA GPU with CUDA support
-- NVIDIA Container Toolkit or equivalent Docker GPU integration
+- **OS / runtime** — macOS, Linux, or another host that can run modern Docker and the `docker compose` plugin
+- **GPU** — NVIDIA GPU with CUDA support plus the NVIDIA container runtime/toolkit available to Docker
+- **VRAM** — `24GB` recommended for the default `14B` profile in [`docker-compose.yml`](/Users/joe/dev/ai-chat/docker-compose.yml); `12GB` can work with the lighter `8B` profile described in [docs/configuration.md](/Users/joe/dev/ai-chat/docs/configuration.md)
+- **Disk** — enough free SSD space for Docker images, Hugging Face model cache, and app data
+- **Network** — internet access is needed for first-time image pulls, model downloads, and optional web search
+- **Browser** — a current Chromium, Firefox, or Safari-class browser for the UI
 
 ## Install
 
@@ -60,32 +56,22 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 ./chat install
 ```
 
-This pulls the vLLM image and builds the chat app container.
-It also rebuilds the TypeScript frontend bundle first so the generated `src/web/app.js` is baked into the image.
-`./chat install` is now non-interactive and prepares the current/default model profile automatically.
+This pulls the vLLM image and builds the chat app container. It also rebuilds the TypeScript frontend bundle first so the generated `src/web/app.js` is baked into the image.
+`./chat start` now reuses that installed/default model non-interactively, so commands like `./chat install start` and `./chat stop install start` work as a single chained invocation.
 
-For a prod box that just received an `rsync` of the repo, use:
+## Runtime Defaults
 
-```bash
-./chat kickstart
-```
+The shipped app keeps the runtime surface fairly small:
 
-That performs a clean stop, rebuilds the frontend and Docker image from the current repo snapshot, ensures the default model is present, and starts the stack.
-
-## Security defaults
-
-The app keeps the runtime surface fairly small:
-
-- No in-app Docker runtime controls
-- No interactive PTY-backed terminal
-- No legacy execute-code endpoint
-- Workspace commands are approved per chat by executable name, then remembered for later turns in that chat only
+- no in-browser Docker controls
+- no PTY-backed terminal surface
+- no legacy execute-code endpoint
+- command execution stays workspace-scoped and argv-based on the backend
 
 ## Usage
 
 ```bash
 ./chat start     # Start the app (idempotent)
-./chat kickstart # Clean rebuild from current repo, then start
 ./chat stop      # Stop the app (idempotent)
 ./chat restart   # Stop then start
 ./chat status    # Check what's running
@@ -102,9 +88,9 @@ Once started, the launcher prints the best URL to open first:
 
 If you prefer a trusted HTTPS URL inside your tailnet, run `tailscale serve --bg 8000` and then use `./chat open`.
 
-Conversation workspaces are stored per run under [`runs/`](/Users/joe/dev/ai-chat/runs) on the host via the default `/app/runs` bind mount, so files the assistant creates remain visible outside the container.
+Workspace roots are path-backed catalog entries. Legacy hosted runs may still exist under [`runs/`](/Users/joe/dev/ai-chat/runs), but the current model is a shared workspace catalog plus visible files on disk.
 
-## Local Mac development
+## Local Mac Development
 
 If you develop on macOS but run inference on another machine, you do not need the full Docker stack locally.
 
@@ -134,14 +120,14 @@ Notes:
 
 - `fastembed` runs on CPU, so semantic retrieval works fine on a Mac without CUDA.
 - The checked-in `docker-compose.yml` is mainly for the bundled local `vllm` + app stack and assumes NVIDIA GPU support for the `vllm` service.
-- `./chat install` now downloads the current/default model profile automatically instead of prompting.
-- `./chat start` prompts for which downloaded model to run for the current session.
+- `./chat install` downloads the current/default model profile automatically instead of prompting.
+- `./chat start` reuses the installed/default model non-interactively so it can be chained after `install` or `stop`.
 
 ## Documentation
 
-- [Configuration](docs/configuration.md) — Model settings, GPU tuning, Docker services, where to edit prompts/themes
-- [API](docs/api.md) — REST and WebSocket payloads
-- [Architecture](docs/architecture.md) — Main modules and high-level data flow
-- [Capability Playbook](docs/capabilities.md) — How to add new agent capabilities with docs, approvals, installs, and workflow entry points
-- [Harness And Tools](docs/harness.md) — Tool loop, deep-mode orchestration, permissions, and workspace model
-- [UI Features](docs/ui.md) — Document editor, workspace panel, and slash command behaviors
+- [Configuration](docs/configuration.md) — model settings, launcher behavior, and runtime knobs
+- [API](docs/api.md) — REST and WebSocket surface
+- [Architecture](docs/architecture.md) — main modules and high-level data flow
+- [Capability Playbook](docs/capabilities.md) — how to add new agent capabilities with docs, approvals, installs, and workflow entry points
+- [Harness And Tools](docs/harness.md) — routing, deep execution, tools, approvals, and background jobs
+- [UI Features](docs/ui.md) — current workspace shell, replay triage, chat flow, and file previews

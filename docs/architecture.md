@@ -4,57 +4,68 @@
 
 ```text
 ai-chat/
-├── app.py               # FastAPI app: routes, WebSockets, SQLite, vLLM client
-├── src/python/ai_chat/themes.py            # Light/dark palettes → CSS custom properties
-├── src/python/ai_chat/prompts.py           # Default system prompt text
-├── src/python/ai_chat/thinking_stream.py   # Model stream → “thinking” vs visible answer
-├── src/python/ai_chat/turn_strategy.py     # Turn assessment and top-level routing decisions
-├── src/python/ai_chat/deep_flow.py         # Deep-mode routing decisions
-├── chat                 # CLI to start/stop the stack
+├── app.py                           # Compatibility shim that re-exports src/python/harness.py
+├── src/python/harness.py            # FastAPI app, WS loop, workspace APIs, tool runtime, file-session worker
+├── src/python/ai_chat/
+│   ├── routing_program.py           # Top-level routing seam
+│   ├── turn_strategy.py             # Heuristic turn assessment
+│   ├── runtime_layers.py            # Model-only runtime context layering
+│   ├── deep_runtime.py              # Deep-session state + preview/execute lifecycle
+│   ├── deep_flow.py                 # Deep execution route decisions
+│   ├── task_engine.py               # Typed task runner for structured plans
+│   ├── context_eval.py              # Replay capture + triage report logic
+│   ├── context_assembler.py         # Retrieval-backed context building
+│   ├── context_policy_program.py    # Context budget policy
+│   ├── context_selection_program.py # Context candidate selection
+│   ├── prompts.py                   # System, tool, and execution prompts
+│   ├── thinking_stream.py           # Thinking/output stream parsing
+│   └── workspace_reader.py          # Workspace read helpers and permission constants
 ├── src/web/
-│   ├── index.html       # Web UI template
-│   ├── app.ts           # Frontend source
-│   ├── app.js           # Generated browser runtime
-│   └── style.css        # Layout and components
-├── docker-compose.yml   # vLLM + chat-app services
-├── Dockerfile           # Chat app image
-├── docs/                # Documentation
-└── data/
-    └── chat.db          # SQLite database
+│   ├── index.html                   # Web UI shell
+│   ├── app.ts                       # Frontend source
+│   ├── app.js                       # Generated browser runtime
+│   └── style.css                    # Layout and styling
+├── chat                             # CLI to install/start/stop the stack
+├── docker-compose.yml               # vLLM + chat-app services
+├── docs/                            # Documentation
+└── data/chat.db                     # SQLite database
 ```
 
 ## How the pieces connect
 
-- `app.py` is the entrypoint. It mounts static files, renders `index.html`, and implements REST and WebSocket handlers. It owns the chat harness, workspace catalog APIs, voice pipeline, tool execution loop, and workspace-backed chat routing.
-- `src/python/ai_chat/turn_strategy.py` evaluates each user turn against the app’s main skill loop: local RAG, web search, file creation, coding mode, planning mode, execution mode, and verification needs.
-- `src/python/ai_chat/routing_program.py` is the top-level routing-program seam. It currently runs the heuristic router, but gives the app a cleaner insertion point for a future DSPy-backed policy.
-- `src/python/ai_chat/runtime_layers.py` composes visible chat text, attachment context, and model-only runtime layers such as active draft metadata without polluting user-facing transcript storage.
-- `src/python/ai_chat/deep_runtime.py` owns deep-session state plus the bootstrap/preview/execute orchestration lifecycle, so the harness no longer carries the full deep-mode state machine inline.
-- `src/python/ai_chat/deep_flow.py` decides what the deep execution pipeline should do next when a turn enters the inspect/plan/execute/verify path.
-- `src/python/ai_chat/prompts.py` holds the default prompt plus tool-use and execution prompts used across normal and deep turns.
-- `src/python/ai_chat/thinking_stream.py` parses model output into thinking and visible-answer streams for the backend streaming pipeline.
-- `src/python/ai_chat/themes.py` still houses theme definitions consumed by the web surface.
-- `src/web/app.ts` is the frontend source for the simplified chat runtime and workspace file viewer. `src/web/app.js` is the generated browser bundle served by FastAPI.
+- `app.py` is no longer the real backend implementation. It exists so Docker and local scripts can still launch the app through a stable entrypoint.
+- `src/python/harness.py` is the actual backend. It mounts the frontend, exposes REST and WebSocket routes, persists SQLite state, runs the tool loop, and manages file-session/background-job behavior.
+- `routing_program.py` and `turn_strategy.py` decide whether a request should be answered directly, sent through a scoped tool loop, or upgraded into a deeper inspect/plan/execute flow.
+- `runtime_layers.py` keeps model-only context such as active draft/file metadata out of the visible transcript.
+- `deep_runtime.py`, `deep_flow.py`, and `task_engine.py` split the older monolithic deep-mode logic into smaller orchestration pieces.
+- `context_eval.py` turns retries and negative feedback into replay captures and triage summaries, which the frontend surfaces as the Replay Triage panel.
+- `src/web/app.ts` is intentionally small: it manages the workspace selector, replay triage, chat stream, file browser, and file preview UI.
 
-## Tech stack
+## Main runtime model
 
-- Backend: Python 3.11, FastAPI, Uvicorn, httpx
-- Frontend: TypeScript-first browser client with a generated ES module bundle
-- LLM runtime: vLLM via an OpenAI-compatible API
-- Database: SQLite for conversations, messages, workspace catalog rows, runs, summaries, and assistant feedback
-- Recent corrective user replies can also be mined from SQLite as implicit failure signals during feedback-driven repo-improvement passes.
-- Streaming: WebSocket `/ws/chat`
+- A **workspace** is a first-class catalog row backed by a real root path on disk.
+- A **conversation** is the visible chat transcript attached to one workspace.
+- A **file session** is durable per-target-file state that can outlive one visible turn.
+- A **file-session job** records foreground or background work for that file.
+- A **background focus** gives one file per workspace ownership of the background polish loop at a time.
 
 ## Persistence model
 
-- Workspaces are first-class rows keyed by canonical absolute root path plus a user-facing display name.
-- Conversations are ephemeral transcripts that attach to one workspace via `conversations.workspace_id`.
-- Multiple conversations may point at the same workspace over time, so fresh chats can continue working in the same files without reopening an old thread.
-- Python package installs use a managed workspace-scoped environment outside the workspace tree, so new conversations in the same workspace reuse the same environment.
-- Assistant message feedback is stored in SQLite and reused during history ranking.
-- Corrective user follow-ups can automatically mark the previous assistant turn as negative feedback, and feedback-driven deep runs can persist a recent-feedback digest into the workspace task state.
+- SQLite stores conversations, messages, workspace rows, file sessions, file-session jobs, model state, and assistant feedback.
+- Workspace files live on disk in their actual root directories, not only inside database blobs.
+- File-session internals are stored as hidden workspace artifacts under `.ai-chat/`, including draft/spec files, candidate outputs, evaluations, and historical versions.
+- Replay/context-eval captures live under `.ai/context-evals/` so failures can be inspected from the workspace browser.
+- Managed Python environments live outside the workspace tree so installs can persist without polluting syncs.
+
+## Tech stack
+
+- Backend: Python 3.11, FastAPI, Uvicorn, httpx, SQLite
+- Frontend: TypeScript source compiled into a checked-in browser bundle
+- Model runtime: vLLM through an OpenAI-compatible API
+- Transport: WebSocket `/ws/chat` plus buffered HTTP fallback at `/api/chat`
 
 ## Additional guides
 
-- [Harness And Tools](harness.md) — how turns are routed, tools run, and progress is reported
-- [UI Features](ui.md) — the current chat/workspace UI surface
+- [Harness And Tools](harness.md) — routing, deep execution, tools, approvals, and background jobs
+- [UI Features](ui.md) — the shipped workspace shell and replay triage UI
+- [API](api.md) — HTTP and WebSocket surface

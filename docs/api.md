@@ -2,20 +2,29 @@
 
 ## Pages
 
-- `GET /` — Web interface
+- `GET /` — web interface
 
 ## WebSocket
 
 ### `/ws/chat` (client → server)
 
-Send JSON objects with fields such as:
+Common request fields:
 
-- `message` — User text
-- `conversation_id` — Conversation UUID
-- `workspace_id` — Active workspace UUID for new chats or workspace switches
-- `system_prompt` — Optional prompt override
-- `features` — Per-turn tool/permission flags inferred by the UI
-- `slash_command` — Optional structured slash intent for `/search`, `/grep`, `/plan`, `/code`, or `/pip`
+- `message` — user text
+- `conversation_id` — conversation UUID
+- `workspace_id` — active workspace UUID
+- `system_prompt` — optional override
+- `mode` — usually `"deep"` in the shipped frontend
+- `turn_kind` — visible/runtime turn classification
+- `features` — optional per-turn feature flags
+- `auto_approve_tool_permissions` — whether the client wants tool permissions auto-approved
+
+Control messages also include:
+
+- `type: "stop"` — cancel the active turn
+- `type: "interrupt"` — stop and immediately reprompt
+- `type: "permission_response"` — answer a pending approval request
+- `type: "pong"` — heartbeat response
 
 ### `/ws/chat` (server → client)
 
@@ -23,29 +32,27 @@ The server streams JSON events with a `type` field.
 
 Common event types:
 
-- `start` — Assistant turn began
-- `activity` — Structured progress update with `phase`, `label`, `content`, and optional `step_label`
-- `assistant_note` — Intermediate draft/note while the turn continues
-- `plan_ready` — Execution plan preview plus `execute_prompt` and `builder_steps`
-- `build_steps` — Structured checklist progress
-- `think_start`, `think_token`, `think_end` — Collapsible reasoning stream
-- `token` — Visible answer stream
-- `tool_start`, `tool_result`, `tool_error` — Tool lifecycle events
-- `permission_required` — Pause for inline tool or command approval
-- `final_replace` — Replace the in-progress draft with finalized text
-- `message_id` — Saved assistant message id
-- `canceled`, `done`, `error` — Terminal turn status
+- `start` — assistant turn began
+- `activity` — progress update with `phase`, `label`, `content`, and optional step metadata
+- `assistant_note` — intermediate draft/update
+- `token` — visible answer token stream
+- `final_replace` — replace the in-progress draft with finalized text
+- `tool_start`, `tool_result`, `tool_error` — tool lifecycle events
+- `permission_required` — blocking approval request for a tool or command
+- `message_id` — persisted assistant message id
+- `canceled`, `done`, `error` — terminal status
+- `ping` — heartbeat
 
-Notes:
+Richer structured events used by deeper flows include:
 
-- Command approvals now support scoped Python setup requests such as `pip install` and `python -m venv`.
-- Long-running install/setup commands are expected to keep running until completion unless the user sends `stop` or `interrupt`.
-- `permission_required` is a blocking pause. If the user declines, the task stays paused until the capability is approved for that chat and resumed.
-- Tool auto-approve applies to tool and command requests only. Plan execution still requires explicit plan approval in the UI.
+- `plan_ready`
+- `build_steps`
+- `scope_audit`
+- `file_session_bound`
+- `draft_bootstrap`
 
-Preferred `activity.phase` values:
+Preferred `activity.phase` values include:
 
-- `analyze`
 - `evaluate`
 - `inspect`
 - `plan`
@@ -57,60 +64,70 @@ Preferred `activity.phase` values:
 - `blocked`
 - `error`
 
+## Buffered HTTP fallback
+
+- `POST /api/chat` — run one chat turn through the same backend and return buffered events instead of streaming
+
 ## Conversations
 
-- `GET /api/conversations` — List conversations
-- `GET /api/conversation/{conversation_id}` — Get recent messages, pending plan preview, and attached workspace metadata
-- `POST /api/conversation/{conversation_id}/rename` — Rename conversation
-- `DELETE /api/conversation/{conversation_id}` — Delete only the conversation transcript
+- `GET /api/conversations` — list conversations
+- `GET /api/conversation/{conversation_id}` — get recent messages, pending plan payload, and attached workspace metadata
+- `POST /api/conversation/{conversation_id}/rename` — rename conversation
+- `DELETE /api/conversation/{conversation_id}` — delete conversation transcript while leaving the workspace intact
 
-## Messages
+## Messages and replay capture
 
-- `POST /api/message/{message_id}/feedback` — Save assistant feedback (`positive`, `negative`, `neutral`)
-- `POST /api/message/{message_id}/retry` — Get retry info for an assistant message
-
-## Search
-
-- `GET /api/search?query=...` — Search chat history
+- `POST /api/message/{message_id}/feedback` — save assistant feedback and optionally capture a replay case for negative feedback
+- `POST /api/message/{message_id}/retry` — prepare a retry payload and capture a replay case
+- `GET /api/search?query=...` — search chat history
+- `GET /api/context-evals/report?conversation_id=...&workspace_id=...&limit=...` — build the replay-triage summary used by the sidebar
 
 ## Workspaces
 
-- `GET /api/workspaces` — List the shared workspace catalog and default selection
-- `POST /api/workspaces` — Create a catalog entry for a workspace root
-- `GET /api/workspaces/{workspace_id}` — Get workspace metadata
-- `POST /api/workspaces/{workspace_id}/rename` — Rename a workspace in the catalog
-- `DELETE /api/workspaces/{workspace_id}` — Remove a workspace from the catalog when no chats still reference it
-- `GET /api/workspaces/{workspace_id}/files?path=...` — List one workspace directory
-- `GET /api/workspaces/{workspace_id}/file?path=...` — Read a workspace file or structured preview payload
-- `GET /api/workspaces/{workspace_id}/file-sessions` — List durable file sessions for a workspace, including the persisted session-level `job_summary`, compatibility fields (`latest_job`, `active_job`), and current artifact state (`artifact_state`)
-- `POST /api/workspaces/{workspace_id}/file-sessions/ensure` — Ensure a durable file session exists for a target path and return its persisted job summary plus current artifact state
-- `POST /api/workspaces/{workspace_id}/file-sessions/focus` — Move or disable the background-polish focus for a file session
-- `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}` — Return one lazy document bundle with the file session, its persisted job summary, spec file payload, current output payload, and version rows
-- `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}/jobs` — List durable foreground/background jobs for one file session
-- `POST /api/workspaces/{workspace_id}/file-session-jobs` — Create a durable file-session job
-- `POST /api/workspaces/{workspace_id}/file-session-jobs/{job_id}/status` — Update one durable file-session job status
-- `POST /api/workspaces/{workspace_id}/file` — Save editor changes into a workspace file
-- `POST /api/workspaces/{workspace_id}/upload` — Upload files into the workspace
-- `GET /api/workspaces/{workspace_id}/file/download?path=...` — Download one workspace file
-- `GET /api/workspaces/{workspace_id}/spreadsheet?path=...&sheet=...` — Spreadsheet preview/summary
-- `GET /api/workspaces/{workspace_id}/download` — Download the full workspace as a zip
+- `GET /api/workspaces` — list the shared workspace catalog and default workspace
+- `POST /api/workspaces` — create/register a workspace root
+- `GET /api/workspaces/{workspace_id}` — get workspace metadata
+- `POST /api/workspaces/{workspace_id}/rename` — rename the display label
+- `DELETE /api/workspaces/{workspace_id}` — remove a workspace catalog row when no conversations still reference it
+- `GET /api/workspaces/{workspace_id}/files?path=...` — list a workspace directory
+- `GET /api/workspaces/{workspace_id}/file?path=...` — read a workspace file or structured preview payload
+- `GET /api/workspaces/{workspace_id}/file/view?path=...` — raw file response for inline preview
+- `GET /api/workspaces/{workspace_id}/file/download?path=...` — download one file
+- `POST /api/workspaces/{workspace_id}/file` — write a file
+- `POST /api/workspaces/{workspace_id}/upload` — upload files
+- `POST /api/workspaces/{workspace_id}/archive/extract` — extract an archive into the workspace
+- `GET /api/workspaces/{workspace_id}/spreadsheet?path=...&sheet=...` — spreadsheet preview/summary
+- `GET /api/workspaces/{workspace_id}/download` — download the entire workspace as a zip
 
-Compatibility routes still exist under `/api/workspace/{conversation_id}/...`, but new clients should prefer the `workspace_id` routes above.
+## File sessions
 
-Workspace API notes:
+- `GET /api/workspaces/{workspace_id}/file-sessions` — list durable file sessions plus summarized current state
+- `POST /api/workspaces/{workspace_id}/file-sessions/ensure` — create/reuse one file session for a target path
+- `POST /api/workspaces/{workspace_id}/file-sessions/focus` — enable or disable background focus for one file
+- `DELETE /api/workspaces/{workspace_id}/file-sessions/{file_session_id}` — delete a file session
+- `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}` — get the full file-session bundle
+- `GET /api/workspaces/{workspace_id}/file-sessions/{file_session_id}/jobs` — list foreground/background jobs
+- `POST /api/workspaces/{workspace_id}/file-session-jobs` — create a file-session job
+- `POST /api/workspaces/{workspace_id}/file-session-jobs/{job_id}/status` — update one job status
 
-- The workspace catalog is shared across the server deployment; there is no per-user isolation in this phase.
-- Workspace roots are keyed by canonical absolute path. Display names are editable labels only.
-- Directory listings hide dot-prefixed paths unless the request explicitly targets a hidden path.
-- Directory listing items now include lightweight metadata such as `modified_at`, `content_kind`, and `kind` so the client can rank and preview artifacts.
-- File reads can return non-text preview metadata. For images, the payload uses `content_kind: "image"` with binary preview metadata instead of raw file bytes.
-- File sessions bind a target file, its hidden draft/spec file, and the hidden agent conversation/runtime context together.
-- File-session jobs are the durable queue substrate for foreground live realization and future background research/optimization work.
-- File-session rows now persist a stable `job_summary` (`current_lane`, `current_status`, `current_job`, `last_result`) so clients can read bundle state without mirroring websocket lifecycle events back into the server.
-- Exactly one file owns the background polish loop at a time. Moving focus to another file or stopping agent work supersedes queued/running background jobs for the previous focus.
-- Tool results from `workspace.run_command` may include detected artifact metadata in `result.items`, plus `result.path` and `result.open_path` when there is a primary artifact worth surfacing in the viewer.
+File-session notes:
+
+- file sessions bind a visible target file to hidden `.ai-chat/` draft/spec/candidate/version state
+- file-session rows persist `job_summary` so clients can render current state without replaying every websocket event
+- exactly one file per workspace owns the background-polish loop at a time
+
+## Compatibility routes
+
+Older conversation-shaped workspace routes still exist under `/api/workspace/{conversation_id}/...`.
+
+There are also simple local debug routes:
+
+- `GET /api/files/list?path=...`
+- `GET /api/files/read?path=...`
+
+New clients should prefer the `workspace_id` routes.
 
 ## System
 
-- `GET /health` — Health check with model availability and loading status
-- `POST /api/reset-all` — Reset chats, workspaces, and related app data
+- `GET /health` — runtime/model health, selected profile, and load-progress metadata
+- `POST /api/reset-all` — reset chats, workspaces, voice/cache/runtime state, and related app data
