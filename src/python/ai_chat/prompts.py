@@ -104,6 +104,20 @@ Rules:
 """
 
 
+CONVERSATION_TITLE_SYSTEM_PROMPT = """You create short rolling conversation titles for a coding assistant.
+
+Return only a plain-text title, no quotes or markdown.
+
+Rules:
+- Use 2 to 5 words.
+- Capture the current main topic of the conversation, not the opening sentence.
+- Prefer concrete nouns over filler.
+- Do not use punctuation unless part of a filename or code term.
+- Do not start with verbs like "Help", "Create", or "Can".
+- Do not include surrounding explanation.
+"""
+
+
 TOOL_USE_SYSTEM_PROMPT = """You may use tools to inspect the workspace, search conversation history, search the web, patch files, inspect spreadsheets, and run commands.
 
 When you need a tool, output ONLY:

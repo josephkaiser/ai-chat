@@ -85,6 +85,10 @@ button[data-tooltip] {
     position: relative;
 }
 
+.shell-toggle[data-tooltip] {
+    position: fixed;
+}
+
 button[data-tooltip]::after {
     content: attr(data-tooltip);
     position: absolute;
@@ -896,6 +900,33 @@ body[data-viewer-mode="file"] .chat-panel {
     border: 1px solid rgba(19, 34, 38, 0.08);
 }
 
+.message-thinking {
+    width: min(var(--chat-lane-width), calc(100% - 24px));
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 2px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.message-thinking.error {
+    color: #8c3427;
+}
+
+.message-thinking-label {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.62rem;
+    font-weight: 700;
+}
+
+.message-thinking-text {
+    min-width: 0;
+}
+
 .message.error {
     border-color: rgba(166, 57, 41, 0.25);
     background: rgba(166, 57, 41, 0.08);
@@ -903,6 +934,9 @@ body[data-viewer-mode="file"] .chat-panel {
 
 .message-content {
     margin-top: 4px;
+}
+
+.rich-text {
     line-height: 1.62;
     overflow-wrap: anywhere;
 }
@@ -926,17 +960,20 @@ body[data-viewer-mode="file"] .chat-panel {
     box-shadow: none;
 }
 
-.message-content p,
-.message-content ul,
-.message-content ol,
-.message-content h1,
-.message-content h2,
-.message-content h3,
-.message-content pre {
+.rich-text p,
+.rich-text ul,
+.rich-text ol,
+.rich-text h1,
+.rich-text h2,
+.rich-text h3,
+.rich-text h4,
+.rich-text pre,
+.rich-text blockquote,
+.rich-text hr {
     margin: 0;
 }
 
-.message-content pre,
+.rich-text pre,
 .preview-code,
 .archive-list {
     margin: 0;
@@ -976,50 +1013,81 @@ body[data-viewer-mode="file"] .chat-panel {
     border-radius: 0;
 }
 
-.message-content code {
+.rich-text code {
     font-family: var(--font-mono);
 }
 
-.message-content .tok-keyword {
+.rich-text .tok-keyword {
     color: #9d5f26;
 }
 
-.message-content .tok-string {
+.rich-text .tok-string {
     color: #12795c;
 }
 
-.message-content .tok-comment {
+.rich-text .tok-comment {
     color: #7b8a92;
 }
 
-.message-content .tok-function {
+.rich-text .tok-function {
     color: #2d6fa3;
 }
 
-.message-content .tok-number {
+.rich-text .tok-number {
     color: #8b6d12;
 }
 
-.message-content p + p {
+.rich-text p + p {
     margin-top: 0.72em;
 }
 
-.message-content ul,
-.message-content ol {
+.rich-text ul,
+.rich-text ol {
     padding-left: 1.1rem;
 }
 
-.message-content ul + p,
-.message-content ol + p,
-.message-content p + ul,
-.message-content p + ol,
-.message-content pre + p,
-.message-content p + pre,
-.message-content ul + pre,
-.message-content ol + pre,
-.message-content pre + ul,
-.message-content pre + ol {
+.rich-text ul + p,
+.rich-text ol + p,
+.rich-text p + ul,
+.rich-text p + ol,
+.rich-text pre + p,
+.rich-text p + pre,
+.rich-text ul + pre,
+.rich-text ol + pre,
+.rich-text pre + ul,
+.rich-text pre + ol,
+.rich-text blockquote + p,
+.rich-text p + blockquote {
     margin-top: 0.72em;
+}
+
+.rich-text strong {
+    font-weight: 700;
+}
+
+.rich-text a {
+    color: var(--accent-strong);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(13, 122, 122, 0.24);
+}
+
+.rich-text a:hover {
+    border-bottom-color: rgba(13, 122, 122, 0.5);
+}
+
+.artifact-inline-ref {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    margin: 0 0.1rem;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(13, 122, 122, 0.18);
+    background: rgba(13, 122, 122, 0.08);
+    color: var(--accent-strong);
+    font-size: 0.72rem;
+    font-weight: 700;
+    vertical-align: baseline;
 }
 
 .scroll-jump {
@@ -1161,8 +1229,122 @@ body[data-viewer-mode="file"] .file-browser {
 
 .preview-markdown,
 .preview-html {
-    line-height: 1.4;
-    font-size: 0.8rem;
+    padding: 18px 18px 30px;
+    font-size: 0.95rem;
+    line-height: 1.74;
+    color: var(--text);
+}
+
+.preview-markdown h1,
+.preview-html h1 {
+    font-size: clamp(1.6rem, 2.2vw, 2.3rem);
+    line-height: 1.08;
+    letter-spacing: -0.04em;
+}
+
+.preview-markdown h2,
+.preview-html h2 {
+    font-size: clamp(1.25rem, 1.6vw, 1.65rem);
+    line-height: 1.16;
+    letter-spacing: -0.03em;
+}
+
+.preview-markdown h3,
+.preview-html h3 {
+    font-size: 1.05rem;
+    line-height: 1.22;
+}
+
+.preview-markdown h4,
+.preview-html h4 {
+    font-size: 0.92rem;
+    line-height: 1.25;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+}
+
+.preview-markdown h1 + p,
+.preview-markdown h2 + p,
+.preview-markdown h3 + p,
+.preview-markdown h4 + p,
+.preview-html h1 + p,
+.preview-html h2 + p,
+.preview-html h3 + p,
+.preview-html h4 + p {
+    margin-top: 0.6rem;
+}
+
+.preview-markdown p + h1,
+.preview-markdown p + h2,
+.preview-markdown p + h3,
+.preview-markdown p + h4,
+.preview-markdown ul + h1,
+.preview-markdown ul + h2,
+.preview-markdown ul + h3,
+.preview-markdown ul + h4,
+.preview-markdown ol + h1,
+.preview-markdown ol + h2,
+.preview-markdown ol + h3,
+.preview-markdown ol + h4 {
+    margin-top: 1.5rem;
+}
+
+.preview-markdown ul,
+.preview-markdown ol,
+.preview-html ul,
+.preview-html ol {
+    padding-left: 1.3rem;
+}
+
+.preview-markdown li + li,
+.preview-html li + li {
+    margin-top: 0.28rem;
+}
+
+.preview-markdown blockquote,
+.preview-html blockquote {
+    padding: 0.25rem 0 0.25rem 1rem;
+    border-left: 3px solid rgba(13, 122, 122, 0.24);
+    color: var(--muted);
+}
+
+.preview-markdown hr,
+.preview-html hr {
+    border: 0;
+    border-top: 1px solid rgba(19, 34, 38, 0.1);
+    margin: 1.3rem 0;
+}
+
+.preview-markdown .message-code-block,
+.preview-html .message-code-block {
+    margin-top: 0.85rem;
+    margin-bottom: 0.85rem;
+    border-radius: 14px;
+    background: #fbfcfd;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.preview-markdown .message-code-header,
+.preview-html .message-code-header {
+    padding: 6px 12px;
+    font-size: 0.66rem;
+    letter-spacing: 0.08em;
+}
+
+.preview-markdown .message-code-block pre,
+.preview-html .message-code-block pre {
+    padding: 14px 16px;
+    font-size: 0.88rem;
+    line-height: 1.62;
+}
+
+.preview-markdown code:not(pre code),
+.preview-html code:not(pre code) {
+    padding: 0.12rem 0.36rem;
+    border-radius: 6px;
+    background: rgba(19, 34, 38, 0.05);
+    font-size: 0.9em;
 }
 
 .preview-table {

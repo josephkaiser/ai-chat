@@ -51,12 +51,22 @@ interface ChatEvent {
     message_id?: string | number;
     conversation_id?: string;
     client_turn_id?: string;
+    label?: string;
+    phase?: string;
+    step_label?: string;
     permission_key?: string;
     approval_target?: string;
     payload?: {
         path?: string;
         open_path?: string;
     };
+}
+
+interface ThinkingStatus {
+    text: string;
+    phase: string;
+    error: boolean;
+    persistent: boolean;
 }
 
 interface ContextEvalRecentFailure {
@@ -197,8 +207,10 @@ const state = {
     selectedFixtureDetail: null as ContextEvalFixtureDetailRecord | null,
     compareFixtureDetail: null as ContextEvalFixtureDetailRecord | null,
     fixtureDetailLoading: false,
+    thinkingStatus: null as ThinkingStatus | null,
     stickChatToBottom: true,
     handledArtifactKeys: new Set<string>(),
+    conversationRefreshTimer: 0 as number,
 };
 
 function query<T extends Element>(selector: string): T {
@@ -656,6 +668,70 @@ function setComposerHint(text: string): void {
     composerHint.textContent = text;
 }
 
+function normalizeThinkingText(text: string): string {
+    return String(text || "")
+        .replace(/^(Inspect|Deep|Verify|Synthesize):\s*/i, "")
+        .replace(/^Slash \/[a-z0-9_-]+:\s*/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function summarizeRuntimeError(text: string): string {
+    const normalized = normalizeThinkingText(text);
+    if (!normalized) {
+        return "Hit a snag before the reply could finish.";
+    }
+    if (/workspace state|saved progress|saved workspace/i.test(normalized)) {
+        return "The reply paused before the final answer, but the current work is still available.";
+    }
+    if (/model loaded|vllm|runtime/i.test(normalized)) {
+        return "The model runtime was not ready to finish that reply.";
+    }
+    if (/internal error/i.test(normalized)) {
+        return "Hit a snag before the reply could finish.";
+    }
+    return normalized;
+}
+
+function buildThinkingSummary(event: ChatEvent): string {
+    if (event.type === "start") {
+        return "Getting oriented.";
+    }
+    if (event.type === "permission_required") {
+        return "Opening workspace access and continuing.";
+    }
+    if (event.type === "error") {
+        return summarizeRuntimeError(event.content || "");
+    }
+    const normalized = normalizeThinkingText(event.content || "");
+    if (!normalized && event.label) {
+        return normalizeThinkingText(event.label);
+    }
+    if (/^Using tools to answer\.?$/i.test(normalized)) {
+        return "Checking the workspace and gathering context.";
+    }
+    return normalized || "Working through the next step.";
+}
+
+function setThinkingStatus(text: string, options: Partial<ThinkingStatus> = {}): void {
+    const normalized = normalizeThinkingText(text);
+    if (!normalized) return;
+    state.thinkingStatus = {
+        text: normalized,
+        phase: options.phase || "thinking",
+        error: Boolean(options.error),
+        persistent: Boolean(options.persistent),
+    };
+    setComposerHint(`Thinking: ${normalized}`);
+    renderMessages();
+}
+
+function clearThinkingStatus(): void {
+    state.thinkingStatus = null;
+    setComposerHint(defaultComposerStatus());
+    renderMessages();
+}
+
 function truncatePreview(value: string, limit = 88): string {
     const flattened = value.replace(/\s+/g, " ").trim();
     if (flattened.length <= limit) return flattened;
@@ -672,11 +748,6 @@ const MATERIALIZABLE_ARTIFACT_EXTENSIONS = new Set([
     "sh", "bash", "zsh", "yaml", "yml", "toml", "csv", "xml", "svg", "c", "h",
     "cpp", "hpp", "java", "rs", "go", "rb", "php",
 ]);
-
-function titleFromMessage(content: string): string {
-    const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "New chat";
-    return firstLine.length > 44 ? `${firstLine.slice(0, 43)}…` : firstLine;
-}
 
 function isNearBottom(element: HTMLElement, threshold = 72): boolean {
     return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -821,6 +892,17 @@ function renderArtifactReferences(paths: string[]): string {
     `;
 }
 
+function bindArtifactLinks(root: ParentNode): void {
+    root.querySelectorAll<HTMLElement>("[data-artifact-path]").forEach((element) => {
+        element.addEventListener("click", (event) => {
+            event.preventDefault();
+            const path = resolveArtifactReferencePath(element.dataset.artifactPath || "");
+            if (!path) return;
+            void openFile(path);
+        });
+    });
+}
+
 function maybeHandleAssistantArtifacts(message: ChatMessage, index: number): void {
     if (message.role !== "assistant" || !state.currentWorkspaceId) return;
     if (state.generating && index === state.activeAssistantIndex) return;
@@ -852,6 +934,11 @@ function maybeHandleAssistantArtifacts(message: ChatMessage, index: number): voi
 
 function renderInlineMarkdown(text: string): string {
     return text
+        .replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath: string) => {
+            const path = resolveArtifactReferencePath(rawPath);
+            const label = path.split("/").pop() || path;
+            return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
+        })
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/\*([^*]+)\*/g, "<em>$1</em>")
@@ -865,6 +952,7 @@ function normalizeCodeLanguage(language?: string): string {
     if (["js", "jsx", "javascript", "ts", "tsx", "typescript"].includes(normalized)) return "javascript";
     if (["sh", "shell", "bash", "zsh"].includes(normalized)) return "bash";
     if (["c", "h", "cpp", "cxx", "hpp"].includes(normalized)) return "c";
+    if (["sql", "sqlite", "postgresql", "postgres", "mysql"].includes(normalized)) return "sql";
     if (["json"].includes(normalized)) return "json";
     return normalized;
 }
@@ -875,6 +963,7 @@ function keywordPatternForLanguage(language: string): RegExp | null {
         javascript: String.raw`\b(?:async|await|break|case|catch|class|const|continue|default|delete|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|switch|throw|true|try|typeof|var|while|yield)\b`,
         bash: String.raw`\b(?:if|then|else|elif|fi|for|do|done|case|esac|while|in|function|return|local|export)\b`,
         c: String.raw`\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b`,
+        sql: String.raw`\b(?:add|all|alter|and|as|asc|avg|begin|between|by|case|check|column|commit|constraint|count|create|database|default|delete|desc|distinct|drop|else|end|exists|from|group|having|in|index|insert|into|is|join|key|like|limit|not|null|on|or|order|primary|references|rollback|select|set|table|then|transaction|union|unique|update|values|view|where)\b`,
         json: String.raw`\b(?:true|false|null)\b`,
     };
     const pattern = patterns[language];
@@ -884,6 +973,7 @@ function keywordPatternForLanguage(language: string): RegExp | null {
 function commentPatternForLanguage(language: string): RegExp | null {
     if (language === "python" || language === "bash") return /#.*$/gm;
     if (language === "javascript" || language === "c") return /\/\/.*$|\/\*[\s\S]*?\*\//gm;
+    if (language === "sql") return /--.*$/gm;
     return null;
 }
 
@@ -950,6 +1040,17 @@ function renderRichText(raw: string): string {
             const escaped = escapeHtml(block);
             const lines = escaped.split("\n");
 
+            if (lines.every((line) => /^[-*_]{3,}$/.test(line.trim()))) {
+                return "<hr>";
+            }
+
+            if (lines.every((line) => /^&gt;\s?/.test(line))) {
+                const quote = lines
+                    .map((line) => line.replace(/^&gt;\s?/, ""))
+                    .join("<br>");
+                return `<blockquote>${renderInlineMarkdown(quote)}</blockquote>`;
+            }
+
             if (lines.every((line) => /^- /.test(line))) {
                 return `<ul>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^- /, ""))}</li>`).join("")}</ul>`;
             }
@@ -958,9 +1059,9 @@ function renderRichText(raw: string): string {
                 return `<ol>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\. /, ""))}</li>`).join("")}</ol>`;
             }
 
-            const heading = lines[0].match(/^(#{1,3})\s+(.*)$/);
+            const heading = lines[0].match(/^(#{1,4})\s+(.*)$/);
             if (heading) {
-                const level = Math.min(heading[1].length, 3);
+                const level = Math.min(heading[1].length, 4);
                 const headingHtml = `<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`;
                 const rest = lines.slice(1).join("<br>");
                 return rest ? `${headingHtml}<p>${renderInlineMarkdown(rest)}</p>` : headingHtml;
@@ -976,8 +1077,11 @@ function renderRichText(raw: string): string {
 function renderMessages(): void {
     const previousScrollTop = chatMessages.scrollTop;
     const shouldStickToBottom = state.stickChatToBottom;
+    const visibleThinking = state.thinkingStatus && (state.generating || state.thinkingStatus.persistent)
+        ? state.thinkingStatus
+        : null;
 
-    if (!state.messages.length) {
+    if (!state.messages.length && !visibleThinking) {
         chatMessages.innerHTML = `
             <div class="empty-state">
                 <div>
@@ -991,7 +1095,7 @@ function renderMessages(): void {
         return;
     }
 
-    chatMessages.innerHTML = state.messages.map((message) => {
+    const messagesHtml = state.messages.map((message) => {
         const role = message.error ? "assistant error" : message.role;
         const parsedArtifacts = message.role === "assistant"
             ? parseArtifactMessage(message.content || "")
@@ -1005,18 +1109,27 @@ function renderMessages(): void {
             <article class="message ${role}">
                 <div class="message-role">${escapeHtml(meta)}</div>
                 ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
-                <div class="message-content">${renderRichText(parsedArtifacts.displayContent || "")}</div>
+                <div class="message-content rich-text">${renderRichText(parsedArtifacts.displayContent || "")}</div>
             </article>
         `;
     }).join("");
-
-    chatMessages.querySelectorAll<HTMLButtonElement>(".artifact-ref").forEach((button) => {
-        button.addEventListener("click", () => {
-            const path = resolveArtifactReferencePath(button.dataset.artifactPath || "");
-            if (!path) return;
-            void openFile(path);
-        });
-    });
+    const thinkingHtml = visibleThinking ? `
+        <div class="message-thinking${visibleThinking.error ? " error" : ""}">
+            <span class="message-thinking-label">Thinking</span>
+            <span class="message-thinking-text">${escapeHtml(visibleThinking.text)}</span>
+        </div>
+    ` : "";
+    chatMessages.innerHTML = messagesHtml || thinkingHtml
+        ? `${messagesHtml}${thinkingHtml}`
+        : `
+            <div class="empty-state">
+                <div>
+                    <div class="empty-state-title">Start a conversation</div>
+                    <p>Ask the assistant to inspect code, make a change, or explain something here.</p>
+                </div>
+            </div>
+        `;
+    bindArtifactLinks(chatMessages);
 
     state.messages.forEach((message, index) => {
         maybeHandleAssistantArtifacts(message, index);
@@ -1608,7 +1721,8 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     }
 
     if (contentKind === "markdown") {
-        filePreview.innerHTML = `<div class="preview-markdown">${renderRichText(payload.content || "")}</div>`;
+        filePreview.innerHTML = `<div class="preview-markdown rich-text">${renderRichText(payload.content || "")}</div>`;
+        bindArtifactLinks(filePreview);
         return;
     }
 
@@ -1865,11 +1979,12 @@ async function loadConversation(id: string): Promise<void> {
     state.messages = payload.messages || [];
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
+    state.thinkingStatus = null;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
 
     const matchingConversation = state.conversations.find((conversation) => conversation.id === id);
-    state.currentConversationTitle = matchingConversation?.title || titleFromMessage(state.messages[0]?.content || "New chat");
+    state.currentConversationTitle = matchingConversation?.title || "New chat";
 
     if (payload.workspace_id && payload.workspace_id !== state.currentWorkspaceId) {
         await loadWorkspaces(payload.workspace_id);
@@ -1888,6 +2003,7 @@ function startNewChat(): void {
     state.messages = [];
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
+    state.thinkingStatus = null;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
     renderMessages();
@@ -1913,23 +2029,25 @@ function ensureAssistantMessage(): ChatMessage {
     return assistantMessage;
 }
 
-function finishGeneration(): void {
+function finishGeneration(options: { preserveThinking?: boolean } = {}): void {
     state.activeAssistantIndex = -1;
     setGenerating(false);
-    setComposerHint(defaultComposerStatus());
+    if (!options.preserveThinking) {
+        state.thinkingStatus = null;
+        setComposerHint(defaultComposerStatus());
+    } else if (state.thinkingStatus) {
+        setComposerHint(`Thinking: ${state.thinkingStatus.text}`);
+    } else {
+        setComposerHint(defaultComposerStatus());
+    }
+    renderMessages();
+    window.clearTimeout(state.conversationRefreshTimer);
     void loadConversations();
+    state.conversationRefreshTimer = window.setTimeout(() => {
+        void loadConversations();
+    }, 1600);
     void loadDirectory(state.currentDirectoryPath);
     void loadContextEvalReport();
-}
-
-function pushSystemMessage(content: string, error = false): void {
-    state.messages.push({
-        role: "system",
-        content,
-        timestamp: new Date().toISOString(),
-        error,
-    });
-    renderMessages();
 }
 
 function handleChatEvent(event: ChatEvent): void {
@@ -1938,7 +2056,7 @@ function handleChatEvent(event: ChatEvent): void {
     if (event.type === "start") {
         ensureAssistantMessage();
         setGenerating(true);
-        setComposerHint("Assistant is working...");
+        setThinkingStatus(buildThinkingSummary(event));
         return;
     }
 
@@ -1956,8 +2074,8 @@ function handleChatEvent(event: ChatEvent): void {
         return;
     }
 
-    if (event.type === "activity" && event.content) {
-        setComposerHint(event.content);
+    if ((event.type === "activity" || event.type === "reasoning_note") && event.content) {
+        setThinkingStatus(buildThinkingSummary(event), { phase: event.phase || "thinking" });
         return;
     }
 
@@ -1977,19 +2095,32 @@ function handleChatEvent(event: ChatEvent): void {
                 approval_target: event.approval_target || "tool",
                 approved: true,
             }));
-            setComposerHint("Auto-approved workspace access. Continuing...");
+            setThinkingStatus(buildThinkingSummary(event), { phase: "permission" });
         } else {
-            setComposerHint(event.content || "Permission is required to continue.");
+            setThinkingStatus(buildThinkingSummary(event), { phase: "permission", error: true, persistent: true });
         }
         return;
     }
 
     if (event.type === "error") {
-        const assistantMessage = ensureAssistantMessage();
-        assistantMessage.content = event.content || "The assistant hit an error.";
-        assistantMessage.error = true;
-        renderMessages();
-        finishGeneration();
+        const assistantMessage = state.activeAssistantIndex >= 0
+            ? state.messages[state.activeAssistantIndex]
+            : null;
+        const hasVisibleReply = Boolean(
+            assistantMessage
+            && assistantMessage.role === "assistant"
+            && String(assistantMessage.content || "").trim()
+        );
+        setThinkingStatus(buildThinkingSummary(event), {
+            phase: event.phase || "thinking",
+            error: true,
+            persistent: !hasVisibleReply,
+        });
+        if (assistantMessage && assistantMessage.role === "assistant" && hasVisibleReply) {
+            assistantMessage.error = true;
+            renderMessages();
+        }
+        finishGeneration({ preserveThinking: !hasVisibleReply });
         return;
     }
 
@@ -2036,15 +2167,11 @@ async function sendCurrentMessage(): Promise<void> {
     });
     state.stickChatToBottom = true;
 
-    if (state.currentConversationTitle === "New chat") {
-        state.currentConversationTitle = titleFromMessage(message);
-    }
-
     composerInput.value = "";
     renderMessages();
     renderConversations();
     setGenerating(true);
-    setComposerHint(state.modelAvailable ? "Waiting for the assistant..." : "Model may still be loading. Sending anyway...");
+    setThinkingStatus(state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading.");
 
     const payload = {
         message,
@@ -2058,8 +2185,11 @@ async function sendCurrentMessage(): Promise<void> {
     try {
         await dispatchChatPayload(payload);
     } catch (error) {
-        pushSystemMessage(error instanceof Error ? error.message : "Message send failed", true);
-        finishGeneration();
+        setThinkingStatus(
+            error instanceof Error ? summarizeRuntimeError(error.message) : "The reply could not be sent.",
+            { error: true, persistent: true },
+        );
+        finishGeneration({ preserveThinking: true });
     }
 }
 
@@ -2166,8 +2296,8 @@ function connectWebSocket(): void {
     state.ws.addEventListener("close", () => {
         setConnectionState("offline");
         if (state.generating) {
-            pushSystemMessage("Streaming connection closed. The current turn stopped.", true);
-            finishGeneration();
+            setThinkingStatus("The reply stopped before it could finish.", { error: true, persistent: true });
+            finishGeneration({ preserveThinking: true });
         }
         window.clearTimeout(state.reconnectTimer);
         state.reconnectTimer = window.setTimeout(() => connectWebSocket(), 2000);
