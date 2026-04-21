@@ -1166,6 +1166,101 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertFalse(app.should_route_prepared_turn_via_direct_search(prepared))
 
+    def test_handle_direct_search_prefetches_fact_pages_and_answers_directly(self):
+        original_emit_direct_tool_call = app.emit_direct_tool_call
+        original_vllm_chat_complete = app.vllm_chat_complete
+        original_run_resumable_tool_loop = app.run_resumable_tool_loop
+
+        class DummyWebSocket:
+            async def send_json(self, _payload):
+                return None
+
+        recorded_calls = []
+
+        async def fake_emit_direct_tool_call(
+            websocket,
+            conversation_id,
+            call,
+            *,
+            features=None,
+            status_prefix="",
+            activity_phase="respond",
+            activity_step_label=None,
+            workflow_execution=None,
+        ):
+            recorded_calls.append(call["name"])
+            if call["name"] == "web.search":
+                return {
+                    "id": call["id"],
+                    "ok": True,
+                    "result": {
+                        "query": "what is the weather in san francisco",
+                        "count": 2,
+                        "results": [
+                            {
+                                "title": "San Francisco Weather",
+                                "url": "https://weather.example/sf",
+                                "domain": "weather.example",
+                                "snippet": "Current conditions for San Francisco.",
+                            },
+                            {
+                                "title": "San Francisco Hourly Forecast",
+                                "url": "https://forecast.example/sf-hourly",
+                                "domain": "forecast.example",
+                                "snippet": "Hourly weather forecast for San Francisco.",
+                            },
+                        ],
+                    },
+                }
+            if call["name"] == "web.fetch_page":
+                return {
+                    "id": call["id"],
+                    "ok": True,
+                    "result": {
+                        "url": call["arguments"]["url"],
+                        "final_url": call["arguments"]["url"],
+                        "title": "San Francisco Weather",
+                        "domain": "weather.example",
+                        "content": "Current weather in San Francisco is 61 F with light wind and clear skies.",
+                    },
+                }
+            raise AssertionError(f"Unexpected tool call: {call['name']}")
+
+        async def fake_vllm_chat_complete(messages, max_tokens=None, temperature=None):
+            self.assertIn("Current weather in San Francisco is 61 F", messages[-1]["content"])
+            self.assertIn("Answer the user's question directly.", messages[-1]["content"])
+            return "San Francisco is **61 F** with light wind and clear skies. [Weather](https://weather.example/sf)"
+
+        async def fail_run_resumable_tool_loop(*args, **kwargs):
+            raise AssertionError("Current-fact direct search should not fall back to the resumable tool loop")
+
+        try:
+            app.emit_direct_tool_call = fake_emit_direct_tool_call
+            app.vllm_chat_complete = fake_vllm_chat_complete
+            app.run_resumable_tool_loop = fail_run_resumable_tool_loop
+
+            response = asyncio.run(
+                app.handle_direct_search_command(
+                    DummyWebSocket(),
+                    "conv-weather-direct",
+                    [],
+                    "system",
+                    1024,
+                    app.FeatureFlags(agent_tools=True, web_search=True),
+                    "what is the weather in san francisco",
+                )
+            )
+        finally:
+            app.emit_direct_tool_call = original_emit_direct_tool_call
+            app.vllm_chat_complete = original_vllm_chat_complete
+            app.run_resumable_tool_loop = original_run_resumable_tool_loop
+
+        self.assertEqual(
+            recorded_calls,
+            ["web.search", "web.fetch_page", "web.fetch_page"],
+        )
+        self.assertIn("61 F", response)
+
     def test_workspace_command_env_disables_python_bytecode_clutter(self):
         env = app.build_workspace_command_env("conv-env-no-pyc")
 
