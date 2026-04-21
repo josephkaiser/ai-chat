@@ -809,6 +809,19 @@ function extractSingleFenceFromMessage(raw) {
 function stripArtifactHelperLines(text) {
     return String(text || "").split(/\r?\n/).filter((line)=>!ARTIFACT_HELPER_TEXT_PATTERNS.some((pattern)=>pattern.test(line.trim()))).join("\n");
 }
+function stripSingleFenceFromMessage(raw) {
+    const matches = [
+        ...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)
+    ];
+    if (matches.length !== 1) return String(raw || "").trim();
+    const match = matches[0];
+    const before = String(raw || "").slice(0, match.index || 0).trim();
+    const after = String(raw || "").slice((match.index || 0) + match[0].length).trim();
+    return [
+        before,
+        after
+    ].filter(Boolean).join("\n\n").trim();
+}
 function parseArtifactMessage(raw) {
     const cleaned = stripArtifactHelperLines(raw);
     const artifactMatch = cleaned.match(/\[\[artifact:([^\]]+)\]\]/i);
@@ -822,15 +835,32 @@ function parseArtifactMessage(raw) {
     }
     const before = cleaned.slice(0, artifactMatch.index || 0).trim();
     const after = cleaned.slice((artifactMatch.index || 0) + artifactMatch[0].length).trim();
-    const displayParts = [
-        before
-    ];
-    if (!after) {
-        displayParts.push(cleaned.replace(/\[\[artifact:[^\]]+\]\]/gi, "").trim());
+    const fenceFromAfter = extractSingleFenceFromMessage(after);
+    if (after && fenceFromAfter) {
+        return {
+            artifactPaths,
+            displayContent: [
+                stripSingleFenceFromMessage(before),
+                stripSingleFenceFromMessage(after)
+            ].filter(Boolean).join("\n\n").trim(),
+            materializedBody: after
+        };
     }
+    const fenceFromBefore = extractSingleFenceFromMessage(before);
+    if (!after && fenceFromBefore) {
+        return {
+            artifactPaths,
+            displayContent: stripSingleFenceFromMessage(before).trim(),
+            materializedBody: before
+        };
+    }
+    const displayParts = [
+        before,
+        after
+    ].filter(Boolean);
     return {
         artifactPaths,
-        displayContent: displayParts.filter(Boolean).join("\n\n").trim(),
+        displayContent: displayParts.join("\n\n").trim(),
         materializedBody: after
     };
 }
@@ -893,6 +923,23 @@ function renderArtifactReferences(paths) {
         </div>
     `;
 }
+function summarizeArtifactDisplayText(text, limit = 140) {
+    const cleaned = cleanConversationText(text);
+    if (!cleaned) return "";
+    if (cleaned.length <= limit) return cleaned;
+    return `${cleaned.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+}
+function renderArtifactObject(paths, note = "", status = "Saved in viewer") {
+    if (!paths.length) return "";
+    const summary = summarizeArtifactDisplayText(note);
+    return `
+        <div class="artifact-object">
+            <div class="artifact-object-meta">${escapeHtml(status)}</div>
+            ${renderArtifactReferences(paths)}
+            ${summary ? `<div class="artifact-object-note">${escapeHtml(summary)}</div>` : ""}
+        </div>
+    `;
+}
 function bindArtifactLinks(root) {
     root.querySelectorAll("[data-artifact-path]").forEach((element)=>{
         element.addEventListener("click", (event)=>{
@@ -908,7 +955,7 @@ function maybeHandleAssistantArtifacts(message, index) {
     if (state.generating && index === state.activeAssistantIndex) return;
     const parsed = parseArtifactMessage(message.content || "");
     if (!parsed.artifactPaths.length) return;
-    const artifactBody = parsed.materializedBody || parsed.displayContent;
+    const artifactBody = parsed.materializedBody;
     const primaryPath = parsed.artifactPaths[0];
     const artifactKey = [
         state.currentConversationId,
@@ -1372,11 +1419,16 @@ function renderMessages() {
             materializedBody: ""
         };
         const meta = message.role === "user" ? "You" : message.role === "assistant" ? assistantMetaLabel(message, index) : "System";
+        const artifactObjectHtml = message.role === "assistant" && parsedArtifacts.artifactPaths.length && parsedArtifacts.materializedBody ? renderArtifactObject(parsedArtifacts.artifactPaths, parsedArtifacts.displayContent || "", parsedArtifacts.displayContent ? "Updated file in viewer" : "Saved in viewer") : "";
+        const bodyHtml = parsedArtifacts.displayContent ? `<div class="message-content rich-text">${renderRichText(parsedArtifacts.displayContent || "")}</div>` : "";
+        const messageBody = artifactObjectHtml || `
+                ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
+                ${bodyHtml}
+            `;
         return `
             <article class="message ${role}">
                 <div class="message-role">${escapeHtml(meta)}</div>
-                ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
-                <div class="message-content rich-text">${renderRichText(parsedArtifacts.displayContent || "")}</div>
+                ${messageBody}
             </article>
         `;
     }).join("");
