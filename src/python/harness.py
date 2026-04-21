@@ -5400,6 +5400,8 @@ def extract_workspace_path_references(message: str) -> List[str]:
         candidate = str(match[1] or match[2] or "").strip()
         if not candidate:
             continue
+        if re.search(r"\s", candidate):
+            continue
         if candidate.startswith("[[artifact:") or "://" in candidate:
             continue
         cleaned = candidate.strip("./")
@@ -5560,6 +5562,131 @@ def strip_unverified_workspace_write_claims(message: str, tool_results: Optional
         "I didn't actually create a workspace file in this turn. "
         "If you want, I can save the result once workspace editing is enabled."
     )
+
+
+INLINE_CODE_ARTIFACT_EXTENSION_MAP = {
+    "c": "c",
+    "h": "h",
+    "cpp": "cpp",
+    "c++": "cpp",
+    "hpp": "hpp",
+    "cc": "cc",
+    "python": "py",
+    "py": "py",
+    "javascript": "js",
+    "js": "js",
+    "typescript": "ts",
+    "ts": "ts",
+    "tsx": "tsx",
+    "jsx": "jsx",
+    "java": "java",
+    "go": "go",
+    "rust": "rs",
+    "rs": "rs",
+    "ruby": "rb",
+    "rb": "rb",
+    "php": "php",
+    "html": "html",
+    "css": "css",
+    "json": "json",
+    "sql": "sql",
+    "sh": "sh",
+    "bash": "sh",
+    "zsh": "sh",
+}
+INLINE_CODE_ARTIFACT_HINT_PATTERN = re.compile(
+    r"\b(updated?|modified|revised|here(?:'s| is) the|save|workspace|file|version|example)\b",
+    re.IGNORECASE,
+)
+
+
+def unwrap_single_fenced_code_block(raw: str) -> Optional[Dict[str, str]]:
+    """Extract a single fenced code block from a message when exactly one exists."""
+    matches = re.findall(r"```([^\n`]*)\n([\s\S]*?)\n```", str(raw or "").strip())
+    if len(matches) != 1:
+        return None
+    language = str(matches[0][0] or "").strip().lower()
+    body = str(matches[0][1] or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not body:
+        return None
+    return {"language": language, "body": body}
+
+
+def infer_inline_code_artifact_path(
+    request_text: str,
+    history: Optional[List[Dict[str, str]]],
+    language: str,
+) -> str:
+    """Infer a reasonable workspace-relative path for a materialized inline code answer."""
+    extension = INLINE_CODE_ARTIFACT_EXTENSION_MAP.get(str(language or "").strip().lower())
+    if not extension:
+        return ""
+
+    candidate_sources: List[str] = [str(request_text or "")]
+    if history:
+        candidate_sources.extend(str(item.get("content", "") or "") for item in history[-6:])
+    for source in reversed(candidate_sources):
+        refs = extract_workspace_path_references(source)
+        for ref in reversed(refs):
+            candidate = str(ref or "").strip()
+            if not candidate:
+                continue
+            suffix = pathlib.Path(candidate).suffix.lower().lstrip(".")
+            if suffix == extension:
+                return sanitize_relative_workspace_path(candidate, fallback=f"code_example.{extension}")
+            if not suffix:
+                return sanitize_relative_workspace_path(f"{candidate}.{extension}", fallback=f"code_example.{extension}")
+
+    naming_stopwords = {"looking", "your", "used", "using", "only", "have", "just", "version", "updated", "example"}
+    terms = extract_request_terms_for_plan(request_text, limit=6)
+    basename_terms: List[str] = []
+    for term in terms:
+        stem = pathlib.Path(term).stem if "." in term else term
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_").lower()
+        if not cleaned or cleaned in naming_stopwords or cleaned in basename_terms:
+            continue
+        basename_terms.append(cleaned)
+        if len(basename_terms) >= 3:
+            break
+    basename = "_".join(basename_terms) if basename_terms else "code_example"
+    return sanitize_relative_workspace_path(f"{basename}.{extension}", fallback=f"code_example.{extension}")
+
+
+def maybe_attach_inline_code_artifact_reference(
+    response: str,
+    request_text: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Append an artifact ref for a standalone inline code answer so the frontend can materialize it."""
+    cleaned = str(response or "").strip()
+    if not cleaned:
+        return ""
+    if extract_artifact_references(cleaned):
+        return cleaned
+    if successful_workspace_write_paths(tool_results or []):
+        return cleaned
+
+    fence = unwrap_single_fenced_code_block(cleaned)
+    if fence is None:
+        return cleaned
+    if len(fence["body"]) < 120 and fence["body"].count("\n") < 5:
+        return cleaned
+
+    combined_history = "\n".join(str(item.get("content", "") or "") for item in (history or [])[-4:])
+    request_lower = str(request_text or "").lower()
+    if not (
+        INLINE_CODE_ARTIFACT_HINT_PATTERN.search(cleaned)
+        or "```" in combined_history
+        or bool(extract_workspace_path_references(combined_history))
+        or any(term in request_lower for term in ("code", "script", "program", "example", "file"))
+    ):
+        return cleaned
+
+    path = infer_inline_code_artifact_path(request_text, history, fence["language"])
+    if not path:
+        return cleaned
+    return f"{cleaned}\n\n[[artifact:{path}]]"
 
 
 def truncate_output(text: str, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
@@ -5766,6 +5893,9 @@ async def finalize_tool_loop_answer(
     tool_results: List[Dict[str, Any]],
     max_tokens: int,
     features: Optional["FeatureFlags"] = None,
+    *,
+    request_text: str = "",
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> ToolLoopOutcome:
     """Apply citation repair when fetched web pages informed the final answer."""
     sources = fetched_web_sources(tool_results)
@@ -5776,6 +5906,12 @@ async def finalize_tool_loop_answer(
     if leaked_call:
         cleaned = format_leaked_tool_call_message(leaked_call, features or FeatureFlags())
     cleaned = strip_unverified_workspace_write_claims(cleaned, tool_results)
+    cleaned = maybe_attach_inline_code_artifact_reference(
+        cleaned,
+        request_text,
+        history=history,
+        tool_results=tool_results,
+    )
     return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
 
 @dataclass
@@ -14761,10 +14897,26 @@ async def run_tool_loop(
             call = parse_tool_call(cleaned)
         except Exception as exc:
             logger.warning("Tool call parse error, treating as final answer: %s", exc)
-            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens, features)
+            request_text = str(history[-1].get("content", "")) if history else ""
+            return await finalize_tool_loop_answer(
+                cleaned,
+                tool_results,
+                max_tokens,
+                features,
+                request_text=request_text,
+                history=history,
+            )
 
         if not call:
-            return await finalize_tool_loop_answer(cleaned, tool_results, max_tokens, features)
+            request_text = str(history[-1].get("content", "")) if history else ""
+            return await finalize_tool_loop_answer(
+                cleaned,
+                tool_results,
+                max_tokens,
+                features,
+                request_text=request_text,
+                history=history,
+            )
 
         if allowed_tools and call["name"] not in allowed_tools:
             if should_upgrade_to_workspace_execution(call, features, activity_phase):
@@ -18499,6 +18651,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     ),
                 )
                 full_response = tool_outcome.final_text
+                full_response = maybe_attach_inline_code_artifact_reference(
+                    full_response,
+                    effective_message,
+                    history=history,
+                    tool_results=tool_outcome.tool_results,
+                )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 if not response_started:
                     mark_foreground_job("running")
@@ -18563,6 +18721,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     )
                     full_response = format_leaked_tool_call_message(leaked_call, features)
                 full_response = strip_unverified_workspace_write_claims(full_response)
+                full_response = maybe_attach_inline_code_artifact_reference(
+                    full_response,
+                    effective_message,
+                    history=history,
+                )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
             mark_foreground_job("completed")

@@ -1004,6 +1004,15 @@ function unwrapSingleFence(raw: string): { language: string; body: string } | nu
     };
 }
 
+function extractSingleFenceFromMessage(raw: string): { language: string; body: string } | null {
+    const matches = [...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)];
+    if (matches.length !== 1) return null;
+    return {
+        language: normalizeCodeLanguage(matches[0][1] || ""),
+        body: String(matches[0][2] || "").replace(/\r\n?/g, "\n"),
+    };
+}
+
 function stripArtifactHelperLines(text: string): string {
     return String(text || "")
         .split(/\r?\n/)
@@ -1048,7 +1057,7 @@ function shouldMaterializeArtifact(path: string, body: string): boolean {
 
 function normalizeArtifactBodyForWrite(path: string, raw: string): string {
     const trimmed = String(raw || "").trim();
-    const fence = unwrapSingleFence(trimmed);
+    const fence = unwrapSingleFence(trimmed) || extractSingleFenceFromMessage(trimmed);
     if (!fence) return trimmed;
     const extension = artifactFileExtension(path);
     if (!extension) return fence.body;
@@ -1113,21 +1122,22 @@ function maybeHandleAssistantArtifacts(message: ChatMessage, index: number): voi
     if (state.generating && index === state.activeAssistantIndex) return;
     const parsed = parseArtifactMessage(message.content || "");
     if (!parsed.artifactPaths.length) return;
+    const artifactBody = parsed.materializedBody || parsed.displayContent;
 
     const primaryPath = parsed.artifactPaths[0];
     const artifactKey = [
         state.currentConversationId,
         primaryPath,
-        parsed.materializedBody.length,
-        parsed.materializedBody.slice(0, 120),
+        artifactBody.length,
+        artifactBody.slice(0, 120),
     ].join(":");
     if (state.handledArtifactKeys.has(artifactKey)) return;
     state.handledArtifactKeys.add(artifactKey);
 
     void (async () => {
         try {
-            if (shouldMaterializeArtifact(primaryPath, parsed.materializedBody)) {
-                await materializeArtifactFromAssistant(primaryPath, parsed.materializedBody);
+            if (shouldMaterializeArtifact(primaryPath, artifactBody)) {
+                await materializeArtifactFromAssistant(primaryPath, artifactBody);
                 return;
             }
             await openFile(primaryPath);
