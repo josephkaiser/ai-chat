@@ -7,6 +7,7 @@ A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a FastA
 - `src/python/harness.py` — main FastAPI app, WebSocket loop, workspace APIs, tool loop, and file-session runtime
 - `src/python/ai_chat/` — routing, deep-runtime orchestration, prompts, context selection, replay triage, and helpers
 - `src/web/` — frontend web app (`index.html`, `app.ts`, generated `app.js`, `style.css`)
+- `docs/` — prose documentation, plans, and design notes
 - `app.py` — compatibility entrypoint used by Docker and `./chat`
 
 ## Features
