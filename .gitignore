@@ -102,3 +102,7 @@ cuda-keyring*.deb
 # Training exports
 training/exports/*
 !training/exports/.gitkeep
+
+# Demo / media / promo
+assets/
+*.mov
