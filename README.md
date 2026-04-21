@@ -4,7 +4,7 @@ A self-hosted coding companion with a FastAPI backend, a lightweight workspace U
 
 ## Video Demo
 
-<video src='assets/demo.mov'></video>
+<video src='https://github.com/josephkaiser/ai-chat/assets/demo.mov'></video>
 
 ## Quick Start with `./chat`
 
