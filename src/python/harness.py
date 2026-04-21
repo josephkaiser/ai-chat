@@ -15720,7 +15720,7 @@ LOCAL_RAG_HINTS = {
 }
 WEB_SEARCH_HINTS = {
     "latest", "today", "current", "recent", "news", "release", "released", "version",
-    "price", "weather", "score", "web", "website", "online", "search", "google", "browse",
+    "price", "weather", "score",
 }
 ATTACHMENT_CONTEXT_MARKERS = (
     "attached files are available in the workspace:",
@@ -15901,6 +15901,23 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
         return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     return bool(words & WEB_SEARCH_HINTS)
+
+
+def select_direct_answer_tools(message: str, allowed_tools: List[str]) -> List[str]:
+    """Keep direct-answer mode chat-first while preserving file iteration for write requests."""
+    filtered = list(allowed_tools)
+    intent = classify_workspace_intent(message)
+    if intent not in {"focused_write", "broad_write"}:
+        filtered = [
+            tool_name for tool_name in filtered
+            if tool_name not in {"workspace.patch_file", "workspace.run_command"}
+        ]
+    if not message_requests_workspace_render(message):
+        filtered = [
+            tool_name for tool_name in filtered
+            if tool_name != "workspace.render"
+        ]
+    return filtered
 
 
 def request_demands_agent_execution(message: str) -> bool:
@@ -16581,15 +16598,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
         session.features,
         history=session.history,
     )
-    allowed_tools = [
-        tool_name for tool_name in allowed_tools
-        if tool_name not in {"workspace.patch_file", "workspace.run_command"}
-    ]
-    if not message_requests_workspace_render(session.message):
-        allowed_tools = [
-            tool_name for tool_name in allowed_tools
-            if tool_name != "workspace.render"
-        ]
+    allowed_tools = select_direct_answer_tools(session.message, allowed_tools)
     direct_bundle = await assemble_direct_answer_context_async(
         session,
         retrieval_adapters=build_context_retrieval_adapters(),

@@ -538,6 +538,31 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertTrue(app.should_use_workspace_tools("conv-avgo", message, features))
         self.assertTrue(app.should_auto_execute_workspace_task("conv-avgo", message, features))
 
+    def test_scraper_request_prefers_code_tools_over_implicit_web_search(self):
+        message = "Write a Python script to scrape a website and save the results to CSV."
+        features = app.FeatureFlags(
+            agent_tools=True,
+            workspace_write=True,
+            workspace_run_commands=True,
+            web_search=True,
+        )
+
+        allowed = app.select_enabled_tools("conv-scrape", message, features)
+        direct_allowed = app.select_direct_answer_tools(message, allowed)
+
+        self.assertEqual(app.classify_workspace_intent(message), "focused_write")
+        self.assertFalse(app.should_offer_web_search(message, features))
+        self.assertIn("workspace.patch_file", allowed)
+        self.assertIn("workspace.run_command", allowed)
+        self.assertIn("workspace.patch_file", direct_allowed)
+        self.assertIn("workspace.run_command", direct_allowed)
+
+    def test_explicit_search_request_still_enables_web_search(self):
+        message = "Search the web for the latest FastAPI release and cite sources."
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        self.assertTrue(app.should_offer_web_search(message, features))
+
     def test_patch_request_can_upgrade_from_respond_phase_into_execution(self):
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)
 
