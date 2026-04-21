@@ -15880,7 +15880,13 @@ LOCAL_RAG_HINTS = {
 }
 WEB_SEARCH_HINTS = {
     "latest", "today", "current", "recent", "news", "release", "released", "version",
-    "price", "weather", "score",
+    "price", "pricing", "weather", "score", "stocks", "docs", "documentation",
+    "announcement", "announcements", "update", "updates",
+}
+WEB_SEARCH_ACTION_WORDS = {"search", "browse", "google", "research", "lookup", "check", "find"}
+WEB_SEARCH_CONTEXT_WORDS = {"web", "internet", "online"}
+WEB_RECOMMENDATION_HINTS = {
+    "best", "top", "recommend", "recommended", "recommendation", "compare", "comparison", "versus", "vs",
 }
 ATTACHMENT_CONTEXT_MARKERS = (
     "attached files are available in the workspace:",
@@ -15989,6 +15995,8 @@ def explicit_web_search_requested(message: str) -> bool:
     if any(phrase in text for phrase in EXPLICIT_WEB_SEARCH_PHRASES):
         return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if words & WEB_SEARCH_ACTION_WORDS and words & WEB_SEARCH_CONTEXT_WORDS:
+        return True
     return bool({"citations", "citation", "sources", "source", "references"} & words)
 
 
@@ -16060,6 +16068,11 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     if re.search(r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text):
         return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if words & WEB_RECOMMENDATION_HINTS and (
+        words & WEB_SEARCH_HINTS
+        or words & {"buy", "use", "tool", "tools", "service", "services", "library", "libraries", "framework", "frameworks"}
+    ):
+        return True
     return bool(words & WEB_SEARCH_HINTS)
 
 
