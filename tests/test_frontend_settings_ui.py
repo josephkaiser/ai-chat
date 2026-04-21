@@ -114,6 +114,8 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('event.type === "status"', ts)
         self.assertIn('turn_kind: "visible_chat"', ts)
         self.assertIn('mode: "auto"', ts)
+        self.assertIn("features: {", ts)
+        self.assertIn("workspace_write: true", ts)
         self.assertIn("auto_approve_tool_permissions: true", ts)
         self.assertIn("attachments,", ts)
         self.assertIn('type: "permission_response"', ts)

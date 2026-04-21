@@ -7,7 +7,7 @@ This app works best when new capabilities are added as a small end-to-end workfl
 For a new capability, try to wire all of these together:
 
 1. **Model-facing instructions**
-   Add examples and constraints to `build_tool_system_prompt(...)` in [app.py](/Users/joe/dev/ai-chat/app.py) so the assistant knows:
+   Add examples and constraints to `build_tool_system_prompt(...)` in [src/python/harness.py](/Users/joe/dev/ai-chat/src/python/harness.py) so the assistant knows:
    - which tool to call
    - what a good invocation looks like
    - when to research first
@@ -25,7 +25,8 @@ For a new capability, try to wire all of these together:
    - `Allow python3?`
 
 3. **Direct entry point**
-   If the capability is common, add a slash command or deterministic workflow so users can invoke it intentionally without relying only on prompt wording.
+   If the capability is common, add a typed slash command or another deterministic workflow so users can invoke it intentionally without relying only on prompt wording.
+   The shipped frontend no longer exposes a dedicated slash menu, but the backend still supports direct slash-command handling for text entered into the composer.
 
 4. **Workspace-first install path**
    Prefer reusable artifacts that live inside the conversation workspace.
@@ -60,9 +61,9 @@ The current Python workflow is the reference example:
 
 Example sequence:
 
-- `/search best python package for sec filings api`
-- `/pip sec-edgar-downloader pandas`
-- `/code build a small script that downloads Broadcom filings into the workspace`
+- type `/search best python package for sec filings api`
+- type `/pip sec-edgar-downloader pandas`
+- type `/code build a small script that downloads Broadcom filings into the workspace`
 
 ## When to add a new capability
 
@@ -75,8 +76,9 @@ A new capability is worth formalizing when it is:
 
 ## Files to update
 
-- [app.py](/Users/joe/dev/ai-chat/app.py) — tool prompt, approvals, direct workflows, runtime behavior
-- [src/web/app.js](/Users/joe/dev/ai-chat/src/web/app.js) — slash menu, turn feature inference, approval UX
+- [src/python/harness.py](/Users/joe/dev/ai-chat/src/python/harness.py) — tool prompt, approvals, direct workflows, runtime behavior
+- [app.py](/Users/joe/dev/ai-chat/app.py) — compatibility entrypoint only
+- [src/web/app.ts](/Users/joe/dev/ai-chat/src/web/app.ts) — current thin client and websocket behavior
 - [docs/harness.md](/Users/joe/dev/ai-chat/docs/harness.md) — harness/tool-loop behavior
-- [docs/api.md](/Users/joe/dev/ai-chat/docs/api.md) — slash/API/event reference
+- [docs/api.md](/Users/joe/dev/ai-chat/docs/api.md) — workflow/API/event reference
 - [docs/ui.md](/Users/joe/dev/ai-chat/docs/ui.md) — user-facing workflow entry points

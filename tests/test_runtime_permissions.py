@@ -33,6 +33,17 @@ class RuntimePermissionTests(unittest.TestCase):
             ["tool:web.search", "tool:workspace.write"],
         )
 
+    def test_parse_feature_flags_from_request_accepts_legacy_top_level_fields(self):
+        features = app.parse_feature_flags_from_request({
+            "workspace_write": True,
+            "auto_approve_tool_permissions": True,
+            "web_search": False,
+        })
+
+        self.assertTrue(features.workspace_write)
+        self.assertTrue(features.auto_approve_tool_permissions)
+        self.assertFalse(features.web_search)
+
     def test_missing_optional_dependency_only_accepts_missing_target_package(self):
         nested = ModuleNotFoundError("missing nested")
         nested.name = "fastapi.routing"

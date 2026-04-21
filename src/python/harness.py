@@ -10514,6 +10514,29 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
     )
 
 
+def parse_feature_flags_from_request(data: Any) -> FeatureFlags:
+    """Decode feature flags from a full request, including legacy top-level fields."""
+    payload = dict(data) if isinstance(data, dict) else {}
+    raw_features = payload.get("features")
+    features_payload = dict(raw_features) if isinstance(raw_features, dict) else {}
+
+    for field_name in (
+        "agent_tools",
+        "workspace",
+        "workspace_write",
+        "workspace_run_commands",
+        "local_rag",
+        "web_search",
+        "auto_approve_tool_permissions",
+        "allowed_commands",
+        "allowed_tool_permissions",
+    ):
+        if field_name in payload and field_name not in features_payload:
+            features_payload[field_name] = payload.get(field_name)
+
+    return parse_feature_flags(features_payload)
+
+
 def allowed_workspace_tools(
     features: FeatureFlags,
     include_write: bool = False,
@@ -18559,7 +18582,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     ]
     custom_system_prompt = data.get('system_prompt')
     requested_mode = normalize_requested_mode(data.get('mode', 'auto'))
-    features = parse_feature_flags(data.get('features'))
+    features = parse_feature_flags_from_request(data)
     slash_command = (
         parse_direct_slash_command_payload(data.get("slash_command"))
         or infer_direct_slash_command_from_message(message)
