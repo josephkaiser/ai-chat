@@ -1011,6 +1011,51 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertEqual(cleaned, "[[artifact:simple_script.py]]")
 
+    def test_inline_code_response_gets_artifact_reference_when_file_like(self):
+        response = (
+            "I'll modify the example to include proper headers. Here's the updated version:\n\n"
+            "```c\n"
+            "#include <stdio.h>\n"
+            "#include <stdlib.h>\n\n"
+            "int main(void) {\n"
+            "    printf(\"hello\\n\");\n"
+            "    return 0;\n"
+            "}\n"
+            "```"
+        )
+        history = [
+            {"role": "assistant", "content": "```c\nint main(){return 0;}\n```"},
+        ]
+
+        wrapped = app.maybe_attach_inline_code_artifact_reference(
+            response,
+            "Ok i am looking at your linked list. I have only used stdio.h, not stdlib.h",
+            history=history,
+            tool_results=[],
+        )
+
+        self.assertIn("[[artifact:", wrapped)
+        self.assertIn("linked", wrapped)
+        self.assertIn(".c]]", wrapped)
+
+    def test_inline_code_response_does_not_get_artifact_reference_after_real_write(self):
+        response = "```c\nint main(void) { return 0; }\n```"
+        tool_results = [
+            {
+                "call": {"name": "workspace.patch_file"},
+                "result": {"ok": True, "result": {"path": "linked_list.c"}},
+            }
+        ]
+
+        wrapped = app.maybe_attach_inline_code_artifact_reference(
+            response,
+            "Update linked_list.c",
+            history=[],
+            tool_results=tool_results,
+        )
+
+        self.assertEqual(wrapped, response)
+
     def test_select_enabled_tools_treats_yes_after_save_offer_as_write_intent(self):
         features = app.FeatureFlags(
             agent_tools=True,

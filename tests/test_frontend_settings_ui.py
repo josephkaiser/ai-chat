@@ -123,6 +123,7 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("function extractArtifactReferences(", ts)
         self.assertIn("function parseArtifactMessage(", ts)
         self.assertIn("function unwrapSingleFence(", ts)
+        self.assertIn("function extractSingleFenceFromMessage(", ts)
         self.assertIn("function normalizeArtifactBodyForWrite(", ts)
         self.assertIn("function bindArtifactLinks(", ts)
         self.assertIn("async function materializeArtifactFromAssistant(", ts)
