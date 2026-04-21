@@ -47,6 +47,19 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(request.approval_target, "tool")
         self.assertIn("search", request.content.lower())
 
+    def test_normalize_attachment_paths_for_workspace_deduplicates_and_normalizes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            (workspace / "pasted").mkdir(parents=True, exist_ok=True)
+            (workspace / "pasted" / "note.txt").write_text("hello", encoding="utf-8")
+
+            cleaned = app.normalize_attachment_paths_for_workspace(
+                workspace,
+                ["pasted/note.txt", "./pasted/note.txt", "pasted/note.txt"],
+            )
+
+        self.assertEqual(cleaned, ["pasted/note.txt"])
+
     def test_command_permission_request_uses_executable_key(self):
         previous_root = app.WORKSPACE_ROOT
         try:
