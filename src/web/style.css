@@ -907,10 +907,10 @@ body[data-viewer-mode="file"] .chat-panel {
     flex-direction: column;
     align-items: stretch;
     gap: 12px;
-    padding: 8px 0 18px;
-    width: min(var(--chat-lane-width), calc(100% - 24px));
-    max-width: 100%;
-    margin: 0 auto;
+    padding: 8px max(12px, calc((100% - var(--chat-lane-width)) / 2)) 18px;
+    width: 100%;
+    max-width: none;
+    margin: 0;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
     scrollbar-width: none;
