@@ -7,13 +7,7 @@ AI Chat is a self-hosted coding companion with:
 - a local `./chat` launcher for install, rebuild, and run workflows
 - a workspace-aware agent runtime with durable artifacts, replay triage, and tool execution
 
-## Video Demo
-
-
-
 https://github.com/user-attachments/assets/8c4a06f3-d863-4d93-8e5d-dbc6f137a9e0
-
-
 
 ## Quick Start
 
