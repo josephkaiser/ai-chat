@@ -1369,6 +1369,7 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(payload["capture"]["tool_policy"]["enabled_tools"], ["web.search", "web.fetch_page"])
         self.assertEqual(payload["capture"]["tool_names"], ["web.search"])
         self.assertEqual(payload["capture"]["final_outcome"], "completed_with_tools")
+        self.assertEqual(payload["capture"]["workflow_status"], "completed")
 
     def test_direct_search_route_handles_pure_web_facts_turns(self):
         prepared = app.PreparedTurnRequest(
