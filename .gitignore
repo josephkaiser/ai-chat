@@ -49,6 +49,7 @@ vite.svg
 .netlify/
 
 # Data
+.ai/
 data/
 runs/
 workspace/

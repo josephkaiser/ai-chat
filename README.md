@@ -1,12 +1,13 @@
-# AI Chat with vLLM
+# AI Chat
 
-A self-hosted coding companion with a FastAPI backend, a lightweight workspace UI, and a `./chat` launcher for install, rebuild, and run workflows.
+AI Chat is a self-hosted coding companion with:
 
-## Video Demo
+- a FastAPI backend
+- a lightweight browser UI
+- a local `./chat` launcher for install, rebuild, and run workflows
+- a workspace-aware agent runtime with durable artifacts, replay triage, and tool execution
 
-
-
-## Quick Start with `./chat`
+## Quick Start
 
 After cloning the repo, `./chat` is the primary way to install and run the app:
 
@@ -49,6 +50,24 @@ The default setup is aimed at a machine that can run vLLM locally.
 - Internet access for initial image pulls, model downloads, and optional web search
 - A modern browser for the UI
 
+## What’s In This Repo
+
+```text
+.
+├── app.py                  # compatibility entrypoint
+├── chat                    # main local launcher
+├── docs/                   # product, architecture, and runtime docs
+├── scripts/                # build helpers
+├── src/python/             # backend and runtime implementation
+├── src/web/                # browser UI
+├── tests/                  # automated coverage
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
+```
+
+Runtime state such as `data/` and workspace-generated `.ai/` artifacts is intentionally ignored so the repository stays clean for contributors and public browsing.
+
 ## Features
 
 - Streaming chat over WebSocket, with HTTP fallback support
@@ -59,15 +78,9 @@ The default setup is aimed at a machine that can run vLLM locally.
 - Replay triage driven by retries and negative feedback
 - SQLite-backed persistence for conversations, workspaces, feedback, and file-session state
 
-## Notes
-
-- The launcher rebuilds `src/web/app.js` from `src/web/app.ts` when needed.
-- `./chat kickstart` is the clean rebuild path for a freshly synced repo.
-- Workspace roots are path-backed catalog entries; legacy hosted runs may still exist under [`runs/`](/Users/joe/dev/ai-chat/runs).
-
 ## Local Development
 
-If you want to run the app without the bundled local vLLM stack, you can point it at a remote OpenAI-compatible server and start it with:
+If you want to run the app without the bundled local vLLM stack, point it at a remote OpenAI-compatible server and start it with either:
 
 ```bash
 npm start
@@ -83,9 +96,11 @@ after setting the relevant environment variables described in [docs/configuratio
 
 ## Documentation
 
+- [Docs Index](docs/README.md)
 - [Configuration](docs/configuration.md)
 - [API](docs/api.md)
 - [Architecture](docs/architecture.md)
 - [Capability Playbook](docs/capabilities.md)
 - [Harness And Tools](docs/harness.md)
 - [UI Features](docs/ui.md)
+- [Roadmaps](docs/roadmaps/README.md)

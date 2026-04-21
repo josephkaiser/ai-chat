@@ -27,15 +27,15 @@ ai-chat/
 │   └── style.css                    # Layout and styling
 ├── chat                             # CLI to install/start/stop the stack
 ├── docker-compose.yml               # vLLM + chat-app services
-├── docs/                            # Prose docs, plans, and design notes
-└── data/chat.db                     # SQLite database
+├── docs/                            # Public docs and contributor-facing roadmaps
+└── data/chat.db                     # Local runtime SQLite database (ignored in git)
 ```
 
 ## How the pieces connect
 
 - `app.py` is no longer the real backend implementation. It exists so Docker and local scripts can still launch the app through a stable entrypoint.
 - `src/python/harness.py` is the actual backend. It mounts the frontend, exposes REST and WebSocket routes, persists SQLite state, runs the tool loop, and manages file-session/background-job behavior.
-- Runtime code lives under `src/`; `docs/` is intentionally documentation-only.
+- Runtime code lives under `src/`; `docs/` is intentionally documentation-only, with roadmaps grouped under `docs/roadmaps/`.
 - `routing_program.py` and `turn_strategy.py` decide whether a request should be answered directly, sent through a scoped tool loop, or upgraded into a deeper inspect/plan/execute flow.
 - `runtime_layers.py` keeps model-only context such as active draft/file metadata out of the visible transcript.
 - `deep_runtime.py`, `deep_flow.py`, and `task_engine.py` split the older monolithic deep-mode logic into smaller orchestration pieces.
