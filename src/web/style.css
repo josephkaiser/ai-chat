@@ -133,6 +133,11 @@ button[data-tooltip]::after {
     transform: translateY(4px);
 }
 
+.viewer-actions button[data-tooltip]::after {
+    top: calc(100% + 8px);
+    bottom: auto;
+}
+
 button[data-tooltip]:hover::after,
 button[data-tooltip]:focus-visible::after {
     opacity: 1;
@@ -347,6 +352,7 @@ body[data-left-sidebar-open="false"] .sidebar {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    overflow: visible;
 }
 
 .sidebar-panel-header {
