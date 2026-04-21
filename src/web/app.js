@@ -94,6 +94,13 @@ function generateId() {
 function escapeHtml(value) {
     return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
+function getKatexRenderer() {
+    const candidate = globalThis.katex;
+    if (candidate && typeof candidate.renderToString === "function") {
+        return candidate;
+    }
+    return null;
+}
 function formatRelativeTime(value) {
     if (!value) return "";
     const date = new Date(value);
@@ -1278,6 +1285,16 @@ function readMathScript(source, start) {
     return readMathAtom(source, start);
 }
 function renderMathExpression(source) {
+    const katex = getKatexRenderer();
+    if (katex) {
+        try {
+            return katex.renderToString(source, {
+                displayMode: false,
+                throwOnError: false,
+                strict: "ignore"
+            });
+        } catch  {}
+    }
     let i = 0;
     let html = "";
     while(i < source.length){
@@ -1294,6 +1311,19 @@ function renderMathExpression(source) {
         html += base;
     }
     return html.replace(/ {2,}/g, " ");
+}
+function renderDisplayMathExpression(source) {
+    const katex = getKatexRenderer();
+    if (katex) {
+        try {
+            return katex.renderToString(source, {
+                displayMode: true,
+                throwOnError: false,
+                strict: "ignore"
+            });
+        } catch  {}
+    }
+    return `<div class="math-block">${renderMathExpression(source)}</div>`;
 }
 function extractInlineMathSegments(text) {
     const mathSegments = [];
@@ -1339,11 +1369,11 @@ function renderMathBlock(block) {
     const trimmed = block.trim();
     const doubleDollar = trimmed.match(/^\$\$([\s\S]*?)\$\$$/);
     if (doubleDollar) {
-        return `<div class="math-block">${renderMathExpression(doubleDollar[1].trim())}</div>`;
+        return `<div class="math-block">${renderDisplayMathExpression(doubleDollar[1].trim())}</div>`;
     }
     const bracketed = trimmed.match(/^\\\[([\s\S]*?)\\\]$/);
     if (bracketed) {
-        return `<div class="math-block">${renderMathExpression(bracketed[1].trim())}</div>`;
+        return `<div class="math-block">${renderDisplayMathExpression(bracketed[1].trim())}</div>`;
     }
     return null;
 }

@@ -70,6 +70,16 @@ interface ThinkingStatus {
     persistent: boolean;
 }
 
+interface KatexRenderOptions {
+    displayMode?: boolean;
+    throwOnError?: boolean;
+    strict?: string;
+}
+
+interface KatexNamespace {
+    renderToString(source: string, options?: KatexRenderOptions): string;
+}
+
 interface ContextEvalRecentFailure {
     source_path: string;
     name: string;
@@ -280,6 +290,14 @@ function escapeHtml(value: string): string {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
+}
+
+function getKatexRenderer(): KatexNamespace | null {
+    const candidate = (globalThis as { katex?: KatexNamespace }).katex;
+    if (candidate && typeof candidate.renderToString === "function") {
+        return candidate;
+    }
+    return null;
 }
 
 function formatRelativeTime(value?: string): string {
@@ -1457,6 +1475,19 @@ function readMathScript(source: string, start: number): { html: string; end: num
 }
 
 function renderMathExpression(source: string): string {
+    const katex = getKatexRenderer();
+    if (katex) {
+        try {
+            return katex.renderToString(source, {
+                displayMode: false,
+                throwOnError: false,
+                strict: "ignore",
+            });
+        } catch {
+            // Fall through to the built-in renderer if KaTeX chokes on malformed input.
+        }
+    }
+
     let i = 0;
     let html = "";
 
@@ -1477,6 +1508,22 @@ function renderMathExpression(source: string): string {
     }
 
     return html.replace(/ {2,}/g, " ");
+}
+
+function renderDisplayMathExpression(source: string): string {
+    const katex = getKatexRenderer();
+    if (katex) {
+        try {
+            return katex.renderToString(source, {
+                displayMode: true,
+                throwOnError: false,
+                strict: "ignore",
+            });
+        } catch {
+            // Fall through to the built-in renderer if KaTeX chokes on malformed input.
+        }
+    }
+    return `<div class="math-block">${renderMathExpression(source)}</div>`;
 }
 
 function extractInlineMathSegments(text: string): { content: string; mathSegments: MathSegment[] } {
@@ -1525,11 +1572,11 @@ function renderMathBlock(block: string): string | null {
     const trimmed = block.trim();
     const doubleDollar = trimmed.match(/^\$\$([\s\S]*?)\$\$$/);
     if (doubleDollar) {
-        return `<div class="math-block">${renderMathExpression(doubleDollar[1].trim())}</div>`;
+        return `<div class="math-block">${renderDisplayMathExpression(doubleDollar[1].trim())}</div>`;
     }
     const bracketed = trimmed.match(/^\\\[([\s\S]*?)\\\]$/);
     if (bracketed) {
-        return `<div class="math-block">${renderMathExpression(bracketed[1].trim())}</div>`;
+        return `<div class="math-block">${renderDisplayMathExpression(bracketed[1].trim())}</div>`;
     }
     return null;
 }

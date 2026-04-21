@@ -10,13 +10,18 @@ class FrontendMathSupportTests(unittest.TestCase):
     def test_generated_javascript_is_built_from_typescript_source(self):
         ts = (WEB_ROOT / "app.ts").read_text(encoding="utf-8")
         js = (WEB_ROOT / "app.js").read_text(encoding="utf-8")
+        html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
         self.assertIn("interface WorkspaceFilePayload", ts)
         self.assertIn("Generated from src/web/app.ts", js)
         self.assertIn("async function loadWorkspaces(preferredId = \"\")", js)
         self.assertNotIn("interface WorkspaceFilePayload", js)
+        self.assertIn("function getKatexRenderer()", ts)
         self.assertIn("function renderMathExpression(", ts)
+        self.assertIn("function renderDisplayMathExpression(", ts)
         self.assertIn("function renderMathBlock(", ts)
         self.assertIn("function extractInlineMathSegments(", ts)
+        self.assertIn("katex.min.css", html)
+        self.assertIn("katex.min.js", html)
 
     def test_repo_includes_local_frontend_build_entrypoint(self):
         package_json = (ROOT / "package.json").read_text(encoding="utf-8")
