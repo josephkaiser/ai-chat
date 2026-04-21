@@ -41,6 +41,12 @@ class RuntimePermissionTests(unittest.TestCase):
         other.name = "starlette"
         self.assertFalse(app.missing_optional_dependency(other, "fastapi"))
 
+    def test_normalize_requested_mode_defaults_to_auto(self):
+        self.assertEqual(app.normalize_requested_mode(None), "auto")
+        self.assertEqual(app.normalize_requested_mode(""), "auto")
+        self.assertEqual(app.normalize_requested_mode("chat"), "auto")
+        self.assertEqual(app.normalize_requested_mode("deep"), "deep")
+
     def test_workspace_grep_permission_request_is_granular(self):
         request = app.build_tool_permission_request(
             "conv-grep",
@@ -1088,6 +1094,77 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(result["query"], "prior messages")
         self.assertGreaterEqual(result["count"], 1)
         self.assertTrue(any("prior" in match["content"].lower() for match in result["matches"]))
+
+    def test_direct_search_route_handles_pure_web_facts_turns(self):
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-weather",
+            active_file_path="",
+            turn_kind="visible_chat",
+            user_message_id=1,
+            saved_user_message="what is the weather in san francisco right now?",
+            effective_message="what is the weather in san francisco right now?",
+            model_message="what is the weather in san francisco right now?",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="deep",
+            resolved_mode="deep",
+            features=app.FeatureFlags(agent_tools=True, web_search=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="none",
+            enabled_tools=["web.search", "web.fetch_page"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                requires_search=True,
+                primary_skill="search",
+                execution_style="plan_preview",
+                enabled_tools=["web.search", "web.fetch_page"],
+            ),
+        )
+
+        self.assertTrue(app.should_route_prepared_turn_via_direct_search(prepared))
+
+    def test_direct_search_route_does_not_hijack_workspace_search_turns(self):
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-mixed",
+            active_file_path="",
+            turn_kind="visible_chat",
+            user_message_id=2,
+            saved_user_message="search docs and patch the file",
+            effective_message="search docs and patch the file",
+            model_message="search docs and patch the file",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="deep",
+            resolved_mode="deep",
+            features=app.FeatureFlags(agent_tools=True, web_search=True, workspace_write=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="focused_write",
+            enabled_tools=["web.search", "web.fetch_page", "workspace.patch_file"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                requires_search=True,
+                primary_skill="plan_and_code",
+                execution_style="plan_execution",
+                workspace_intent="focused_write",
+                enabled_tools=["web.search", "web.fetch_page", "workspace.patch_file"],
+            ),
+        )
+
+        self.assertFalse(app.should_route_prepared_turn_via_direct_search(prepared))
 
     def test_workspace_command_env_disables_python_bytecode_clutter(self):
         env = app.build_workspace_command_env("conv-env-no-pyc")

@@ -5820,6 +5820,14 @@ class PreparedTurnRequest:
     assessment: TurnAssessment
 
 
+def normalize_requested_mode(value: Any) -> str:
+    """Normalize the requested mode so the default chat path stays lightweight."""
+    normalized = str(value or "").strip().lower()
+    if normalized == "deep":
+        return "deep"
+    return "auto"
+
+
 DIRECT_SLASH_COMMAND_ALIASES = {
     "search": "search",
     "web": "search",
@@ -17711,6 +17719,26 @@ def format_turn_route_activity(
     return " ".join(line for line in lines if line)
 
 
+def should_route_prepared_turn_via_direct_search(prepared: PreparedTurnRequest) -> bool:
+    """Use the deterministic search path for pure current-facts/web-research turns."""
+    if prepared.slash_command:
+        return False
+    if prepared.auto_execute_workspace or prepared.resume_saved_workspace:
+        return False
+    if str(prepared.workspace_intent or "none") != "none":
+        return False
+    if not prepared.assessment.requires_search:
+        return False
+    if prepared.assessment.primary_skill != "search":
+        return False
+    if any(
+        tool_name.startswith("workspace.") or tool_name == "spreadsheet.describe"
+        for tool_name in prepared.enabled_tools
+    ):
+        return False
+    return any(tool_name.startswith("web.") for tool_name in prepared.enabled_tools)
+
+
 async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
@@ -17726,7 +17754,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         if isinstance(item, str) and str(item).strip()
     ]
     custom_system_prompt = data.get('system_prompt')
-    requested_mode = data.get('mode', 'deep')
+    requested_mode = normalize_requested_mode(data.get('mode', 'auto'))
     features = parse_feature_flags(data.get('features'))
     slash_command = (
         parse_direct_slash_command_payload(data.get("slash_command"))
@@ -17801,7 +17829,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         custom_system_prompt or DEFAULT_SYSTEM_PROMPT,
         effective_message,
     )
-    mode = str(requested_mode or "deep").strip().lower() or "deep"
+    mode = "deep" if requested_mode == "deep" else "chat"
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
     workspace_intent = classify_workspace_intent(effective_message, history=history)
@@ -17848,8 +17876,11 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     if (
         not slash_command
         and mode != "deep"
-        and assessment.explicit_planning_request
-        and workspace_requested
+        and (
+            (assessment.explicit_planning_request and workspace_requested)
+            or auto_execute_workspace
+            or resume_saved_workspace
+        )
     ):
         mode = "deep"
         promoted_to_planning = True
@@ -18072,6 +18103,35 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 full_response,
                 workflow_execution=workflow_execution,
                 final_outcome="completed_slash",
+                active_file_path=prepared.active_file_path,
+                queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                turn_kind=prepared.turn_kind,
+            )
+            return
+
+        if should_route_prepared_turn_via_direct_search(prepared):
+            mark_foreground_job("running")
+            full_response = await handle_direct_search_command(
+                websocket,
+                conv_id,
+                model_history,
+                system_prompt,
+                max_tokens,
+                features,
+                effective_message,
+                workflow_execution=workflow_execution,
+            )
+            if not response_started:
+                await websocket.send_json({'type': 'start'})
+                response_started = True
+            await send_final_replacement(websocket, full_response)
+            mark_foreground_job("completed")
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                full_response,
+                workflow_execution=workflow_execution,
+                final_outcome="completed_direct_search",
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
