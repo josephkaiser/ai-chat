@@ -2665,7 +2665,7 @@ async function sendCurrentMessage(): Promise<void> {
         conversation_id: state.currentConversationId,
         workspace_id: state.currentWorkspaceId || null,
         attachments,
-        mode: "deep",
+        mode: "auto",
         turn_kind: "visible_chat",
         auto_approve_tool_permissions: true,
     };
