@@ -6963,7 +6963,7 @@ def apply_deep_plan_guardrails(session: DeepSession, plan: Dict[str, Any]) -> Di
         ]
 
     if session.workspace_enabled and workspace_is_effectively_empty(session.workspace_snapshot):
-        intent = classify_workspace_intent(session.message)
+        intent = classify_workspace_intent(session.message, history=session.history)
         if intent in {"focused_write", "broad_write"} or is_explicit_plan_execution_request(session.message):
             normalized["strategy"] = build_empty_workspace_strategy(request_text)
             normalized["deliverable"] = build_empty_workspace_deliverable(request_text)
@@ -7122,20 +7122,148 @@ WORKSPACE_SAVE_OFFER_PATTERN = re.compile(
     r"(would you like me to save|if you want, i can save|i can save .*workspace|save (?:this|it|the result|the script).*(?:workspace|file))",
     re.IGNORECASE,
 )
+WORKSPACE_EDIT_OFFER_PATTERN = re.compile(
+    r"(would you like me to (?:edit|patch|change|update|fix|implement|create)|"
+    r"want me to (?:edit|patch|change|update|fix|implement|create)|"
+    r"if you want, i can (?:edit|patch|change|update|fix|implement|create)|"
+    r"i can (?:edit|patch|change|update|fix|implement|create) (?:that|it|this))",
+    re.IGNORECASE,
+)
+WEB_SEARCH_OFFER_PATTERN = re.compile(
+    r"(would you like me to (?:search the web|look (?:that|it) up|get sources|cite sources)|"
+    r"want me to (?:search the web|look (?:that|it) up|get sources|cite sources)|"
+    r"if you want, i can (?:search the web|look (?:that|it) up|get sources|cite sources|check online)|"
+    r"retry and approve web search|approve web search|live sources|current sources)",
+    re.IGNORECASE,
+)
+RENDER_OFFER_PATTERN = re.compile(
+    r"(would you like me to (?:render|preview|open|show) (?:that|it|this|the page|the chart|the artifact)|"
+    r"want me to (?:render|preview|open|show) (?:that|it|this|the page|the chart|the artifact)|"
+    r"if you want, i can (?:render|preview|open|show) (?:that|it|this|the page|the chart|the artifact)|"
+    r"open in the viewer|render it in the viewer|preview it in the viewer)",
+    re.IGNORECASE,
+)
+EXECUTION_OFFER_PATTERN = re.compile(
+    r"(would you like me to (?:run|test|verify|check|execute) (?:that|it|this)|"
+    r"want me to (?:run|test|verify|check|execute) (?:that|it|this)|"
+    r"if you want, i can (?:run|test|verify|check|execute) (?:that|it|this)|"
+    r"i can (?:run|test|verify|check|execute) (?:that|it|this))",
+    re.IGNORECASE,
+)
+CONTEXTUAL_AFFIRMATION_REPLY_MARKERS = {
+    "yes",
+    "yes please",
+    "yes do it",
+    "yes do that",
+    "yes go ahead",
+    "yep",
+    "sure",
+    "ok",
+    "okay",
+    "go ahead",
+    "sounds good",
+    "do it",
+    "do that",
+    "please",
+    "try it",
+    "try that",
+}
+WEB_SEARCH_FOLLOWUP_MARKERS = CONTEXTUAL_AFFIRMATION_REPLY_MARKERS | {
+    "search that",
+    "search it",
+    "look that up",
+    "look it up",
+    "check online",
+    "check that online",
+    "get sources",
+    "find sources",
+    "cite that",
+    "cite it",
+}
+RENDER_FOLLOWUP_MARKERS = CONTEXTUAL_AFFIRMATION_REPLY_MARKERS | {
+    "show me",
+    "show it",
+    "show that",
+    "open it",
+    "open that",
+    "render it",
+    "render that",
+    "preview it",
+    "preview that",
+}
+EXECUTION_FOLLOWUP_MARKERS = CONTEXTUAL_AFFIRMATION_REPLY_MARKERS | {
+    "run it",
+    "run that",
+    "test it",
+    "test that",
+    "verify it",
+    "verify that",
+    "check it",
+    "check that",
+    "fix it",
+    "fix that",
+}
+WORKSPACE_EDIT_FOLLOWUP_MARKERS = WORKSPACE_SAVE_REPLY_MARKERS | CONTEXTUAL_AFFIRMATION_REPLY_MARKERS | {
+    "edit it",
+    "edit that",
+    "change it",
+    "change that",
+    "update it",
+    "update that",
+    "patch it",
+    "patch that",
+    "implement that",
+    "implement it",
+}
 
 
-def assistant_offered_workspace_save(history: Optional[List[Dict[str, str]]]) -> bool:
-    """Return whether the latest assistant turn offered to save the result into the workspace."""
+def latest_assistant_message(history: Optional[List[Dict[str, str]]]) -> str:
+    """Return the most recent assistant message in the current chat history."""
     if not history:
-        return False
+        return ""
     for item in reversed(history):
         if str(item.get("role") or "").strip() != "assistant":
             continue
         content = str(item.get("content") or "").strip()
-        if not content:
-            continue
-        return bool(WORKSPACE_SAVE_OFFER_PATTERN.search(content))
-    return False
+        if content:
+            return content
+    return ""
+
+
+def assistant_offered_pattern(
+    history: Optional[List[Dict[str, str]]],
+    pattern: re.Pattern[str],
+) -> bool:
+    """Return whether the latest assistant turn clearly offered a specific next action."""
+    content = latest_assistant_message(history)
+    if not content:
+        return False
+    return bool(pattern.search(content))
+
+
+def assistant_offered_workspace_save(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered to save the result into the workspace."""
+    return assistant_offered_pattern(history, WORKSPACE_SAVE_OFFER_PATTERN)
+
+
+def assistant_offered_workspace_edit(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered to edit or create something in the workspace."""
+    return assistant_offered_pattern(history, WORKSPACE_EDIT_OFFER_PATTERN)
+
+
+def assistant_offered_web_search(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered web research or live sources."""
+    return assistant_offered_pattern(history, WEB_SEARCH_OFFER_PATTERN)
+
+
+def assistant_offered_workspace_render(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered to render, preview, or open something."""
+    return assistant_offered_pattern(history, RENDER_OFFER_PATTERN)
+
+
+def assistant_offered_execution(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered to run, test, or verify something."""
+    return assistant_offered_pattern(history, EXECUTION_OFFER_PATTERN)
 
 
 def is_affirmative_workspace_save_followup(
@@ -7147,6 +7275,50 @@ def is_affirmative_workspace_save_followup(
     if normalized not in WORKSPACE_SAVE_REPLY_MARKERS:
         return False
     return assistant_offered_workspace_save(history)
+
+
+def is_contextual_followup_for_web_search(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether a short follow-up is clearly accepting or requesting a web-search offer."""
+    normalized = normalize_approval_reply_text(message)
+    if normalized not in WEB_SEARCH_FOLLOWUP_MARKERS:
+        return False
+    return assistant_offered_web_search(history)
+
+
+def is_contextual_followup_for_render(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether a short follow-up is clearly accepting a render/viewer offer."""
+    normalized = normalize_approval_reply_text(message)
+    if normalized not in RENDER_FOLLOWUP_MARKERS:
+        return False
+    return assistant_offered_workspace_render(history)
+
+
+def is_contextual_followup_for_execution(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether a short follow-up is clearly accepting a run/test/verify offer."""
+    normalized = normalize_approval_reply_text(message)
+    if normalized not in EXECUTION_FOLLOWUP_MARKERS:
+        return False
+    return assistant_offered_execution(history)
+
+
+def is_contextual_followup_for_workspace_edit(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether a short follow-up is clearly accepting an edit/create offer."""
+    normalized = normalize_approval_reply_text(message)
+    if normalized not in WORKSPACE_EDIT_FOLLOWUP_MARKERS:
+        return False
+    return assistant_offered_workspace_save(history) or assistant_offered_workspace_edit(history)
 
 
 def normalize_turn_message(message: str) -> str:
@@ -7280,13 +7452,14 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
         return False
     if infer_explicit_planning_request(session.message):
         return True
-    return classify_workspace_intent(session.message) in {"focused_write", "broad_write"}
+    return classify_workspace_intent(session.message, history=session.history) in {"focused_write", "broad_write"}
 
 
 def should_auto_execute_workspace_task(
     conversation_id: str,
     message: str,
     features: "FeatureFlags",
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> bool:
     """Auto-upgrade concrete workspace build requests into the full inspect/plan/build/verify flow."""
     if not features.agent_tools or not features.workspace_write:
@@ -7295,10 +7468,10 @@ def should_auto_execute_workspace_task(
         return False
     if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
         return False
-    intent = classify_workspace_intent(message)
+    intent = classify_workspace_intent(message, history=history)
     if intent not in {"focused_write", "broad_write"}:
         return False
-    return should_use_workspace_tools(conversation_id, message, features)
+    return should_use_workspace_tools(conversation_id, message, features, history=history)
 
 
 def should_resume_saved_workspace_task(
@@ -12755,7 +12928,7 @@ def conversation_search_history_result(
                 LIMIT ?''',
             (fts_query, conversation_id, max(safe_limit * 4, 12)),
         )
-        ranked_rows = rerank_search_rows([
+        lexical_rows = [
             {
                 "id": row[0],
                 "role": row[1],
@@ -12765,7 +12938,8 @@ def conversation_search_history_result(
                 "fts_rank": row[5],
             }
             for row in c.fetchall()
-        ], cleaned_query, max(safe_limit * 4, 12))
+        ]
+        ranked_rows = rerank_search_rows(lexical_rows, cleaned_query, max(safe_limit * 4, 12))
     except sqlite3.OperationalError:
         search_term = f"%{cleaned_query}%"
         c.execute(
@@ -12786,6 +12960,7 @@ def conversation_search_history_result(
             }
             for row in c.fetchall()
         ]
+        lexical_rows = list(ranked_rows)
 
     semantic_rows = fetch_semantic_message_candidates(
         conversation_id,
@@ -15141,11 +15316,23 @@ def build_context_eval_replay_report(
     return summary
 
 
-def classify_workspace_intent(message: str) -> str:
+def classify_workspace_intent(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
     """Classify whether a workspace request is read-only, focused edit, or broad exploration."""
     text = (message or "").strip().lower()
     if not text:
         return "none"
+
+    if (
+        is_affirmative_workspace_save_followup(message, history)
+        or is_contextual_followup_for_workspace_edit(message, history)
+        or is_contextual_followup_for_execution(message, history)
+    ):
+        return "focused_write"
+    if is_contextual_followup_for_render(message, history):
+        return "focused_read"
 
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     read_verbs = {"inspect", "read", "open", "show", "list", "search", "find", "grep", "explain", "review", "render", "preview", "display", "view"}
@@ -15278,11 +15465,9 @@ def select_enabled_tools(
 ) -> List[str]:
     """Return the small set of tools worth exposing for this request."""
     allowed: List[str] = []
-    intent = classify_workspace_intent(message)
-    if intent == "none" and is_affirmative_workspace_save_followup(message, history):
-        intent = "focused_write"
+    intent = classify_workspace_intent(message, history=history)
     render_requested = should_offer_workspace_render(message, history, features)
-    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features) or (
+    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features, history=history) or (
         features.agent_tools
         and features.workspace_write
         and intent in {"focused_write", "broad_write"}
@@ -15299,7 +15484,7 @@ def select_enabled_tools(
             allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
     if should_offer_local_rag(message, features):
         allowed.append("conversation.search_history")
-    if should_offer_web_search(message, features):
+    if should_offer_web_search(message, features, history=history):
         allowed.append("web.search")
         allowed.append("web.fetch_page")
     deduped: List[str] = []
@@ -15825,7 +16010,12 @@ async def run_structured_task_turn(
     )
 
 
-def should_use_workspace_tools(conversation_id: str, message: str, features: FeatureFlags) -> bool:
+def should_use_workspace_tools(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
     """Heuristic: enter workspace mode when local files are likely to ground the answer or change."""
     if not features.agent_tools:
         return False
@@ -15833,6 +16023,14 @@ def should_use_workspace_tools(conversation_id: str, message: str, features: Fea
     text = (message or "").strip().lower()
     if not text:
         return False
+
+    if (
+        is_affirmative_workspace_save_followup(message, history)
+        or is_contextual_followup_for_workspace_edit(message, history)
+        or is_contextual_followup_for_render(message, history)
+        or is_contextual_followup_for_execution(message, history)
+    ):
+        return True
 
     if extract_artifact_references(message):
         return True
@@ -16035,6 +16233,8 @@ def should_offer_workspace_render(
     """Expose the HTML render tool when the prompt strongly implies it."""
     if not features.agent_tools:
         return False
+    if is_contextual_followup_for_render(message, history):
+        return True
     if not message_requests_workspace_render(message):
         return False
     text = " ".join((message or "").strip().lower().split())
@@ -16054,13 +16254,19 @@ def should_offer_local_rag(message: str, features: FeatureFlags) -> bool:
     return bool(words & LOCAL_RAG_HINTS)
 
 
-def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
+def should_offer_web_search(
+    message: str,
+    features: FeatureFlags,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
     """Only offer web search when explicitly useful."""
     text = (message or "").strip().lower()
-    if len(text) < 3:
-        return False
     if explicit_web_search_requested(message):
         return True
+    if is_contextual_followup_for_web_search(message, history):
+        return True
+    if len(text) < 3:
+        return False
     if not features.web_search:
         return False
     if "http://" in text or "https://" in text:
@@ -16083,15 +16289,13 @@ def select_direct_answer_tools(
 ) -> List[str]:
     """Keep direct-answer mode chat-first while preserving file iteration for write requests."""
     filtered = list(allowed_tools)
-    intent = classify_workspace_intent(message)
-    if intent == "none" and is_affirmative_workspace_save_followup(message, history):
-        intent = "focused_write"
+    intent = classify_workspace_intent(message, history=history)
     if intent not in {"focused_write", "broad_write"}:
         filtered = [
             tool_name for tool_name in filtered
             if tool_name not in {"workspace.patch_file", "workspace.run_command"}
         ]
-    if not message_requests_workspace_render(message):
+    if not (message_requests_workspace_render(message) or is_contextual_followup_for_render(message, history)):
         filtered = [
             tool_name for tool_name in filtered
             if tool_name != "workspace.render"
@@ -16099,11 +16303,16 @@ def select_direct_answer_tools(
     return filtered
 
 
-def request_demands_agent_execution(message: str) -> bool:
+def request_demands_agent_execution(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
     """Return whether the user asked the assistant to run, render, or verify the result itself."""
     text = " ".join((message or "").strip().lower().split())
     if not text:
         return False
+    if is_contextual_followup_for_execution(message, history) or is_contextual_followup_for_render(message, history):
+        return True
     if any(phrase in text for phrase in LOCAL_INSTRUCTIONS_REQUEST_PHRASES):
         return False
     if any(phrase in text for phrase in AGENT_EXECUTION_EXPECTATION_PHRASES):
@@ -16144,7 +16353,7 @@ def direct_response_tool_recovery_candidates(
     if (
         not DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(str(response or ""))
         and not (
-            request_demands_agent_execution(message)
+            request_demands_agent_execution(message, history=history)
             and response_hands_execution_back_to_user(response)
         )
     ):
@@ -16152,12 +16361,12 @@ def direct_response_tool_recovery_candidates(
 
     allowed: List[str] = []
     render_requested = should_offer_workspace_render(message, history, features)
-    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features)
+    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features, history=history)
     if workspace_requested:
         allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
     if should_offer_local_rag(message, features):
         allowed.append("conversation.search_history")
-    if should_offer_web_search(message, features):
+    if should_offer_web_search(message, features, history=history):
         allowed.extend(["web.search", "web.fetch_page"])
 
     deduped: List[str] = []
@@ -17107,7 +17316,7 @@ async def orchestrated_chat(
         workspace_enabled=(
             auto_execute
             or should_resume_saved_workspace_task(conversation_id, message, features)
-            or should_use_workspace_tools(conversation_id, message, features)
+            or should_use_workspace_tools(conversation_id, message, features, history=history)
         ),
         context_builder=build_recent_context,
         execution_requested=is_explicit_plan_execution_request(message),
@@ -17594,9 +17803,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     mode = str(requested_mode or "deep").strip().lower() or "deep"
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
-    workspace_intent = classify_workspace_intent(effective_message)
-    if workspace_intent == "none" and is_affirmative_workspace_save_followup(effective_message, history):
-        workspace_intent = "focused_write"
+    workspace_intent = classify_workspace_intent(effective_message, history=history)
     enabled_tools = (
         select_enabled_tools(conv_id, effective_message, features, history=history)
         if TOOL_LOOP_ENABLED else []
@@ -17609,17 +17816,17 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     auto_execute_workspace = (
         not slash_command
         and (
-            should_auto_execute_workspace_task(conv_id, effective_message, features)
+            should_auto_execute_workspace_task(conv_id, effective_message, features, history=history)
             or resume_saved_workspace
         )
     )
     workspace_requested = (
-        should_use_workspace_tools(conv_id, effective_message, features)
+        should_use_workspace_tools(conv_id, effective_message, features, history=history)
         or auto_execute_workspace
         or resume_saved_workspace
     )
     local_rag_requested = should_offer_local_rag(effective_message, features)
-    web_search_requested = should_offer_web_search(effective_message, features)
+    web_search_requested = should_offer_web_search(effective_message, features, history=history)
     assessment = DEFAULT_ROUTE_PROGRAM.run(RouteProgramInputs(
         message=effective_message,
         requested_mode=requested_mode,

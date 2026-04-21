@@ -703,9 +703,6 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .conversation-row {
     position: relative;
-    display: flex;
-    align-items: center;
-    gap: 4px;
     min-width: 0;
 }
 
@@ -721,8 +718,8 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .conversation-item {
-    flex: 1 1 auto;
     min-width: 0;
+    padding-right: 76px;
 }
 
 .conversation-row.active .conversation-item,
@@ -733,9 +730,9 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .conversation-line {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
     gap: 8px;
     min-width: 0;
 }
@@ -743,17 +740,19 @@ body[data-left-sidebar-open="false"] .sidebar {
 .conversation-time {
     flex: 0 0 auto;
     color: var(--muted);
-    font-size: 0.62rem;
+    font-size: 0.66rem;
     line-height: 1.2;
-    margin-left: auto;
 }
 
 .conversation-actions {
+    position: absolute;
+    top: 50%;
+    right: 8px;
     display: flex;
     gap: 4px;
     opacity: 0;
     pointer-events: none;
-    transform: translateY(-2px);
+    transform: translateY(calc(-50% - 2px));
     transition: opacity 140ms ease, transform 140ms ease;
 }
 
@@ -761,7 +760,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 .conversation-row.active .conversation-actions {
     opacity: 1;
     pointer-events: auto;
-    transform: translateY(0);
+    transform: translateY(-50%);
 }
 
 .conversation-action-button {
@@ -798,13 +797,13 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .conversation-title {
-    flex: 0 1 auto;
-    max-width: 44%;
+    font-size: 0.78rem;
+    line-height: 1.25;
+    max-width: none;
 }
 
 .conversation-preview {
-    flex: 1 1 auto;
-    min-width: 0;
+    display: none;
 }
 
 .main-grid {

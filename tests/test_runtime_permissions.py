@@ -977,6 +977,118 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("workspace.run_command", filtered)
         self.assertIn("conversation.search_history", filtered)
 
+    def test_classify_workspace_intent_inherits_edit_offer_for_short_followup(self):
+        intent = app.classify_workspace_intent(
+            "do that",
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "If you want, I can patch that file directly in the workspace.",
+                }
+            ],
+        )
+
+        self.assertEqual(intent, "focused_write")
+
+    def test_should_offer_web_search_inherits_offer_for_short_followup(self):
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        self.assertTrue(
+            app.should_offer_web_search(
+                "ok",
+                features,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "If you want, I can search the web for current sources and cite them.",
+                    }
+                ],
+            )
+        )
+
+    def test_should_use_workspace_tools_inherits_render_offer_for_show_me(self):
+        features = app.FeatureFlags(agent_tools=True)
+
+        self.assertTrue(
+            app.should_use_workspace_tools(
+                "conv-render-followup",
+                "show me",
+                features,
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "If you want, I can open it in the viewer and preview the page.",
+                    }
+                ],
+            )
+        )
+
+    def test_request_demands_agent_execution_inherits_run_offer_for_yes(self):
+        self.assertTrue(
+            app.request_demands_agent_execution(
+                "yes",
+                history=[
+                    {
+                        "role": "assistant",
+                        "content": "If you want, I can run that and show you the real output here.",
+                    }
+                ],
+            )
+        )
+
+    def test_select_enabled_tools_includes_web_tools_for_short_followup_after_offer(self):
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        allowed = app.select_enabled_tools(
+            "conv-web-followup",
+            "look it up",
+            features,
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "If you want, I can search the web for current sources and compare the top options.",
+                }
+            ],
+        )
+
+        self.assertIn("web.search", allowed)
+        self.assertIn("web.fetch_page", allowed)
+
+    def test_conversation_search_history_result_does_not_crash_on_fts_path(self):
+        original_db_path = app.DB_PATH
+        original_semantic = app.fetch_semantic_message_candidates
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.init_db()
+
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    ("conv-search", "Search chat", "2026-04-10T00:00:00", "2026-04-10T00:00:00"),
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("conv-search", "user", "Can you remember anything from earlier in this chat?", "2026-04-10T00:00:00", "visible_chat", None),
+                        ("conv-search", "assistant", "Yes, I can search the current conversation history when needed.", "2026-04-10T00:00:01", "visible_chat", "neutral"),
+                        ("conv-search", "user", "Please tell me about prior messages.", "2026-04-10T00:00:02", "visible_chat", None),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                app.fetch_semantic_message_candidates = lambda conversation_id, query, limit=0: []
+                result = app.conversation_search_history_result("conv-search", "prior messages", limit=3)
+        finally:
+            app.DB_PATH = original_db_path
+            app.fetch_semantic_message_candidates = original_semantic
+
+        self.assertEqual(result["query"], "prior messages")
+        self.assertGreaterEqual(result["count"], 1)
+        self.assertTrue(any("prior" in match["content"].lower() for match in result["matches"]))
+
     def test_workspace_command_env_disables_python_bytecode_clutter(self):
         env = app.build_workspace_command_env("conv-env-no-pyc")
 
