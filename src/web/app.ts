@@ -247,7 +247,6 @@ const sendButton = query<HTMLButtonElement>("#sendButton");
 const viewerTitle = query<HTMLHeadingElement>("#viewerTitle");
 const viewerMeta = query<HTMLParagraphElement>("#viewerMeta");
 const viewerModeButton = query<HTMLButtonElement>("#viewerModeButton");
-const upDirectoryButton = query<HTMLButtonElement>("#upDirectoryButton");
 const viewerCloseButton = query<HTMLButtonElement>("#viewerCloseButton");
 const directoryPath = query<HTMLDivElement>("#directoryPath");
 const fileList = query<HTMLDivElement>("#fileList");
@@ -696,7 +695,6 @@ function syncShellLayout(): void {
         viewerModeButton.dataset.tooltip = viewerModeLabel;
     }
 
-    upDirectoryButton.hidden = state.viewerMode !== "tree";
     viewerCloseButton.hidden = state.viewerMode === "closed";
 
     window.requestAnimationFrame(() => {
@@ -3061,10 +3059,6 @@ function attachEvents(): void {
 
     viewerCloseButton.addEventListener("click", () => {
         closeViewer();
-    });
-
-    upDirectoryButton.addEventListener("click", () => {
-        void loadDirectory(parentDirectory(state.currentDirectoryPath));
     });
 
     composerForm.addEventListener("submit", (event) => {

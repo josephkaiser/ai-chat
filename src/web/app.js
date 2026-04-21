@@ -68,7 +68,6 @@ const sendButton = query("#sendButton");
 const viewerTitle = query("#viewerTitle");
 const viewerMeta = query("#viewerMeta");
 const viewerModeButton = query("#viewerModeButton");
-const upDirectoryButton = query("#upDirectoryButton");
 const viewerCloseButton = query("#viewerCloseButton");
 const directoryPath = query("#directoryPath");
 const fileList = query("#fileList");
@@ -468,7 +467,6 @@ function syncShellLayout() {
         viewerModeButton.setAttribute("aria-label", viewerModeLabel);
         viewerModeButton.dataset.tooltip = viewerModeLabel;
     }
-    upDirectoryButton.hidden = state.viewerMode !== "tree";
     viewerCloseButton.hidden = state.viewerMode === "closed";
     window.requestAnimationFrame(()=>{
         if (state.stickChatToBottom) {
@@ -2710,9 +2708,6 @@ function attachEvents() {
     });
     viewerCloseButton.addEventListener("click", ()=>{
         closeViewer();
-    });
-    upDirectoryButton.addEventListener("click", ()=>{
-        void loadDirectory(parentDirectory(state.currentDirectoryPath));
     });
     composerForm.addEventListener("submit", (event)=>{
         event.preventDefault();
