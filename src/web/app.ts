@@ -211,6 +211,7 @@ const state = {
     stickChatToBottom: true,
     handledArtifactKeys: new Set<string>(),
     conversationRefreshTimer: 0 as number,
+    healthPollTimer: 0 as number,
 };
 
 function query<T extends Element>(selector: string): T {
@@ -2046,6 +2047,7 @@ function finishGeneration(options: { preserveThinking?: boolean } = {}): void {
     state.conversationRefreshTimer = window.setTimeout(() => {
         void loadConversations();
     }, 1600);
+    void fetchHealth();
     void loadDirectory(state.currentDirectoryPath);
     void loadContextEvalReport();
 }
@@ -2392,6 +2394,10 @@ async function bootstrap(): Promise<void> {
     renderContextEvalReport();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     connectWebSocket();
+    window.clearInterval(state.healthPollTimer);
+    state.healthPollTimer = window.setInterval(() => {
+        void fetchHealth();
+    }, 2500);
     await fetchHealth();
     await loadWorkspaces();
     await loadConversations();
