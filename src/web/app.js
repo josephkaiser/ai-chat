@@ -37,7 +37,6 @@ const state = {
     handledArtifactKeys: new Set(),
     conversationRefreshTimer: 0,
     healthPollTimer: 0,
-    messageClockTimer: 0,
     pendingAttachmentPaths: []
 };
 function query(selector) {
@@ -466,13 +465,6 @@ function setGenerating(nextValue) {
     state.generating = nextValue;
     sendButton.textContent = nextValue ? "Stop" : "Send";
     setConnectionState(nextValue ? "streaming" : state.ws?.readyState === WebSocket.OPEN ? "online" : "offline");
-    window.clearInterval(state.messageClockTimer);
-    state.messageClockTimer = 0;
-    if (nextValue) {
-        state.messageClockTimer = window.setInterval(()=>{
-            renderMessages();
-        }, 1000);
-    }
 }
 function setComposerHint(text) {
     composerHint.textContent = text;
@@ -490,12 +482,19 @@ function findAssistantWorkStartedAt(messages, assistantIndex) {
     return messages[assistantIndex]?.timestamp || "";
 }
 function assistantMetaLabel(message, index) {
+    if (state.generating && index === state.activeAssistantIndex) {
+        return "Assistant";
+    }
     const startedAt = findAssistantWorkStartedAt(state.messages, index);
     const duration = formatElapsedDuration(startedAt || message.timestamp);
-    const summary = state.generating && index === state.activeAssistantIndex ? normalizeThinkingText(state.thinkingStatus?.text || "") : "";
-    if (duration && summary) return `Worked for ${duration} > ${summary}`;
     if (duration) return `Worked for ${duration}`;
     return "Assistant";
+}
+function thinkingStatusLabel(status) {
+    if (status.error) return "Attention";
+    if (status.phase === "permission") return "Permissions";
+    if (status.phase === "thinking") return "Working";
+    return "Status";
 }
 function summarizeRuntimeError(text) {
     const normalized = normalizeThinkingText(text);
@@ -1050,7 +1049,7 @@ function renderMessages() {
     }).join("");
     const thinkingHtml = visibleThinking ? `
         <div class="message-thinking${visibleThinking.error ? " error" : ""}">
-            <span class="message-thinking-label">Thinking</span>
+            <span class="message-thinking-label">${escapeHtml(thinkingStatusLabel(visibleThinking))}</span>
             <span class="message-thinking-text">${escapeHtml(visibleThinking.text)}</span>
         </div>
     ` : "";
