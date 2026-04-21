@@ -178,7 +178,7 @@ class AppBehaviorTests(unittest.TestCase):
 
     def test_default_prompt_no_longer_instructs_step_by_step_confirmation(self):
         self.assertNotIn("ask a short yes-or-no question", DEFAULT_SYSTEM_PROMPT)
-        self.assertIn("complete answer in one pass", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("Keep the visible answer brief", DEFAULT_SYSTEM_PROMPT)
 
     def test_prompts_favor_context_window_aware_progress_over_tiny_changes(self):
         combined = "\n".join((DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT))

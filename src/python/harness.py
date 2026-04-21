@@ -390,7 +390,7 @@ DOCUMENT_INDEX_SIZE_LIMIT = int(os.getenv("DOCUMENT_INDEX_SIZE_LIMIT", str(25 * 
 DOCUMENT_TEXT_READ_LIMIT = int(os.getenv("DOCUMENT_TEXT_READ_LIMIT", str(8 * 1024 * 1024)))
 DOCUMENT_CHUNK_TARGET_CHARS = int(os.getenv("DOCUMENT_CHUNK_TARGET_CHARS", "900"))
 DOCUMENT_CHUNK_OVERLAP_CHARS = int(os.getenv("DOCUMENT_CHUNK_OVERLAP_CHARS", "120"))
-DOCUMENT_RETRIEVAL_CONTEXT_BUDGET = int(os.getenv("DOCUMENT_RETRIEVAL_CONTEXT_BUDGET", "9000"))
+DOCUMENT_RETRIEVAL_CONTEXT_BUDGET = int(os.getenv("DOCUMENT_RETRIEVAL_CONTEXT_BUDGET", "6000"))
 DOCUMENT_RETRIEVAL_MAX_WINDOWS = int(os.getenv("DOCUMENT_RETRIEVAL_MAX_WINDOWS", "4"))
 DOCUMENT_RETRIEVAL_FTS_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_FTS_LIMIT", "18"))
 DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT", "32"))
@@ -5310,14 +5310,15 @@ async def build_attachment_context(conversation_id: str, paths: List[str], messa
         hyde_query = "" if embedding_backend_active() else await generate_hyde_query(message, ready_paths)
         ranked = fetch_ranked_document_candidates(conversation_id, ready_paths, message, hyde_query=hyde_query)
         windows = pack_document_context_windows(conversation_id, ranked)
-        if windows:
+        overview_requested = is_overview_attachment_request(message)
+        if windows and not overview_requested:
             lines.extend(["", "Relevant extracted context from attachments:"])
             lines.extend(f"---\n{window['text']}" for window in windows)
-        if (not windows or is_overview_attachment_request(message)) and ready_paths:
+        elif ready_paths:
             overview_entries = build_document_overview_entries(
                 conversation_id,
                 ready_paths,
-                char_budget=max(1800, DOCUMENT_RETRIEVAL_CONTEXT_BUDGET // 2),
+                char_budget=(max(1800, DOCUMENT_RETRIEVAL_CONTEXT_BUDGET // 2) if overview_requested else 1800),
             )
             if overview_entries:
                 lines.extend(["", "Attachment overview:"])
@@ -8513,7 +8514,7 @@ DOCUMENT_FTS_TABLE = "document_chunks_fts"
 SUMMARY_TRIGGER_MESSAGE_COUNT = 16
 TITLE_TRIGGER_MESSAGE_COUNT = 4
 TITLE_REFRESH_MESSAGE_INTERVAL = 4
-SUMMARY_KEEP_RECENT_MESSAGES = 8
+SUMMARY_KEEP_RECENT_MESSAGES = 6
 SUMMARY_MAX_SOURCE_MESSAGES = 40
 SUMMARY_MAX_CHARS = 12000
 SUMMARY_RELATED_HISTORY_LIMIT = 2
