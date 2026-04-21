@@ -243,6 +243,7 @@ except Exception:
 
 from src.python.ai_chat.embeddings import configured_embedding_model_name, embed_passages, embed_queries, embeddings_available
 from src.python.ai_chat.prompts import (
+    CONVERSATION_MEMORY_SYSTEM_PROMPT,
     CONVERSATION_TITLE_SYSTEM_PROMPT,
     CONVERSATION_SUMMARY_SYSTEM_PROMPT,
     CRITIQUE_SYSTEM_PROMPT,
@@ -7354,6 +7355,13 @@ WORKSPACE_EDIT_FOLLOWUP_MARKERS = WORKSPACE_SAVE_REPLY_MARKERS | CONTEXTUAL_AFFI
     "implement that",
     "implement it",
 }
+SHORT_CONTEXTUAL_FOLLOWUP_MAX_WORDS = 10
+SHORT_CONTEXTUAL_GOOGLE_FOLLOWUP_PATTERN = re.compile(
+    r"^(?:can(?:not|'t)? you (?:just )?(?:see|check)(?: it)? on google|"
+    r"(?:use|check|see) google|"
+    r"on google)$",
+    re.IGNORECASE,
+)
 
 
 def latest_assistant_message(history: Optional[List[Dict[str, str]]]) -> str:
@@ -7472,6 +7480,125 @@ def normalize_approval_reply_text(message: str) -> str:
         text = text[6:].strip()
     text = re.sub(r"[.!?,;:]+", " ", text)
     return " ".join(text.split())
+
+
+def latest_substantive_user_request(history: Optional[List[Dict[str, str]]]) -> str:
+    """Return the latest non-trivial prior user request from chat history."""
+    if not history:
+        return ""
+    for item in reversed(history):
+        if str(item.get("role") or "").strip() != "user":
+            continue
+        content = str(item.get("content") or "").strip()
+        normalized = normalize_approval_reply_text(content)
+        if (
+            not content
+            or len(content.split()) <= 1
+            or normalized in CONTEXTUAL_AFFIRMATION_REPLY_MARKERS
+            or normalized in WEB_SEARCH_FOLLOWUP_MARKERS
+            or normalized in RENDER_FOLLOWUP_MARKERS
+            or normalized in EXECUTION_FOLLOWUP_MARKERS
+            or normalized in WORKSPACE_EDIT_FOLLOWUP_MARKERS
+            or normalized in {"continue", "resume", "keep going", "pick up from there"}
+        ):
+            continue
+        return content
+    return ""
+
+
+def latest_followup_request_focus(
+    conversation_id: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """Resolve the best durable prior request focus for contextual follow-ups."""
+    memory = load_conversation_memory(conversation_id) or {}
+    recent_requests = memory.get("recent_requests", []) if isinstance(memory, dict) else []
+    if isinstance(recent_requests, list):
+        for item in reversed(recent_requests):
+            cleaned = _normalize_memory_item(item, limit=200)
+            if cleaned:
+                return cleaned
+    return latest_substantive_user_request(history)
+
+
+def latest_followup_active_file(conversation_id: str) -> str:
+    """Return the most relevant active file from compacted conversation memory, if any."""
+    memory = load_conversation_memory(conversation_id) or {}
+    active_files = memory.get("active_files", []) if isinstance(memory, dict) else []
+    if isinstance(active_files, list):
+        for item in active_files:
+            cleaned = _normalize_memory_item(item, limit=140)
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def is_contextual_google_followup(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Detect short web-search follow-ups that mention Google instead of explicit search verbs."""
+    normalized = normalize_approval_reply_text(message)
+    if not normalized:
+        return False
+    if len(normalized.split()) > SHORT_CONTEXTUAL_FOLLOWUP_MAX_WORDS:
+        return False
+    if not SHORT_CONTEXTUAL_GOOGLE_FOLLOWUP_PATTERN.match(normalized):
+        return False
+    return bool(latest_substantive_user_request(history))
+
+
+def resolve_contextual_followup_request(
+    conversation_id: str,
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """Rewrite short contextual follow-ups into explicit internal requests before routing."""
+    raw_message = str(message or "").strip()
+    if not raw_message:
+        return ""
+
+    normalized = normalize_approval_reply_text(raw_message)
+    if not normalized:
+        return raw_message
+    if len(normalized.split()) > SHORT_CONTEXTUAL_FOLLOWUP_MAX_WORDS and not is_contextual_google_followup(raw_message, history):
+        return raw_message
+
+    request_focus = latest_followup_request_focus(conversation_id, history)
+    active_file = latest_followup_active_file(conversation_id)
+
+    if is_affirmative_workspace_save_followup(raw_message, history):
+        if active_file and request_focus:
+            return f"Save or update the workspace file {active_file} for this request: {request_focus}"
+        if request_focus:
+            return f"Save the current result into the workspace for this request: {request_focus}"
+        return "Save the current result into the workspace as a real file."
+
+    if is_contextual_followup_for_workspace_edit(raw_message, history):
+        if active_file and request_focus:
+            return f"Apply the previously offered workspace edit to {active_file} for this request: {request_focus}"
+        if request_focus:
+            return f"Apply the previously offered workspace edit for this request: {request_focus}"
+        return "Apply the previously offered workspace edit in the workspace."
+
+    if is_contextual_followup_for_render(raw_message, history):
+        if active_file and request_focus:
+            return f"Open or render the current result in the viewer for {active_file} and this request: {request_focus}"
+        if request_focus:
+            return f"Open or render the current result in the viewer for this request: {request_focus}"
+        return "Open or render the current result in the viewer."
+
+    if is_contextual_followup_for_execution(raw_message, history):
+        if request_focus:
+            return f"Run, test, or verify the current result for this request: {request_focus}"
+        return "Run, test, or verify the current result and report what happened."
+
+    if is_contextual_followup_for_web_search(raw_message, history) or is_contextual_google_followup(raw_message, history):
+        if request_focus:
+            return f"Use web search or current online sources to answer this request directly: {request_focus}"
+        return "Use web search or current online sources to answer the active request directly."
+
+    return raw_message
 
 
 def is_explicit_plan_execution_request(message: str) -> bool:
@@ -8657,6 +8784,10 @@ SUMMARY_MAX_SOURCE_MESSAGES = 40
 SUMMARY_MAX_CHARS = 12000
 SUMMARY_RELATED_HISTORY_LIMIT = 2
 SUMMARY_RELATED_HISTORY_MIN_SCORE = 0.55
+CONVERSATION_MEMORY_ARTIFACT_PATH = ".ai/conversation-memory.json"
+CONVERSATION_MEMORY_TRIGGER_MESSAGE_COUNT = 2
+CONVERSATION_MEMORY_MAX_RECENT_MESSAGES = 12
+CONVERSATION_MEMORY_MAX_CHARS = 3600
 
 
 def normalize_fts_query(query: str) -> str:
@@ -9603,6 +9734,147 @@ def get_conversation_summary_entry(conv_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def load_conversation_memory(
+    conversation_id: str,
+    rel_path: str = CONVERSATION_MEMORY_ARTIFACT_PATH,
+) -> Optional[Dict[str, Any]]:
+    """Load the structured conversation-memory artifact if present."""
+    raw = read_workspace_text(conversation_id, rel_path)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_memory_item(raw: Any, *, limit: int = 220) -> str:
+    cleaned = strip_stream_special_tokens(str(raw or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = cleaned.strip(" -:;,.")
+    if not cleaned:
+        return ""
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned
+
+
+def _normalize_memory_list(raw: Any, *, limit: int = 4, item_limit: int = 220) -> List[str]:
+    values: List[str] = []
+    if isinstance(raw, list):
+        source = raw
+    elif isinstance(raw, str):
+        source = re.split(r"[;\n]+", raw)
+    else:
+        source = []
+    for item in source:
+        cleaned = _normalize_memory_item(item, limit=item_limit)
+        if cleaned and cleaned not in values:
+            values.append(cleaned)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _extract_summary_line_items(summary_text: str) -> Dict[str, List[str]]:
+    extracted: Dict[str, List[str]] = {
+        "goals": [],
+        "constraints": [],
+        "decisions": [],
+        "active_files": [],
+        "open_questions": [],
+    }
+    for raw_line in str(summary_text or "").splitlines():
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        key = label.strip().lower()
+        normalized_value = value.strip()
+        if key == "goals":
+            extracted["goals"] = _normalize_memory_list(normalized_value)
+        elif key == "constraints":
+            extracted["constraints"] = _normalize_memory_list(normalized_value)
+        elif key == "decisions":
+            extracted["decisions"] = _normalize_memory_list(normalized_value)
+        elif key == "files":
+            extracted["active_files"] = _normalize_memory_list(normalized_value, item_limit=120)
+        elif key == "open questions":
+            extracted["open_questions"] = _normalize_memory_list(normalized_value)
+    return extracted
+
+
+def _extract_recent_user_requests(rows: List[tuple], *, limit: int = 3) -> List[str]:
+    requests: List[str] = []
+    for row in reversed(rows):
+        role = str((row or [""])[0] or "").strip().lower()
+        content = _normalize_memory_item((row or ["", ""])[1], limit=200)
+        if role != "user" or not content or len(content) < 4:
+            continue
+        if content.lower() in {"yes", "ok", "okay", "continue", "do it", "do that", "show me"}:
+            continue
+        if content not in requests:
+            requests.append(content)
+        if len(requests) >= limit:
+            break
+    requests.reverse()
+    return requests
+
+
+def fallback_conversation_memory_payload(
+    rows: List[tuple],
+    *,
+    summary_text: str = "",
+) -> Dict[str, Any]:
+    """Build a conservative memory payload from the cached summary and visible rows."""
+    line_items = _extract_summary_line_items(summary_text)
+    recent_requests = _extract_recent_user_requests(rows)
+    summary = _normalize_memory_item(summary_text, limit=260)
+    next_steps = [recent_requests[-1]] if recent_requests else []
+    return {
+        "summary": summary,
+        "goals": line_items.get("goals", []) or recent_requests[:1],
+        "constraints": line_items.get("constraints", []),
+        "decisions": line_items.get("decisions", []),
+        "active_files": line_items.get("active_files", []),
+        "open_questions": line_items.get("open_questions", []),
+        "recent_requests": recent_requests,
+        "next_steps": next_steps,
+    }
+
+
+def normalize_conversation_memory_payload(
+    payload: Dict[str, Any],
+    *,
+    summary_fallback: str = "",
+    rows: Optional[List[tuple]] = None,
+) -> Dict[str, Any]:
+    """Normalize structured memory into a stable durable payload."""
+    rows = rows or []
+    fallback = fallback_conversation_memory_payload(rows, summary_text=summary_fallback)
+    normalized_summary = _normalize_memory_item(payload.get("summary"), limit=260)
+    normalized = {
+        "summary": normalized_summary or _normalize_memory_item(fallback.get("summary"), limit=260),
+        "goals": _normalize_memory_list(payload.get("goals") or fallback.get("goals"), limit=4),
+        "constraints": _normalize_memory_list(payload.get("constraints") or fallback.get("constraints"), limit=4),
+        "decisions": _normalize_memory_list(payload.get("decisions") or fallback.get("decisions"), limit=5),
+        "active_files": _normalize_memory_list(payload.get("active_files") or fallback.get("active_files"), limit=6, item_limit=140),
+        "open_questions": _normalize_memory_list(payload.get("open_questions") or fallback.get("open_questions"), limit=4),
+        "recent_requests": _normalize_memory_list(payload.get("recent_requests") or fallback.get("recent_requests"), limit=4),
+        "next_steps": _normalize_memory_list(payload.get("next_steps") or fallback.get("next_steps"), limit=4),
+    }
+    source_count = payload.get("source_message_count")
+    try:
+        normalized["source_message_count"] = int(source_count or len(rows) or 0)
+    except Exception:
+        normalized["source_message_count"] = int(len(rows) or 0)
+    updated_at = _normalize_memory_item(payload.get("updated_at"), limit=64)
+    if updated_at:
+        normalized["updated_at"] = updated_at
+    return normalized
+
+
 def format_messages_for_summary(messages: List[Dict[str, str]], char_limit: int = SUMMARY_MAX_CHARS) -> str:
     """Flatten messages into a bounded transcript for summary generation."""
     parts: List[str] = []
@@ -9985,6 +10257,79 @@ async def refresh_conversation_summary(conv_id: str):
     conn.close()
 
 
+async def refresh_conversation_memory(conv_id: str):
+    """Refresh the structured conversation-memory artifact for one conversation."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        '''SELECT role, content, timestamp
+           FROM messages
+           WHERE conversation_id = ?
+             AND ''' + visible_message_kind_sql() + '''
+           ORDER BY timestamp ASC''',
+        (conv_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if len(rows) < CONVERSATION_MEMORY_TRIGGER_MESSAGE_COUNT:
+        return
+
+    existing = load_conversation_memory(conv_id)
+    if isinstance(existing, dict):
+        try:
+            if int(existing.get("source_message_count", 0) or 0) >= len(rows):
+                return
+        except Exception:
+            pass
+
+    summary_entry = get_conversation_summary_entry(conv_id) or {}
+    summary_text = str(summary_entry.get("summary", "") or "").strip()
+    recent_rows = rows[-CONVERSATION_MEMORY_MAX_RECENT_MESSAGES:]
+    transcript = format_messages_for_summary(
+        [
+            {"role": row[0], "content": row[1], "timestamp": row[2]}
+            for row in recent_rows
+        ],
+        char_limit=CONVERSATION_MEMORY_MAX_CHARS,
+    )
+    if not transcript and not summary_text:
+        return
+
+    memory_input_parts: List[str] = []
+    if summary_text:
+        memory_input_parts.append(f"Compressed older context:\n{summary_text}")
+    if transcript:
+        memory_input_parts.append(f"Recent visible transcript:\n{transcript}")
+    memory_messages = [
+        {"role": "system", "content": CONVERSATION_MEMORY_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(part for part in memory_input_parts if part).strip()},
+    ]
+    normalized = fallback_conversation_memory_payload(rows, summary_text=summary_text)
+    try:
+        raw_memory = await vllm_chat_complete(memory_messages, max_tokens=320, temperature=0.1)
+        parsed = parse_json_object(raw_memory)
+        normalized = normalize_conversation_memory_payload(
+            parsed,
+            summary_fallback=summary_text,
+            rows=rows,
+        )
+    except Exception:
+        normalized = normalize_conversation_memory_payload(
+            normalized,
+            summary_fallback=summary_text,
+            rows=rows,
+        )
+
+    normalized["updated_at"] = utcnow_iso()
+    normalized["source_message_count"] = int(len(rows))
+    write_workspace_text(
+        conv_id,
+        CONVERSATION_MEMORY_ARTIFACT_PATH,
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+    )
+
+
 async def refresh_conversation_title(conv_id: str):
     """Refresh the short rolling title for one conversation."""
     conn = sqlite3.connect(DB_PATH)
@@ -10045,6 +10390,7 @@ def schedule_conversation_summary_refresh(conv_id: str):
     async def runner():
         try:
             await refresh_conversation_summary(conv_id)
+            await refresh_conversation_memory(conv_id)
             await refresh_conversation_title(conv_id)
         except Exception as exc:
             logger.warning("Conversation summary refresh failed for %s: %s", conv_id, exc)
@@ -18161,6 +18507,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
             if attachment_context else
             str(slash_command.get("args", "")).strip()
         )
+    prior_history = get_conversation_history(conv_id, current_query=message)
     turn_envelope = compose_runtime_turn(
         raw_message=message,
         attachment_context=attachment_context,
@@ -18169,12 +18516,20 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         turn_kind=turn_kind,
     )
     saved_user_message = turn_envelope.saved_user_message
-    effective_message = turn_envelope.effective_message
-    model_message = turn_envelope.model_message
+    effective_message = resolve_contextual_followup_request(
+        conv_id,
+        turn_envelope.effective_message,
+        history=prior_history,
+    ) if not slash_command else turn_envelope.effective_message
+    model_message = (
+        effective_message + str(turn_envelope.model_message[len(turn_envelope.effective_message):])
+        if turn_envelope.model_message.startswith(turn_envelope.effective_message)
+        else turn_envelope.model_message
+    )
     user_message_id = save_message(
         conv_id,
         'user',
-        saved_user_message if slash_command else effective_message,
+        saved_user_message,
         workspace_id=requested_workspace_id or None,
         kind=turn_kind,
     )

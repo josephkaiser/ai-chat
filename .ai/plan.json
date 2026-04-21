@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "id": "llm-harness-core-roadmap",
+  "title": "LLM + Harness Core Capability Roadmap",
+  "updated_at": "2026-04-20",
+  "status": "active",
+  "objective": "Make AI Chat a strong general problem-solving agent centered on LLM strengths: durable memory, tool use, planning, retrieval, workspace progress, and truthful execution.",
+  "north_star": {
+    "product_shape": "A chat-native assistant that can remember, retrieve, plan, search, act in a workspace, and leave durable artifacts without bluffing capability or losing context.",
+    "non_goals": [
+      "Do not prioritize social/account integrations.",
+      "Do not broaden into a full analyst/data-science product before the core coding and problem-solving runtime feels reliable.",
+      "Do not depend on chat transcript alone when durable workspace state or compacted memory would be better."
+    ]
+  },
+  "principles": [
+    "Favor durable workspace state over long in-context recall.",
+    "Escalate depth only when the task actually warrants it.",
+    "Use tools deliberately and truthfully; never imply a result that was not produced.",
+    "Keep chat calm and useful while pushing heavy state into files, memory, and artifacts.",
+    "Treat follow-up turns as first-class interactions, not edge cases."
+  ],
+  "agent_guidance": {
+    "default_execution_order": [
+      "conversation-memory",
+      "follow-up-grounding",
+      "tool-reliability",
+      "artifact-durability",
+      "search-lanes",
+      "adaptive-planning",
+      "memory-retrieval",
+      "self-improvement-loop"
+    ],
+    "rules": [
+      "Prefer extending existing runtime seams such as task-state, context assembly, routing, and replay capture instead of creating parallel systems.",
+      "When a capability becomes durable, write it into the workspace under .ai/ or another explicit artifact path instead of leaving it only in chat.",
+      "If a turn claims a file, artifact, search result, or verification outcome, make sure the runtime can point to the real backing output.",
+      "When adding a capability, wire model instructions, runtime policy, artifact surfacing, and tests together as one end-to-end slice."
+    ],
+    "definition_of_done": [
+      "A capability has a durable runtime surface, not just a prompt tweak.",
+      "The user can observe the result through chat, viewer, workspace artifacts, or explicit status updates.",
+      "The failure mode is captured by tests or replay fixtures.",
+      "Follow-up turns remain coherent after the new capability lands."
+    ]
+  },
+  "phases": [
+    {
+      "id": "conversation-memory",
+      "order": 1,
+      "status": "done",
+      "goal": "Add real per-conversation compacted memory so the assistant can preserve goals, decisions, active files, and open questions without depending on raw transcript replay.",
+      "why_now": "This unlocks better follow-ups, better retrieval, and cleaner context windows across the rest of the roadmap.",
+      "deliverables": [
+        "A durable machine-readable conversation memory artifact stored in the workspace.",
+        "A compacted memory update path tied to visible chat turns and summary refreshes.",
+        "Context assembly that prefers structured conversation memory before raw history search."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/python/ai_chat/context_assembler.py",
+        "src/python/ai_chat/context_policy_program.py",
+        "src/python/ai_chat/prompts.py"
+      ],
+      "acceptance_criteria": [
+        "A conversation can carry forward pinned goals, decisions, active artifacts, and unresolved questions across many turns.",
+        "Short follow-ups no longer require large raw-history retrieval when compacted memory already contains the needed state.",
+        "The runtime can inspect and surface the memory artifact for debugging and replay."
+      ],
+      "dependencies": []
+    },
+    {
+      "id": "follow-up-grounding",
+      "order": 2,
+      "status": "in_progress",
+      "goal": "Resolve short follow-up turns against prior assistant offers, active task state, and conversation memory so the chat feels natural.",
+      "deliverables": [
+        "A follow-up rewrite / grounding layer before routing.",
+        "Shared follow-up intent features used by tool policy, search policy, render policy, and execution routing.",
+        "Replay fixtures for ambiguous follow-ups such as yes, do that, show me, save it, look it up, and continue."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/python/ai_chat/context_eval.py",
+        "tests/test_runtime_permissions.py"
+      ],
+      "acceptance_criteria": [
+        "Short replies inherit the intended action without topic drift.",
+        "Elliptical web/search follow-ups stay attached to the original topic instead of becoming a new literal query.",
+        "Observed misses are explainable through triage or replay captures."
+      ],
+      "dependencies": [
+        "conversation-memory"
+      ]
+    },
+    {
+      "id": "tool-reliability",
+      "order": 3,
+      "status": "queued",
+      "goal": "Make tool availability, selection, and truthfulness predictable so the model can act confidently without bluffing.",
+      "deliverables": [
+        "Explicit policy helpers for web search, workspace writes, command execution, render/open, and verification.",
+        "Observability for why a tool was or was not used.",
+        "Truthfulness filters covering files, artifact refs, searches, and verification claims."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/python/ai_chat/routing_program.py",
+        "src/python/ai_chat/context_eval.py"
+      ],
+      "acceptance_criteria": [
+        "Equivalent user intents expose equivalent tool capabilities.",
+        "The assistant does not claim to have produced an artifact, search result, or file update unless the runtime can verify it.",
+        "Tool gating decisions can be debugged from captures and tests."
+      ],
+      "dependencies": [
+        "follow-up-grounding"
+      ]
+    },
+    {
+      "id": "artifact-durability",
+      "order": 4,
+      "status": "queued",
+      "goal": "Make workspace files and viewer artifacts the durable source of truth whenever the assistant creates or updates something important.",
+      "deliverables": [
+        "Compact artifact objects in chat instead of repeated file dumps.",
+        "Reliable file/viewer materialization for code-like responses and other durable outputs.",
+        "Cleaner file naming, preview labeling, and artifact metadata."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/web/app.ts",
+        "src/web/style.css"
+      ],
+      "acceptance_criteria": [
+        "When the assistant updates a file, the viewer shows the current saved version and chat stays compact.",
+        "Explanatory prose never leaks into saved code files.",
+        "File surfacing feels intentional rather than generic or duplicated."
+      ],
+      "dependencies": [
+        "tool-reliability"
+      ]
+    },
+    {
+      "id": "search-lanes",
+      "order": 5,
+      "status": "queued",
+      "goal": "Keep search useful by splitting it into strong, narrow lanes instead of one generic search behavior.",
+      "deliverables": [
+        "Distinct handling for direct fact lookup, current docs/source lookup, recommendation/comparison, and broader research.",
+        "Direct-answer extraction for fact queries before falling back to result lists.",
+        "Follow-up-aware search routing that preserves the active topic."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/python/ai_chat/context_policy_program.py",
+        "tests/test_runtime_permissions.py"
+      ],
+      "acceptance_criteria": [
+        "Current fact queries return short sourced answers instead of generic link dumps.",
+        "Search does not hijack coding requests that merely mention websites or APIs.",
+        "Short follow-ups like 'can't you see on google?' remain grounded in the prior request."
+      ],
+      "dependencies": [
+        "follow-up-grounding",
+        "tool-reliability"
+      ]
+    },
+    {
+      "id": "adaptive-planning",
+      "order": 6,
+      "status": "queued",
+      "goal": "Use lightweight chat for easy turns and deeper plan/execute/verify loops only when tasks become multi-step, durable, or resumable.",
+      "deliverables": [
+        "Mode auto-selection that remains lightweight by default.",
+        "Saved plan/task-board state for deeper tasks.",
+        "Replanning when the task changes materially."
+      ],
+      "repo_touchpoints": [
+        "src/python/harness.py",
+        "src/python/ai_chat/deep_runtime.py",
+        "src/python/ai_chat/routing_program.py",
+        "src/web/app.ts"
+      ],
+      "acceptance_criteria": [
+        "Simple chat and fact turns stay fast and conversational.",
+        "Multi-step work can pause and resume from durable state without losing the thread.",
+        "The user can tell when the runtime escalated depth and why."
+      ],
+      "dependencies": [
+        "conversation-memory",
+        "tool-reliability"
+      ]
+    },
+    {
+      "id": "memory-retrieval",
+      "order": 7,
+      "status": "queued",
+      "goal": "Use structured memory and targeted retrieval together so the runtime pulls only the most relevant prior context.",
+      "deliverables": [
+        "Policy that decides when compacted memory is enough and when raw history retrieval is still needed.",
+        "Better ranking of retrieved memory slices for corrective follow-ups and long-running tasks.",
+        "Evaluation coverage for memory underuse, overuse, and wrong-turn retrieval."
+      ],
+      "repo_touchpoints": [
+        "src/python/ai_chat/context_assembler.py",
+        "src/python/ai_chat/context_policy_program.py",
+        "src/python/ai_chat/context_eval.py"
+      ],
+      "acceptance_criteria": [
+        "The runtime avoids dragging large history into context when compacted memory already answers the need.",
+        "Corrective follow-ups still pull enough raw evidence when necessary.",
+        "Memory-related misses appear clearly in triage buckets."
+      ],
+      "dependencies": [
+        "conversation-memory",
+        "search-lanes"
+      ]
+    },
+    {
+      "id": "self-improvement-loop",
+      "order": 8,
+      "status": "queued",
+      "goal": "Keep turning real user misses into replayable fixtures and tuning targets so the runtime improves from evidence rather than guesswork.",
+      "deliverables": [
+        "A capture path for misses related to memory, follow-ups, tool choice, and search quality.",
+        "Promotion/review workflow for turning bad turns into accepted eval fixtures.",
+        "Triage that maps top failure buckets to the roadmap phases they block."
+      ],
+      "repo_touchpoints": [
+        "src/python/ai_chat/context_eval.py",
+        "src/python/harness.py",
+        "src/web/app.ts",
+        "src/web/index.html"
+      ],
+      "acceptance_criteria": [
+        "The biggest recurring misses are visible as concrete replay buckets, not anecdotes.",
+        "Accepted fixtures become the regression bar for future runtime changes.",
+        "Agents can identify which roadmap phase to work on from the captures alone."
+      ],
+      "dependencies": [
+        "conversation-memory",
+        "follow-up-grounding",
+        "tool-reliability",
+        "search-lanes"
+      ]
+    }
+  ],
+  "immediate_next_actions": [
+    {
+      "id": "bootstrap-conversation-memory",
+      "phase": "conversation-memory",
+      "status": "done",
+      "task": "Create a durable conversation memory artifact under .ai/ that stores goals, decisions, active files, open questions, recent requests, and next steps.",
+      "success_signal": "A chat can be rehydrated from the memory artifact without depending on raw transcript replay."
+    },
+    {
+      "id": "wire-memory-into-context-assembly",
+      "phase": "conversation-memory",
+      "status": "done",
+      "task": "Teach context assembly to read structured conversation memory first and include it as a ranked section before raw history retrieval.",
+      "success_signal": "Context bundles for follow-up and planning phases include compacted memory when available."
+    },
+    {
+      "id": "add-memory-replay-cases",
+      "phase": "conversation-memory",
+      "status": "done",
+      "task": "Add replay/eval fixtures for long-running chat continuity and short follow-ups that should be resolved from compacted memory.",
+      "success_signal": "Context eval coverage fails if memory is missing or ignored in those cases."
+    },
+    {
+      "id": "followup-rewrite-layer",
+      "phase": "follow-up-grounding",
+      "status": "done",
+      "task": "Add a follow-up rewrite/grounding layer that uses compacted memory plus prior assistant offers to resolve short replies before routing.",
+      "success_signal": "Elliptical turns like yes, do that, save it, and can't you see on google stay attached to the intended prior action."
+    },
+    {
+      "id": "followup-grounding-replay-cases",
+      "phase": "follow-up-grounding",
+      "status": "next",
+      "task": "Add replay fixtures and triage coverage for grounded follow-up rewrites so missed short-turn resolutions show up as explicit failures.",
+      "success_signal": "Follow-up regressions such as topic drift, wrong tool lane, or missed prior offers are visible in context evals and triage."
+    }
+  ]
+}

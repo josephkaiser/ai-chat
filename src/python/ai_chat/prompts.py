@@ -99,6 +99,24 @@ Rules:
 """
 
 
+CONVERSATION_MEMORY_SYSTEM_PROMPT = """You build structured durable memory for a coding assistant.
+
+Return ONLY valid JSON in this format:
+{"summary":"...","goals":["..."],"constraints":["..."],"decisions":["..."],"active_files":["..."],"open_questions":["..."],"recent_requests":["..."],"next_steps":["..."]}
+
+Rules:
+- Keep every string short, concrete, and durable.
+- Prefer stable facts, decisions, active artifact paths, and unresolved questions over chatter.
+- `summary` should be one compact sentence.
+- Include only fields that have meaningful content; use empty arrays or an empty string otherwise.
+- `active_files` should contain specific file or artifact paths when they matter.
+- `recent_requests` should capture the latest substantive user asks, not greetings or filler.
+- `next_steps` should describe likely pending work only when it is clearly implied by the conversation.
+- Do not include markdown, commentary, or extra keys.
+- Do not invent details.
+"""
+
+
 CONVERSATION_TITLE_SYSTEM_PROMPT = """You create short rolling conversation titles for a coding assistant.
 
 Return only a plain-text title, no quotes or markdown.

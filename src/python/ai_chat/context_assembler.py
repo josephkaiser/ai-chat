@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
+import json
 from typing import Callable, Dict, List, Optional, Sequence
 
 from src.python.ai_chat.context_selection_program import (
@@ -17,6 +18,9 @@ from src.python.ai_chat.context_policy_program import (
 )
 
 from src.python.ai_chat.deep_runtime import DeepSession
+
+
+CONVERSATION_MEMORY_ARTIFACT_PATH = ".ai/conversation-memory.json"
 
 
 @dataclass(frozen=True)
@@ -188,6 +192,44 @@ def format_workspace_excerpt_blocks(
     return "\n\n".join(blocks) if blocks else empty
 
 
+def format_conversation_memory_payload(
+    payload: Dict[str, object],
+    *,
+    empty: str = "(none)",
+) -> str:
+    """Render structured conversation memory into a compact prompt block."""
+    if not isinstance(payload, dict) or not payload:
+        return empty
+
+    lines: List[str] = []
+    summary = str(payload.get("summary") or "").strip()
+    if summary:
+        lines.append(f"Summary: {summary}")
+
+    field_map = [
+        ("goals", "Goals"),
+        ("constraints", "Constraints"),
+        ("decisions", "Decisions"),
+        ("active_files", "Active files"),
+        ("open_questions", "Open questions"),
+        ("recent_requests", "Recent requests"),
+        ("next_steps", "Next steps"),
+    ]
+    for key, title in field_map:
+        raw_values = payload.get(key, [])
+        values = [
+            str(item).strip()
+            for item in (raw_values if isinstance(raw_values, list) else [])
+            if str(item).strip()
+        ]
+        if values:
+            lines.append(f"{title}: " + "; ".join(values[:4]))
+
+    if lines:
+        lines.append(f"Artifact: [[artifact:{CONVERSATION_MEMORY_ARTIFACT_PATH}]]")
+    return "\n".join(lines) if lines else empty
+
+
 def _feedback_section(session: DeepSession, *, include_heading: bool = False) -> str:
     summary = str(session.recent_product_feedback_summary or "").strip()
     if not summary:
@@ -264,6 +306,32 @@ async def build_dynamic_context_sections(
             has_step_reports=bool(session.step_reports),
         )
     )
+
+    memory_raw = await _read_workspace_preview(
+        adapters,
+        session.conversation_id,
+        CONVERSATION_MEMORY_ARTIFACT_PATH,
+    )
+    if memory_raw:
+        try:
+            memory_payload = json.loads(memory_raw)
+        except Exception:
+            memory_payload = {}
+        memory_text = format_conversation_memory_payload(
+            memory_payload if isinstance(memory_payload, dict) else {},
+        )
+        if memory_text and memory_text != "(none)":
+            sections.append(
+                ContextSection(
+                    "conversation_memory",
+                    "Compacted conversation memory",
+                    memory_text,
+                    priority=18,
+                    tags=("conversation", "memory", "artifacts"),
+                    phase_hints=("inspect", "plan", "direct_answer", "verify", "synthesize"),
+                    metadata={"sticky": "true"},
+                )
+            )
 
     if policy.retrieve_memory and len(cleaned_request) >= 2:
         try:

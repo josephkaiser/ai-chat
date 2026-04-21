@@ -435,6 +435,51 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertFalse(app.should_refresh_conversation_title_for_count("Useful title", 6))
         self.assertTrue(app.should_refresh_conversation_title_for_count("Useful title", 8))
 
+    def test_fallback_conversation_memory_payload_uses_summary_lines_and_recent_requests(self):
+        rows = [
+            ("user", "Can you make the app feel more chat-first?", "2026-04-10T00:00:00"),
+            ("assistant", "Yes, we should keep workspace artifacts durable.", "2026-04-10T00:00:01"),
+            ("user", "Also improve follow-up handling.", "2026-04-10T00:00:02"),
+        ]
+
+        payload = app.fallback_conversation_memory_payload(
+            rows,
+            summary_text=(
+                "Goals: Make the app chat-first; Improve follow-up handling\n"
+                "Decisions: Keep durable workspace artifacts\n"
+                "Files: src/web/app.ts; src/python/harness.py\n"
+                "Open questions: How much memory should be retrieved?"
+            ),
+        )
+
+        self.assertEqual(payload["goals"], ["Make the app chat-first", "Improve follow-up handling"])
+        self.assertEqual(payload["decisions"], ["Keep durable workspace artifacts"])
+        self.assertEqual(payload["active_files"], ["src/web/app.ts", "src/python/harness.py"])
+        self.assertEqual(payload["open_questions"], ["How much memory should be retrieved?"])
+        self.assertEqual(payload["recent_requests"], ["Can you make the app feel more chat-first?", "Also improve follow-up handling"])
+
+    def test_normalize_conversation_memory_payload_falls_back_cleanly(self):
+        rows = [
+            ("user", "Write a linked list example in C", "2026-04-10T00:00:00"),
+            ("assistant", "I can create the file.", "2026-04-10T00:00:01"),
+        ]
+
+        payload = app.normalize_conversation_memory_payload(
+            {
+                "summary": " ",
+                "goals": [],
+                "active_files": [" linked_list.c ", "linked_list.c"],
+                "recent_requests": [],
+            },
+            summary_fallback="Goals: Linked list example in C\nFiles: linked_list.c",
+            rows=rows,
+        )
+
+        self.assertEqual(payload["summary"], "Goals: Linked list example in C Files: linked_list.c")
+        self.assertEqual(payload["goals"], ["Linked list example in C"])
+        self.assertEqual(payload["active_files"], ["linked_list.c"])
+        self.assertEqual(payload["recent_requests"], ["Write a linked list example in C"])
+
     def test_refresh_conversation_title_skips_non_trigger_message_counts(self):
         original_db_path = app.DB_PATH
         original_vllm = app.vllm_chat_complete
@@ -1121,6 +1166,50 @@ class RuntimePermissionTests(unittest.TestCase):
                     }
                 ],
             )
+        )
+
+    def test_resolve_contextual_followup_request_rewrites_google_followup_from_memory(self):
+        original_loader = app.load_conversation_memory
+        try:
+            app.load_conversation_memory = lambda _conversation_id, rel_path=app.CONVERSATION_MEMORY_ARTIFACT_PATH: {
+                "recent_requests": ["what is the weather in san francisco currently?"],
+            }
+            rewritten = app.resolve_contextual_followup_request(
+                "conv-google-followup",
+                "can't you see on google?",
+                history=[
+                    {"role": "user", "content": "what is the weather in san francisco currently?"},
+                    {"role": "assistant", "content": "Here are some weather sites I found."},
+                ],
+            )
+        finally:
+            app.load_conversation_memory = original_loader
+
+        self.assertEqual(
+            rewritten,
+            "Use web search or current online sources to answer this request directly: what is the weather in san francisco currently?",
+        )
+
+    def test_resolve_contextual_followup_request_rewrites_save_followup_with_active_file(self):
+        original_loader = app.load_conversation_memory
+        try:
+            app.load_conversation_memory = lambda _conversation_id, rel_path=app.CONVERSATION_MEMORY_ARTIFACT_PATH: {
+                "recent_requests": ["write a linked list example in C"],
+                "active_files": ["linked_list.c"],
+            }
+            rewritten = app.resolve_contextual_followup_request(
+                "conv-save-followup",
+                "yes",
+                history=[
+                    {"role": "assistant", "content": "Would you like me to save this script to your workspace?"},
+                ],
+            )
+        finally:
+            app.load_conversation_memory = original_loader
+
+        self.assertEqual(
+            rewritten,
+            "Save or update the workspace file linked_list.c for this request: write a linked list example in C",
         )
 
     def test_should_use_workspace_tools_inherits_render_offer_for_show_me(self):
