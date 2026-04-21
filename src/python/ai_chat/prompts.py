@@ -109,6 +109,7 @@ Rules:
 - Prefer concrete nouns over filler.
 - Do not use punctuation unless part of a filename or code term.
 - Do not start with verbs like "Help", "Create", or "Can".
+- Do not begin with conversational filler like "Okay", "Sure", "Yes", "Let's", or "I can".
 - Do not include surrounding explanation.
 """
 

@@ -407,6 +407,28 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertEqual(updated_title, "SQLite CLI CRUD quickstart guide")
 
+    def test_normalize_conversation_title_rejects_chatty_leadins(self):
+        self.assertEqual(
+            app.normalize_conversation_title("Okay, let's debug weather search", fallback="Weather in San Francisco"),
+            "Weather in San Francisco",
+        )
+        self.assertEqual(
+            app.normalize_conversation_title("Can you help me?", fallback="SQL CLI guide"),
+            "SQL CLI guide",
+        )
+
+    def test_derive_conversation_title_seed_uses_first_user_topic(self):
+        rows = [
+            ("user", "what's the weather in san francisco?", "2026-04-10T00:00:00"),
+            ("assistant", "Let me check.", "2026-04-10T00:00:01"),
+            ("user", "what is 11 C in F?", "2026-04-10T00:00:02"),
+        ]
+
+        self.assertEqual(
+            app.derive_conversation_title_seed(rows),
+            "The weather in san francisco",
+        )
+
     def test_should_refresh_conversation_title_for_count_throttles_followups(self):
         self.assertFalse(app.should_refresh_conversation_title_for_count("New chat", 3))
         self.assertTrue(app.should_refresh_conversation_title_for_count("New chat", 4))
@@ -449,6 +471,50 @@ class RuntimePermissionTests(unittest.TestCase):
         finally:
             app.DB_PATH = original_db_path
             app.vllm_chat_complete = original_vllm
+
+    def test_refresh_conversation_title_falls_back_from_chatty_llm_title(self):
+        original_db_path = app.DB_PATH
+        original_vllm = app.vllm_chat_complete
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.init_db()
+
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    ("conv-title-fallback", "New chat", "2026-04-10T00:00:00", "2026-04-10T00:00:00"),
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("conv-title-fallback", "user", "what's the weather in san francisco?", "2026-04-10T00:00:00", "visible_chat", None),
+                        ("conv-title-fallback", "assistant", "I can check that.", "2026-04-10T00:00:01", "visible_chat", "neutral"),
+                        ("conv-title-fallback", "user", "what is 11 C in F?", "2026-04-10T00:00:02", "visible_chat", None),
+                        ("conv-title-fallback", "assistant", "11 C is 51.8 F.", "2026-04-10T00:00:03", "visible_chat", "neutral"),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                async def fake_vllm_chat_complete(messages, max_tokens=None, temperature=None):
+                    return "Okay, let's figure this out"
+
+                app.vllm_chat_complete = fake_vllm_chat_complete
+                asyncio.run(app.refresh_conversation_title("conv-title-fallback"))
+
+                conn = sqlite3.connect(app.DB_PATH)
+                updated_title = conn.execute(
+                    "SELECT title FROM conversations WHERE id = ?",
+                    ("conv-title-fallback",),
+                ).fetchone()[0]
+                conn.close()
+        finally:
+            app.DB_PATH = original_db_path
+            app.vllm_chat_complete = original_vllm
+
+        self.assertEqual(updated_title, "The weather in san francisco")
 
     def test_request_wants_recent_product_feedback_for_repo_improvement_prompts(self):
         self.assertTrue(

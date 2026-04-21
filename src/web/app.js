@@ -570,10 +570,41 @@ function truncatePreview(value, limit = 88) {
 function cleanConversationText(value) {
     return String(value || "").replace(/<\/?think>/gi, " ").replace(/\[\[artifact:([^\]]+)\]\]/gi, "$1").replace(/[`*_#>\[\]]+/g, " ").replace(/\s+/g, " ").trim();
 }
-function displayConversationTitle(title, preview) {
+function conversationTitleLooksLowQuality(title) {
+    const normalized = cleanConversationText(title).toLowerCase();
+    if (!normalized || normalized === "new chat" || normalized === "untitled" || normalized === "untitled chat") {
+        return true;
+    }
+    if (normalized.endsWith("?")) {
+        return true;
+    }
+    return [
+        "okay",
+        "ok",
+        "sure",
+        "yes",
+        "no",
+        "here",
+        "heres",
+        "here's",
+        "let's",
+        "lets",
+        "i can",
+        "i will",
+        "i'll",
+        "we can",
+        "you can",
+        "can you",
+        "could you",
+        "would you",
+        "help me"
+    ].some((prefix)=>normalized.startsWith(prefix));
+}
+function displayConversationTitle(title, preview, seed = "") {
     const cleanedTitle = cleanConversationText(title);
+    const cleanedSeed = cleanConversationText(seed);
     const cleanedPreview = cleanConversationText(preview);
-    const base = cleanedTitle && cleanedTitle.toLowerCase() !== "untitled chat" ? cleanedTitle : cleanedPreview || "New chat";
+    const base = cleanedTitle && !conversationTitleLooksLowQuality(cleanedTitle) ? cleanedTitle : cleanedSeed || cleanedPreview || "New chat";
     const words = base.split(/\s+/).filter(Boolean);
     if (words.length <= 5) return base;
     return `${words.slice(0, 5).join(" ")}…`;
@@ -1390,7 +1421,7 @@ function renderConversations() {
     }
     conversationList.innerHTML = items.map((conversation)=>{
         const editableTitle = cleanConversationText(conversation.title || "");
-        const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "");
+        const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "", conversation.seed_message || "");
         const visiblePreview = displayConversationPreview(conversation.title || "", conversation.last_message || "");
         return `
             <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
