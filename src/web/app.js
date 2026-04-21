@@ -496,6 +496,10 @@ function thinkingStatusLabel(status) {
     if (status.phase === "thinking") return "Working";
     return "Status";
 }
+function isSuppressedAssistantNote(text) {
+    const normalized = normalizeThinkingText(text).toLowerCase();
+    return normalized.includes("i hit an unexpected internal error before i could finish the reply") || normalized.includes("please say continue and i'll retry from the current workspace state") || normalized.includes("please say continue and i’ll retry from the current workspace state");
+}
 function summarizeRuntimeError(text) {
     const normalized = normalizeThinkingText(text);
     if (!normalized) {
@@ -515,6 +519,13 @@ function summarizeRuntimeError(text) {
 function buildThinkingSummary(event) {
     if (event.type === "start") {
         return "Getting oriented.";
+    }
+    if (event.type === "status") {
+        const normalized = normalizeThinkingText(event.content || "");
+        if (/workspace execution path failed/i.test(normalized)) {
+            return "Switching to the fallback path and continuing.";
+        }
+        return normalized || "Continuing.";
     }
     if (event.type === "permission_required") {
         return "Opening workspace access and continuing.";
@@ -1894,7 +1905,19 @@ function handleChatEvent(event) {
         setThinkingStatus(buildThinkingSummary(event));
         return;
     }
-    if (event.type === "assistant_note" || event.type === "final_replace") {
+    if (event.type === "assistant_note") {
+        if (isSuppressedAssistantNote(event.content || "")) {
+            setThinkingStatus("Switching to the fallback path and continuing.", {
+                phase: "thinking"
+            });
+            return;
+        }
+        const assistantMessage = ensureAssistantMessage();
+        assistantMessage.content = event.content || "";
+        renderMessages();
+        return;
+    }
+    if (event.type === "final_replace") {
         const assistantMessage = ensureAssistantMessage();
         assistantMessage.content = event.content || "";
         renderMessages();
@@ -1906,7 +1929,7 @@ function handleChatEvent(event) {
         renderMessages();
         return;
     }
-    if ((event.type === "activity" || event.type === "reasoning_note") && event.content) {
+    if ((event.type === "activity" || event.type === "reasoning_note" || event.type === "status") && event.content) {
         setThinkingStatus(buildThinkingSummary(event), {
             phase: event.phase || "thinking"
         });

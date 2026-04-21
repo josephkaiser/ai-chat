@@ -628,6 +628,18 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertTrue(app.should_offer_web_search(message, features))
 
+    def test_typoed_search_the_web_request_still_enables_web_search(self):
+        message = "Can you search teh web for the current FastAPI docs?"
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        self.assertTrue(app.should_offer_web_search(message, features))
+
+    def test_recommendation_research_request_enables_web_search(self):
+        message = "What are the best current note-taking apps? Please compare top options."
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        self.assertTrue(app.should_offer_web_search(message, features))
+
     def test_patch_request_can_upgrade_from_respond_phase_into_execution(self):
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)
 
