@@ -35,6 +35,7 @@ rsync -avz --progress \
     --exclude='logs/' \
     --exclude='data/' \
     --exclude='runs/' \
+    --exclude='assets/' \
     ~/dev/ai-chat/ joe@euler:~/prod/ai-chat/
 ```
 
