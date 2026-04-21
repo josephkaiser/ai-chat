@@ -72,7 +72,7 @@
     {
       "id": "follow-up-grounding",
       "order": 2,
-      "status": "in_progress",
+      "status": "done",
       "goal": "Resolve short follow-up turns against prior assistant offers, active task state, and conversation memory so the chat feels natural.",
       "deliverables": [
         "A follow-up rewrite / grounding layer before routing.",
@@ -96,7 +96,7 @@
     {
       "id": "tool-reliability",
       "order": 3,
-      "status": "queued",
+      "status": "in_progress",
       "goal": "Make tool availability, selection, and truthfulness predictable so the model can act confidently without bluffing.",
       "deliverables": [
         "Explicit policy helpers for web search, workspace writes, command execution, render/open, and verification.",
@@ -278,9 +278,23 @@
     {
       "id": "followup-grounding-replay-cases",
       "phase": "follow-up-grounding",
-      "status": "next",
+      "status": "done",
       "task": "Add replay fixtures and triage coverage for grounded follow-up rewrites so missed short-turn resolutions show up as explicit failures.",
       "success_signal": "Follow-up regressions such as topic drift, wrong tool lane, or missed prior offers are visible in context evals and triage."
+    },
+    {
+      "id": "tool-policy-observability",
+      "phase": "tool-reliability",
+      "status": "done",
+      "task": "Make tool exposure decisions observable so captures and triage can show whether search, workspace, render, or execution tools were not offered, filtered, or simply not chosen.",
+      "success_signal": "A failed turn can distinguish missing capability exposure from a bad model decision."
+    },
+    {
+      "id": "tool-failure-bucketing",
+      "phase": "tool-reliability",
+      "status": "next",
+      "task": "Turn captured tool-policy traces into triage buckets that explicitly distinguish not offered, filtered out, permission-blocked, and offered-but-unused tool failures.",
+      "success_signal": "Replay and triage can point to the exact missing tool lane instead of only generic context or routing symptoms."
     }
   ]
 }

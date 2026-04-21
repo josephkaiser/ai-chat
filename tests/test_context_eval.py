@@ -227,7 +227,12 @@ class ContextEvalTests(unittest.TestCase):
         good_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
         good_payload["capture"] = {"trigger": "retry", "phase": "plan"}
         bad_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[1])
-        bad_payload["capture"] = {"trigger": "explicit_feedback", "phase": "verify"}
+        bad_payload["capture"] = {
+            "trigger": "explicit_feedback",
+            "phase": "verify",
+            "tool_policy": {"workspace_requested": True, "has_workspace_tools": True},
+            "tool_names": ["workspace.read_file"],
+        }
         bad_payload["expectation"]["forbidden_selected_keys"] = ["conversation_context", "workspace_excerpts"]
 
         results = [
@@ -241,6 +246,8 @@ class ContextEvalTests(unittest.TestCase):
         self.assertIn("trigger_counts", summary)
         self.assertIn("explicit_feedback", summary["trigger_counts"])
         self.assertTrue(summary["recent_failures"])
+        self.assertEqual(summary["recent_failures"][0]["tool_policy"]["workspace_requested"], True)
+        self.assertEqual(summary["recent_failures"][0]["tool_names"], ["workspace.read_file"])
         self.assertTrue(summary["top_triage_buckets"])
         self.assertEqual(summary["recommended_fix"]["key"], "forbidden_selected:workspace_excerpts")
         self.assertEqual(summary["top_triage_buckets"][0]["severity"], "high")
@@ -269,6 +276,29 @@ class ContextEvalTests(unittest.TestCase):
         self.assertIn("retry", top_bucket["trigger_counts"])
         self.assertIn("plan", top_bucket["phase_counts"])
         self.assertTrue(top_bucket["example_cases"])
+
+    def test_summarize_captured_context_eval_results_recommends_compacted_memory_fix(self):
+        followup_case = next(
+            case
+            for case in DEFAULT_CONTEXT_EVAL_CASES
+            if case.name == "direct_answer_short_followup_prefers_compacted_memory"
+        )
+        memory_payload = serialize_context_eval_case(followup_case)
+        memory_payload["capture"] = {"trigger": "implicit_feedback", "phase": "direct_answer"}
+        memory_payload["selection_candidates"] = [
+            candidate
+            for candidate in memory_payload["selection_candidates"]
+            if candidate.get("key") != "conversation_memory"
+        ]
+        memory_payload["expectation"]["required_selected_keys"] = ["conversation_memory"]
+
+        summary = summarize_captured_context_eval_results([
+            replay_captured_context_eval_payload(memory_payload, source_path="/tmp/memory.json"),
+        ])
+
+        top_bucket = summary["top_triage_buckets"][0]
+        self.assertEqual(top_bucket["key"], "missing_selected:conversation_memory")
+        self.assertIn("compacted conversation memory", top_bucket["recommendation"].lower())
 
     def test_summarize_captured_context_eval_results_includes_fixture_coverage(self):
         missing_workspace_payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])

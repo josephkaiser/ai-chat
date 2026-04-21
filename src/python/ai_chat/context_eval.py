@@ -881,6 +881,8 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             "trigger": str(item.capture.get("trigger", "")).strip() or "unknown",
             "failed_checks": list(item.result.failed_checks),
             "selected_keys": list(item.result.selection_output.selected_keys),
+            "tool_policy": dict(item.capture.get("tool_policy", {})) if isinstance(item.capture.get("tool_policy"), dict) else {},
+            "tool_names": list(item.capture.get("tool_names", [])) if isinstance(item.capture.get("tool_names"), list) else [],
         }
         for item in materialized
         if not item.result.passed
@@ -902,6 +904,8 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             "phase": phase,
             "failed_checks": list(item.result.failed_checks),
             "selected_keys": list(item.result.selection_output.selected_keys),
+            "tool_policy": dict(item.capture.get("tool_policy", {})) if isinstance(item.capture.get("tool_policy"), dict) else {},
+            "tool_names": list(item.capture.get("tool_names", [])) if isinstance(item.capture.get("tool_names"), list) else [],
         }
         for failed_check in item.result.failed_checks:
             bucket_meta = _triage_bucket_for_failed_check(failed_check)
