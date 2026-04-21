@@ -2933,9 +2933,13 @@ async function bootstrap(): Promise<void> {
     state.healthPollTimer = window.setInterval(() => {
         void fetchHealth();
     }, 2500);
-    await fetchHealth();
-    await loadWorkspaces();
-    await loadConversations();
+    void fetchHealth();
+
+    const conversationsPromise = loadConversations();
+    const workspacesPromise = loadWorkspaces();
+
+    await conversationsPromise;
+    await workspacesPromise;
 
     if (state.conversations.length) {
         await loadConversation(state.conversations[0].id);
