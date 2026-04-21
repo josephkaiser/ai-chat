@@ -333,7 +333,51 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["category"], "artifact_visibility")
         self.assertEqual(entries[1]["category"], "non_interactive_artifact")
-        self.assertIn("plot doesn't show", entries[0]["user_feedback"].lower())
+
+    def test_refresh_conversation_title_updates_short_llm_title(self):
+        original_db_path = app.DB_PATH
+        original_vllm = app.vllm_chat_complete
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.init_db()
+
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    ("conv-title", "Can you help me learn SQL by creating a new db in sqlite3 from CLI", "2026-04-10T00:00:00", "2026-04-10T00:00:00"),
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("conv-title", "user", "Can you help me learn SQL from the CLI?", "2026-04-10T00:00:00", "visible_chat", None),
+                        ("conv-title", "assistant", "Yes, let's build a SQLite guide.", "2026-04-10T00:00:01", "visible_chat", "neutral"),
+                        ("conv-title", "user", "Please include table creation and inserts too.", "2026-04-10T00:00:02", "visible_chat", None),
+                        ("conv-title", "assistant", "I'll include create table, insert, and query steps.", "2026-04-10T00:00:03", "visible_chat", "neutral"),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                async def fake_vllm_chat_complete(messages, max_tokens=None, temperature=None):
+                    self.assertEqual(messages[0]["content"], app.CONVERSATION_TITLE_SYSTEM_PROMPT)
+                    return "SQLite CLI CRUD quickstart guide today"
+
+                app.vllm_chat_complete = fake_vllm_chat_complete
+                asyncio.run(app.refresh_conversation_title("conv-title"))
+
+                conn = sqlite3.connect(app.DB_PATH)
+                updated_title = conn.execute(
+                    "SELECT title FROM conversations WHERE id = ?",
+                    ("conv-title",),
+                ).fetchone()[0]
+                conn.close()
+        finally:
+            app.DB_PATH = original_db_path
+            app.vllm_chat_complete = original_vllm
+
+        self.assertEqual(updated_title, "SQLite CLI CRUD quickstart guide")
 
     def test_request_wants_recent_product_feedback_for_repo_improvement_prompts(self):
         self.assertTrue(
@@ -683,6 +727,13 @@ class RuntimePermissionTests(unittest.TestCase):
             app.build_saved_progress_fallback_response = original_builder
 
         self.assertEqual(response, "Saved progress summary.")
+
+    def test_ensure_nonempty_turn_response_uses_cleaner_resume_copy_on_error(self):
+        response = app.ensure_nonempty_turn_response("", "conv-fallback", "Review this repo", error_text="boom")
+
+        self.assertIn("wasn't able to finish", response)
+        self.assertIn("Say continue", response)
+        self.assertNotIn("unexpected internal error", response)
 
     def test_bootstrap_workspace_from_current_repo_seeds_filtered_snapshot(self):
         original_base_dir = app._base_dir

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Compatibility entrypoint for the Python harness.
+"""Compatibility entrypoint that aliases the backend harness module."""
 
-Primary backend source now lives in `src/python/harness.py`.
-"""
+import sys
 
-from src.python.harness import *  # noqa: F401,F403
-from src.python.harness import app as fastapi_app
-from src.python.harness import build_uvicorn_run_kwargs
+from src.python import harness as _harness
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(fastapi_app, **build_uvicorn_run_kwargs())
+    uvicorn.run(_harness.app, **_harness.build_uvicorn_run_kwargs())
+else:
+    sys.modules[__name__] = _harness

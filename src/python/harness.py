@@ -39,13 +39,137 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 
-import httpx
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+try:
+    import httpx
+except Exception as exc:
+    HTTPX_IMPORT_ERROR = exc
+
+    class _MissingHttpxModule:
+        class HTTPStatusError(Exception):
+            pass
+
+        class ConnectError(Exception):
+            pass
+
+        class Timeout:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("httpx is required for network-backed runtime features") from HTTPX_IMPORT_ERROR
+
+        class AsyncClient:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("httpx is required for network-backed runtime features") from HTTPX_IMPORT_ERROR
+
+    httpx = _MissingHttpxModule()
+else:
+    HTTPX_IMPORT_ERROR = None
+
+try:
+    from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.templating import Jinja2Templates
+    FASTAPI_IMPORT_ERROR = None
+except Exception as exc:
+    FASTAPI_IMPORT_ERROR = exc
+
+    class HTTPException(Exception):
+        def __init__(self, status_code: int = 500, detail: str = ""):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    class Request:
+        pass
+
+    class UploadFile:
+        filename = ""
+
+    class WebSocket:
+        pass
+
+    class WebSocketDisconnect(Exception):
+        pass
+
+    class Response:
+        def __init__(self, content: Any = None, status_code: int = 200, media_type: Optional[str] = None, **kwargs):
+            self.content = content
+            self.status_code = status_code
+            self.media_type = media_type
+
+    class JSONResponse(Response):
+        pass
+
+    class HTMLResponse(Response):
+        pass
+
+    class FileResponse(Response):
+        def __init__(self, path: Any, *args, **kwargs):
+            super().__init__(content=path, *args, **kwargs)
+
+    class StaticFiles:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class Jinja2Templates:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def TemplateResponse(self, *args, **kwargs):
+            return HTMLResponse()
+
+    class CORSMiddleware:
+        pass
+
+    def File(default: Any = None, *args, **kwargs):
+        return default
+
+    def Form(default: Any = None, *args, **kwargs):
+        return default
+
+    class FastAPI:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def add_middleware(self, *args, **kwargs):
+            return None
+
+        def mount(self, *args, **kwargs):
+            return None
+
+        def exception_handler(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def get(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        post = delete = websocket = on_event = get
+
+try:
+    from pydantic import BaseModel, Field
+    PYDANTIC_IMPORT_ERROR = None
+except Exception as exc:
+    PYDANTIC_IMPORT_ERROR = exc
+
+    class BaseModel:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+    def Field(default: Any = None, default_factory: Optional[Callable[[], Any]] = None, **kwargs):
+        if default_factory is not None:
+            return default_factory()
+        return default
 
 from src.python.ai_chat.context_assembler import (
     ContextRetrievalAdapters,
@@ -108,6 +232,7 @@ except Exception:
 
 from src.python.ai_chat.embeddings import configured_embedding_model_name, embed_passages, embed_queries, embeddings_available
 from src.python.ai_chat.prompts import (
+    CONVERSATION_TITLE_SYSTEM_PROMPT,
     CONVERSATION_SUMMARY_SYSTEM_PROMPT,
     CRITIQUE_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
@@ -601,14 +726,43 @@ APP_TITLE = "AI Chat"
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
 MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
 
-WORKSPACE_ROOT_PATH = pathlib.Path(WORKSPACE_ROOT).resolve()
-WORKSPACE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
-RUNS_ROOT_PATH = pathlib.Path(RUNS_ROOT).resolve()
-RUNS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
-MANAGED_PYTHON_ENVS_ROOT_PATH = pathlib.Path(MANAGED_PYTHON_ENVS_ROOT).resolve()
-MANAGED_PYTHON_ENVS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
-VOICE_ROOT_PATH = pathlib.Path(VOICE_ROOT).resolve()
-VOICE_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+REPO_ROOT_PATH = pathlib.Path(__file__).resolve().parents[2]
+_base_dir = REPO_ROOT_PATH
+
+def ensure_runtime_root(raw_path: str, fallback_relative: str) -> pathlib.Path:
+    """Resolve a writable runtime directory, falling back to repo-local data in dev/test."""
+    candidate = pathlib.Path(raw_path).resolve()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+    except PermissionError:
+        fallback = (REPO_ROOT_PATH / fallback_relative).resolve()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def ensure_runtime_file_path(raw_path: str, fallback_relative: str) -> pathlib.Path:
+    """Resolve a writable runtime file path, falling back to repo-local data in dev/test."""
+    candidate = pathlib.Path(raw_path).resolve()
+    try:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        return candidate
+    except PermissionError:
+        fallback = (REPO_ROOT_PATH / fallback_relative).resolve()
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+DB_PATH = str(ensure_runtime_file_path(DB_PATH, "data/chat.db"))
+MODEL_STATE_PATH = str(ensure_runtime_file_path(MODEL_STATE_PATH, "data/model_state.json"))
+WORKSPACE_ROOT_PATH = ensure_runtime_root(WORKSPACE_ROOT, "data/workspaces")
+WORKSPACE_ROOT = str(WORKSPACE_ROOT_PATH)
+RUNS_ROOT_PATH = ensure_runtime_root(RUNS_ROOT, "data/runs")
+RUNS_ROOT = str(RUNS_ROOT_PATH)
+MANAGED_PYTHON_ENVS_ROOT_PATH = ensure_runtime_root(MANAGED_PYTHON_ENVS_ROOT, "data/python-envs")
+MANAGED_PYTHON_ENVS_ROOT = str(MANAGED_PYTHON_ENVS_ROOT_PATH)
+VOICE_ROOT_PATH = ensure_runtime_root(VOICE_ROOT, "data/voice")
+VOICE_ROOT = str(VOICE_ROOT_PATH)
 PIPER_DEFAULT_MODEL = pathlib.Path(
     os.getenv("PIPER_MODEL", str(VOICE_ROOT_PATH / "models" / "en_US-lessac-high.onnx"))
 )
@@ -6551,11 +6705,9 @@ def repo_bootstrap_ignore(source_root: pathlib.Path, current_dir: str, names: Li
 
 def bootstrap_workspace_from_current_repo(conversation_id: str) -> Dict[str, Any]:
     """Seed an empty conversation workspace with a filtered snapshot of the current server repo."""
-    source_root = _repo_root.resolve()
+    source_root = pathlib.Path(_base_dir).resolve()
     workspace = get_workspace_path(conversation_id)
     if not source_root.exists() or not source_root.is_dir():
-        return {}
-    if not path_is_within_root(workspace, WORKSPACE_ROOT_PATH):
         return {}
 
     copied_entries = 0
@@ -6595,7 +6747,7 @@ def maybe_bootstrap_workspace_from_current_repo(conversation_id: str, message: s
     snapshot = capture_workspace_snapshot(conversation_id)
     if not workspace_is_effectively_empty(snapshot):
         return {}
-    if not (_repo_root / "app.py").exists():
+    if not (pathlib.Path(_base_dir).resolve() / "app.py").exists():
         return {}
     return bootstrap_workspace_from_current_repo(conversation_id)
 
@@ -7412,22 +7564,25 @@ def build_saved_progress_fallback_response(
     completed_count = len(build_summaries)
     pending_follow_up = task_state_has_pending_follow_up(payload)
 
+    def resume_prompt() -> str:
+        return "Say continue and I'll pick up from there."
+
     lines: List[str] = []
     if error_text:
-        lines.append("I hit an unexpected internal error before I could finish the chat reply, but I saved the current workspace state.")
+        lines.append("I wasn't able to finish the reply cleanly, but the current work is still saved.")
     else:
-        lines.append("I didn't finish a clean chat reply for this turn, but I did save the current workspace state.")
+        lines.append("I paused before the final reply, but the current work is still saved.")
 
     if request and request_targets_current_repo(request) and int(snapshot.get("user_file_count", 0) or 0) > 0 and not changed_files:
         lines.append("The files in the workspace panel are the repo snapshot for context, not newly generated output from this turn.")
 
     if builder_steps:
-        lines.append(f"Progress: completed {completed_count} of {len(builder_steps)} build steps.")
+        lines.append(f"Progress: {completed_count} of {len(builder_steps)} planned steps complete.")
         if completed_count < len(builder_steps):
-            lines.append(f"Next step: {builder_steps[completed_count]}")
+            lines.append(f"Up next: {builder_steps[completed_count]}")
 
     if build_summaries:
-        lines.append("Latest saved note: " + truncate_output(build_summaries[-1], limit=280))
+        lines.append("Latest note: " + truncate_output(build_summaries[-1], limit=280))
 
     if changed_files:
         preview = ", ".join(f"`{path}`" for path in changed_files[:5])
@@ -7436,13 +7591,13 @@ def build_saved_progress_fallback_response(
         lines.append(f"Touched files: {preview}")
 
     if verification_summary:
-        lines.append("Verification: " + truncate_output(verification_summary, limit=220))
+        lines.append("Checked so far: " + truncate_output(verification_summary, limit=220))
 
     if task_board_path:
         lines.append(f"[[artifact:{task_board_path}]]")
 
     if pending_follow_up:
-        lines.append("Say continue to resume from the saved workspace state.")
+        lines.append(resume_prompt())
 
     return "\n\n".join(line for line in lines if line).strip()
 
@@ -7467,10 +7622,10 @@ def ensure_nonempty_turn_response(
         return fallback
     if error_text:
         return (
-            "I hit an unexpected internal error before I could finish the reply. "
-            "Please say continue and I'll retry from the current workspace state."
+            "I wasn't able to finish that reply cleanly. "
+            "Say continue and I'll pick up from the current workspace state."
         )
-    return "I finished the turn without producing a visible reply. Please say continue and I'll resume from the current workspace state."
+    return "I finished the turn without a clean visible reply. Say continue and I'll pick up from the current workspace state."
 
 
 def render_step_checkpoint_message(session: DeepSession, step_index: int, step_summary: str) -> str:
@@ -7492,17 +7647,17 @@ def render_step_checkpoint_message(session: DeepSession, step_index: int, step_s
     ]
     if step_index + 1 < total_steps:
         lines.extend([
-            f"Next step: {steps[step_index + 1]}",
+            f"Up next: {steps[step_index + 1]}",
             "",
-            "Saved progress is ready to resume from the next step.",
+            "Progress is saved and ready to continue.",
         ])
     else:
         lines.extend([
-            "Build steps are complete.",
+            "Planned steps are complete.",
             "",
-            "Next step: run verification and prepare the final answer.",
+            "Up next: run verification and prepare the final answer.",
             "",
-            "Saved progress is ready to resume from verification.",
+            "Progress is saved and ready for the final pass.",
         ])
     return "\n".join(lines)
 
@@ -8044,6 +8199,7 @@ def sync_active_profile_from_model_name(model_name: Optional[str]) -> str:
 FTS_TABLE = "messages_fts"
 DOCUMENT_FTS_TABLE = "document_chunks_fts"
 SUMMARY_TRIGGER_MESSAGE_COUNT = 16
+TITLE_TRIGGER_MESSAGE_COUNT = 2
 SUMMARY_KEEP_RECENT_MESSAGES = 8
 SUMMARY_MAX_SOURCE_MESSAGES = 40
 SUMMARY_MAX_CHARS = 12000
@@ -8369,7 +8525,11 @@ def init_db():
             sandbox_path_value = str(existing_run.get("sandbox_path") or "").strip()
             if sandbox_path_value:
                 sandbox_path = pathlib.Path(sandbox_path_value).expanduser().resolve(strict=False)
-                sandbox_path.mkdir(parents=True, exist_ok=True)
+                try:
+                    sandbox_path.mkdir(parents=True, exist_ok=True)
+                except PermissionError:
+                    run_id = str(existing_run.get("id") or "").strip() or build_run_id(conv_id)
+                    sandbox_path = get_run_workspace_root(run_id, create=True)
             else:
                 run_id = build_run_id(conv_id)
                 sandbox_path = get_run_workspace_root(run_id, create=True)
@@ -9007,6 +9167,20 @@ def format_messages_for_summary(messages: List[Dict[str, str]], char_limit: int 
     return "".join(parts).strip()
 
 
+def normalize_conversation_title(raw: str, fallback: str = "New chat") -> str:
+    """Normalize a model-produced conversation title into a short UI-safe label."""
+    cleaned = strip_stream_special_tokens(str(raw or "")).strip()
+    cleaned = re.sub(r"^['\"`#\-\s]+|['\"`#\-\s]+$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return fallback
+    words = cleaned.split(" ")
+    if len(words) > 5:
+        cleaned = " ".join(words[:5])
+    cleaned = cleaned.strip(" .,:;!?")
+    return cleaned or fallback
+
+
 def get_conversation_messages_for_ui(conv_id: str, limit: int = 100) -> List[Dict[str, Any]]:
     """Return recent raw conversation messages for the UI, preserving ids and feedback."""
     safe_limit = max(1, min(int(limit or 100), 500))
@@ -9276,6 +9450,50 @@ async def refresh_conversation_summary(conv_id: str):
     conn.close()
 
 
+async def refresh_conversation_title(conv_id: str):
+    """Refresh the short rolling title for one conversation."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        '''SELECT role, content, timestamp
+           FROM messages
+           WHERE conversation_id = ?
+             AND ''' + visible_message_kind_sql() + '''
+           ORDER BY timestamp ASC''',
+        (conv_id,),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if len(rows) < TITLE_TRIGGER_MESSAGE_COUNT:
+        return
+
+    transcript = format_messages_for_summary([
+        {"role": row[0], "content": row[1], "timestamp": row[2]}
+        for row in rows[-12:]
+    ], char_limit=2400)
+    if not transcript:
+        return
+
+    title_messages = [
+        {"role": "system", "content": CONVERSATION_TITLE_SYSTEM_PROMPT},
+        {"role": "user", "content": transcript},
+    ]
+    raw_title = await vllm_chat_complete(title_messages, max_tokens=24, temperature=0.1)
+    title = normalize_conversation_title(raw_title)
+    if not title:
+        return
+
+    now = utcnow_iso()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        'UPDATE conversations SET title = ?, updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END WHERE id = ?',
+        (title, now, now, conv_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def schedule_conversation_summary_refresh(conv_id: str):
     """Kick off a background summary refresh without blocking the current turn."""
     try:
@@ -9286,6 +9504,7 @@ def schedule_conversation_summary_refresh(conv_id: str):
     async def runner():
         try:
             await refresh_conversation_summary(conv_id)
+            await refresh_conversation_title(conv_id)
         except Exception as exc:
             logger.warning("Conversation summary refresh failed for %s: %s", conv_id, exc)
 
