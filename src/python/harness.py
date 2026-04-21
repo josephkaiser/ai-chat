@@ -9500,7 +9500,77 @@ def normalize_conversation_title(raw: str, fallback: str = "New chat") -> str:
     if len(words) > 5:
         cleaned = " ".join(words[:5])
     cleaned = cleaned.strip(" .,:;!?")
+    if conversation_title_looks_low_quality(cleaned):
+        return fallback
     return cleaned or fallback
+
+
+LOW_QUALITY_CONVERSATION_TITLE_PREFIXES = (
+    "okay", "ok", "sure", "yes", "no", "here", "heres", "here's",
+    "lets", "let's", "i can", "i will", "i'll", "we can", "you can",
+    "can you", "could you", "would you", "help me",
+)
+CONVERSATION_TITLE_SEED_PREFIXES = (
+    "can you help me ",
+    "can you ",
+    "could you help me ",
+    "could you ",
+    "would you ",
+    "please ",
+    "what is ",
+    "what's ",
+    "whats ",
+    "how do i ",
+    "how can i ",
+    "help me ",
+    "i need ",
+    "show me ",
+    "tell me ",
+)
+
+
+def conversation_title_looks_low_quality(title: str) -> bool:
+    """Return whether a conversation title sounds like assistant chatter instead of a topic."""
+    normalized = " ".join(str(title or "").strip().lower().split())
+    if not normalized:
+        return True
+    if normalized in {"new chat", "untitled", "untitled chat"}:
+        return True
+    if normalized.endswith("?"):
+        return True
+    return any(normalized.startswith(prefix) for prefix in LOW_QUALITY_CONVERSATION_TITLE_PREFIXES)
+
+
+def derive_conversation_title_seed(rows: List[tuple], fallback: str = "New chat") -> str:
+    """Derive a short topic seed from the earliest substantive user request."""
+    for row in rows:
+        role = str(row[0] or "").strip().lower()
+        content = str(row[1] or "").strip()
+        if role != "user" or not content:
+            continue
+        cleaned = strip_stream_special_tokens(content)
+        cleaned = re.sub(r"\[\[artifact:[^\]]+\]\]", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[`*_#>\[\]\(\)]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        lowered = cleaned.lower()
+        changed = True
+        while changed and lowered:
+            changed = False
+            for prefix in CONVERSATION_TITLE_SEED_PREFIXES:
+                if lowered.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].strip()
+                    lowered = cleaned.lower()
+                    changed = True
+                    break
+        cleaned = cleaned.strip(" .,:;!?")
+        if not cleaned:
+            continue
+        words = cleaned.split()
+        if len(words) > 5:
+            cleaned = " ".join(words[:5])
+        candidate = cleaned[:1].upper() + cleaned[1:] if cleaned else ""
+        return normalize_conversation_title(candidate, fallback=fallback)
+    return fallback
 
 
 def should_refresh_conversation_title_for_count(
@@ -9808,6 +9878,7 @@ async def refresh_conversation_title(conv_id: str):
     if not should_refresh_conversation_title_for_count(existing_title, len(rows)):
         return
 
+    fallback_title = derive_conversation_title_seed(rows, fallback="New chat")
     transcript = format_messages_for_summary([
         {"role": row[0], "content": row[1], "timestamp": row[2]}
         for row in rows[-12:]
@@ -9820,7 +9891,7 @@ async def refresh_conversation_title(conv_id: str):
         {"role": "user", "content": transcript},
     ]
     raw_title = await vllm_chat_complete(title_messages, max_tokens=24, temperature=0.1)
-    title = normalize_conversation_title(raw_title)
+    title = normalize_conversation_title(raw_title, fallback=fallback_title)
     if not title:
         return
 
@@ -10181,7 +10252,8 @@ async def get_conversations():
         c = conn.cursor()
         c.execute('''SELECT c.id, c.title, c.created_at, c.updated_at,
                      c.workspace_id, w.display_name, w.root_path,
-                     m.content, m.timestamp
+                     m.content, m.timestamp,
+                     seed.content
                      FROM conversations c
                      LEFT JOIN workspaces w ON w.id = c.workspace_id
                      LEFT JOIN (
@@ -10190,6 +10262,13 @@ async def get_conversations():
                          FROM messages
                          WHERE ''' + visible_message_kind_sql() + '''
                      ) m ON c.id = m.conversation_id AND m.rn = 1
+                     LEFT JOIN (
+                         SELECT conversation_id, content,
+                                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY timestamp ASC) as rn
+                         FROM messages
+                         WHERE role = 'user'
+                           AND ''' + visible_message_kind_sql() + '''
+                     ) seed ON c.id = seed.conversation_id AND seed.rn = 1
                      ORDER BY c.updated_at DESC''')
 
         conversations = []
@@ -10201,7 +10280,8 @@ async def get_conversations():
                 'workspace_display_name': str(row[5] or '').strip(),
                 'workspace_root_path': str(row[6] or '').strip(),
                 'last_message': row[7] if row[7] else '',
-                'last_message_timestamp': row[8] if row[8] else row[3]
+                'last_message_timestamp': row[8] if row[8] else row[3],
+                'seed_message': row[9] if row[9] else '',
             })
 
         conn.close()
