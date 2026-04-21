@@ -3,6 +3,7 @@ import unittest
 import pathlib
 import asyncio
 import sqlite3
+import json
 
 try:
     import app
@@ -1295,6 +1296,80 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertGreaterEqual(result["count"], 1)
         self.assertTrue(any("prior" in match["content"].lower() for match in result["matches"]))
 
+    def test_capture_context_eval_case_includes_tool_policy_trace(self):
+        original_db_path = app.DB_PATH
+        original_get_workspace_path = app.get_workspace_path
+        original_cache = dict(app.MESSAGE_WORKFLOW_METADATA_CACHE)
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                workspace_root = pathlib.Path(tempdir) / "workspace"
+                workspace_root.mkdir(parents=True, exist_ok=True)
+                app.DB_PATH = str(db_path)
+                app.init_db()
+                resolved_workspace_root = workspace_root.resolve()
+                app.get_workspace_path = lambda _conversation_id, create=True: resolved_workspace_root
+                app.MESSAGE_WORKFLOW_METADATA_CACHE.clear()
+
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    ("conv-capture", "Capture test", "2026-04-10T00:00:00", "2026-04-10T00:00:00"),
+                )
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-capture", "user", "what is the weather in san francisco?", "2026-04-10T00:00:00", "visible_chat", None),
+                )
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-capture", "assistant", "Here are some weather sites.", "2026-04-10T00:00:01", "visible_chat", "neutral"),
+                )
+                assistant_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.commit()
+                conn.close()
+
+                execution = app.create_workflow_execution(
+                    "conv-capture",
+                    1,
+                    "chat_turn",
+                    {
+                        "tool_policy": {
+                            "web_search_requested": True,
+                            "enabled_tools": ["web.search", "web.fetch_page"],
+                            "has_web_tools": True,
+                            "workspace_requested": False,
+                        }
+                    },
+                )
+                app.record_workflow_step(
+                    execution,
+                    step_name="respond",
+                    call={"name": "web.search", "arguments": {"query": "weather san francisco"}},
+                    result={"ok": True, "result": {}},
+                )
+                app.finalize_workflow_execution(
+                    execution,
+                    assistant_message_id=assistant_message_id,
+                    final_outcome="completed_with_tools",
+                )
+
+                capture_path = app.capture_context_eval_case_for_assistant_message(
+                    "conv-capture",
+                    assistant_message_id,
+                    trigger="retry",
+                )
+                payload = json.loads((resolved_workspace_root / capture_path).read_text(encoding="utf-8"))
+        finally:
+            app.DB_PATH = original_db_path
+            app.get_workspace_path = original_get_workspace_path
+            app.MESSAGE_WORKFLOW_METADATA_CACHE.clear()
+            app.MESSAGE_WORKFLOW_METADATA_CACHE.update(original_cache)
+
+        self.assertEqual(payload["capture"]["tool_policy"]["web_search_requested"], True)
+        self.assertEqual(payload["capture"]["tool_policy"]["enabled_tools"], ["web.search", "web.fetch_page"])
+        self.assertEqual(payload["capture"]["tool_names"], ["web.search"])
+        self.assertEqual(payload["capture"]["final_outcome"], "completed_with_tools")
+
     def test_direct_search_route_handles_pure_web_facts_turns(self):
         prepared = app.PreparedTurnRequest(
             conversation_id="conv-weather",
@@ -1313,6 +1388,7 @@ class RuntimePermissionTests(unittest.TestCase):
             slash_command=None,
             max_tokens=1024,
             workspace_intent="none",
+            tool_policy_trace={},
             enabled_tools=["web.search", "web.fetch_page"],
             auto_execute_workspace=False,
             resume_saved_workspace=False,
@@ -1348,6 +1424,7 @@ class RuntimePermissionTests(unittest.TestCase):
             slash_command=None,
             max_tokens=1024,
             workspace_intent="focused_write",
+            tool_policy_trace={},
             enabled_tools=["web.search", "web.fetch_page", "workspace.patch_file"],
             auto_execute_workspace=False,
             resume_saved_workspace=False,

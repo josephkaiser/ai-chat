@@ -3120,7 +3120,12 @@ class WorkflowExecutionContext:
     workflow_name: str
     route_metadata: Dict[str, Any] = field(default_factory=dict)
     tool_count: int = 0
+    tool_names: List[str] = field(default_factory=list)
     artifact_paths: List[str] = field(default_factory=list)
+
+
+MESSAGE_WORKFLOW_METADATA_CACHE: Dict[int, Dict[str, Any]] = {}
+WORKFLOW_METADATA_CACHE_LIMIT = 500
 
 
 def create_workflow_execution(
@@ -3142,6 +3147,41 @@ def persist_workflow_execution_route(execution: WorkflowExecutionContext) -> Non
     del execution
 
 
+def build_tool_policy_trace(
+    *,
+    saved_user_message: str,
+    effective_message: str,
+    workspace_intent: str,
+    render_requested: bool,
+    workspace_requested: bool,
+    local_rag_requested: bool,
+    web_search_requested: bool,
+    enabled_tools: List[str],
+    auto_execute_workspace: bool,
+    resume_saved_workspace: bool,
+) -> Dict[str, Any]:
+    """Summarize why tool lanes were or were not exposed for one turn."""
+    tool_names = [str(name).strip() for name in enabled_tools if str(name).strip()]
+    return {
+        "saved_user_message": str(saved_user_message or "").strip(),
+        "effective_message": str(effective_message or "").strip(),
+        "followup_rewritten": str(saved_user_message or "").strip() != str(effective_message or "").strip(),
+        "workspace_intent": str(workspace_intent or "").strip() or "none",
+        "render_requested": bool(render_requested),
+        "workspace_requested": bool(workspace_requested),
+        "local_rag_requested": bool(local_rag_requested),
+        "web_search_requested": bool(web_search_requested),
+        "auto_execute_workspace": bool(auto_execute_workspace),
+        "resume_saved_workspace": bool(resume_saved_workspace),
+        "enabled_tools": tool_names,
+        "has_workspace_tools": any(name.startswith("workspace.") or name == "spreadsheet.describe" for name in tool_names),
+        "has_web_tools": any(name.startswith("web.") for name in tool_names),
+        "has_history_tools": "conversation.search_history" in tool_names,
+        "has_render_tools": any(name == "workspace.render" for name in tool_names),
+        "has_execution_tools": any(name == "workspace.run_command" for name in tool_names),
+    }
+
+
 def record_workflow_step(
     execution: Optional[WorkflowExecutionContext],
     *,
@@ -3156,6 +3196,9 @@ def record_workflow_step(
     if not execution:
         return
     execution.tool_count += 1
+    tool_name = str(call.get("name", "")).strip()
+    if tool_name:
+        execution.tool_names.append(tool_name)
     payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
     path = str(payload.get("path", "")).strip()
     if result.get("ok") and path and path not in execution.artifact_paths:
@@ -3175,8 +3218,39 @@ def finalize_workflow_execution(
     status: str = "completed",
     error_text: str = "",
 ) -> None:
-    """Compatibility shim for removed workflow persistence."""
-    del execution, assistant_message_id, final_outcome, status, error_text
+    """Cache compact workflow metadata for later feedback/replay capture."""
+    if not execution or assistant_message_id is None:
+        return
+    try:
+        message_id = int(assistant_message_id)
+    except Exception:
+        return
+    if message_id <= 0:
+        return
+    MESSAGE_WORKFLOW_METADATA_CACHE[message_id] = {
+        "workflow_name": str(execution.workflow_name or "").strip(),
+        "route_metadata": dict(execution.route_metadata or {}),
+        "tool_count": int(execution.tool_count or 0),
+        "tool_names": list(execution.tool_names),
+        "artifact_paths": list(execution.artifact_paths),
+        "final_outcome": str(final_outcome or "").strip(),
+        "status": str(status or "").strip(),
+        "error_text": str(error_text or "").strip(),
+    }
+    if len(MESSAGE_WORKFLOW_METADATA_CACHE) > WORKFLOW_METADATA_CACHE_LIMIT:
+        overflow = len(MESSAGE_WORKFLOW_METADATA_CACHE) - WORKFLOW_METADATA_CACHE_LIMIT
+        for key in sorted(MESSAGE_WORKFLOW_METADATA_CACHE.keys())[:overflow]:
+            MESSAGE_WORKFLOW_METADATA_CACHE.pop(key, None)
+
+
+def get_workflow_metadata_for_message(message_id: int) -> Dict[str, Any]:
+    """Return cached workflow metadata for one assistant message, if available."""
+    try:
+        safe_id = int(message_id)
+    except Exception:
+        return {}
+    payload = MESSAGE_WORKFLOW_METADATA_CACHE.get(safe_id)
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def sync_workflow_feedback_for_message(message_id: int, feedback: str) -> None:
@@ -5941,6 +6015,7 @@ class PreparedTurnRequest:
     slash_command: Optional[Dict[str, str]]
     max_tokens: int
     workspace_intent: str
+    tool_policy_trace: Dict[str, Any]
     enabled_tools: List[str]
     auto_execute_workspace: bool
     resume_saved_workspace: bool
@@ -15694,6 +15769,12 @@ def capture_context_eval_case_for_assistant_message(
 
     assistant_text = str(assistant_message.get("content") or "").strip()
     conversation = get_conversation_record(conversation_id) or {}
+    workflow_metadata = get_workflow_metadata_for_message(assistant_message_id)
+    tool_policy = (
+        dict(workflow_metadata.get("route_metadata", {}).get("tool_policy") or {})
+        if isinstance(workflow_metadata.get("route_metadata"), dict)
+        else {}
+    )
     workspace_snapshot = capture_workspace_snapshot(conversation_id)
     phase = detect_context_eval_phase(request_text, assistant_text, workspace_snapshot)
     workspace_excerpt = build_context_eval_workspace_excerpt(
@@ -15803,6 +15884,10 @@ def capture_context_eval_case_for_assistant_message(
         "assistant_feedback": str(assistant_message.get("feedback") or "").strip(),
         "conversation_title": str(conversation.get("title") or "").strip(),
         "corrective_message": corrective_excerpt,
+        "tool_policy": tool_policy,
+        "tool_names": list(workflow_metadata.get("tool_names", [])) if isinstance(workflow_metadata, dict) else [],
+        "workflow_name": str(workflow_metadata.get("workflow_name") or "").strip() if isinstance(workflow_metadata, dict) else "",
+        "final_outcome": str(workflow_metadata.get("final_outcome") or "").strip() if isinstance(workflow_metadata, dict) else "",
     }
     rel_path = context_eval_capture_path(trigger, assistant_message_id)
     try:
@@ -18559,6 +18644,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
     workspace_intent = classify_workspace_intent(effective_message, history=history)
+    render_requested = should_offer_workspace_render(effective_message, history, features)
     enabled_tools = (
         select_enabled_tools(conv_id, effective_message, features, history=history)
         if TOOL_LOOP_ENABLED else []
@@ -18582,6 +18668,18 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     )
     local_rag_requested = should_offer_local_rag(effective_message, features)
     web_search_requested = should_offer_web_search(effective_message, features, history=history)
+    tool_policy_trace = build_tool_policy_trace(
+        saved_user_message=saved_user_message,
+        effective_message=effective_message,
+        workspace_intent=workspace_intent,
+        render_requested=render_requested,
+        workspace_requested=workspace_requested,
+        local_rag_requested=local_rag_requested,
+        web_search_requested=web_search_requested,
+        enabled_tools=enabled_tools,
+        auto_execute_workspace=auto_execute_workspace,
+        resume_saved_workspace=resume_saved_workspace,
+    )
     assessment = DEFAULT_ROUTE_PROGRAM.run(RouteProgramInputs(
         message=effective_message,
         requested_mode=requested_mode,
@@ -18644,6 +18742,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         slash_command=slash_command,
         max_tokens=max_tokens,
         workspace_intent=workspace_intent,
+        tool_policy_trace=tool_policy_trace,
         enabled_tools=enabled_tools,
         auto_execute_workspace=auto_execute_workspace,
         resume_saved_workspace=resume_saved_workspace,
@@ -18783,7 +18882,10 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             conv_id,
             prepared.user_message_id,
             "chat_turn",
-            {"assessment": prepared.assessment.as_metadata()},
+            {
+                "assessment": prepared.assessment.as_metadata(),
+                "tool_policy": dict(prepared.tool_policy_trace),
+            },
         )
 
         if prepared.repo_bootstrapped and prepared.repo_bootstrap_summary:
@@ -19032,6 +19134,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     features,
                 )
                 if recovery_tools:
+                    if workflow_execution:
+                        tool_policy = dict(workflow_execution.route_metadata.get("tool_policy") or {})
+                        tool_policy["recovery_tools"] = list(recovery_tools)
+                        tool_policy["recovered_to_tools"] = True
+                        workflow_execution.route_metadata["tool_policy"] = tool_policy
                     await send_activity_event(
                         websocket,
                         "evaluate",
