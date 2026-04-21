@@ -697,23 +697,32 @@ body[data-left-sidebar-open="false"] .sidebar {
 .conversation-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 2px;
     padding-right: 0;
 }
 
 .conversation-row {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
 }
 
 .conversation-item,
 .file-item {
     width: 100%;
     text-align: left;
-    border-radius: 12px;
-    padding: 8px 10px;
+    border-radius: 10px;
+    padding: 6px 8px;
     border: 1px solid transparent;
     background: transparent;
     box-shadow: none;
+}
+
+.conversation-item {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .conversation-row.active .conversation-item,
@@ -723,11 +732,12 @@ body[data-left-sidebar-open="false"] .sidebar {
     background: rgba(19, 34, 38, 0.05);
 }
 
-.conversation-head {
+.conversation-line {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 8px;
+    min-width: 0;
 }
 
 .conversation-time {
@@ -735,12 +745,10 @@ body[data-left-sidebar-open="false"] .sidebar {
     color: var(--muted);
     font-size: 0.62rem;
     line-height: 1.2;
+    margin-left: auto;
 }
 
 .conversation-actions {
-    position: absolute;
-    top: 8px;
-    right: 10px;
     display: flex;
     gap: 4px;
     opacity: 0;
@@ -757,8 +765,10 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .conversation-action-button {
-    min-height: 20px;
-    padding: 0 6px;
+    min-height: 24px;
+    min-width: 24px;
+    padding: 0;
+    border-radius: 999px;
     font-size: 0.6rem;
     background: rgba(255, 255, 255, 0.96);
 }
@@ -775,14 +785,26 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .conversation-preview,
 .file-item-meta {
-    margin-top: 3px;
     font-size: 0.68rem;
     color: var(--muted);
-    line-height: 1.42;
+    line-height: 1.2;
 }
 
-.conversation-item .conversation-preview:first-of-type {
-    display: none;
+.conversation-title,
+.conversation-preview {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.conversation-title {
+    flex: 0 1 auto;
+    max-width: 44%;
+}
+
+.conversation-preview {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .main-grid {

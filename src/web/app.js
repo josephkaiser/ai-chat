@@ -404,16 +404,17 @@ function syncShellLayout() {
     const sidebarToggleLabel = state.leftSidebarOpen ? "Close sidebar" : "Open sidebar";
     sidebarToggle.setAttribute("aria-label", sidebarToggleLabel);
     sidebarToggle.dataset.tooltip = sidebarToggleLabel;
-    const viewerToggleTitle = state.viewerMode === "closed" ? "Open file browser" : "Close file browser";
+    const viewerToggleTitle = "Open file browser";
     viewerToggle.setAttribute("aria-label", viewerToggleTitle);
     viewerToggle.dataset.tooltip = viewerToggleTitle;
     viewerToggle.disabled = !state.currentWorkspaceId;
+    viewerToggle.hidden = state.viewerMode !== "closed";
     refreshWorkspaceButton.hidden = state.viewerMode === "closed";
     refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
-    const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode !== "closed";
+    const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode === "file";
     viewerModeButton.hidden = !showModeButton;
     if (showModeButton) {
-        const viewerModeLabel = state.viewerMode === "file" ? "Show file list" : "Open selected file";
+        const viewerModeLabel = "Back to file list";
         viewerModeButton.setAttribute("aria-label", viewerModeLabel);
         viewerModeButton.dataset.tooltip = viewerModeLabel;
     }
@@ -516,6 +517,25 @@ function truncatePreview(value, limit = 88) {
     const flattened = value.replace(/\s+/g, " ").trim();
     if (flattened.length <= limit) return flattened;
     return `${flattened.slice(0, limit - 1)}…`;
+}
+function cleanConversationText(value) {
+    return String(value || "").replace(/<\/?think>/gi, " ").replace(/\[\[artifact:([^\]]+)\]\]/gi, "$1").replace(/[`*_#>\[\]]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function displayConversationTitle(title, preview) {
+    const cleanedTitle = cleanConversationText(title);
+    const cleanedPreview = cleanConversationText(preview);
+    const base = cleanedTitle && cleanedTitle.toLowerCase() !== "untitled chat" ? cleanedTitle : cleanedPreview || "New chat";
+    const words = base.split(/\s+/).filter(Boolean);
+    if (words.length <= 5) return base;
+    return `${words.slice(0, 5).join(" ")}…`;
+}
+function displayConversationPreview(title, preview) {
+    const cleanedTitle = cleanConversationText(title).toLowerCase();
+    const cleanedPreview = truncatePreview(cleanConversationText(preview), 72);
+    if (!cleanedPreview || cleanedPreview.toLowerCase() === cleanedTitle) {
+        return "No messages yet";
+    }
+    return cleanedPreview;
 }
 function lineCount(text) {
     return text ? text.split(/\r?\n/).length : 0;
@@ -1045,25 +1065,47 @@ function renderConversations() {
         `;
         return;
     }
-    conversationList.innerHTML = items.map((conversation)=>`
-        <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
-            <button
-                type="button"
-                class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
-                data-conversation-id="${escapeHtml(conversation.id)}"
-            >
-                <div class="conversation-head">
-                    <div class="conversation-title">${escapeHtml(conversation.title || "Untitled chat")}</div>
-                    <div class="conversation-time">${escapeHtml(formatRelativeTime(conversation.updated_at) || "Just now")}</div>
+    conversationList.innerHTML = items.map((conversation)=>{
+        const editableTitle = cleanConversationText(conversation.title || "");
+        const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "");
+        const visiblePreview = displayConversationPreview(conversation.title || "", conversation.last_message || "");
+        const visibleTime = formatRelativeTime(conversation.updated_at) || "Just now";
+        return `
+            <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
+                <button
+                    type="button"
+                    class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
+                    data-conversation-id="${escapeHtml(conversation.id)}"
+                >
+                    <div class="conversation-line">
+                        <span class="conversation-title">${escapeHtml(visibleTitle)}</span>
+                        <span class="conversation-preview">${escapeHtml(visiblePreview)}</span>
+                        <span class="conversation-time">${escapeHtml(visibleTime)}</span>
+                    </div>
+                </button>
+                <div class="conversation-actions">
+                    <button type="button" class="conversation-action-button" data-action="rename" data-conversation-id="${escapeHtml(conversation.id)}" data-title="${escapeHtml(editableTitle || visibleTitle)}" data-tooltip="Rename chat">
+                        <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M4.25 14.75 4.75 12l8.5-8.5 2.75 2.75-8.5 8.5z"></path>
+                            <path d="M12.5 4.25 15.25 7"></path>
+                        </svg>
+                        <span class="sr-only">Rename</span>
+                    </button>
+                    <button type="button" class="conversation-action-button conversation-action-danger" data-action="delete" data-conversation-id="${escapeHtml(conversation.id)}" data-tooltip="Delete chat">
+                        <svg class="shell-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M6.5 6.5v8"></path>
+                            <path d="M10 6.5v8"></path>
+                            <path d="M13.5 6.5v8"></path>
+                            <path d="M4.5 5.5h11"></path>
+                            <path d="M7.25 5.5 8 3.5h4l.75 2"></path>
+                            <path d="M5.5 5.5v10.25h9V5.5"></path>
+                        </svg>
+                        <span class="sr-only">Delete</span>
+                    </button>
                 </div>
-                <div class="conversation-preview">${escapeHtml(truncatePreview(conversation.last_message || "No messages yet"))}</div>
-            </button>
-            <div class="conversation-actions">
-                <button type="button" class="conversation-action-button" data-action="rename" data-conversation-id="${escapeHtml(conversation.id)}" data-title="${escapeHtml(conversation.title || "Untitled chat")}">Rename</button>
-                <button type="button" class="conversation-action-button conversation-action-danger" data-action="delete" data-conversation-id="${escapeHtml(conversation.id)}">Delete</button>
             </div>
-        </div>
-    `).join("");
+        `;
+    }).join("");
     conversationList.querySelectorAll(".conversation-item").forEach((button)=>{
         button.addEventListener("click", ()=>{
             const id = button.dataset.conversationId || "";
