@@ -119,10 +119,35 @@ button[data-tooltip]::after {
     z-index: 40;
 }
 
+.shell-toggle-left[data-tooltip]::after,
+.sidebar-rail button[data-tooltip]::after {
+    left: 0;
+    right: auto;
+    transform: translateY(4px);
+}
+
+.shell-toggle-right[data-tooltip]::after,
+.viewer-actions button[data-tooltip]::after {
+    left: auto;
+    right: 0;
+    transform: translateY(4px);
+}
+
 button[data-tooltip]:hover::after,
 button[data-tooltip]:focus-visible::after {
     opacity: 1;
     transform: translate(-50%, 0);
+}
+
+.shell-toggle-left[data-tooltip]:hover::after,
+.shell-toggle-left[data-tooltip]:focus-visible::after,
+.sidebar-rail button[data-tooltip]:hover::after,
+.sidebar-rail button[data-tooltip]:focus-visible::after,
+.shell-toggle-right[data-tooltip]:hover::after,
+.shell-toggle-right[data-tooltip]:focus-visible::after,
+.viewer-actions button[data-tooltip]:hover::after,
+.viewer-actions button[data-tooltip]:focus-visible::after {
+    transform: translateY(0);
 }
 
 .shell-toggle {
@@ -367,6 +392,25 @@ body[data-left-sidebar-open="false"] .sidebar {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+}
+
+.viewer-download-button {
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border-color: transparent;
+    background: var(--accent);
+    color: white;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-meta);
+    font-weight: 700;
+}
+
+.viewer-download-button:hover,
+.viewer-download-button:focus-visible {
+    background: var(--accent-strong);
 }
 
 #sendButton {
@@ -1070,6 +1114,7 @@ body[data-viewer-mode="file"] .chat-panel {
     overflow: hidden;
     border: 1px solid var(--code-line);
     background: var(--code-bg);
+    font-family: var(--font-mono);
 }
 
 .message-code-header {
@@ -1087,10 +1132,19 @@ body[data-viewer-mode="file"] .chat-panel {
 .message-code-block pre {
     border: 0;
     border-radius: 0;
+    font-family: var(--font-mono);
+}
+
+.message-code-block code,
+.preview-markdown .message-code-block code,
+.preview-html .message-code-block code {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
 }
 
 .rich-text code {
     font-family: var(--font-mono);
+    font-variant-ligatures: none;
 }
 
 .rich-text .tok-keyword {

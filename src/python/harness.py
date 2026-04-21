@@ -5607,6 +5607,9 @@ def infer_inline_code_artifact_path(
     extension = INLINE_CODE_ARTIFACT_EXTENSION_MAP.get(str(language or "").strip().lower())
     if not extension:
         return ""
+    request_lower = str(request_text or "").lower()
+    if "linked list" in request_lower:
+        return sanitize_relative_workspace_path(f"linked_list.{extension}", fallback=f"code_example.{extension}")
 
     candidate_sources: List[str] = [str(request_text or "")]
     if history:
@@ -5623,10 +5626,15 @@ def infer_inline_code_artifact_path(
             if not suffix:
                 return sanitize_relative_workspace_path(f"{candidate}.{extension}", fallback=f"code_example.{extension}")
 
-    naming_stopwords = {"looking", "your", "used", "using", "only", "have", "just", "version", "updated", "example"}
+    naming_stopwords = {
+        "looking", "your", "used", "using", "only", "have", "just", "version", "updated", "example",
+        "write", "teach", "show", "make", "create", "build", "implement",
+    }
     terms = extract_request_terms_for_plan(request_text, limit=6)
     basename_terms: List[str] = []
     for term in terms:
+        if "." in term:
+            continue
         stem = pathlib.Path(term).stem if "." in term else term
         cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_").lower()
         if not cleaned or cleaned in naming_stopwords or cleaned in basename_terms:

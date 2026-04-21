@@ -231,6 +231,7 @@ function isMobileViewport(): boolean {
 const sidebarToggle = query<HTMLButtonElement>("#sidebarToggle");
 const viewerToggle = query<HTMLButtonElement>("#viewerToggle");
 const refreshWorkspaceButton = query<HTMLButtonElement>("#refreshWorkspaceButton");
+const downloadFileButton = query<HTMLButtonElement>("#downloadFileButton");
 const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButton");
 const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
 const newChatButton = query<HTMLButtonElement>("#newChatButton");
@@ -591,6 +592,40 @@ function fileViewUrl(path: string): string {
     return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
 }
 
+function downloadSelectedFile(): void {
+    if (!state.currentWorkspaceId || !state.selectedFilePath) return;
+    const anchor = document.createElement("a");
+    anchor.href = fileViewUrl(state.selectedFilePath);
+    anchor.download = state.selectedFilePath.split("/").pop() || "download";
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+}
+
+function inferredPreviewLanguage(path: string): string {
+    const extension = artifactFileExtension(path);
+    return normalizeCodeLanguage(extension || "text");
+}
+
+function shouldRenderTextAsMarkdown(path: string, content: string): boolean {
+    const extension = artifactFileExtension(path);
+    if (["md", "markdown", "mdx"].includes(extension)) return true;
+    const trimmed = String(content || "").trim();
+    return Boolean(trimmed) && (
+        trimmed.includes("[[artifact:")
+        || /(^|\n)#{1,4}\s/.test(trimmed)
+        || /```[\s\S]*?```/.test(trimmed)
+        || /\$\$[\s\S]*?\$\$/.test(trimmed)
+        || /\\\[[\s\S]*?\\\]/.test(trimmed)
+    );
+}
+
+function shouldRenderTextAsCode(path: string): boolean {
+    const extension = artifactFileExtension(path);
+    return Boolean(extension) && !["md", "markdown", "mdx", "txt"].includes(extension);
+}
+
 function composerHasConversationHistory(): boolean {
     return state.messages.some((message) => message.role === "user" || message.role === "assistant");
 }
@@ -651,6 +686,8 @@ function syncShellLayout(): void {
 
     refreshWorkspaceButton.hidden = state.viewerMode === "closed";
     refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
+    downloadFileButton.hidden = !(state.viewerMode === "file" && state.selectedFilePath);
+    downloadFileButton.disabled = !state.selectedFilePath;
     const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode === "file";
     viewerModeButton.hidden = !showModeButton;
     if (showModeButton) {
@@ -992,6 +1029,65 @@ function artifactFileExtension(path: string): string {
     const fileName = resolveArtifactReferencePath(path).split("/").pop() || "";
     const match = fileName.match(/\.([A-Za-z0-9]+)$/);
     return String(match?.[1] || "").toLowerCase();
+}
+
+function displayFileKindLabel(path: string, contentKind = "", itemType = "file"): string {
+    if (itemType === "directory") return "Dir";
+    const extension = artifactFileExtension(path);
+    if (extension === "c") return "C";
+    if (extension === "h") return "Header";
+    if (["cpp", "cxx", "cc"].includes(extension)) return "C++";
+    if (extension === "hpp") return "C++ Header";
+    if (extension === "py") return "Python";
+    if (extension === "js") return "JS";
+    if (extension === "ts") return "TS";
+    if (extension === "tsx") return "TSX";
+    if (extension === "jsx") return "JSX";
+    if (extension === "rs") return "Rust";
+    if (extension === "go") return "Go";
+    if (extension === "java") return "Java";
+    if (extension === "sql") return "SQL";
+    if (extension === "html") return "HTML";
+    if (extension === "css") return "CSS";
+    if (extension === "json") return "JSON";
+    if (extension === "md") return "Markdown";
+
+    const normalized = String(contentKind || "").trim().toLowerCase();
+    if (normalized === "code") return "Code";
+    if (normalized === "markdown") return "Markdown";
+    if (normalized === "html") return "HTML";
+    if (normalized === "pdf") return "PDF";
+    if (normalized === "image") return "Image";
+    if (normalized === "csv") return "CSV";
+    if (normalized === "spreadsheet") return "Sheet";
+    return "File";
+}
+
+function displayFilePreviewLabel(path: string, contentKind = ""): string {
+    const extension = artifactFileExtension(path);
+    if (extension === "c") return "C source";
+    if (extension === "h") return "C header";
+    if (["cpp", "cxx", "cc"].includes(extension)) return "C++ source";
+    if (extension === "hpp") return "C++ header";
+    if (extension === "py") return "Python";
+    if (extension === "js") return "JavaScript";
+    if (extension === "ts") return "TypeScript";
+    if (extension === "tsx") return "TSX";
+    if (extension === "jsx") return "JSX";
+    if (extension === "rs") return "Rust";
+    if (extension === "go") return "Go";
+    if (extension === "java") return "Java";
+    if (extension === "sql") return "SQL";
+    if (extension === "html") return "HTML";
+    if (extension === "css") return "CSS";
+    if (extension === "json") return "JSON";
+    if (extension === "md") return "Markdown";
+
+    const normalized = String(contentKind || "").trim().toLowerCase();
+    if (normalized === "text") return "Text";
+    if (normalized === "code") return "Code";
+    if (normalized) return normalized.toUpperCase();
+    return "Preview";
 }
 
 function unwrapSingleFence(raw: string): { language: string; body: string } | null {
@@ -1801,10 +1897,10 @@ function renderFileList(): void {
             data-kind="${escapeHtml(item.type)}"
         >
             <div class="file-item-name">
-                <span class="file-item-kind">${escapeHtml(item.type === "directory" ? "Dir" : (item.content_kind || "File"))}</span>
+                <span class="file-item-kind">${escapeHtml(displayFileKindLabel(item.path, item.content_kind || "", item.type))}</span>
                 ${escapeHtml(item.name)}
             </div>
-            <div class="file-item-meta">${escapeHtml([formatBytes(item.size), formatRelativeTime(item.modified_at)].filter(Boolean).join(" • "))}</div>
+            <div class="file-item-meta">${escapeHtml(formatBytes(item.size) || "")}</div>
         </button>
     `));
 
@@ -2254,7 +2350,7 @@ function renderPreviewEmpty(title: string, body: string): void {
 function renderPreview(payload: WorkspaceFilePayload): void {
     const contentKind = payload.content_kind || "text";
     viewerTitle.textContent = payload.path;
-    viewerMeta.textContent = `${contentKind.toUpperCase()} preview`;
+    viewerMeta.textContent = `${displayFilePreviewLabel(payload.path, contentKind)} preview`;
     viewerMeta.hidden = false;
 
     if (contentKind === "image") {
@@ -2309,6 +2405,21 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     if (contentKind === "archive") {
         filePreview.innerHTML = `<pre class="archive-list">${escapeHtml(payload.content || "")}</pre>`;
         return;
+    }
+
+    if (contentKind === "text") {
+        if (shouldRenderTextAsMarkdown(payload.path || "", payload.content || "")) {
+            viewerMeta.textContent = "Markdown preview";
+            filePreview.innerHTML = `<div class="preview-markdown rich-text">${renderRichText(payload.content || "")}</div>`;
+            bindArtifactLinks(filePreview);
+            return;
+        }
+        if (shouldRenderTextAsCode(payload.path || "")) {
+            const language = inferredPreviewLanguage(payload.path || "");
+            filePreview.innerHTML = `<div class="preview-markdown rich-text">${renderRichText(`\`\`\`${language}\n${payload.content || ""}\n\`\`\``)}</div>`;
+            bindArtifactLinks(filePreview);
+            return;
+        }
     }
 
     filePreview.innerHTML = `<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
@@ -2918,6 +3029,9 @@ function attachEvents(): void {
     refreshWorkspaceButton.addEventListener("click", () => {
         void loadDirectory(state.currentDirectoryPath);
         if (state.viewerMode === "file" && state.selectedFilePath) void openFile(state.selectedFilePath);
+    });
+    downloadFileButton.addEventListener("click", () => {
+        downloadSelectedFile();
     });
 
     sidebarToggle.addEventListener("click", () => {

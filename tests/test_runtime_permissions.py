@@ -1035,7 +1035,7 @@ class RuntimePermissionTests(unittest.TestCase):
         )
 
         self.assertIn("[[artifact:", wrapped)
-        self.assertIn("linked", wrapped)
+        self.assertIn("linked_list.c", wrapped)
         self.assertIn(".c]]", wrapped)
 
     def test_inline_code_response_does_not_get_artifact_reference_after_real_write(self):
