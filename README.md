@@ -4,7 +4,7 @@ A self-hosted coding companion with a FastAPI backend, a lightweight workspace U
 
 ## Video Demo
 
-Demo video coming soon.
+<video src='assets/demo.mov'>
 
 ## Quick Start with `./chat`
 
