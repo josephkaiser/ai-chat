@@ -3201,10 +3201,32 @@ def resolve_workspace_relative_path(conversation_id: str, rel_path: str = "") ->
 
 def resolve_workspace_relative_path_from_root(workspace: pathlib.Path, rel_path: str = "") -> pathlib.Path:
     """Resolve a user/model path inside a specific workspace root."""
-    target = (workspace / (rel_path or "")).resolve()
-    if target != workspace and workspace not in target.parents:
+    workspace_root = workspace.resolve(strict=False)
+    target = (workspace_root / (rel_path or "")).resolve()
+    if target != workspace_root and workspace_root not in target.parents:
         raise HTTPException(status_code=403, detail="Access denied")
     return target
+
+
+def normalize_attachment_paths_for_workspace(
+    workspace_root: pathlib.Path,
+    paths: List[str],
+) -> List[str]:
+    """Deduplicate attachment paths and ensure they stay inside the selected workspace."""
+    resolved_workspace = workspace_root.resolve(strict=False)
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw_path in paths[:MAX_ATTACHMENTS_PER_MESSAGE]:
+        rel_path = str(raw_path or "").strip()
+        if not rel_path or rel_path in seen:
+            continue
+        target = resolve_workspace_relative_path_from_root(resolved_workspace, rel_path)
+        normalized = format_workspace_path(target, resolved_workspace)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return cleaned
 
 
 def path_is_within_root(path: pathlib.Path, root: pathlib.Path) -> bool:
@@ -17352,8 +17374,19 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         )
         conv_id = str(ensured_session.get("conversation_id") or conv_id or "").strip()
 
-    conversation_title = active_file_path or (message[:50] + "..." if len(message) > 50 else message)
+    attachment_title = ""
+    if attachments:
+        attachment_title = pathlib.Path(str(attachments[0])).name or str(attachments[0])
+    conversation_title = (
+        active_file_path
+        or (message[:50] + "..." if len(message) > 50 else message)
+        or attachment_title
+        or "New chat"
+    )
     ensure_conversation_record(conv_id, title=conversation_title, workspace_id=requested_workspace_id or None)
+    if requested_workspace_id and attachments:
+        workspace_root = get_workspace_path_for_workspace_id(requested_workspace_id, create=True)
+        attachments = normalize_attachment_paths_for_workspace(workspace_root, attachments)
 
     attachment_context = await build_attachment_context(conv_id, attachments, message)
     slash_request = ""
