@@ -2,6 +2,36 @@
 
 A self-hosted coding companion on **vLLM** (OpenAI-compatible API), with a FastAPI backend, a small TypeScript workspace UI, and a deeper server-side harness for repo work.
 
+## Quick Start with `./chat`
+
+After cloning the repo, `./chat` is the primary way to install and run the app:
+
+```bash
+./chat install
+./chat start
+./chat open
+```
+
+- `./chat install` pulls the vLLM image, builds the app container, and rebuilds the checked-in frontend bundle when needed.
+- `./chat start` launches the stack using the installed/default model profile.
+- `./chat open` opens the best available browser URL.
+
+Useful commands:
+
+```bash
+./chat install   # Build images and prepare the default model
+./chat start     # Start the app
+./chat kickstart # Clean rebuild from the current repo snapshot, then start
+./chat stop      # Stop the app
+./chat restart   # Stop then start
+./chat status    # Check what's running
+./chat logs      # Tail logs from all services
+./chat url       # Print the preferred browser URL
+./chat open      # Open the preferred browser URL
+```
+
+`./chat start` reuses the installed/default model non-interactively, so chained commands like `./chat install start` and `./chat stop install start` work as expected.
+
 ## Source Layout
 
 - `src/python/harness.py` — main FastAPI app, WebSocket loop, workspace APIs, tool loop, and file-session runtime
@@ -51,15 +81,6 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 - **Network** — internet access is needed for first-time image pulls, model downloads, and optional web search
 - **Browser** — a current Chromium, Firefox, or Safari-class browser for the UI
 
-## Install
-
-```bash
-./chat install
-```
-
-This pulls the vLLM image and builds the chat app container. It also rebuilds the TypeScript frontend bundle first so the generated `src/web/app.js` is baked into the image.
-`./chat start` now reuses that installed/default model non-interactively, so commands like `./chat install start` and `./chat stop install start` work as a single chained invocation.
-
 ## Runtime Defaults
 
 The shipped app keeps the runtime surface fairly small:
@@ -68,18 +89,6 @@ The shipped app keeps the runtime surface fairly small:
 - no PTY-backed terminal surface
 - no legacy execute-code endpoint
 - command execution stays workspace-scoped and argv-based on the backend
-
-## Usage
-
-```bash
-./chat start     # Start the app (idempotent)
-./chat stop      # Stop the app (idempotent)
-./chat restart   # Stop then start
-./chat status    # Check what's running
-./chat logs      # Tail logs from all services
-./chat url       # Print the preferred browser URL
-./chat open      # Open the preferred browser URL
-```
 
 Once started, the launcher prints the best URL to open first:
 
