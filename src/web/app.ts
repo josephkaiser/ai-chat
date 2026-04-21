@@ -212,6 +212,7 @@ const state = {
     handledArtifactKeys: new Set<string>(),
     conversationRefreshTimer: 0 as number,
     healthPollTimer: 0 as number,
+    pendingAttachmentPaths: [] as string[],
 };
 
 function query<T extends Element>(selector: string): T {
@@ -254,6 +255,11 @@ const refreshFixtureReviewButton = query<HTMLButtonElement>("#refreshFixtureRevi
 const fixtureReviewList = query<HTMLDivElement>("#fixtureReviewList");
 const fixtureReviewDetail = query<HTMLDivElement>("#fixtureReviewDetail");
 const resetAppButton = query<HTMLButtonElement>("#resetAppButton");
+
+const PASTE_ATTACH_CHAR_THRESHOLD = 1200;
+const PASTE_ATTACH_LINE_THRESHOLD = 28;
+const FIRST_TURN_COMPOSER_MAX_HEIGHT = 260;
+const LATER_TURN_COMPOSER_MAX_HEIGHT = 152;
 
 function generateId(): string {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -568,6 +574,21 @@ function fileViewUrl(path: string): string {
     return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
 }
 
+function composerHasConversationHistory(): boolean {
+    return state.messages.some((message) => message.role === "user" || message.role === "assistant");
+}
+
+function composerMaxHeight(): number {
+    return composerHasConversationHistory() ? LATER_TURN_COMPOSER_MAX_HEIGHT : FIRST_TURN_COMPOSER_MAX_HEIGHT;
+}
+
+function syncComposerHeight(): void {
+    composerInput.style.height = "auto";
+    const nextHeight = Math.min(Math.max(composerInput.scrollHeight, 42), composerMaxHeight());
+    composerInput.style.height = `${nextHeight}px`;
+    composerInput.style.overflowY = composerInput.scrollHeight > nextHeight ? "auto" : "hidden";
+}
+
 function currentWorkspaceName(): string {
     const workspace = state.workspaces.find((entry) => entry.id === state.currentWorkspaceId);
     if (!workspace) return "";
@@ -737,6 +758,85 @@ function truncatePreview(value: string, limit = 88): string {
     const flattened = value.replace(/\s+/g, " ").trim();
     if (flattened.length <= limit) return flattened;
     return `${flattened.slice(0, limit - 1)}…`;
+}
+
+function lineCount(text: string): number {
+    return text ? text.split(/\r?\n/).length : 0;
+}
+
+function inferPastedLanguage(text: string): { language: string; extension: string } {
+    const trimmed = text.trim();
+    if (!trimmed) return { language: "text", extension: "txt" };
+    if (/^#!/.test(trimmed) || /(^|\n)\s*(from\s+\w+\s+import|import\s+\w+|def\s+\w+\(|class\s+\w+[\(:])/m.test(trimmed)) {
+        return { language: "python", extension: "py" };
+    }
+    if (/^\s*<!doctype html>|<html\b|<body\b|<head\b/i.test(trimmed)) {
+        return { language: "html", extension: "html" };
+    }
+    if (/(^|\n)\s*(SELECT|INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE|ALTER TABLE)\b/i.test(trimmed)) {
+        return { language: "sql", extension: "sql" };
+    }
+    if (/^\s*[{[]/.test(trimmed)) {
+        try {
+            JSON.parse(trimmed);
+            return { language: "json", extension: "json" };
+        } catch (_error) {
+            // Ignore malformed JSON and continue through the remaining heuristics.
+        }
+    }
+    if (/(^|\n)\s*(export\s+default|export\s+(const|function|class)|import\s+.+from\s+['"]|const\s+\w+\s*=|let\s+\w+\s*=|function\s+\w+\()/m.test(trimmed)) {
+        return { language: "javascript", extension: "js" };
+    }
+    if (/(^|\n)\s*#\s+/.test(trimmed) || /(^|\n)\s*##\s+/.test(trimmed)) {
+        return { language: "markdown", extension: "md" };
+    }
+    if (/(^|\n)\s*(body|html|main|div|section|header|footer)\s*\{/.test(trimmed)) {
+        return { language: "css", extension: "css" };
+    }
+    return { language: "text", extension: "txt" };
+}
+
+function shouldMaterializePastedText(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const chars = trimmed.length;
+    const lines = lineCount(trimmed);
+    if (chars >= PASTE_ATTACH_CHAR_THRESHOLD || lines >= PASTE_ATTACH_LINE_THRESHOLD) {
+        return true;
+    }
+    const { extension } = inferPastedLanguage(trimmed);
+    return extension !== "txt" && (chars > 320 || lines > 12);
+}
+
+function suggestPastedFilename(text: string): string {
+    const { extension } = inferPastedLanguage(text);
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    return `pasted/paste-${stamp}.${extension}`;
+}
+
+async function materializeComposerPaste(text: string): Promise<string> {
+    if (!state.currentWorkspaceId) {
+        throw new Error("Select a workspace before attaching pasted files.");
+    }
+    const path = suggestPastedFilename(text);
+    await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            path,
+            content: text,
+        }),
+    });
+    state.pendingAttachmentPaths = [...state.pendingAttachmentPaths, path];
+    await loadDirectory(parentDirectory(path));
+    await openFile(path);
+    return path;
+}
+
+function mergeComposerText(note: string): void {
+    const existing = composerInput.value.trim();
+    composerInput.value = existing ? `${existing}\n\n${note}` : note;
+    syncComposerHeight();
 }
 
 const ARTIFACT_HELPER_TEXT_PATTERNS = [
@@ -2002,6 +2102,7 @@ function startNewChat(): void {
     state.currentConversationId = generateId();
     state.currentConversationTitle = "New chat";
     state.messages = [];
+    state.pendingAttachmentPaths = [];
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
@@ -2010,6 +2111,7 @@ function startNewChat(): void {
     renderMessages();
     renderConversations();
     syncShellLayout();
+    syncComposerHeight();
     void loadContextEvalReport();
 }
 
@@ -2050,6 +2152,7 @@ function finishGeneration(options: { preserveThinking?: boolean } = {}): void {
     void fetchHealth();
     void loadDirectory(state.currentDirectoryPath);
     void loadContextEvalReport();
+    syncComposerHeight();
 }
 
 function handleChatEvent(event: ChatEvent): void {
@@ -2157,19 +2260,22 @@ async function sendCurrentMessage(): Promise<void> {
     }
 
     const message = composerInput.value.trim();
-    if (!message) return;
+    const attachments = [...state.pendingAttachmentPaths];
+    if (!message && !attachments.length) return;
     if (!state.currentConversationId) {
         startNewChat();
     }
 
     state.messages.push({
         role: "user",
-        content: message,
+        content: message || attachments.map((path) => `Attached \`${path.split("/").pop() || path}\``).join(", "),
         timestamp: new Date().toISOString(),
     });
     state.stickChatToBottom = true;
 
     composerInput.value = "";
+    state.pendingAttachmentPaths = [];
+    syncComposerHeight();
     renderMessages();
     renderConversations();
     setGenerating(true);
@@ -2179,6 +2285,7 @@ async function sendCurrentMessage(): Promise<void> {
         message,
         conversation_id: state.currentConversationId,
         workspace_id: state.currentWorkspaceId || null,
+        attachments,
         mode: "deep",
         turn_kind: "visible_chat",
         auto_approve_tool_permissions: true,
@@ -2187,6 +2294,7 @@ async function sendCurrentMessage(): Promise<void> {
     try {
         await dispatchChatPayload(payload);
     } catch (error) {
+        state.pendingAttachmentPaths = attachments;
         setThinkingStatus(
             error instanceof Error ? summarizeRuntimeError(error.message) : "The reply could not be sent.",
             { error: true, persistent: true },
@@ -2378,6 +2486,26 @@ function attachEvents(): void {
         void sendCurrentMessage();
     });
 
+    composerInput.addEventListener("input", () => {
+        syncComposerHeight();
+    });
+
+    composerInput.addEventListener("paste", (event: ClipboardEvent) => {
+        const pastedText = event.clipboardData?.getData("text/plain") || "";
+        if (!shouldMaterializePastedText(pastedText)) return;
+        event.preventDefault();
+        void materializeComposerPaste(pastedText)
+            .then((path) => {
+                const filename = path.split("/").pop() || path;
+                mergeComposerText(`Attached \`${filename}\`. Please use that file for this request.`);
+                setComposerHint(`Attached pasted file: ${filename}`);
+            })
+            .catch((error) => {
+                mergeComposerText(pastedText);
+                setComposerHint(error instanceof Error ? error.message : "Could not attach pasted file.");
+            });
+    });
+
     composerInput.addEventListener("keydown", (event: KeyboardEvent) => {
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
@@ -2393,6 +2521,7 @@ async function bootstrap(): Promise<void> {
     renderConversations();
     renderContextEvalReport();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
+    syncComposerHeight();
     connectWebSocket();
     window.clearInterval(state.healthPollTimer);
     state.healthPollTimer = window.setInterval(() => {

@@ -867,9 +867,12 @@ body[data-viewer-mode="file"] .chat-panel {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
     gap: 12px;
     padding: 8px 0 18px;
+    width: min(var(--chat-lane-width), calc(100% - 24px));
+    max-width: 100%;
+    margin: 0 auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable both-edges;
     scroll-padding-bottom: 112px;
@@ -878,7 +881,7 @@ body[data-viewer-mode="file"] .chat-panel {
 .message {
     padding: 10px 14px;
     border-radius: 16px;
-    width: min(var(--chat-lane-width), calc(100% - 24px));
+    width: 100%;
     max-width: 100%;
     white-space: normal;
     font-size: 0.9rem;
@@ -888,7 +891,7 @@ body[data-viewer-mode="file"] .chat-panel {
 .message.user {
     align-self: flex-end;
     width: fit-content;
-    max-width: min(var(--chat-lane-width), calc(100% - 24px));
+    max-width: 100%;
     background: var(--user-bubble);
     color: var(--user-text);
     border: 1px solid rgba(19, 34, 38, 0.08);
@@ -896,13 +899,13 @@ body[data-viewer-mode="file"] .chat-panel {
 
 .message.assistant,
 .message.system {
-    align-self: center;
+    align-self: stretch;
     background: var(--assistant-bubble);
     border: 1px solid rgba(19, 34, 38, 0.08);
 }
 
 .message-thinking {
-    width: min(var(--chat-lane-width), calc(100% - 24px));
+    width: 100%;
     max-width: 100%;
     display: flex;
     align-items: center;
@@ -1144,6 +1147,7 @@ body[data-viewer-mode="file"] .chat-panel {
     color: var(--text);
     font-size: 0.84rem;
     line-height: 1.42;
+    overflow-y: hidden;
 }
 
 .viewer-layout {
