@@ -1357,18 +1357,16 @@ function renderConversations(): void {
         const editableTitle = cleanConversationText(conversation.title || "");
         const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "");
         const visiblePreview = displayConversationPreview(conversation.title || "", conversation.last_message || "");
-        const visibleTime = formatRelativeTime(conversation.updated_at) || "Just now";
         return `
             <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
                 <button
                     type="button"
                     class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
                     data-conversation-id="${escapeHtml(conversation.id)}"
+                    data-tooltip="${escapeHtml(visiblePreview)}"
                 >
                     <div class="conversation-line">
                         <span class="conversation-title">${escapeHtml(visibleTitle)}</span>
-                        <span class="conversation-preview">${escapeHtml(visiblePreview)}</span>
-                        <span class="conversation-time">${escapeHtml(visibleTime)}</span>
                     </div>
                 </button>
                 <div class="conversation-actions">
