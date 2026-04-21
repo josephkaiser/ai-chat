@@ -874,8 +874,27 @@ body[data-viewer-mode="file"] .chat-panel {
     max-width: 100%;
     margin: 0 auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable both-edges;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(19, 34, 38, 0.18) transparent;
     scroll-padding-bottom: 112px;
+}
+
+.chat-messages::-webkit-scrollbar {
+    width: 8px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(19, 34, 38, 0.14);
+}
+
+.chat-messages:hover::-webkit-scrollbar-thumb {
+    background: rgba(19, 34, 38, 0.22);
 }
 
 .message {

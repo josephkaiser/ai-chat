@@ -210,7 +210,9 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn("margin: 0 auto;", css)
         self.assertIn("position: sticky;", css)
         self.assertIn("overscroll-behavior: contain;", css)
-        self.assertIn("scrollbar-gutter: stable both-edges;", css)
+        self.assertIn("scrollbar-gutter: stable;", css)
+        self.assertIn("scrollbar-width: thin;", css)
+        self.assertIn(".chat-messages::-webkit-scrollbar", css)
         self.assertIn(".settings-scroll-section", css)
         self.assertIn(".settings-overlay[hidden]", css)
 
