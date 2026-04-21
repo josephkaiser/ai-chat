@@ -674,6 +674,12 @@ def _recommendation_for_context_key(key: str, *, missing: bool) -> str:
             if missing
             else "Downrank chat history for evidence-heavy phases so file and artifact context win."
         )
+    if normalized == "conversation_memory":
+        return (
+            "Promote compacted conversation memory earlier so short follow-ups and long-running chats do not depend on raw transcript replay."
+            if missing
+            else "Only keep compacted conversation memory when it materially helps the active turn instead of crowding out stronger evidence."
+        )
     if normalized == "retrieved_history":
         return (
             "Increase memory retrieval or lower the selection threshold for relevant prior chat history."

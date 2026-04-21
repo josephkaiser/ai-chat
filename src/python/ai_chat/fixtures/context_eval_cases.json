@@ -219,5 +219,208 @@
         "conversation_context"
       ]
     }
+  },
+  {
+    "name": "direct_answer_short_followup_prefers_compacted_memory",
+    "policy_inputs": {
+      "phase": "direct_answer",
+      "request_text": "do that",
+      "changed_files": [],
+      "workspace_sample_paths": [],
+      "has_task_board": false,
+      "has_recent_feedback": false,
+      "has_scope_gaps": false,
+      "has_step_reports": false
+    },
+    "selection_candidates": [
+      {
+        "key": "user_request",
+        "title": "User request",
+        "content": "do that",
+        "priority": 10,
+        "required": true,
+        "tags": [],
+        "phase_hints": [
+          "direct_answer"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "answer_instruction",
+        "title": "Answer mode",
+        "content": "Answer directly unless execution is clearly required.",
+        "priority": 90,
+        "required": true,
+        "tags": [
+          "instruction"
+        ],
+        "phase_hints": [
+          "direct_answer"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "conversation_memory",
+        "title": "Compacted conversation memory",
+        "content": "Summary: The user wants a linked list example in C with a saved workspace file.\nGoals: Save the example into the workspace.\nActive files: linked_list.c\nRecent requests: Write a linked list example in C; save it\nNext steps: Update the saved C file with the requested changes.\nArtifact: [[artifact:.ai/conversation-memory.json]]",
+        "priority": 18,
+        "required": false,
+        "tags": [
+          "conversation",
+          "memory",
+          "artifacts"
+        ],
+        "phase_hints": [
+          "direct_answer"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "conversation_context",
+        "title": "Conversation context",
+        "content": "user: yes\nassistant: I can save the file if you want.",
+        "priority": 20,
+        "required": false,
+        "tags": [
+          "conversation",
+          "history"
+        ],
+        "phase_hints": [
+          "direct_answer"
+        ],
+        "metadata": {}
+      }
+    ],
+    "selection_max_sections": 3,
+    "expectation": {
+      "retrieve_memory": true,
+      "retrieve_workspace_previews": false,
+      "min_memory_limit": 2,
+      "min_workspace_preview_limit": 0,
+      "required_selected_keys": [
+        "user_request",
+        "answer_instruction",
+        "conversation_memory"
+      ],
+      "forbidden_selected_keys": [
+        "conversation_context"
+      ]
+    }
+  },
+  {
+    "name": "plan_continuity_prefers_compacted_memory_over_generic_chat",
+    "policy_inputs": {
+      "phase": "plan",
+      "request_text": "continue with the chat memory work",
+      "changed_files": [
+        "src/python/harness.py"
+      ],
+      "workspace_sample_paths": [
+        "src/python/harness.py",
+        "src/python/ai_chat/context_assembler.py"
+      ],
+      "has_task_board": true,
+      "has_recent_feedback": false,
+      "has_scope_gaps": false,
+      "has_step_reports": false
+    },
+    "selection_candidates": [
+      {
+        "key": "user_query",
+        "title": "User's new query",
+        "content": "continue with the chat memory work",
+        "priority": 10,
+        "required": true,
+        "tags": [],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "workspace_facts",
+        "title": "Observed workspace facts",
+        "content": "Found harness.py and context_assembler.py",
+        "priority": 30,
+        "required": true,
+        "tags": [
+          "workspace",
+          "facts"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      },
+      {
+        "key": "conversation_memory",
+        "title": "Compacted conversation memory",
+        "content": "Summary: The runtime is adding durable conversation memory.\nGoals: Add a structured memory artifact; use it before raw history retrieval.\nDecisions: Persist memory under .ai/conversation-memory.json.\nActive files: src/python/harness.py; src/python/ai_chat/context_assembler.py\nRecent requests: make this plan real\nNext steps: Add replay coverage for memory continuity.\nArtifact: [[artifact:.ai/conversation-memory.json]]",
+        "priority": 18,
+        "required": false,
+        "tags": [
+          "conversation",
+          "memory",
+          "artifacts"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "retrieved_memory",
+        "title": "Retrieved chat memory",
+        "content": "1. user: We should stay core to LLM strengths and make memory real.",
+        "priority": 45,
+        "required": false,
+        "tags": [
+          "history",
+          "retrieval",
+          "conversation"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {
+          "sticky": "true"
+        }
+      },
+      {
+        "key": "conversation_context",
+        "title": "Conversation context",
+        "content": "user: yes\nassistant: I can build that next.",
+        "priority": 20,
+        "required": false,
+        "tags": [
+          "conversation",
+          "history"
+        ],
+        "phase_hints": [
+          "plan"
+        ],
+        "metadata": {}
+      }
+    ],
+    "selection_max_sections": 4,
+    "expectation": {
+      "retrieve_memory": true,
+      "retrieve_workspace_previews": true,
+      "min_memory_limit": 3,
+      "min_workspace_preview_limit": 1,
+      "required_selected_keys": [
+        "user_query",
+        "workspace_facts",
+        "conversation_memory",
+        "retrieved_memory"
+      ],
+      "forbidden_selected_keys": [
+        "conversation_context"
+      ]
+    }
   }
 ]

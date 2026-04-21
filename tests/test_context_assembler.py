@@ -170,6 +170,8 @@ class ContextAssemblerAsyncTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
             read_workspace_text=lambda _conversation_id, path: (
+                '{"summary":"Chat-first coding flow.","goals":["Keep chat conversational"],"decisions":["Use workspace artifacts for durable progress"],"active_files":["src/web/app.js"],"open_questions":["How much memory to retrieve?"],"recent_requests":["Improve the document flow"],"next_steps":["Wire memory into context assembly"]}'
+                if path == ".ai/conversation-memory.json" else
                 "const mode = 'chat';\nfunction sendMessage() { return mode; }"
                 if path == "src/web/app.js" else None
             ),
@@ -179,6 +181,7 @@ class ContextAssemblerAsyncTests(unittest.IsolatedAsyncioTestCase):
         bundle = await assemble_plan_context_async(session, retrieval_adapters=adapters)
         rendered = bundle.render()
 
+        self.assertIn("Compacted conversation memory:\nSummary: Chat-first coding flow.", rendered)
         self.assertIn("Retrieved chat memory:\n1. user: Earlier we said the app should feel chat-first.", rendered)
         self.assertIn("Relevant workspace excerpts:\n[src/web/app.js]", rendered)
 
