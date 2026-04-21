@@ -803,6 +803,187 @@ def _bucket_keys_for_context_eval_case(case: ContextEvalCase) -> List[str]:
     return keys
 
 
+def _tool_failure_bucket_meta(
+    *,
+    lane: str,
+    title: str,
+    bucket_suffix: str,
+    severity: str,
+    severity_rank: int,
+    recommendation: str,
+) -> Dict[str, object]:
+    """Build triage metadata for a tool-policy-derived failure bucket."""
+    return {
+        "bucket_key": f"tool:{lane}:{bucket_suffix}",
+        "category": "tool_policy",
+        "title": title,
+        "severity": severity,
+        "severity_rank": severity_rank,
+        "recommendation": recommendation,
+    }
+
+
+def _tool_failure_buckets_for_capture(capture: Dict[str, object]) -> List[Dict[str, object]]:
+    """Infer triage buckets from captured tool-policy traces."""
+    tool_policy = capture.get("tool_policy")
+    if not isinstance(tool_policy, dict):
+        return []
+
+    tool_names = {
+        str(name).strip()
+        for name in capture.get("tool_names", [])
+        if str(name).strip()
+    } if isinstance(capture.get("tool_names"), list) else set()
+    workflow_status = str(capture.get("workflow_status") or "").strip().lower()
+    error_text = str(capture.get("error_text") or "").strip().lower()
+
+    def tool_used(*prefixes: str) -> bool:
+        return any(
+            any(name.startswith(prefix) for prefix in prefixes)
+            for name in tool_names
+        )
+
+    permission_blocked = bool(
+        error_text
+        and any(
+            marker in error_text
+            for marker in (
+                "permission denied",
+                "permission was denied",
+                "approval denied",
+                "not approved",
+                "not allowed",
+                "requires approval",
+                "denied for this chat",
+            )
+        )
+    ) or workflow_status in {"blocked", "permission_blocked"}
+
+    bucket_metas: List[Dict[str, object]] = []
+
+    def maybe_add_bucket(
+        *,
+        requested: bool,
+        available: bool,
+        used: bool,
+        lane: str,
+        missing_title: str,
+        missing_recommendation: str,
+        unused_title: str,
+        unused_recommendation: str,
+        blocked_title: str,
+        blocked_recommendation: str,
+    ) -> None:
+        if not requested:
+            return
+        if not available:
+            bucket_metas.append(
+                _tool_failure_bucket_meta(
+                    lane=lane,
+                    title=missing_title,
+                    bucket_suffix="not_offered",
+                    severity="high",
+                    severity_rank=4,
+                    recommendation=missing_recommendation,
+                )
+            )
+            return
+        if permission_blocked:
+            bucket_metas.append(
+                _tool_failure_bucket_meta(
+                    lane=lane,
+                    title=blocked_title,
+                    bucket_suffix="permission_blocked",
+                    severity="high",
+                    severity_rank=4,
+                    recommendation=blocked_recommendation,
+                )
+            )
+            return
+        if not used:
+            bucket_metas.append(
+                _tool_failure_bucket_meta(
+                    lane=lane,
+                    title=unused_title,
+                    bucket_suffix="offered_but_unused",
+                    severity="medium",
+                    severity_rank=3,
+                    recommendation=unused_recommendation,
+                )
+            )
+
+    maybe_add_bucket(
+        requested=bool(tool_policy.get("web_search_requested")),
+        available=bool(tool_policy.get("has_web_tools")),
+        used=tool_used("web.search", "web.fetch_page"),
+        lane="web_search",
+        missing_title="Web search was not offered",
+        missing_recommendation="Expose web search tools for current-info turns before routing them into a weaker answer-only path.",
+        unused_title="Web search was offered but not used",
+        unused_recommendation="Tighten tool-choice policy so current-info turns actually invoke web search instead of stopping at a generic answer.",
+        blocked_title="Web search was blocked by permissions",
+        blocked_recommendation="Make web-search permission handling resumable so the requested lookup can continue after approval.",
+    )
+    maybe_add_bucket(
+        requested=bool(tool_policy.get("workspace_requested") or str(tool_policy.get("workspace_intent") or "").strip().lower() not in {"", "none"}),
+        available=bool(tool_policy.get("has_workspace_tools")),
+        used=tool_used("workspace.list_files", "workspace.grep", "workspace.read_file", "workspace.patch_file"),
+        lane="workspace",
+        missing_title="Workspace tools were not offered",
+        missing_recommendation="Keep workspace tools enabled when the user is asking to inspect or modify files in the current workspace.",
+        unused_title="Workspace tools were offered but not used",
+        unused_recommendation="Tighten tool-choice policy so file-grounded turns actually use workspace tools instead of staying in chat-only mode.",
+        blocked_title="Workspace tools were blocked by permissions",
+        blocked_recommendation="Make workspace-tool approvals resumable so file inspection or edits continue after permission is granted.",
+    )
+    maybe_add_bucket(
+        requested=bool(tool_policy.get("render_requested")),
+        available=bool(tool_policy.get("has_render_tools")),
+        used=tool_used("workspace.render"),
+        lane="render",
+        missing_title="Render tools were not offered",
+        missing_recommendation="Keep render tools available when the user is asking to preview or open a durable artifact in the viewer.",
+        unused_title="Render tools were offered but not used",
+        unused_recommendation="Prefer render/open actions when the turn is asking to show or preview an artifact instead of only describing it in chat.",
+        blocked_title="Render tools were blocked by permissions",
+        blocked_recommendation="Make render permission handling resumable so viewer-oriented turns do not stall after approval.",
+    )
+    maybe_add_bucket(
+        requested=bool(tool_policy.get("local_rag_requested")),
+        available=bool(tool_policy.get("has_history_tools")),
+        used=tool_used("conversation.search_history"),
+        lane="history",
+        missing_title="History retrieval was not offered",
+        missing_recommendation="Expose conversation-history retrieval when the request depends on prior turns or compacted memory is insufficient.",
+        unused_title="History retrieval was offered but not used",
+        unused_recommendation="Use history retrieval when follow-up turns depend on prior chat state instead of guessing from the latest message alone.",
+        blocked_title="History retrieval was blocked by permissions",
+        blocked_recommendation="Make history retrieval resumable when approval gates prevent the follow-up from grounding itself correctly.",
+    )
+    maybe_add_bucket(
+        requested=bool(tool_policy.get("auto_execute_workspace") or tool_policy.get("resume_saved_workspace")),
+        available=bool(tool_policy.get("has_execution_tools")),
+        used=tool_used("workspace.run_command"),
+        lane="execution",
+        missing_title="Execution tools were not offered",
+        missing_recommendation="Keep command-execution tools available when the turn is explicitly trying to continue or verify saved workspace work.",
+        unused_title="Execution tools were offered but not used",
+        unused_recommendation="Tighten tool-choice policy so resume/verify turns actually run the expected command instead of stalling in chat.",
+        blocked_title="Execution tools were blocked by permissions",
+        blocked_recommendation="Make execution approvals resumable so run/test/verify turns can continue after permission is granted.",
+    )
+
+    deduped: List[Dict[str, object]] = []
+    seen_keys = set()
+    for meta in bucket_metas:
+        key = str(meta.get("bucket_key") or "")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(meta)
+    return deduped
+
+
 def promoted_fixture_bucket_coverage(
     fixtures_dir: pathlib.Path | str | None = None,
 ) -> Dict[str, Dict[str, object]]:
@@ -883,6 +1064,8 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             "selected_keys": list(item.result.selection_output.selected_keys),
             "tool_policy": dict(item.capture.get("tool_policy", {})) if isinstance(item.capture.get("tool_policy"), dict) else {},
             "tool_names": list(item.capture.get("tool_names", [])) if isinstance(item.capture.get("tool_names"), list) else [],
+            "workflow_status": str(item.capture.get("workflow_status", "")).strip(),
+            "error_text": str(item.capture.get("error_text", "")).strip(),
         }
         for item in materialized
         if not item.result.passed
@@ -906,9 +1089,12 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             "selected_keys": list(item.result.selection_output.selected_keys),
             "tool_policy": dict(item.capture.get("tool_policy", {})) if isinstance(item.capture.get("tool_policy"), dict) else {},
             "tool_names": list(item.capture.get("tool_names", [])) if isinstance(item.capture.get("tool_names"), list) else [],
+            "workflow_status": str(item.capture.get("workflow_status", "")).strip(),
+            "error_text": str(item.capture.get("error_text", "")).strip(),
         }
-        for failed_check in item.result.failed_checks:
-            bucket_meta = _triage_bucket_for_failed_check(failed_check)
+        bucket_metas = [_triage_bucket_for_failed_check(failed_check) for failed_check in item.result.failed_checks]
+        bucket_metas.extend(_tool_failure_buckets_for_capture(item.capture))
+        for bucket_meta in bucket_metas:
             bucket_key = str(bucket_meta["bucket_key"])
             bucket = triage_buckets.setdefault(
                 bucket_key,
@@ -931,8 +1117,16 @@ def summarize_captured_context_eval_results(results: Sequence[CapturedContextEva
             bucket["case_refs"].add((item.source_path, item.result.name))
             bucket["trigger_counts"][trigger] += 1
             bucket["phase_counts"][phase] += 1
-            if failed_check not in bucket["sample_failed_checks"] and len(bucket["sample_failed_checks"]) < 3:
-                bucket["sample_failed_checks"].append(failed_check)
+            sample_label = next(
+                (
+                    failed_check
+                    for failed_check in item.result.failed_checks
+                    if str(_triage_bucket_for_failed_check(failed_check).get("bucket_key") or "") == bucket_key
+                ),
+                str(bucket_meta["title"]),
+            )
+            if sample_label not in bucket["sample_failed_checks"] and len(bucket["sample_failed_checks"]) < 3:
+                bucket["sample_failed_checks"].append(sample_label)
             if len(bucket["example_cases"]) < 3 and all(
                 existing.get("source_path") != item.source_path or existing.get("name") != item.result.name
                 for existing in bucket["example_cases"]

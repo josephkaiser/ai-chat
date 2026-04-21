@@ -15888,6 +15888,8 @@ def capture_context_eval_case_for_assistant_message(
         "tool_names": list(workflow_metadata.get("tool_names", [])) if isinstance(workflow_metadata, dict) else [],
         "workflow_name": str(workflow_metadata.get("workflow_name") or "").strip() if isinstance(workflow_metadata, dict) else "",
         "final_outcome": str(workflow_metadata.get("final_outcome") or "").strip() if isinstance(workflow_metadata, dict) else "",
+        "workflow_status": str(workflow_metadata.get("status") or "").strip() if isinstance(workflow_metadata, dict) else "",
+        "error_text": str(workflow_metadata.get("error_text") or "").strip() if isinstance(workflow_metadata, dict) else "",
     }
     rel_path = context_eval_capture_path(trigger, assistant_message_id)
     try:

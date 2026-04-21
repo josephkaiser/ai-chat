@@ -232,6 +232,8 @@ class ContextEvalTests(unittest.TestCase):
             "phase": "verify",
             "tool_policy": {"workspace_requested": True, "has_workspace_tools": True},
             "tool_names": ["workspace.read_file"],
+            "workflow_status": "completed",
+            "error_text": "",
         }
         bad_payload["expectation"]["forbidden_selected_keys"] = ["conversation_context", "workspace_excerpts"]
 
@@ -248,6 +250,7 @@ class ContextEvalTests(unittest.TestCase):
         self.assertTrue(summary["recent_failures"])
         self.assertEqual(summary["recent_failures"][0]["tool_policy"]["workspace_requested"], True)
         self.assertEqual(summary["recent_failures"][0]["tool_names"], ["workspace.read_file"])
+        self.assertEqual(summary["recent_failures"][0]["workflow_status"], "completed")
         self.assertTrue(summary["top_triage_buckets"])
         self.assertEqual(summary["recommended_fix"]["key"], "forbidden_selected:workspace_excerpts")
         self.assertEqual(summary["top_triage_buckets"][0]["severity"], "high")
@@ -382,6 +385,55 @@ class ContextEvalTests(unittest.TestCase):
         top_bucket = summary["top_triage_buckets"][0]
         self.assertEqual(top_bucket["fixture_coverage"]["suggested_count"], 1)
         self.assertFalse(top_bucket["promotion_suggestion"]["should_suggest"])
+
+    def test_summarize_captured_context_eval_results_adds_tool_not_offered_bucket(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        payload["capture"] = {
+            "trigger": "implicit_feedback",
+            "phase": "direct_answer",
+            "tool_policy": {
+                "web_search_requested": True,
+                "has_web_tools": False,
+            },
+            "tool_names": [],
+            "workflow_status": "completed",
+            "error_text": "",
+        }
+        payload["expectation"]["required_selected_keys"] = ["conversation_memory"]
+
+        summary = summarize_captured_context_eval_results([
+            replay_captured_context_eval_payload(payload, source_path="/tmp/web-search-missed.json"),
+        ])
+
+        bucket_keys = {bucket["key"] for bucket in summary["top_triage_buckets"]}
+        self.assertIn("tool:web_search:not_offered", bucket_keys)
+        bucket = next(bucket for bucket in summary["top_triage_buckets"] if bucket["key"] == "tool:web_search:not_offered")
+        self.assertEqual(bucket["category"], "tool_policy")
+        self.assertIn("web search tools", bucket["recommendation"].lower())
+
+    def test_summarize_captured_context_eval_results_adds_tool_permission_blocked_bucket(self):
+        payload = serialize_context_eval_case(DEFAULT_CONTEXT_EVAL_CASES[0])
+        payload["capture"] = {
+            "trigger": "retry",
+            "phase": "plan",
+            "tool_policy": {
+                "workspace_requested": True,
+                "has_workspace_tools": True,
+            },
+            "tool_names": [],
+            "workflow_status": "failed",
+            "error_text": "workspace.patch_file permission denied for this chat",
+        }
+        payload["expectation"]["required_selected_keys"] = ["missing_key"]
+
+        summary = summarize_captured_context_eval_results([
+            replay_captured_context_eval_payload(payload, source_path="/tmp/workspace-blocked.json"),
+        ])
+
+        bucket_keys = {bucket["key"] for bucket in summary["top_triage_buckets"]}
+        self.assertIn("tool:workspace:permission_blocked", bucket_keys)
+        bucket = next(bucket for bucket in summary["top_triage_buckets"] if bucket["key"] == "tool:workspace:permission_blocked")
+        self.assertEqual(bucket["severity"], "high")
 
 
 if __name__ == "__main__":

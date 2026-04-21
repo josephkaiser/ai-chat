@@ -292,9 +292,16 @@
     {
       "id": "tool-failure-bucketing",
       "phase": "tool-reliability",
-      "status": "next",
+      "status": "done",
       "task": "Turn captured tool-policy traces into triage buckets that explicitly distinguish not offered, filtered out, permission-blocked, and offered-but-unused tool failures.",
       "success_signal": "Replay and triage can point to the exact missing tool lane instead of only generic context or routing symptoms."
+    },
+    {
+      "id": "artifact-source-of-truth",
+      "phase": "artifact-durability",
+      "status": "next",
+      "task": "Make viewer-backed files the clear source of truth by compacting artifact chat cards, preventing duplicate file dumps, and keeping saved file contents clean.",
+      "success_signal": "When the assistant updates a durable file, chat stays compact and the viewer shows the exact saved artifact without leaked prose."
     }
   ]
 }
