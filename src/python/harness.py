@@ -9382,15 +9382,15 @@ def save_message(
     kind: str = TURN_KIND_VISIBLE_CHAT,
 ) -> int:
     """Save message to database and return message ID"""
-    title = content[:50] + "..." if len(content) > 50 else content
-    ensure_run_for_conversation(conv_id, title=title, workspace_id=workspace_id)
+    seeded_title = "New chat"
+    ensure_run_for_conversation(conv_id, title=seeded_title, workspace_id=workspace_id)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
     c.execute('SELECT id FROM conversations WHERE id = ?', (conv_id,))
     if not c.fetchone():
-        created = ensure_conversation_record(conv_id, title=title, workspace_id=workspace_id)
+        created = ensure_conversation_record(conv_id, title=seeded_title, workspace_id=workspace_id)
         try:
             c.execute('UPDATE conversations SET run_id = ? WHERE id = ?', (created.get("run_id", ""), conv_id))
         except sqlite3.OperationalError:
@@ -17377,11 +17377,10 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     attachment_title = ""
     if attachments:
         attachment_title = pathlib.Path(str(attachments[0])).name or str(attachments[0])
-    conversation_title = (
-        active_file_path
-        or (message[:50] + "..." if len(message) > 50 else message)
-        or attachment_title
-        or "New chat"
+    conversation_title = normalize_conversation_title(
+        pathlib.Path(str(active_file_path or "")).name
+        or attachment_title,
+        fallback="New chat",
     )
     ensure_conversation_record(conv_id, title=conversation_title, workspace_id=requested_workspace_id or None)
     if requested_workspace_id and attachments:
