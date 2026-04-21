@@ -14,6 +14,9 @@ class FrontendMathSupportTests(unittest.TestCase):
         self.assertIn("Generated from src/web/app.ts", js)
         self.assertIn("async function loadWorkspaces(preferredId = \"\")", js)
         self.assertNotIn("interface WorkspaceFilePayload", js)
+        self.assertIn("function renderMathExpression(", ts)
+        self.assertIn("function renderMathBlock(", ts)
+        self.assertIn("function extractInlineMathSegments(", ts)
 
     def test_repo_includes_local_frontend_build_entrypoint(self):
         package_json = (ROOT / "package.json").read_text(encoding="utf-8")
@@ -39,6 +42,13 @@ class FrontendMathSupportTests(unittest.TestCase):
         self.assertNotIn("kickstart) do_kickstart ;;", chat_launcher)
         self.assertIn("def ensure_frontend_bundle()", harness)
         self.assertIn("ensure_frontend_bundle()", harness)
+
+    def test_math_rendering_styles_are_present(self):
+        css = (WEB_ROOT / "style.css").read_text(encoding="utf-8")
+        self.assertIn(".math-inline", css)
+        self.assertIn(".math-block", css)
+        self.assertIn(".math-frac", css)
+        self.assertIn(".math-sqrt", css)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,9 @@ function query(selector) {
     }
     return element;
 }
+function isMobileViewport() {
+    return window.matchMedia("(max-width: 720px)").matches;
+}
 const sidebarToggle = query("#sidebarToggle");
 const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
@@ -885,12 +888,287 @@ function maybeHandleAssistantArtifacts(message, index) {
         }
     })();
 }
+const MATH_COMMAND_HTML = {
+    alpha: "&alpha;",
+    beta: "&beta;",
+    gamma: "&gamma;",
+    delta: "&delta;",
+    epsilon: "&epsilon;",
+    theta: "&theta;",
+    lambda: "&lambda;",
+    mu: "&mu;",
+    pi: "&pi;",
+    sigma: "&sigma;",
+    phi: "&phi;",
+    omega: "&omega;",
+    Gamma: "&Gamma;",
+    Delta: "&Delta;",
+    Theta: "&Theta;",
+    Lambda: "&Lambda;",
+    Pi: "&Pi;",
+    Sigma: "&Sigma;",
+    Phi: "&Phi;",
+    Omega: "&Omega;",
+    cdot: "&middot;",
+    times: "&times;",
+    pm: "&plusmn;",
+    mp: "∓",
+    le: "&le;",
+    leq: "&le;",
+    ge: "&ge;",
+    geq: "&ge;",
+    neq: "&ne;",
+    ne: "&ne;",
+    infty: "&infin;",
+    to: "&rarr;",
+    rightarrow: "&rarr;",
+    Rightarrow: "&Rightarrow;",
+    leftarrow: "&larr;",
+    Leftarrow: "&lArr;",
+    implies: "&Rightarrow;",
+    approx: "&asymp;",
+    sim: "&sim;",
+    partial: "&part;",
+    nabla: "&nabla;",
+    int: "&int;",
+    sum: "&sum;",
+    prod: "&prod;",
+    ln: "ln",
+    log: "log",
+    sin: "sin",
+    cos: "cos",
+    tan: "tan",
+    sec: "sec",
+    csc: "csc",
+    cot: "cot",
+    lim: "lim"
+};
+const MATH_SPACING_COMMANDS = new Set([
+    "quad",
+    "qquad",
+    ",",
+    ";",
+    "!",
+    ":",
+    "enspace",
+    "enskip",
+    "medspace",
+    "thinspace"
+]);
+function readMathGroup(source, start) {
+    if (source[start] !== "{") return null;
+    let depth = 0;
+    let i = start;
+    let content = "";
+    while(i < source.length){
+        const char = source[i];
+        if (char === "{") {
+            if (depth > 0) content += char;
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if (char === "}") {
+            depth -= 1;
+            if (depth === 0) {
+                return {
+                    content,
+                    end: i + 1
+                };
+            }
+            if (depth < 0) return null;
+            content += char;
+            i += 1;
+            continue;
+        }
+        content += char;
+        i += 1;
+    }
+    return null;
+}
+function readMathEntity(source, start) {
+    if (source[start] !== "&") return null;
+    const end = source.indexOf(";", start + 1);
+    if (end === -1) return null;
+    return {
+        html: source.slice(start, end + 1),
+        end: end + 1
+    };
+}
+function readMathAtom(source, start) {
+    if (start >= source.length) return {
+        html: "",
+        end: start
+    };
+    const char = source[start];
+    if (char === " ") return {
+        html: " ",
+        end: start + 1
+    };
+    if (char === "\n") return {
+        html: "<br>",
+        end: start + 1
+    };
+    const entity = readMathEntity(source, start);
+    if (entity) return entity;
+    if (char === "{") {
+        const group = readMathGroup(source, start);
+        if (group) {
+            return {
+                html: renderMathExpression(group.content),
+                end: group.end
+            };
+        }
+    }
+    if (char === "\\") {
+        const commandMatch = source.slice(start + 1).match(/^([A-Za-z]+|.)/);
+        if (!commandMatch) return {
+            html: "\\",
+            end: start + 1
+        };
+        const command = commandMatch[1];
+        const end = start + 1 + command.length;
+        if (command === "\\") return {
+            html: "<br>",
+            end
+        };
+        if (command === "left" || command === "right") return readMathAtom(source, end);
+        if (command === "frac") {
+            const numerator = readMathGroup(source, end);
+            const denominator = numerator ? readMathGroup(source, numerator.end) : null;
+            if (numerator && denominator) {
+                return {
+                    html: `<span class="math-frac"><span class="math-frac-num">${renderMathExpression(numerator.content)}</span><span class="math-frac-den">${renderMathExpression(denominator.content)}</span></span>`,
+                    end: denominator.end
+                };
+            }
+        }
+        if (command === "sqrt") {
+            const radicand = readMathGroup(source, end);
+            if (radicand) {
+                return {
+                    html: `<span class="math-sqrt"><span class="math-sqrt-sign">&radic;</span><span class="math-sqrt-body">${renderMathExpression(radicand.content)}</span></span>`,
+                    end: radicand.end
+                };
+            }
+        }
+        if (command === "text") {
+            const textGroup = readMathGroup(source, end);
+            if (textGroup) {
+                return {
+                    html: `<span class="math-text">${textGroup.content}</span>`,
+                    end: textGroup.end
+                };
+            }
+        }
+        if (MATH_SPACING_COMMANDS.has(command)) return {
+            html: "&nbsp;",
+            end
+        };
+        return {
+            html: MATH_COMMAND_HTML[command] || command,
+            end
+        };
+    }
+    return {
+        html: char,
+        end: start + 1
+    };
+}
+function readMathScript(source, start) {
+    if (start >= source.length) return {
+        html: "",
+        end: start
+    };
+    if (source[start] === "{") {
+        const group = readMathGroup(source, start);
+        if (group) {
+            return {
+                html: renderMathExpression(group.content),
+                end: group.end
+            };
+        }
+    }
+    return readMathAtom(source, start);
+}
+function renderMathExpression(source) {
+    let i = 0;
+    let html = "";
+    while(i < source.length){
+        const atom = readMathAtom(source, i);
+        let base = atom.html;
+        i = atom.end;
+        while(i < source.length && (source[i] === "^" || source[i] === "_")){
+            const operator = source[i];
+            const script = readMathScript(source, i + 1);
+            const tag = operator === "^" ? "sup" : "sub";
+            base += `<${tag}>${script.html}</${tag}>`;
+            i = script.end;
+        }
+        html += base;
+    }
+    return html.replace(/ {2,}/g, " ");
+}
+function extractInlineMathSegments(text) {
+    const mathSegments = [];
+    let content = "";
+    const stash = (html)=>{
+        const placeholder = `@@MATH_${mathSegments.length}@@`;
+        mathSegments.push({
+            placeholder,
+            html
+        });
+        return placeholder;
+    };
+    let i = 0;
+    while(i < text.length){
+        if (text[i] === "$" && text[i + 1] !== "$") {
+            const end = text.indexOf("$", i + 1);
+            if (end > i + 1) {
+                content += stash(`<span class="math-inline">${renderMathExpression(text.slice(i + 1, end))}</span>`);
+                i = end + 1;
+                continue;
+            }
+        }
+        if (text.startsWith("\\(", i)) {
+            const end = text.indexOf("\\)", i + 2);
+            if (end !== -1) {
+                content += stash(`<span class="math-inline">${renderMathExpression(text.slice(i + 2, end))}</span>`);
+                i = end + 2;
+                continue;
+            }
+        }
+        content += text[i];
+        i += 1;
+    }
+    return {
+        content,
+        mathSegments
+    };
+}
+function restoreMathSegments(text, mathSegments) {
+    return mathSegments.reduce((current, segment)=>current.replace(segment.placeholder, segment.html), text);
+}
+function renderMathBlock(block) {
+    const trimmed = block.trim();
+    const doubleDollar = trimmed.match(/^\$\$([\s\S]*?)\$\$$/);
+    if (doubleDollar) {
+        return `<div class="math-block">${renderMathExpression(doubleDollar[1].trim())}</div>`;
+    }
+    const bracketed = trimmed.match(/^\\\[([\s\S]*?)\\\]$/);
+    if (bracketed) {
+        return `<div class="math-block">${renderMathExpression(bracketed[1].trim())}</div>`;
+    }
+    return null;
+}
 function renderInlineMarkdown(text) {
-    return text.replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath)=>{
+    const extracted = extractInlineMathSegments(text);
+    const rendered = extracted.content.replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath)=>{
         const path = resolveArtifactReferencePath(rawPath);
         const label = path.split("/").pop() || path;
         return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
     }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    return restoreMathSegments(rendered, extracted.mathSegments);
 }
 function normalizeCodeLanguage(language) {
     const normalized = String(language || "").trim().toLowerCase();
@@ -999,6 +1277,8 @@ function renderRichText(raw) {
     });
     const blocks = fenced.split(/\n{2,}/).map((block)=>block.trim()).filter(Boolean).map((block)=>{
         if (/^@@CODEBLOCK_\d+@@$/.test(block)) return block;
+        const mathBlock = renderMathBlock(block);
+        if (mathBlock) return mathBlock;
         const escaped = escapeHtml(block);
         const lines = escaped.split("\n");
         if (lines.every((line)=>/^[-*_]{3,}$/.test(line.trim()))) {
@@ -1112,18 +1392,16 @@ function renderConversations() {
         const editableTitle = cleanConversationText(conversation.title || "");
         const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "");
         const visiblePreview = displayConversationPreview(conversation.title || "", conversation.last_message || "");
-        const visibleTime = formatRelativeTime(conversation.updated_at) || "Just now";
         return `
             <div class="conversation-row${conversation.id === state.currentConversationId ? " active" : ""}">
                 <button
                     type="button"
                     class="conversation-item${conversation.id === state.currentConversationId ? " active" : ""}"
                     data-conversation-id="${escapeHtml(conversation.id)}"
+                    data-tooltip="${escapeHtml(visiblePreview)}"
                 >
                     <div class="conversation-line">
                         <span class="conversation-title">${escapeHtml(visibleTitle)}</span>
-                        <span class="conversation-preview">${escapeHtml(visiblePreview)}</span>
-                        <span class="conversation-time">${escapeHtml(visibleTime)}</span>
                     </div>
                 </button>
                 <div class="conversation-actions">
@@ -1153,6 +1431,10 @@ function renderConversations() {
         button.addEventListener("click", ()=>{
             const id = button.dataset.conversationId || "";
             if (!id) return;
+            if (isMobileViewport()) {
+                state.leftSidebarOpen = false;
+                syncShellLayout();
+            }
             void loadConversation(id);
         });
     });
@@ -1668,6 +1950,9 @@ function closeViewer() {
 }
 function openFileTree() {
     if (!state.currentWorkspaceId) return;
+    if (isMobileViewport()) {
+        state.leftSidebarOpen = false;
+    }
     setViewerMode("tree");
     renderFileList();
 }
@@ -2113,6 +2398,9 @@ async function openFile(path) {
     const samePath = state.selectedFilePath === path;
     const previousPreviewScrollTop = samePath ? filePreview.scrollTop : 0;
     state.selectedFilePath = path;
+    if (isMobileViewport()) {
+        state.leftSidebarOpen = false;
+    }
     state.viewerMode = "file";
     syncShellLayout();
     renderFileList();
@@ -2193,6 +2481,9 @@ function attachEvents() {
     });
     sidebarToggle.addEventListener("click", ()=>{
         state.leftSidebarOpen = !state.leftSidebarOpen;
+        if (state.leftSidebarOpen && isMobileViewport()) {
+            state.viewerMode = "closed";
+        }
         syncShellLayout();
     });
     viewerToggle.addEventListener("click", ()=>{
