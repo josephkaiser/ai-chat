@@ -23,6 +23,15 @@
     --font-sans: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
     --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     --font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+    --fs-label: 0.64rem;
+    --fs-meta: 0.72rem;
+    --fs-ui: 0.78rem;
+    --fs-body: 0.9rem;
+    --fs-body-lg: 0.95rem;
+    --fs-code: 0.82rem;
+    --lh-tight: 1.2;
+    --lh-meta: 1.35;
+    --lh-body: 1.6;
     --sidebar-width: 228px;
     --viewer-width: clamp(420px, 50vw, 960px);
 }
@@ -99,7 +108,7 @@ button[data-tooltip]::after {
     border-radius: 10px;
     background: rgba(19, 34, 38, 0.92);
     color: white;
-    font-size: 0.68rem;
+    font-size: var(--fs-label);
     font-weight: 600;
     letter-spacing: 0.01em;
     white-space: nowrap;
@@ -126,7 +135,7 @@ button[data-tooltip]:focus-visible::after {
     border-radius: 999px;
     border: 1px solid var(--line);
     background: rgba(255, 253, 248, 0.94);
-    font-size: 0.78rem;
+    font-size: var(--fs-ui);
     box-shadow: 0 8px 20px rgba(17, 30, 33, 0.08);
     display: inline-flex;
     align-items: center;
@@ -259,7 +268,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 .panel-header h2 {
     margin: 0;
     font-family: var(--font-sans);
-    font-size: clamp(0.8rem, 0.92vw, 0.94rem);
+    font-size: clamp(0.82rem, 0.9vw, 0.94rem);
     font-weight: 700;
     letter-spacing: -0.03em;
 }
@@ -268,8 +277,8 @@ body[data-left-sidebar-open="false"] .sidebar {
     min-width: 0;
     padding: 0 2px;
     color: var(--muted);
-    font-size: 0.7rem;
-    line-height: 1.35;
+    font-size: var(--fs-meta);
+    line-height: var(--lh-meta);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -290,7 +299,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 .sidebar-panel-label {
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    font-size: 0.64rem;
+    font-size: var(--fs-label);
     font-weight: 700;
     color: var(--muted);
 }
@@ -321,7 +330,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .sidebar-panel-header span {
-    font-size: 0.64rem;
+    font-size: var(--fs-label);
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -345,7 +354,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 #sendButton {
     min-height: 24px;
     padding: 0 8px;
-    font-size: 0.74rem;
+    font-size: var(--fs-meta);
 }
 
 .icon-button {
@@ -398,7 +407,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 .context-eval-card p {
     margin: 6px 0 0;
     color: var(--muted);
-    line-height: 1.45;
+    line-height: var(--lh-meta);
 }
 
 .context-eval-stats,
@@ -426,19 +435,19 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .context-eval-stat strong,
 .context-eval-item strong {
-    font-size: 0.92rem;
+    font-size: var(--fs-body);
 }
 
 .context-eval-stat span,
 .context-eval-meta {
     color: var(--muted);
-    font-size: 0.76rem;
+    font-size: var(--fs-meta);
 }
 
 .context-eval-label {
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    font-size: 0.62rem;
+    font-size: var(--fs-label);
     font-weight: 700;
     color: var(--muted);
 }
@@ -473,7 +482,7 @@ body[data-left-sidebar-open="false"] .sidebar {
     min-height: 22px;
     padding: 0 8px;
     border-radius: 999px;
-    font-size: 0.66rem;
+    font-size: var(--fs-label);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     border: 1px solid transparent;
@@ -538,7 +547,7 @@ body[data-left-sidebar-open="false"] .sidebar {
     padding: 0 10px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.85);
-    font-size: 0.78rem;
+    font-size: var(--fs-ui);
 }
 
 .context-eval-button.active {
@@ -555,7 +564,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .context-eval-kv-label {
     color: var(--muted);
-    font-size: 0.72rem;
+    font-size: var(--fs-meta);
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
@@ -593,8 +602,8 @@ body[data-left-sidebar-open="false"] .sidebar {
     border: 1px dashed var(--line);
     border-radius: var(--radius-md);
     color: var(--muted);
-    line-height: 1.24;
-    font-size: 0.68rem;
+    line-height: var(--lh-meta);
+    font-size: var(--fs-meta);
     background: rgba(255, 255, 255, 0.5);
 }
 
@@ -624,7 +633,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 #fixtureReviewFilter,
 #refreshFixtureReviewButton {
     min-height: 24px;
-    font-size: 0.72rem;
+    font-size: var(--fs-meta);
     padding: 0 8px;
 }
 
@@ -681,7 +690,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .fixture-detail-kv-key {
-    font-size: 0.68rem;
+    font-size: var(--fs-meta);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -690,7 +699,7 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 #fixtureCompareSelect {
     min-height: 24px;
-    font-size: 0.72rem;
+    font-size: var(--fs-meta);
     padding: 0 8px;
 }
 
@@ -741,8 +750,8 @@ body[data-left-sidebar-open="false"] .sidebar {
 .conversation-time {
     flex: 0 0 auto;
     color: var(--muted);
-    font-size: 0.66rem;
-    line-height: 1.2;
+    font-size: var(--fs-label);
+    line-height: var(--lh-tight);
 }
 
 .conversation-actions {
@@ -773,7 +782,7 @@ body[data-left-sidebar-open="false"] .sidebar {
     min-width: 20px;
     padding: 0;
     border-radius: 999px;
-    font-size: 0.56rem;
+    font-size: var(--fs-label);
     background: rgba(255, 255, 255, 0.96);
     border-color: transparent;
 }
@@ -790,9 +799,9 @@ body[data-left-sidebar-open="false"] .sidebar {
 
 .conversation-preview,
 .file-item-meta {
-    font-size: 0.68rem;
+    font-size: var(--fs-meta);
     color: var(--muted);
-    line-height: 1.2;
+    line-height: var(--lh-tight);
 }
 
 .conversation-title,
@@ -803,8 +812,8 @@ body[data-left-sidebar-open="false"] .sidebar {
 }
 
 .conversation-title {
-    font-size: 0.72rem;
-    line-height: 1.2;
+    font-size: var(--fs-meta);
+    line-height: var(--lh-tight);
     max-width: none;
     font-weight: 600;
     letter-spacing: -0.01em;
@@ -848,8 +857,8 @@ body[data-viewer-mode="file"] .chat-panel {
 
 .panel-subtitle {
     margin: 2px 0 0;
-    font-size: 0.76rem;
-    line-height: 1.35;
+    font-size: var(--fs-meta);
+    line-height: var(--lh-meta);
 }
 
 .panel-subtitle:empty {
@@ -866,7 +875,7 @@ body[data-viewer-mode="file"] .chat-panel {
 .status-badge {
     padding: 2px 7px;
     border-radius: 999px;
-    font-size: 0.64rem;
+    font-size: var(--fs-label);
     font-weight: 700;
     background: rgba(19, 34, 38, 0.08);
 }
@@ -920,8 +929,8 @@ body[data-viewer-mode="file"] .chat-panel {
     width: 100%;
     max-width: 100%;
     white-space: normal;
-    font-size: 0.9rem;
-    line-height: 1.62;
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
 }
 
 .message.user {
@@ -951,8 +960,8 @@ body[data-viewer-mode="file"] .chat-panel {
     gap: 8px;
     padding: 0 2px;
     color: var(--muted);
-    font-size: 0.78rem;
-    line-height: 1.4;
+    font-size: var(--fs-ui);
+    line-height: var(--lh-meta);
 }
 
 .message-thinking.error {
@@ -962,7 +971,7 @@ body[data-viewer-mode="file"] .chat-panel {
 .message-thinking-label {
     text-transform: uppercase;
     letter-spacing: 0.12em;
-    font-size: 0.62rem;
+    font-size: var(--fs-label);
     font-weight: 700;
 }
 
@@ -998,7 +1007,7 @@ body[data-viewer-mode="file"] .chat-panel {
     border: 1px solid rgba(13, 122, 122, 0.18);
     background: rgba(13, 122, 122, 0.08);
     color: var(--accent-strong);
-    font-size: 0.72rem;
+    font-size: var(--fs-meta);
     font-weight: 700;
     box-shadow: none;
 }
@@ -1027,7 +1036,7 @@ body[data-viewer-mode="file"] .chat-panel {
     color: #203038;
     border-radius: var(--radius-md);
     padding: 11px 12px;
-    font-size: 0.78rem;
+    font-size: var(--fs-code);
     line-height: 1.55;
     border: 1px solid var(--code-line);
 }
@@ -1041,7 +1050,7 @@ body[data-viewer-mode="file"] .chat-panel {
 
 .message-code-header {
     padding: 4px 10px;
-    font-size: 0.62rem;
+    font-size: var(--fs-label);
     font-weight: 700;
     text-transform: uppercase;
     line-height: 1.2;
@@ -1128,7 +1137,7 @@ body[data-viewer-mode="file"] .chat-panel {
     border: 1px solid rgba(13, 122, 122, 0.18);
     background: rgba(13, 122, 122, 0.08);
     color: var(--accent-strong);
-    font-size: 0.72rem;
+    font-size: var(--fs-meta);
     font-weight: 700;
     vertical-align: baseline;
 }
@@ -1184,8 +1193,8 @@ body[data-viewer-mode="file"] .chat-panel {
     outline: none;
     background: transparent;
     color: var(--text);
-    font-size: 0.84rem;
-    line-height: 1.42;
+    font-size: var(--fs-body);
+    line-height: var(--lh-meta);
     overflow-y: hidden;
 }
 
@@ -1220,7 +1229,7 @@ body[data-viewer-mode="file"] .file-browser {
     padding: 8px 10px 7px;
     border-bottom: 1px solid var(--line);
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--fs-ui);
 }
 
 .file-list {
@@ -1243,7 +1252,7 @@ body[data-viewer-mode="file"] .file-browser {
     border-radius: 999px;
     background: rgba(19, 34, 38, 0.08);
     color: var(--muted);
-    font-size: 0.64rem;
+    font-size: var(--fs-label);
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
@@ -1274,8 +1283,8 @@ body[data-viewer-mode="file"] .file-browser {
 .preview-markdown,
 .preview-html {
     padding: 18px 18px 30px;
-    font-size: 0.95rem;
-    line-height: 1.74;
+    font-size: var(--fs-body-lg);
+    line-height: 1.72;
     color: var(--text);
 }
 
@@ -1301,7 +1310,7 @@ body[data-viewer-mode="file"] .file-browser {
 
 .preview-markdown h4,
 .preview-html h4 {
-    font-size: 0.92rem;
+    font-size: var(--fs-body);
     line-height: 1.25;
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -1372,15 +1381,15 @@ body[data-viewer-mode="file"] .file-browser {
 .preview-markdown .message-code-header,
 .preview-html .message-code-header {
     padding: 6px 12px;
-    font-size: 0.66rem;
+    font-size: var(--fs-label);
     letter-spacing: 0.08em;
 }
 
 .preview-markdown .message-code-block pre,
 .preview-html .message-code-block pre {
     padding: 14px 16px;
-    font-size: 0.88rem;
-    line-height: 1.62;
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
 }
 
 .preview-markdown code:not(pre code),
@@ -1478,7 +1487,7 @@ body[data-viewer-mode="file"] .file-browser {
     text-align: left;
     border: 1px solid rgba(19, 34, 38, 0.09);
     vertical-align: top;
-    font-size: 0.74rem;
+    font-size: var(--fs-meta);
 }
 
 .empty-state {
@@ -1491,7 +1500,7 @@ body[data-viewer-mode="file"] .file-browser {
 
 .empty-state-title {
     font-family: var(--font-sans);
-    font-size: 0.88rem;
+    font-size: var(--fs-body);
     font-weight: 700;
     margin-bottom: 6px;
 }
@@ -1564,7 +1573,7 @@ body[data-viewer-mode="file"] .viewer-panel {
 .settings-summary {
     display: grid;
     gap: 6px;
-    font-size: 0.82rem;
+    font-size: var(--fs-ui);
     color: var(--muted);
 }
 
@@ -1691,7 +1700,7 @@ body[data-viewer-mode="file"] .viewer-panel {
 
     .shell-toggle {
         min-height: 30px;
-        font-size: 0.74rem;
+        font-size: var(--fs-meta);
         top: 12px;
     }
 
