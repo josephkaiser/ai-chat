@@ -17354,6 +17354,119 @@ def build_seeded_tool_history(
     return seeded
 
 
+DIRECT_SEARCH_FACT_TERMS = {
+    "weather", "temperature", "forecast", "humidity", "wind",
+    "price", "pricing", "cost", "stock", "stocks", "market", "quote",
+    "score", "scores", "standings",
+    "version", "release", "released", "announcement", "announcements",
+}
+DIRECT_SEARCH_FACT_LEADINS = (
+    "what is", "what's", "whats", "who is", "who's", "when is", "when did",
+    "how much", "how many", "current", "latest", "today", "right now",
+)
+DIRECT_SEARCH_FETCH_SKIP_DOMAINS = {"reddit.com", "wikipedia.org"}
+DIRECT_SEARCH_ANSWER_SYSTEM_PROMPT = (
+    "You are answering a web lookup from provided search evidence. "
+    "Lead with the best grounded answer, not a list of links. "
+    "When the evidence supports a current or numeric fact, state it directly in the opening sentence. "
+    "Use concise Markdown citations with the provided URLs. "
+    "Do not tell the user to check the links themselves unless the evidence truly does not contain the requested fact."
+)
+
+
+def direct_search_query_prefers_fact_extraction(query: str) -> bool:
+    """Return whether a direct-search query should prefetch evidence and answer directly."""
+    text = " ".join(str(query or "").strip().lower().split())
+    if len(text) < 3:
+        return False
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if words & {"weather", "temperature", "forecast"}:
+        return True
+    if words & DIRECT_SEARCH_FACT_TERMS and (
+        any(text.startswith(prefix) for prefix in DIRECT_SEARCH_FACT_LEADINS)
+        or text.endswith("?")
+    ):
+        return True
+    return False
+
+
+def select_direct_search_prefetch_urls(
+    search_payload: Dict[str, Any],
+    query: str,
+    *,
+    limit: int = 2,
+) -> List[str]:
+    """Pick a couple of likely-answer pages for direct factual search prompts."""
+    if not direct_search_query_prefers_fact_extraction(query):
+        return []
+    urls: List[str] = []
+    seen: set[str] = set()
+    for item in search_payload.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        url = canonicalize_http_url(str(item.get("url", "")).strip())
+        if not url or url in seen:
+            continue
+        domain = normalize_web_domain(url)
+        if domain in DIRECT_SEARCH_FETCH_SKIP_DOMAINS:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= max(1, int(limit)):
+            break
+    return urls
+
+
+def render_direct_search_answer_prompt(
+    query: str,
+    search_payload: Dict[str, Any],
+    fetched_pages: List[Dict[str, Any]],
+) -> str:
+    """Render a concise grounded-answer prompt for direct search responses."""
+    result_rows = []
+    for item in search_payload.get("results", [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        result_rows.append({
+            "title": str(item.get("title", "")).strip(),
+            "url": str(item.get("url", "")).strip(),
+            "domain": str(item.get("domain", "")).strip(),
+            "snippet": truncate_output(str(item.get("snippet", "")).strip(), limit=280),
+        })
+    page_rows = []
+    for page in fetched_pages[:2]:
+        if not isinstance(page, dict):
+            continue
+        page_rows.append({
+            "title": str(page.get("title", "")).strip(),
+            "url": str(page.get("final_url") or page.get("url") or "").strip(),
+            "domain": str(page.get("domain", "")).strip(),
+            "content_excerpt": truncate_output(str(page.get("content", "")).strip(), limit=1800),
+        })
+
+    instructions = [
+        f"User query:\n{query}",
+        "",
+        "Search results:",
+        json.dumps(result_rows, ensure_ascii=False, indent=2),
+    ]
+    if page_rows:
+        instructions.extend([
+            "",
+            "Fetched page excerpts:",
+            json.dumps(page_rows, ensure_ascii=False, indent=2),
+        ])
+    instructions.extend([
+        "",
+        "Answer the user's question directly.",
+        "If the evidence contains the requested fact, state it in the first sentence.",
+        "Use 1-3 Markdown citations from the provided URLs.",
+        "Do not answer with only a source roundup or tell the user to check the links themselves unless the evidence is still missing the fact.",
+        "If the evidence is incomplete or conflicting, say that briefly and then give the best grounded answer available.",
+    ])
+    return "\n".join(instructions)
+
+
 async def handle_direct_search_command(
     websocket: WebSocket,
     conversation_id: str,
@@ -17388,6 +17501,38 @@ async def handle_direct_search_command(
         if search_result.get("error_code") == "permission_denied":
             return str(search_result.get("message_to_user") or search_result.get("error") or "").strip()
         return f"Search failed: {search_result.get('error', 'unknown error')}"
+
+    search_payload = search_result.get("result", {}) if isinstance(search_result.get("result"), dict) else {}
+    prefetched_pages: List[Dict[str, Any]] = []
+    for index, url in enumerate(select_direct_search_prefetch_urls(search_payload, cleaned_query), start=1):
+        fetch_call = {
+            "id": f"direct_search_fetch_{index}",
+            "name": "web.fetch_page",
+            "arguments": {"url": url},
+        }
+        fetch_result = await emit_direct_tool_call(
+            websocket,
+            conversation_id,
+            fetch_call,
+            features=command_features,
+            status_prefix="Slash /search: ",
+            activity_phase="respond",
+            workflow_execution=workflow_execution,
+        )
+        if fetch_result.get("ok") and isinstance(fetch_result.get("result"), dict):
+            prefetched_pages.append(fetch_result["result"])
+
+    if direct_search_query_prefers_fact_extraction(cleaned_query):
+        answer_prompt = render_direct_search_answer_prompt(cleaned_query, search_payload, prefetched_pages)
+        answer_messages = [{"role": "system", "content": f"{system_prompt}\n\n{DIRECT_SEARCH_ANSWER_SYSTEM_PROMPT}"}]
+        answer_messages.extend({"role": msg["role"], "content": msg["content"]} for msg in history)
+        answer_messages.append({"role": "user", "content": answer_prompt})
+        answer = await vllm_chat_complete(
+            answer_messages,
+            max_tokens=min(max_tokens, 1024),
+            temperature=0.1,
+        )
+        return strip_stream_special_tokens(answer).strip()
 
     seeded_history = build_seeded_tool_history(
         history,
