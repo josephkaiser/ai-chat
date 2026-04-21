@@ -11,6 +11,8 @@ Related recent commits in the same iteration cycle:
 
 Note: the line references below point at the current working tree on top of `020e515`. That is the most useful way to review the code right now, even though some of the latest changes are still uncommitted.
 
+Historical note: during this case-study iteration, much of the backend still lived in `app.py`. In the current repo, that implementation has been split out into [`src/python/harness.py`](/Users/joe/dev/ai-chat/src/python/harness.py), so `app.py` references below should be read as historical breadcrumbs rather than the current primary file location.
+
 ## Representative Prompt
 
 From `data/chat.db`, conversation `343c7b07-ab29-4e2d-a707-4d94795d274a`:

@@ -2915,7 +2915,11 @@ async function sendCurrentMessage(): Promise<void> {
         attachments,
         mode: "auto",
         turn_kind: "visible_chat",
-        auto_approve_tool_permissions: true,
+        features: {
+            agent_tools: true,
+            workspace_write: true,
+            auto_approve_tool_permissions: true,
+        },
     };
 
     try {
