@@ -5,13 +5,15 @@ Edit `docker-compose.yml` to change the model or vLLM settings:
 ```yaml
 vllm:
   command: >
-    --model Qwen/Qwen3-8B
-    --gpu-memory-utilization 0.90
-    --max-model-len 32768
-    --swap-space 8
+    --model Qwen/Qwen3-14B-AWQ
+    --gpu-memory-utilization 0.95
+    --max-model-len 8192
     --enable-prefix-caching
-    --max-num-seqs 256
+    --max-num-seqs 16
     --enable-chunked-prefill
+    --quantization awq_marlin
+    --trust-remote-code
+    --enforce-eager
 ```
 
 Set `MODEL_NAME` in the `chat-app` environment to match.
@@ -29,7 +31,7 @@ Workspace roots are path-backed catalog entries. Managed workspace directories a
 
 ## Model profiles
 
-The app keeps a primary model profile plus optional additional configured profiles. The selected profile is persisted in `/app/data/model_state.json`.
+The app keeps a single configured `14B` profile. The selected profile is persisted in `/app/data/model_state.json`, and a non-matching loaded model is treated as a custom runtime model.
 
 Example `chat-app` environment:
 
@@ -39,8 +41,6 @@ environment:
   - MODEL_NAME=Qwen/Qwen3-14B-AWQ
   - MODEL_14B_NAME=Qwen/Qwen3-14B-AWQ
   - MODEL_14B_ARGS=--gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager
-  - MODEL_8B_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
-  - MODEL_8B_ARGS=--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --enforce-eager
   - DEFAULT_MODEL_PROFILE=14b
 ```
 
@@ -74,14 +74,6 @@ The Docker image launches through `app.py`, which immediately hands off to `src/
 ## GPU configurations
 
 24GB-class GPUs: the default config is the intended target.
-
-12GB-class GPUs:
-
-```yaml
---gpu-memory-utilization 0.90
---max-model-len 16384
---swap-space 4
-```
 
 40GB+ GPUs:
 

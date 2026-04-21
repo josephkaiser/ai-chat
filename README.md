@@ -46,7 +46,7 @@ The default stack is aimed at a local machine that can run vLLM with an NVIDIA G
 
 - **OS / runtime** — macOS, Linux, or another host that can run modern Docker and the `docker compose` plugin
 - **GPU** — NVIDIA GPU with CUDA support plus the NVIDIA container runtime/toolkit available to Docker
-- **VRAM** — `24GB` recommended for the default `14B` profile in [`docker-compose.yml`](/Users/joe/dev/ai-chat/docker-compose.yml); `12GB` can work with the lighter `8B` profile described in [docs/configuration.md](/Users/joe/dev/ai-chat/docs/configuration.md)
+- **VRAM** — `24GB` recommended for the default `14B` profile in [`docker-compose.yml`](/Users/joe/dev/ai-chat/docker-compose.yml)
 - **Disk** — enough free SSD space for Docker images, Hugging Face model cache, and app data
 - **Network** — internet access is needed for first-time image pulls, model downloads, and optional web search
 - **Browser** — a current Chromium, Firefox, or Safari-class browser for the UI

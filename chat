@@ -17,19 +17,16 @@ FRONTEND_BUNDLE_CHANGED=0
 
 DEFAULT_14B_MODEL_NAME="${MODEL_14B_NAME:-Qwen/Qwen3-14B-AWQ}"
 DEFAULT_14B_MODEL_ARGS="${MODEL_14B_ARGS:---gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager}"
-DEFAULT_8B_MODEL_NAME="${MODEL_8B_NAME:-meta-llama/Meta-Llama-3.1-8B-Instruct}"
-DEFAULT_8B_MODEL_ARGS="${MODEL_8B_ARGS:---gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --enforce-eager}"
 
 cd "$PROJECT_DIR"
 
 model_profile_keys() {
-    printf '%s\n' "14b" "8b"
+    printf '%s\n' "14b"
 }
 
 model_profile_label() {
     case "$1" in
         14b) printf '%s\n' "14B" ;;
-        8b) printf '%s\n' "8B" ;;
         *) return 1 ;;
     esac
 }
@@ -37,7 +34,6 @@ model_profile_label() {
 model_profile_name() {
     case "$1" in
         14b) printf '%s\n' "$DEFAULT_14B_MODEL_NAME" ;;
-        8b) printf '%s\n' "$DEFAULT_8B_MODEL_NAME" ;;
         *) return 1 ;;
     esac
 }
@@ -45,7 +41,6 @@ model_profile_name() {
 model_profile_args() {
     case "$1" in
         14b) printf '%s\n' "$DEFAULT_14B_MODEL_ARGS" ;;
-        8b) printf '%s\n' "$DEFAULT_8B_MODEL_ARGS" ;;
         *) return 1 ;;
     esac
 }
@@ -383,7 +378,7 @@ usage() {
 default_model_profile() {
     local profile="${DEFAULT_MODEL_PROFILE:-}"
     case "$profile" in
-        14b|8b)
+        14b)
             printf '%s\n' "$profile"
             ;;
         *)
@@ -397,7 +392,7 @@ install_target_profile() {
     current_profile="$(current_runtime_profile)"
     if [[ -n "$current_profile" ]]; then
         case "$current_profile" in
-            14b|8b)
+            14b)
                 printf '%s\n' "$current_profile"
                 return 0
                 ;;

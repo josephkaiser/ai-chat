@@ -331,18 +331,6 @@ MODEL_14B_ARGS = os.getenv(
     "--max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin "
     "--trust-remote-code --enforce-eager",
 )
-MODEL_8B_NAME = os.getenv("MODEL_8B_NAME", "meta-llama/Meta-Llama-3.1-8B-Instruct")
-MODEL_8B_ARGS = os.getenv(
-    "MODEL_8B_ARGS",
-    "--gpu-memory-utilization 0.90 --max-model-len 8192 --enable-prefix-caching "
-    "--max-num-seqs 16 --enable-chunked-prefill --enforce-eager",
-)
-MODEL_GEMMA_4_NAME = os.getenv("MODEL_GEMMA_4_NAME", "google/gemma-4-E4B-it")
-MODEL_GEMMA_4_ARGS = os.getenv(
-    "MODEL_GEMMA_4_ARGS",
-    "--gpu-memory-utilization 0.85 --max-model-len 8192 --enable-prefix-caching "
-    "--max-num-seqs 12 --enable-chunked-prefill --enforce-eager",
-)
 CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -540,8 +528,6 @@ def build_configured_model_profiles() -> Dict[str, Dict[str, Any]]:
     """Build the configured model profile table from environment defaults."""
     configured = [
         ("14b", MODEL_14B_NAME, MODEL_14B_ARGS, "14B", False),
-        ("8b", MODEL_8B_NAME, MODEL_8B_ARGS, "8B", True),
-        ("gemma4", MODEL_GEMMA_4_NAME, MODEL_GEMMA_4_ARGS, "Gemma 4 E4B", True),
     ]
     profiles: Dict[str, Dict[str, Any]] = {}
     for key, name, args, label, fast_path in configured:
