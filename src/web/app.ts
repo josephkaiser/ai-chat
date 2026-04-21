@@ -1605,6 +1605,7 @@ function normalizeCodeLanguage(language?: string): string {
     if (["c", "h", "cpp", "cxx", "hpp"].includes(normalized)) return "c";
     if (["sql", "sqlite", "postgresql", "postgres", "mysql"].includes(normalized)) return "sql";
     if (["json"].includes(normalized)) return "json";
+    if (["latex", "tex", "math"].includes(normalized)) return "latex";
     return normalized;
 }
 
@@ -1670,8 +1671,12 @@ function renderRichText(raw: string): string {
     const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language: string, code: string) => {
         const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
         const normalizedLanguage = normalizeCodeLanguage(language);
-        const displayLanguage = normalizedLanguage === "text" ? "text" : normalizedLanguage;
         const cleanCode = code.replace(/^\n+|\n+$/g, "");
+        if (normalizedLanguage === "latex") {
+            codeBlocks.push(renderDisplayMathExpression(cleanCode));
+            return token;
+        }
+        const displayLanguage = normalizedLanguage === "text" ? "text" : normalizedLanguage;
         codeBlocks.push(`
             <div class="message-code-block">
                 <div class="message-code-header">${escapeHtml(displayLanguage)}</div>

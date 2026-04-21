@@ -20,6 +20,9 @@ class FrontendMathSupportTests(unittest.TestCase):
         self.assertIn("function renderDisplayMathExpression(", ts)
         self.assertIn("function renderMathBlock(", ts)
         self.assertIn("function extractInlineMathSegments(", ts)
+        self.assertIn('if (["latex", "tex", "math"].includes(normalized)) return "latex";', ts)
+        self.assertIn("if (normalizedLanguage === \"latex\") {", ts)
+        self.assertIn("codeBlocks.push(renderDisplayMathExpression(cleanCode));", ts)
         self.assertIn("katex.min.css", html)
         self.assertIn("katex.min.js", html)
 
