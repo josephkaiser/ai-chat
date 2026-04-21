@@ -39,9 +39,16 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 
+def missing_optional_dependency(exc: ModuleNotFoundError, package_name: str) -> bool:
+    """Return whether an optional import failed because the top-level package itself is missing."""
+    return isinstance(exc, ModuleNotFoundError) and str(getattr(exc, "name", "") or "").split(".")[0] == package_name
+
+
 try:
     import httpx
-except Exception as exc:
+except ModuleNotFoundError as exc:
+    if not missing_optional_dependency(exc, "httpx"):
+        raise
     HTTPX_IMPORT_ERROR = exc
 
     class _MissingHttpxModule:
@@ -70,7 +77,9 @@ try:
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     FASTAPI_IMPORT_ERROR = None
-except Exception as exc:
+except ModuleNotFoundError as exc:
+    if not missing_optional_dependency(exc, "fastapi"):
+        raise
     FASTAPI_IMPORT_ERROR = exc
 
     class HTTPException(Exception):
@@ -155,7 +164,9 @@ except Exception as exc:
 try:
     from pydantic import BaseModel, Field
     PYDANTIC_IMPORT_ERROR = None
-except Exception as exc:
+except ModuleNotFoundError as exc:
+    if not missing_optional_dependency(exc, "pydantic"):
+        raise
     PYDANTIC_IMPORT_ERROR = exc
 
     class BaseModel:
@@ -5398,7 +5409,7 @@ def extract_workspace_path_references(message: str) -> List[str]:
 
 
 WORKSPACE_RESPONSE_TRUTHFULNESS_RULES = """Workspace and tool truthfulness rules:
-- Never claim a workspace file was created, saved, or updated unless this turn actually completed a successful `workspace.patch_file` call.
+- Never claim a workspace file was created, saved, or updated unless this turn actually produced that file through a successful workspace write, render, or command result.
 - If no workspace file was written, provide the result inline and optionally offer to save it.
 - Never claim you searched the web, looked something up, or added sourced citations unless this turn actually used the web tools.
 - If the prompt already includes extracted attachment context, treat that content as available instead of claiming you cannot read the attachment.
@@ -5425,23 +5436,76 @@ def normalize_workspace_reference_path(path_value: str) -> str:
 def successful_workspace_write_paths(tool_results: List[Dict[str, Any]]) -> set[str]:
     """Collect workspace paths that were actually written during the current turn."""
     written_paths: set[str] = set()
+
+    def add_path(raw_path: Any) -> None:
+        normalized = normalize_workspace_reference_path(str(raw_path or ""))
+        if normalized:
+            written_paths.add(normalized)
+
     for entry in tool_results:
         call = entry.get("call", {})
         result = entry.get("result", {})
-        if call.get("name") != "workspace.patch_file" or not result.get("ok"):
+        if not result.get("ok"):
             continue
         payload = result.get("result", {})
         if not isinstance(payload, dict):
             continue
-        normalized = normalize_workspace_reference_path(str(payload.get("path", "")))
-        if normalized:
-            written_paths.add(normalized)
+        tool_name = str(call.get("name") or "").strip()
+        if tool_name in {"workspace.patch_file", "workspace.render", "workspace.run_command"}:
+            add_path(payload.get("path", ""))
+        items = payload.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                add_path(item.get("path", ""))
     return written_paths
+
+
+def canonicalize_workspace_reference_path(path_value: str, written_paths: set[str]) -> str:
+    """Return the verified workspace-relative path that best matches a user-visible reference."""
+    normalized = normalize_workspace_reference_path(path_value)
+    if not normalized:
+        return ""
+    if normalized in written_paths:
+        return normalized
+    if normalized.startswith("workspace/"):
+        alias_stripped = normalized[len("workspace/"):].strip("/")
+        if alias_stripped in written_paths:
+            return alias_stripped
+    workspace_prefixed = f"workspace/{normalized}"
+    if workspace_prefixed in written_paths:
+        return workspace_prefixed
+    return ""
+
+
+def strip_unverified_workspace_artifact_references(
+    message: str,
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Remove artifact references that do not map to a verified file produced this turn."""
+    cleaned = str(message or "").strip()
+    if not cleaned:
+        return ""
+
+    written_paths = successful_workspace_write_paths(tool_results or [])
+
+    def replace(match: re.Match[str]) -> str:
+        raw_path = str(match.group(1) or "").strip()
+        canonical = canonicalize_workspace_reference_path(raw_path, written_paths)
+        if not canonical:
+            return ""
+        return f"[[artifact:{canonical}]]"
+
+    repaired = re.sub(r"\[\[artifact:([^\]]+)\]\]", replace, cleaned, flags=re.IGNORECASE)
+    repaired = re.sub(r"[ \t]+\n", "\n", repaired)
+    repaired = re.sub(r"\n{3,}", "\n\n", repaired).strip()
+    return repaired
 
 
 def strip_unverified_workspace_write_claims(message: str, tool_results: Optional[List[Dict[str, Any]]] = None) -> str:
     """Remove file-write claims that are not backed by a successful workspace write tool result."""
-    cleaned = str(message or "").strip()
+    cleaned = strip_unverified_workspace_artifact_references(message, tool_results)
     if not cleaned:
         return ""
 
@@ -5467,7 +5531,12 @@ def strip_unverified_workspace_write_claims(message: str, tool_results: Optional
             continue
 
         if line_paths:
-            if written_paths.intersection(line_paths):
+            verified_line_paths = {
+                canonicalize_workspace_reference_path(path_ref, written_paths)
+                for path_ref in line_paths
+            }
+            verified_line_paths.discard("")
+            if verified_line_paths:
                 filtered_lines.append(raw_line)
                 continue
             removed_any = True
@@ -7031,6 +7100,54 @@ PLAN_APPROVAL_REPLY_MARKERS = {
     "start with the first step",
 }
 
+WORKSPACE_SAVE_REPLY_MARKERS = {
+    "yes",
+    "yes please",
+    "yes do it",
+    "yes do that",
+    "yes go ahead",
+    "yep",
+    "sure",
+    "ok",
+    "okay",
+    "save it",
+    "save this",
+    "please save it",
+    "please save this",
+    "go ahead",
+    "do it",
+}
+
+WORKSPACE_SAVE_OFFER_PATTERN = re.compile(
+    r"(would you like me to save|if you want, i can save|i can save .*workspace|save (?:this|it|the result|the script).*(?:workspace|file))",
+    re.IGNORECASE,
+)
+
+
+def assistant_offered_workspace_save(history: Optional[List[Dict[str, str]]]) -> bool:
+    """Return whether the latest assistant turn offered to save the result into the workspace."""
+    if not history:
+        return False
+    for item in reversed(history):
+        if str(item.get("role") or "").strip() != "assistant":
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        return bool(WORKSPACE_SAVE_OFFER_PATTERN.search(content))
+    return False
+
+
+def is_affirmative_workspace_save_followup(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Treat short confirmations after a save offer as explicit workspace write intent."""
+    normalized = " ".join((message or "").strip().lower().split())
+    if normalized not in WORKSPACE_SAVE_REPLY_MARKERS:
+        return False
+    return assistant_offered_workspace_save(history)
+
 
 def normalize_turn_message(message: str) -> str:
     """Normalize a user message for short command-style intent checks."""
@@ -8221,7 +8338,8 @@ def sync_active_profile_from_model_name(model_name: Optional[str]) -> str:
 FTS_TABLE = "messages_fts"
 DOCUMENT_FTS_TABLE = "document_chunks_fts"
 SUMMARY_TRIGGER_MESSAGE_COUNT = 16
-TITLE_TRIGGER_MESSAGE_COUNT = 2
+TITLE_TRIGGER_MESSAGE_COUNT = 4
+TITLE_REFRESH_MESSAGE_INTERVAL = 4
 SUMMARY_KEEP_RECENT_MESSAGES = 8
 SUMMARY_MAX_SOURCE_MESSAGES = 40
 SUMMARY_MAX_CHARS = 12000
@@ -9203,6 +9321,19 @@ def normalize_conversation_title(raw: str, fallback: str = "New chat") -> str:
     return cleaned or fallback
 
 
+def should_refresh_conversation_title_for_count(
+    existing_title: str,
+    visible_message_count: int,
+) -> bool:
+    """Throttle rolling title generation so it only runs on meaningful transcript growth."""
+    if visible_message_count < TITLE_TRIGGER_MESSAGE_COUNT:
+        return False
+    normalized_title = str(existing_title or "").strip().lower()
+    if normalized_title in {"", "new chat", "untitled"}:
+        return True
+    return visible_message_count % TITLE_REFRESH_MESSAGE_INTERVAL == 0
+
+
 def get_conversation_messages_for_ui(conv_id: str, limit: int = 100) -> List[Dict[str, Any]]:
     """Return recent raw conversation messages for the UI, preserving ids and feedback."""
     safe_limit = max(1, min(int(limit or 100), 500))
@@ -9476,6 +9607,10 @@ async def refresh_conversation_title(conv_id: str):
     """Refresh the short rolling title for one conversation."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    existing_title_row = c.execute(
+        'SELECT title FROM conversations WHERE id = ?',
+        (conv_id,),
+    ).fetchone()
     c.execute(
         '''SELECT role, content, timestamp
            FROM messages
@@ -9487,7 +9622,8 @@ async def refresh_conversation_title(conv_id: str):
     rows = c.fetchall()
     conn.close()
 
-    if len(rows) < TITLE_TRIGGER_MESSAGE_COUNT:
+    existing_title = str((existing_title_row or [""])[0] or "")
+    if not should_refresh_conversation_title_for_count(existing_title, len(rows)):
         return
 
     transcript = format_messages_for_summary([
@@ -15143,6 +15279,8 @@ def select_enabled_tools(
     """Return the small set of tools worth exposing for this request."""
     allowed: List[str] = []
     intent = classify_workspace_intent(message)
+    if intent == "none" and is_affirmative_workspace_save_followup(message, history):
+        intent = "focused_write"
     render_requested = should_offer_workspace_render(message, history, features)
     workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features) or (
         features.agent_tools
@@ -15925,10 +16063,16 @@ def should_offer_web_search(message: str, features: FeatureFlags) -> bool:
     return bool(words & WEB_SEARCH_HINTS)
 
 
-def select_direct_answer_tools(message: str, allowed_tools: List[str]) -> List[str]:
+def select_direct_answer_tools(
+    message: str,
+    allowed_tools: List[str],
+    history: Optional[List[Dict[str, str]]] = None,
+) -> List[str]:
     """Keep direct-answer mode chat-first while preserving file iteration for write requests."""
     filtered = list(allowed_tools)
     intent = classify_workspace_intent(message)
+    if intent == "none" and is_affirmative_workspace_save_followup(message, history):
+        intent = "focused_write"
     if intent not in {"focused_write", "broad_write"}:
         filtered = [
             tool_name for tool_name in filtered
@@ -16620,7 +16764,7 @@ async def deep_answer_directly(session: DeepSession) -> str:
         session.features,
         history=session.history,
     )
-    allowed_tools = select_direct_answer_tools(session.message, allowed_tools)
+    allowed_tools = select_direct_answer_tools(session.message, allowed_tools, history=session.history)
     direct_bundle = await assemble_direct_answer_context_async(
         session,
         retrieval_adapters=build_context_retrieval_adapters(),
@@ -17438,6 +17582,8 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
     workspace_intent = classify_workspace_intent(effective_message)
+    if workspace_intent == "none" and is_affirmative_workspace_save_followup(effective_message, history):
+        workspace_intent = "focused_write"
     enabled_tools = (
         select_enabled_tools(conv_id, effective_message, features, history=history)
         if TOOL_LOOP_ENABLED else []

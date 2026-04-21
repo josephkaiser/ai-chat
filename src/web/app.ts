@@ -212,6 +212,7 @@ const state = {
     handledArtifactKeys: new Set<string>(),
     conversationRefreshTimer: 0 as number,
     healthPollTimer: 0 as number,
+    messageClockTimer: 0 as number,
     pendingAttachmentPaths: [] as string[],
 };
 
@@ -289,6 +290,18 @@ function formatRelativeTime(value?: string): string {
     if (Math.abs(hours) < 48) return formatter.format(hours, "hour");
     const days = Math.round(hours / 24);
     return formatter.format(days, "day");
+}
+
+function formatElapsedDuration(startValue?: string, endMs = Date.now()): string {
+    if (!startValue) return "";
+    const startMs = new Date(startValue).getTime();
+    if (Number.isNaN(startMs)) return "";
+    const diffMs = Math.max(0, endMs - startMs);
+    const totalSeconds = Math.round(diffMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes <= 0) return `${seconds}s`;
+    return `${minutes}m ${seconds}s`;
 }
 
 function formatBytes(value?: number | null): string {
@@ -685,6 +698,13 @@ function setGenerating(nextValue: boolean): void {
     state.generating = nextValue;
     sendButton.textContent = nextValue ? "Stop" : "Send";
     setConnectionState(nextValue ? "streaming" : (state.ws?.readyState === WebSocket.OPEN ? "online" : "offline"));
+    window.clearInterval(state.messageClockTimer);
+    state.messageClockTimer = 0;
+    if (nextValue) {
+        state.messageClockTimer = window.setInterval(() => {
+            renderMessages();
+        }, 1000);
+    }
 }
 
 function setComposerHint(text: string): void {
@@ -697,6 +717,27 @@ function normalizeThinkingText(text: string): string {
         .replace(/^Slash \/[a-z0-9_-]+:\s*/i, "")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+function findAssistantWorkStartedAt(messages: ChatMessage[], assistantIndex: number): string {
+    for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+        const candidate = messages[index];
+        if (candidate.role === "user" && candidate.timestamp) {
+            return candidate.timestamp;
+        }
+    }
+    return messages[assistantIndex]?.timestamp || "";
+}
+
+function assistantMetaLabel(message: ChatMessage, index: number): string {
+    const startedAt = findAssistantWorkStartedAt(state.messages, index);
+    const duration = formatElapsedDuration(startedAt || message.timestamp);
+    const summary = state.generating && index === state.activeAssistantIndex
+        ? normalizeThinkingText(state.thinkingStatus?.text || "")
+        : "";
+    if (duration && summary) return `Worked for ${duration} > ${summary}`;
+    if (duration) return `Worked for ${duration}`;
+    return "Assistant";
 }
 
 function summarizeRuntimeError(text: string): string {
@@ -1226,15 +1267,14 @@ function renderMessages(): void {
         return;
     }
 
-    const messagesHtml = state.messages.map((message) => {
+    const messagesHtml = state.messages.map((message, index) => {
         const role = message.error ? "assistant error" : message.role;
         const parsedArtifacts = message.role === "assistant"
             ? parseArtifactMessage(message.content || "")
             : { artifactPaths: [], displayContent: message.content || "", materializedBody: "" };
-        const meta = [
-            message.role === "user" ? "You" : (message.role === "assistant" ? "Assistant" : "System"),
-            formatRelativeTime(message.timestamp),
-        ].filter(Boolean).join(" • ");
+        const meta = message.role === "user"
+            ? "You"
+            : (message.role === "assistant" ? assistantMetaLabel(message, index) : "System");
 
         return `
             <article class="message ${role}">

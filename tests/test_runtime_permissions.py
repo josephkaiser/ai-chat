@@ -32,6 +32,15 @@ class RuntimePermissionTests(unittest.TestCase):
             ["tool:web.search", "tool:workspace.write"],
         )
 
+    def test_missing_optional_dependency_only_accepts_missing_target_package(self):
+        nested = ModuleNotFoundError("missing nested")
+        nested.name = "fastapi.routing"
+        self.assertTrue(app.missing_optional_dependency(nested, "fastapi"))
+
+        other = ModuleNotFoundError("other")
+        other.name = "starlette"
+        self.assertFalse(app.missing_optional_dependency(other, "fastapi"))
+
     def test_workspace_grep_permission_request_is_granular(self):
         request = app.build_tool_permission_request(
             "conv-grep",
@@ -391,6 +400,49 @@ class RuntimePermissionTests(unittest.TestCase):
             app.vllm_chat_complete = original_vllm
 
         self.assertEqual(updated_title, "SQLite CLI CRUD quickstart guide")
+
+    def test_should_refresh_conversation_title_for_count_throttles_followups(self):
+        self.assertFalse(app.should_refresh_conversation_title_for_count("New chat", 3))
+        self.assertTrue(app.should_refresh_conversation_title_for_count("New chat", 4))
+        self.assertFalse(app.should_refresh_conversation_title_for_count("Useful title", 6))
+        self.assertTrue(app.should_refresh_conversation_title_for_count("Useful title", 8))
+
+    def test_refresh_conversation_title_skips_non_trigger_message_counts(self):
+        original_db_path = app.DB_PATH
+        original_vllm = app.vllm_chat_complete
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.init_db()
+
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    ("conv-title-skip", "Already titled", "2026-04-10T00:00:00", "2026-04-10T00:00:00"),
+                )
+                conn.executemany(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        ("conv-title-skip", "user", "one", "2026-04-10T00:00:00", "visible_chat", None),
+                        ("conv-title-skip", "assistant", "two", "2026-04-10T00:00:01", "visible_chat", "neutral"),
+                        ("conv-title-skip", "user", "three", "2026-04-10T00:00:02", "visible_chat", None),
+                        ("conv-title-skip", "assistant", "four", "2026-04-10T00:00:03", "visible_chat", "neutral"),
+                        ("conv-title-skip", "user", "five", "2026-04-10T00:00:04", "visible_chat", None),
+                        ("conv-title-skip", "assistant", "six", "2026-04-10T00:00:05", "visible_chat", "neutral"),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                async def fail_if_called(messages, max_tokens=None, temperature=None):
+                    raise AssertionError("title refresh should have been skipped")
+
+                app.vllm_chat_complete = fail_if_called
+                asyncio.run(app.refresh_conversation_title("conv-title-skip"))
+        finally:
+            app.DB_PATH = original_db_path
+            app.vllm_chat_complete = original_vllm
 
     def test_request_wants_recent_product_feedback_for_repo_improvement_prompts(self):
         self.assertTrue(
@@ -854,6 +906,64 @@ class RuntimePermissionTests(unittest.TestCase):
         cleaned = app.strip_unverified_workspace_write_claims(message, tool_results)
 
         self.assertEqual(cleaned, message)
+
+    def test_truthfulness_filter_strips_unverified_artifact_reference(self):
+        cleaned = app.strip_unverified_workspace_write_claims("[[artifact:workspace/simple_script.py]]")
+
+        self.assertEqual(cleaned, "")
+
+    def test_truthfulness_filter_canonicalizes_workspace_prefixed_artifact_reference(self):
+        tool_results = [
+            {
+                "call": {"name": "workspace.patch_file"},
+                "result": {"ok": True, "result": {"path": "simple_script.py"}},
+            }
+        ]
+
+        cleaned = app.strip_unverified_workspace_write_claims(
+            "[[artifact:workspace/simple_script.py]]",
+            tool_results,
+        )
+
+        self.assertEqual(cleaned, "[[artifact:simple_script.py]]")
+
+    def test_select_enabled_tools_treats_yes_after_save_offer_as_write_intent(self):
+        features = app.FeatureFlags(
+            agent_tools=True,
+            workspace_write=True,
+            workspace_run_commands=True,
+        )
+
+        allowed = app.select_enabled_tools(
+            "conv-save-offer",
+            "yes",
+            features,
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "Would you like me to save this script to your workspace?",
+                }
+            ],
+        )
+
+        self.assertIn("workspace.patch_file", allowed)
+        self.assertIn("workspace.run_command", allowed)
+
+    def test_select_direct_answer_tools_keeps_write_tools_for_yes_after_save_offer(self):
+        filtered = app.select_direct_answer_tools(
+            "yes",
+            ["workspace.patch_file", "workspace.run_command", "conversation.search_history"],
+            history=[
+                {
+                    "role": "assistant",
+                    "content": "If you want, I can save the result to your workspace.",
+                }
+            ],
+        )
+
+        self.assertIn("workspace.patch_file", filtered)
+        self.assertIn("workspace.run_command", filtered)
+        self.assertIn("conversation.search_history", filtered)
 
     def test_workspace_command_env_disables_python_bytecode_clutter(self):
         env = app.build_workspace_command_env("conv-env-no-pyc")
