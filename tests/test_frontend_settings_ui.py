@@ -44,7 +44,6 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('aria-label="Refresh files"', html)
         self.assertIn('aria-label="Download file"', html)
         self.assertIn('aria-label="Back to file list"', html)
-        self.assertIn('aria-label="Up one level"', html)
         self.assertIn('aria-label="Close file browser"', html)
         self.assertIn('type="module" src="/static/app.js', html)
         self.assertIn('id="settingsOverlay"', html)

@@ -381,7 +381,6 @@ body[data-left-sidebar-open="false"] .sidebar {
 #refreshWorkspaceButton,
 #workspaceSettingsButton,
 #newChatButton,
-#upDirectoryButton,
 #sendButton {
     min-height: 24px;
     padding: 0 8px;
@@ -1804,7 +1803,6 @@ body[data-viewer-mode="file"] .viewer-panel {
 
     #refreshWorkspaceButton,
     #viewerModeButton,
-    #upDirectoryButton,
     #viewerCloseButton {
         width: 40px;
         min-width: 40px;
