@@ -3,9 +3,10 @@
 Coding companion with vLLM — short technical answers with code.
 
 Repo map (start here if you are new):
-  src/python/harness.py — FastAPI routes, WebSockets, SQLite helpers, vLLM httpx client
-  src/python/src/python/ai_chat/   — Internal helper modules (prompts, themes, routing, readers)
-  src/web/              — index.html, app.js, style.css (vanilla front end)
+  src/python/harness.py           — FastAPI composition root and shared backend services
+  src/python/ai_chat/api/         — Route registration modules
+  src/python/ai_chat/             — Internal helper modules (prompts, themes, routing, readers)
+  src/web/                        — index.html, app.js, style.css (vanilla front end)
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ import pathlib
 import re
 import shlex
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -156,10 +156,22 @@ except ModuleNotFoundError as exc:
                 return func
             return decorator
 
+        def add_exception_handler(self, *args, **kwargs):
+            return None
+
         def get(self, *args, **kwargs):
             def decorator(func):
                 return func
             return decorator
+
+        def add_api_route(self, *args, **kwargs):
+            return None
+
+        def add_api_websocket_route(self, *args, **kwargs):
+            return None
+
+        def add_event_handler(self, *args, **kwargs):
+            return None
 
         post = delete = websocket = on_event = get
 
@@ -286,6 +298,25 @@ from src.python.ai_chat.workspace_reader import (
     workspace_file_is_editable as workspace_file_is_editable_helper,
     workspace_file_live_reader_mode as workspace_file_live_reader_mode_helper,
 )
+from src.python.ai_chat.api.chat_routes import register_chat_routes
+from src.python.ai_chat.api.context_eval_routes import register_context_eval_routes
+from src.python.ai_chat.api.core_routes import register_core_routes
+from src.python.ai_chat.api.workspace_routes import register_workspace_routes
+from src.python.ai_chat.frontend_assets import (
+    FrontendAssets,
+    compute_static_asset_version,
+    ensure_frontend_bundle,
+)
+from src.python.ai_chat.runtime_config import (
+    MODEL_DEFAULTS_FILE,
+    MODEL_OVERRIDES_FILE,
+    build_model_args_from_env,
+    ensure_runtime_file_path,
+    ensure_runtime_root,
+    env_flag,
+    first_env_value,
+    load_env_defaults_file,
+)
 
 # Setup logging with capture
 log_capture = io.StringIO()
@@ -319,93 +350,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-MODEL_DEFAULTS_FILE = pathlib.Path(__file__).resolve().parents[3] / "config" / "model-defaults.env"
-MODEL_OVERRIDES_FILE = pathlib.Path(__file__).resolve().parents[3] / "config" / "model-overrides.local.env"
-ORIGINAL_ENV_KEYS = set(os.environ.keys())
-
-
-def load_env_defaults_file(path: pathlib.Path, *, allow_override: bool = False) -> None:
-    """Populate environment variables from a simple KEY=VALUE defaults file."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        return
-
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        if not key:
-            continue
-        if allow_override:
-            if key in ORIGINAL_ENV_KEYS:
-                continue
-            os.environ[key] = value.strip()
-            continue
-        if key in os.environ:
-            continue
-        os.environ[key] = value.strip()
-
-
 load_env_defaults_file(MODEL_DEFAULTS_FILE)
 load_env_defaults_file(MODEL_OVERRIDES_FILE, allow_override=True)
-
-
-def env_truthy(name: str, default: bool = False) -> bool:
-    """Parse a boolean environment variable using a small truthy set."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def first_env_value(*names: str) -> str:
-    """Return the first non-empty environment value from the provided keys."""
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value.strip():
-            return value.strip()
-    return ""
-
-
-def build_model_args_from_env(prefix: str) -> str:
-    """Build one vLLM argument string from line-by-line env settings."""
-    parts: List[str] = []
-
-    gpu_memory_utilization = os.getenv(f"{prefix}_GPU_MEMORY_UTILIZATION", "").strip()
-    max_model_len = os.getenv(f"{prefix}_MAX_MODEL_LEN", "").strip()
-    max_num_seqs = os.getenv(f"{prefix}_MAX_NUM_SEQS", "").strip()
-    quantization = os.getenv(f"{prefix}_QUANTIZATION", "").strip()
-    swap_space = os.getenv(f"{prefix}_SWAP_SPACE", "").strip()
-    extra_args = os.getenv(f"{prefix}_EXTRA_ARGS", "").strip()
-
-    if gpu_memory_utilization:
-        parts.extend(["--gpu-memory-utilization", gpu_memory_utilization])
-    if max_model_len:
-        parts.extend(["--max-model-len", max_model_len])
-    if env_truthy(f"{prefix}_ENABLE_PREFIX_CACHING"):
-        parts.append("--enable-prefix-caching")
-    if max_num_seqs:
-        parts.extend(["--max-num-seqs", max_num_seqs])
-    if env_truthy(f"{prefix}_ENABLE_CHUNKED_PREFILL"):
-        parts.append("--enable-chunked-prefill")
-    if quantization:
-        parts.extend(["--quantization", quantization])
-    if env_truthy(f"{prefix}_TRUST_REMOTE_CODE"):
-        parts.append("--trust-remote-code")
-    if env_truthy(f"{prefix}_ENFORCE_EAGER"):
-        parts.append("--enforce-eager")
-    if swap_space:
-        parts.extend(["--swap-space", swap_space])
-    if extra_args:
-        try:
-            parts.extend(shlex.split(extra_args))
-        except ValueError:
-            parts.append(extra_args)
-
-    return " ".join(parts)
 
 # --- Runtime configuration (override with env vars; see docs/configuration.md) ---
 DB_PATH = os.getenv("DB_PATH", "/app/data/chat.db")
@@ -548,13 +494,6 @@ CURRENT_REPO_REFERENCE_PHRASES = (
     "in this codebase",
 )
 
-
-def env_flag(name: str, default: bool = False) -> bool:
-    """Parse a conventional boolean environment variable."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 STRICT_WORKSPACE_COMMAND_PATHS = env_flag("STRICT_WORKSPACE_COMMAND_PATHS", True)
 def infer_model_provider(model_name: str) -> str:
@@ -755,64 +694,6 @@ logger.info(f"Using vLLM at {VLLM_HOST} with model {get_active_model_name()}")
 logger.info("Configured models: %s", ", ".join(f"{key}={value['name']}" for key, value in MODEL_PROFILES.items()))
 logger.info("Workspace root: %s", WORKSPACE_ROOT)
 
-HOSTNAME_ADJECTIVES = (
-    "Bright", "Clever", "Cosmic", "Daring", "Electric", "Golden", "Lucky",
-    "Merry", "Nova", "Radiant", "Rocket", "Sonic", "Spark", "Starlit",
-    "Sunny", "Swift", "Velvet", "Wild",
-)
-HOSTNAME_NOUNS = (
-    "Anchor", "Atlas", "Beacon", "Camp", "Canvas", "Comet", "Cove", "Den",
-    "Forge", "Garden", "Grove", "Harbor", "Hideout", "Lab", "Loft", "Nest",
-    "Orbit", "Outpost", "Studio", "Trail",
-)
-HOSTNAME_SKIP_TOKENS = {
-    "local", "localhost", "home", "host", "hostname", "node", "server", "srv",
-    "desktop", "laptop", "computer", "machine", "mac", "macbook", "macbookpro",
-    "macbook-air", "macmini", "imac", "pc", "pro", "air", "mini",
-    "linux", "ubuntu", "debian",
-    "fedora", "arch", "windows",
-}
-
-
-def _title_case_token(token: str) -> str:
-    """Render a hostname token as a human-readable title fragment."""
-    if token.isupper() and len(token) <= 4:
-        return token
-    if token.isdigit():
-        return token
-    return token[:1].upper() + token[1:].lower()
-
-
-def build_dynamic_app_title(hostname: str) -> str:
-    """Turn a raw hostname into a friendlier, deterministic codename."""
-    raw = (hostname or "").strip()
-    if not raw:
-        return "Lucky Harbor"
-
-    digest = hashlib.sha256(raw.encode("utf-8")).digest()
-    adjective = HOSTNAME_ADJECTIVES[digest[0] % len(HOSTNAME_ADJECTIVES)]
-    fallback_noun = HOSTNAME_NOUNS[digest[1] % len(HOSTNAME_NOUNS)]
-
-    parts = [part for part in re.split(r"[^A-Za-z0-9]+", raw) if part]
-    meaningful_parts = []
-    numeric_parts = []
-    for part in parts:
-        lowered = part.lower()
-        if part.isdigit():
-            numeric_parts.append(part)
-            continue
-        if len(part) <= 2 or lowered in HOSTNAME_SKIP_TOKENS:
-            continue
-        if re.fullmatch(r"[a-f0-9]{6,}", lowered):
-            continue
-        meaningful_parts.append(_title_case_token(part))
-
-    anchor = " ".join(meaningful_parts[:2]).strip() or fallback_noun
-    suffix = numeric_parts[-1][-2:] if numeric_parts else f"{digest[2] % 100:02d}"
-    return f"{adjective} {anchor} {suffix}"
-
-
-RAW_HOSTNAME = socket.gethostname() or "localhost"
 APP_TITLE = "AI Chat"
 
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
@@ -826,39 +707,15 @@ except ValueError:
 REPO_ROOT_PATH = pathlib.Path(__file__).resolve().parents[2]
 _base_dir = REPO_ROOT_PATH
 
-def ensure_runtime_root(raw_path: str, fallback_relative: str) -> pathlib.Path:
-    """Resolve a writable runtime directory, falling back to repo-local data in dev/test."""
-    candidate = pathlib.Path(raw_path).resolve()
-    try:
-        candidate.mkdir(parents=True, exist_ok=True)
-        return candidate
-    except PermissionError:
-        fallback = (REPO_ROOT_PATH / fallback_relative).resolve()
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
-
-
-def ensure_runtime_file_path(raw_path: str, fallback_relative: str) -> pathlib.Path:
-    """Resolve a writable runtime file path, falling back to repo-local data in dev/test."""
-    candidate = pathlib.Path(raw_path).resolve()
-    try:
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        return candidate
-    except PermissionError:
-        fallback = (REPO_ROOT_PATH / fallback_relative).resolve()
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        return fallback
-
-
-DB_PATH = str(ensure_runtime_file_path(DB_PATH, "data/chat.db"))
-MODEL_STATE_PATH = str(ensure_runtime_file_path(MODEL_STATE_PATH, "data/model_state.json"))
-WORKSPACE_ROOT_PATH = ensure_runtime_root(WORKSPACE_ROOT, "data/workspaces")
+DB_PATH = str(ensure_runtime_file_path(DB_PATH, "data/chat.db", repo_root=REPO_ROOT_PATH))
+MODEL_STATE_PATH = str(ensure_runtime_file_path(MODEL_STATE_PATH, "data/model_state.json", repo_root=REPO_ROOT_PATH))
+WORKSPACE_ROOT_PATH = ensure_runtime_root(WORKSPACE_ROOT, "data/workspaces", repo_root=REPO_ROOT_PATH)
 WORKSPACE_ROOT = str(WORKSPACE_ROOT_PATH)
-RUNS_ROOT_PATH = ensure_runtime_root(RUNS_ROOT, "data/runs")
+RUNS_ROOT_PATH = ensure_runtime_root(RUNS_ROOT, "data/runs", repo_root=REPO_ROOT_PATH)
 RUNS_ROOT = str(RUNS_ROOT_PATH)
-MANAGED_PYTHON_ENVS_ROOT_PATH = ensure_runtime_root(MANAGED_PYTHON_ENVS_ROOT, "data/python-envs")
+MANAGED_PYTHON_ENVS_ROOT_PATH = ensure_runtime_root(MANAGED_PYTHON_ENVS_ROOT, "data/python-envs", repo_root=REPO_ROOT_PATH)
 MANAGED_PYTHON_ENVS_ROOT = str(MANAGED_PYTHON_ENVS_ROOT_PATH)
-VOICE_ROOT_PATH = ensure_runtime_root(VOICE_ROOT, "data/voice")
+VOICE_ROOT_PATH = ensure_runtime_root(VOICE_ROOT, "data/voice", repo_root=REPO_ROOT_PATH)
 VOICE_ROOT = str(VOICE_ROOT_PATH)
 PIPER_DEFAULT_MODEL = pathlib.Path(
     os.getenv("PIPER_MODEL", str(VOICE_ROOT_PATH / "models" / "en_US-lessac-high.onnx"))
@@ -11370,77 +11227,14 @@ app.add_middleware(
 
 _repo_root = pathlib.Path(__file__).resolve().parents[2]
 _web_root = _repo_root / "src" / "web"
-_frontend_source_path = _web_root / "app.ts"
-_frontend_bundle_path = _web_root / "app.js"
-_frontend_build_script_path = _repo_root / "scripts" / "build_frontend.mjs"
-_frontend_package_path = _repo_root / "package.json"
-
-
-def compute_static_asset_version(web_root: pathlib.Path) -> str:
-    """Build a cheap cache-busting token from local static asset mtimes."""
-    hasher = hashlib.sha1()
-    for rel_path in ("index.html", "app.js", "style.css"):
-        target = web_root / rel_path
-        try:
-            stat = target.stat()
-        except OSError:
-            continue
-        hasher.update(rel_path.encode("utf-8"))
-        hasher.update(str(int(stat.st_mtime_ns)).encode("utf-8"))
-    digest = hasher.hexdigest()[:12]
-    return digest or str(int(time.time()))
-
-
-def frontend_bundle_is_stale() -> bool:
-    """Return True when the generated browser bundle should be rebuilt."""
-    try:
-        bundle_stat = _frontend_bundle_path.stat()
-    except OSError:
-        return True
-    for candidate in (_frontend_source_path, _frontend_build_script_path, _frontend_package_path):
-        try:
-            if candidate.stat().st_mtime_ns > bundle_stat.st_mtime_ns:
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def ensure_frontend_bundle() -> bool:
-    """Build the generated frontend bundle when local sources are newer."""
-    if not frontend_bundle_is_stale():
-        return False
-
-    node_bin = shutil.which("node")
-    if not node_bin:
-        if _frontend_bundle_path.is_file():
-            logger.warning(
-                "Frontend sources are newer than %s, but node is unavailable; serving the existing bundle.",
-                _frontend_bundle_path,
-            )
-            return False
-        raise RuntimeError(
-            "Frontend bundle is missing and node is unavailable. Run `npm run build:frontend` first."
-        )
-
-    command = [node_bin, str(_frontend_build_script_path)]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=str(_repo_root),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or str(exc)
-        raise RuntimeError(f"Frontend build failed: {detail}") from exc
-
-    build_output = (result.stdout or "").strip()
-    logger.info(build_output or "Built frontend bundle from %s", _frontend_source_path)
-    return True
+FRONTEND_ASSETS = FrontendAssets(
+    repo_root=_repo_root,
+    web_root=_web_root,
+    frontend_source_path=_web_root / "app.ts",
+    frontend_bundle_path=_web_root / "app.js",
+    frontend_build_script_path=_repo_root / "scripts" / "build_frontend.mjs",
+    frontend_package_path=_repo_root / "package.json",
+)
 
 
 app.mount("/static", StaticFiles(directory=str(_web_root)), name="static")
@@ -11448,7 +11242,6 @@ templates = Jinja2Templates(directory=str(_web_root))
 
 # ==================== API Endpoints ====================
 
-@app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     logger.error(f"Unhandled exception: {exc}\n{traceback.format_exc()}")
     return JSONResponse(
@@ -11456,7 +11249,6 @@ async def global_exception_handler(request, exc):
         content={"error": "Internal server error"}
     )
 
-@app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     try:
         response = templates.TemplateResponse(
@@ -11466,7 +11258,7 @@ async def home(request: Request):
                 "themes_json": json.dumps({"light": COLORS_LIGHT, "dark": COLORS_DARK}),
                 "model_name": get_active_model_name(),
                 "app_title": APP_TITLE,
-                "static_asset_version": compute_static_asset_version(_web_root),
+                "static_asset_version": compute_static_asset_version(FRONTEND_ASSETS.web_root),
             },
         )
         response.headers["Cache-Control"] = "no-store"
@@ -11506,7 +11298,6 @@ def get_workspace_route_target(workspace_id: str, *, create: bool = False) -> tu
     return workspace, workspace_path, run
 
 
-@app.get("/api/workspaces")
 async def get_workspaces():
     try:
         workspaces = [build_workspace_catalog_payload(item) for item in list_workspace_records(ensure_default=True)]
@@ -11517,7 +11308,6 @@ async def get_workspaces():
         return {"workspaces": [], "default_workspace_id": None}
 
 
-@app.post("/api/workspaces")
 async def create_workspace(request: WorkspaceCreateRequest):
     try:
         workspace = create_workspace_record(
@@ -11532,7 +11322,6 @@ async def create_workspace(request: WorkspaceCreateRequest):
         raise HTTPException(status_code=409, detail="A workspace already exists for that path") from exc
 
 
-@app.get("/api/workspaces/{workspace_id}")
 async def get_workspace_catalog_entry(workspace_id: str):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -11540,7 +11329,6 @@ async def get_workspace_catalog_entry(workspace_id: str):
     return build_workspace_catalog_payload(workspace)
 
 
-@app.post("/api/workspaces/{workspace_id}/rename")
 async def rename_workspace(workspace_id: str, request: RenameRequest):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -11561,7 +11349,6 @@ async def rename_workspace(workspace_id: str, request: RenameRequest):
     return build_workspace_catalog_payload(updated)
 
 
-@app.delete("/api/workspaces/{workspace_id}")
 async def delete_workspace(workspace_id: str, delete_files: bool = False):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -11593,7 +11380,6 @@ async def delete_workspace(workspace_id: str, delete_files: bool = False):
     return {"status": "success", "workspace_id": workspace_id, "deleted_files": bool(delete_files)}
 
 
-@app.get("/api/conversations")
 async def get_conversations():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -11638,7 +11424,6 @@ async def get_conversations():
         logger.error(f"Error getting conversations: {e}")
         return {'conversations': []}
 
-@app.post("/api/message/{message_id}/feedback")
 async def submit_feedback(message_id: int, request: FeedbackRequest):
     try:
         feedback = normalize_feedback_label(request.feedback, strict=True)
@@ -11673,7 +11458,6 @@ async def submit_feedback(message_id: int, request: FeedbackRequest):
             raise
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/message/{message_id}/retry")
 async def retry_message(message_id: int, request: dict):
     try:
         message = get_message_by_id(message_id)
@@ -11715,7 +11499,6 @@ async def retry_message(message_id: int, request: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/chat")
 async def chat_http(request: ChatRequest):
     transport = BufferedChatTransport()
     payload = request.model_dump()
@@ -11729,7 +11512,6 @@ async def chat_http(request: ChatRequest):
     await process_chat_turn(transport, payload)
     return {"events": transport.events}
 
-@app.get("/api/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
     try:
         conversation = get_conversation_record(conversation_id)
@@ -11745,7 +11527,6 @@ async def get_conversation(conversation_id: str):
     except Exception as e:
         return {'messages': [], 'pending_plan': None, 'workspace_id': '', 'workspace': None}
 
-@app.post("/api/conversation/{conversation_id}/rename")
 async def rename_conversation(conversation_id: str, request: RenameRequest):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -11758,7 +11539,6 @@ async def rename_conversation(conversation_id: str, request: RenameRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/conversation/{conversation_id}")
 async def delete_conversation(conversation_id: str):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -11774,7 +11554,6 @@ async def delete_conversation(conversation_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/reset-all")
 async def reset_all_application_data():
     try:
         await reset_application_state()
@@ -11783,7 +11562,6 @@ async def reset_all_application_data():
         logger.error("Error resetting application data: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/search")
 async def search_chats(query: str):
     try:
         results = search_messages(query, limit=50)
@@ -11792,7 +11570,6 @@ async def search_chats(query: str):
         return {'results': [], 'count': 0}
 
 
-@app.get("/api/context-evals/report")
 async def get_context_eval_report(
     conversation_id: str = "",
     workspace_id: str = "",
@@ -11811,7 +11588,6 @@ async def get_context_eval_report(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/context-evals/promote")
 async def promote_context_eval_capture(request: ContextEvalPromotionRequest):
     try:
         source_path = pathlib.Path(str(request.source_path or "").strip()).expanduser()
@@ -11852,7 +11628,6 @@ async def promote_context_eval_capture(request: ContextEvalPromotionRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/context-evals/auto-draft")
 async def auto_draft_context_eval_capture(request: ContextEvalAutoDraftRequest):
     try:
         source_path = pathlib.Path(str(request.source_path or "").strip()).expanduser()
@@ -11895,7 +11670,6 @@ async def auto_draft_context_eval_capture(request: ContextEvalAutoDraftRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/context-evals/fixtures")
 async def list_context_eval_fixtures():
     try:
         return {
@@ -11906,7 +11680,6 @@ async def list_context_eval_fixtures():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/context-evals/fixtures/detail")
 async def get_context_eval_fixture_detail(fixture_path: str):
     try:
         return load_promoted_context_eval_fixture_detail(fixture_path)
@@ -11917,7 +11690,6 @@ async def get_context_eval_fixture_detail(fixture_path: str):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/context-evals/fixtures/review")
 async def update_context_eval_fixture_review(request: ContextEvalFixtureReviewRequest):
     try:
         target = update_promoted_context_eval_fixture_review_state(
@@ -11938,7 +11710,6 @@ async def update_context_eval_fixture_review(request: ContextEvalFixtureReviewRe
         logger.error("Error updating context eval fixture review state: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-@app.get("/api/files/list")
 async def list_files(path: str = "."):
     try:
         abs_path = os.path.abspath(path)
@@ -11963,7 +11734,6 @@ async def list_files(path: str = "."):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/files/read")
 async def read_file_content(path: str):
     try:
         abs_path = os.path.abspath(path)
@@ -13400,21 +13170,18 @@ async def file_session_background_worker() -> None:
             await asyncio.sleep(FILE_SESSION_BACKGROUND_POLL_SECONDS)
 
 
-@app.get("/api/workspaces/{workspace_id}/files")
 async def list_workspace_files_by_workspace(workspace_id: str, path: str = "", response: Response = None):
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
     return list_workspace_files_for_workspace(workspace_id, path)
 
 
-@app.get("/api/workspaces/{workspace_id}/file")
 async def read_workspace_file_by_workspace(workspace_id: str, path: str, response: Response = None):
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
     return read_workspace_file_for_workspace(workspace_id, path)
 
 
-@app.get("/api/workspaces/{workspace_id}/file-sessions")
 async def list_file_sessions(workspace_id: str):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -13428,7 +13195,6 @@ async def list_file_sessions(workspace_id: str):
     }
 
 
-@app.post("/api/workspaces/{workspace_id}/file-sessions/ensure")
 async def ensure_file_session(workspace_id: str, request: FileSessionEnsureRequest):
     try:
         session = ensure_file_session_record(
@@ -13445,7 +13211,6 @@ async def ensure_file_session(workspace_id: str, request: FileSessionEnsureReque
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/workspaces/{workspace_id}/file-sessions/focus")
 async def set_file_session_focus_for_workspace(workspace_id: str, request: FileSessionFocusRequest):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -13473,7 +13238,6 @@ async def set_file_session_focus_for_workspace(workspace_id: str, request: FileS
     }
 
 
-@app.delete("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}")
 async def delete_file_session_for_workspace(workspace_id: str, file_session_id: str):
     workspace = get_workspace_record(workspace_id)
     if not workspace:
@@ -13484,7 +13248,6 @@ async def delete_file_session_for_workspace(workspace_id: str, file_session_id: 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}")
 async def get_file_session_bundle_for_workspace(
     workspace_id: str,
     file_session_id: str,
@@ -13503,7 +13266,6 @@ async def get_file_session_bundle_for_workspace(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/api/workspaces/{workspace_id}/file-sessions/{file_session_id}/jobs")
 async def list_file_session_jobs_for_workspace(
     workspace_id: str,
     file_session_id: str,
@@ -13521,7 +13283,6 @@ async def list_file_session_jobs_for_workspace(
     }
 
 
-@app.post("/api/workspaces/{workspace_id}/file-session-jobs")
 async def create_file_session_job_for_workspace(workspace_id: str, request: FileSessionJobCreateRequest):
     try:
         job = create_file_session_job_record(
@@ -13549,7 +13310,6 @@ async def create_file_session_job_for_workspace(workspace_id: str, request: File
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/workspaces/{workspace_id}/file-session-jobs/{job_id}/status")
 async def update_file_session_job_for_workspace(
     workspace_id: str,
     job_id: str,
@@ -13572,7 +13332,6 @@ async def update_file_session_job_for_workspace(
     }
 
 
-@app.get("/api/workspaces/{workspace_id}/file/view")
 async def view_workspace_file_by_workspace(workspace_id: str, path: str):
     _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
     target = resolve_workspace_relative_path_from_root(workspace, path)
@@ -13582,13 +13341,11 @@ async def view_workspace_file_by_workspace(workspace_id: str, path: str):
     return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/workspaces/{workspace_id}/file/render/{path:path}")
 async def render_workspace_file_by_workspace(workspace_id: str, path: str):
     _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
     return render_workspace_file_preview_response(workspace, path)
 
 
-@app.get("/api/workspaces/{workspace_id}/file/download")
 async def download_workspace_file_by_workspace(workspace_id: str, path: str):
     _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
     target = resolve_workspace_relative_path_from_root(workspace, path)
@@ -13597,17 +13354,14 @@ async def download_workspace_file_by_workspace(workspace_id: str, path: str):
     return FileResponse(target, filename=target.name)
 
 
-@app.post("/api/workspaces/{workspace_id}/file")
 async def write_workspace_file_by_workspace(workspace_id: str, request: WorkspaceFileUpdateRequest):
     return write_workspace_file_for_workspace(workspace_id, request)
 
 
-@app.get("/api/workspaces/{workspace_id}/spreadsheet")
 async def read_workspace_spreadsheet_by_workspace(workspace_id: str, path: str, sheet: Optional[str] = None):
     return read_workspace_spreadsheet_for_workspace(workspace_id, path, sheet=sheet)
 
 
-@app.post("/api/workspaces/{workspace_id}/upload")
 async def upload_workspace_files_by_workspace(
     workspace_id: str,
     files: List[UploadFile] = File(...),
@@ -13616,17 +13370,14 @@ async def upload_workspace_files_by_workspace(
     return await upload_workspace_files_for_workspace(workspace_id, files, target_path)
 
 
-@app.post("/api/workspaces/{workspace_id}/archive/extract")
 async def extract_workspace_archive_by_workspace(workspace_id: str, request: WorkspaceArchiveExtractRequest):
     return extract_workspace_archive_for_workspace(workspace_id, request.path, request.destination_path)
 
 
-@app.get("/api/workspaces/{workspace_id}/download")
 async def download_workspace_by_workspace(workspace_id: str):
     return build_workspace_archive_response(workspace_id)
 
 
-@app.get("/api/workspace/{conversation_id}")
 async def get_workspace_info(conversation_id: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
     if not workspace_id:
@@ -13634,7 +13385,6 @@ async def get_workspace_info(conversation_id: str):
     return build_workspace_info_payload(workspace_id, conversation_id=conversation_id)
 
 
-@app.post("/api/workspace/{conversation_id}/upload")
 async def upload_workspace_files(
     conversation_id: str,
     files: List[UploadFile] = File(...),
@@ -13644,7 +13394,6 @@ async def upload_workspace_files(
     return await upload_workspace_files_for_workspace(workspace_id, files, target_path, conversation_id=conversation_id)
 
 
-@app.post("/api/workspace/{conversation_id}/archive/extract")
 async def extract_workspace_archive(conversation_id: str, request: WorkspaceArchiveExtractRequest):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return extract_workspace_archive_for_workspace(
@@ -13655,7 +13404,6 @@ async def extract_workspace_archive(conversation_id: str, request: WorkspaceArch
     )
 
 
-@app.get("/api/workspace/{conversation_id}/files")
 async def list_workspace_files(conversation_id: str, path: str = ""):
     workspace_id = get_workspace_id_for_conversation(conversation_id, create=False)
     if not workspace_id:
@@ -13671,7 +13419,6 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
     return list_workspace_files_for_workspace(workspace_id, path, conversation_id=conversation_id)
 
 
-@app.get("/api/workspace/{conversation_id}/file")
 async def read_workspace_file(conversation_id: str, path: str, response: Response = None):
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
@@ -13679,37 +13426,31 @@ async def read_workspace_file(conversation_id: str, path: str, response: Respons
     return read_workspace_file_for_workspace(workspace_id, path, conversation_id=conversation_id)
 
 
-@app.get("/api/workspace/{conversation_id}/file/view")
 async def view_workspace_file(conversation_id: str, path: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return await view_workspace_file_by_workspace(workspace_id, path)
 
 
-@app.get("/api/workspace/{conversation_id}/file/render/{path:path}")
 async def render_workspace_file(conversation_id: str, path: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return await render_workspace_file_by_workspace(workspace_id, path)
 
 
-@app.get("/api/workspace/{conversation_id}/file/download")
 async def download_workspace_file(conversation_id: str, path: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return await download_workspace_file_by_workspace(workspace_id, path)
 
 
-@app.post("/api/workspace/{conversation_id}/file")
 async def write_workspace_file(conversation_id: str, request: WorkspaceFileUpdateRequest):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return write_workspace_file_for_workspace(workspace_id, request, conversation_id=conversation_id)
 
 
-@app.get("/api/workspace/{conversation_id}/spreadsheet")
 async def read_workspace_spreadsheet(conversation_id: str, path: str, sheet: Optional[str] = None):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return read_workspace_spreadsheet_for_workspace(workspace_id, path, sheet=sheet, conversation_id=conversation_id)
 
 
-@app.get("/api/workspace/{conversation_id}/download")
 async def download_workspace(conversation_id: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return build_workspace_archive_response(workspace_id)
@@ -21429,7 +21170,6 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             setattr(websocket, "active_file_session_workspace_id", "")
             setattr(websocket, "active_file_session_path", "")
 
-@app.websocket("/ws/chat")
 async def chat_websocket(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connected")
@@ -21594,7 +21334,6 @@ async def get_model_runtime_summary() -> Dict[str, Any]:
         "loading": get_model_loading_stats(loaded_model_name or selected_profile["name"], model_ok),
     }
 
-@app.get("/health")
 async def health():
     runtime = await get_model_runtime_summary()
     loading = runtime["loading"]
@@ -21738,11 +21477,10 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
         "container": loading.get("container"),
     }
 
-@app.on_event("startup")
 async def startup_event():
     global ACTIVE_MODEL_LOCK, FILE_SESSION_BACKGROUND_WORKER_TASK
     ACTIVE_MODEL_LOCK = asyncio.Lock()
-    ensure_frontend_bundle()
+    ensure_frontend_bundle(FRONTEND_ASSETS, logger)
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
     logger.info(f"Selected model tune: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
@@ -21774,6 +21512,76 @@ async def startup_event():
 
     if FILE_SESSION_BACKGROUND_WORKER_TASK is None or FILE_SESSION_BACKGROUND_WORKER_TASK.done():
         FILE_SESSION_BACKGROUND_WORKER_TASK = asyncio.create_task(file_session_background_worker())
+
+
+register_core_routes(
+    app,
+    global_exception_handler=global_exception_handler,
+    home=home,
+    health=health,
+    startup_event=startup_event,
+)
+register_chat_routes(
+    app,
+    get_conversations=get_conversations,
+    submit_feedback=submit_feedback,
+    retry_message=retry_message,
+    chat_http=chat_http,
+    get_conversation=get_conversation,
+    rename_conversation=rename_conversation,
+    delete_conversation=delete_conversation,
+    reset_all_application_data=reset_all_application_data,
+    search_chats=search_chats,
+    chat_websocket=chat_websocket,
+)
+register_context_eval_routes(
+    app,
+    get_context_eval_report=get_context_eval_report,
+    promote_context_eval_capture=promote_context_eval_capture,
+    auto_draft_context_eval_capture=auto_draft_context_eval_capture,
+    list_context_eval_fixtures=list_context_eval_fixtures,
+    get_context_eval_fixture_detail=get_context_eval_fixture_detail,
+    review_context_eval_fixture=update_context_eval_fixture_review,
+)
+register_workspace_routes(
+    app,
+    list_files=list_files,
+    read_file_content=read_file_content,
+    get_workspaces=get_workspaces,
+    create_workspace=create_workspace,
+    get_workspace_catalog_entry=get_workspace_catalog_entry,
+    rename_workspace=rename_workspace,
+    delete_workspace=delete_workspace,
+    list_workspace_files_by_workspace=list_workspace_files_by_workspace,
+    read_workspace_file_by_workspace=read_workspace_file_by_workspace,
+    list_file_sessions=list_file_sessions,
+    ensure_file_session=ensure_file_session,
+    set_file_session_focus_for_workspace=set_file_session_focus_for_workspace,
+    delete_file_session_for_workspace=delete_file_session_for_workspace,
+    get_file_session_bundle_for_workspace=get_file_session_bundle_for_workspace,
+    list_file_session_jobs_for_workspace=list_file_session_jobs_for_workspace,
+    create_file_session_job_for_workspace=create_file_session_job_for_workspace,
+    update_file_session_job_for_workspace=update_file_session_job_for_workspace,
+    view_workspace_file_by_workspace=view_workspace_file_by_workspace,
+    render_workspace_file_by_workspace=render_workspace_file_by_workspace,
+    download_workspace_file_by_workspace=download_workspace_file_by_workspace,
+    write_workspace_file_by_workspace=write_workspace_file_by_workspace,
+    read_workspace_spreadsheet_by_workspace=read_workspace_spreadsheet_by_workspace,
+    upload_workspace_files_by_workspace=upload_workspace_files_by_workspace,
+    extract_workspace_archive_by_workspace=extract_workspace_archive_by_workspace,
+    download_workspace_by_workspace=download_workspace_by_workspace,
+    get_workspace_info=get_workspace_info,
+    upload_workspace_files=upload_workspace_files,
+    extract_workspace_archive=extract_workspace_archive,
+    list_workspace_files=list_workspace_files,
+    read_workspace_file=read_workspace_file,
+    view_workspace_file=view_workspace_file,
+    render_workspace_file=render_workspace_file,
+    download_workspace_file=download_workspace_file,
+    write_workspace_file=write_workspace_file,
+    read_workspace_spreadsheet=read_workspace_spreadsheet,
+    download_workspace=download_workspace,
+)
 
 
 def build_uvicorn_run_kwargs() -> Dict[str, Any]:
