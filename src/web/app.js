@@ -17,6 +17,7 @@ const state = {
     currentDirectoryPath: ".",
     fileItems: [],
     selectedFilePath: "",
+    selectedFileContentKind: "",
     leftSidebarOpen: false,
     viewerMode: "closed",
     contextEvalReport: null,
@@ -52,6 +53,7 @@ function isMobileViewport() {
 const sidebarToggle = query("#sidebarToggle");
 const viewerToggle = query("#viewerToggle");
 const refreshWorkspaceButton = query("#refreshWorkspaceButton");
+const openInTabButton = query("#openInTabButton");
 const downloadFileButton = query("#downloadFileButton");
 const workspaceSettingsButton = query("#workspaceSettingsButton");
 const refreshContextEvalButton = query("#refreshContextEvalButton");
@@ -386,6 +388,10 @@ function downloadSelectedFile() {
     anchor.click();
     anchor.remove();
 }
+function openSelectedFileInTab() {
+    if (!state.currentWorkspaceId || !state.selectedFilePath) return;
+    window.open(fileViewUrl(state.selectedFilePath), "_blank", "noopener");
+}
 function inferredPreviewLanguage(path) {
     const extension = artifactFileExtension(path);
     return normalizeCodeLanguage(extension || "text");
@@ -465,6 +471,9 @@ function syncShellLayout() {
     viewerToggle.hidden = state.viewerMode !== "closed";
     refreshWorkspaceButton.hidden = state.viewerMode === "closed";
     refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
+    const showOpenInTabButton = state.viewerMode === "file" && Boolean(state.selectedFilePath) && state.selectedFileContentKind === "html";
+    openInTabButton.hidden = !showOpenInTabButton;
+    openInTabButton.disabled = !showOpenInTabButton;
     downloadFileButton.hidden = !(state.viewerMode === "file" && state.selectedFilePath);
     downloadFileButton.disabled = !state.selectedFilePath;
     const showModeButton = Boolean(state.selectedFilePath) && state.viewerMode === "file";
@@ -827,6 +836,14 @@ function artifactFileExtension(path) {
     const fileName = resolveArtifactReferencePath(path).split("/").pop() || "";
     const match = fileName.match(/\.([A-Za-z0-9]+)$/);
     return String(match?.[1] || "").toLowerCase();
+}
+function isSpreadsheetPreviewPath(path) {
+    const extension = artifactFileExtension(path);
+    return [
+        "xlsx",
+        "xls",
+        "xlsm"
+    ].includes(extension);
 }
 function displayFileKindLabel(path, contentKind = "", itemType = "file") {
     if (itemType === "directory") return "Dir";
@@ -2114,6 +2131,7 @@ function renderPreviewEmpty(title, body) {
     viewerTitle.textContent = title;
     viewerMeta.textContent = state.viewerMode === "file" ? "Preview" : "";
     viewerMeta.hidden = !viewerMeta.textContent;
+    state.selectedFileContentKind = "";
     filePreview.innerHTML = `
         <div class="empty-state">
             <div>
@@ -2123,8 +2141,136 @@ function renderPreviewEmpty(title, body) {
         </div>
     `;
 }
+function formatSpreadsheetCell(value) {
+    if (value === null || value === undefined || value === "") return "";
+    if (typeof value === "string") return escapeHtml(value);
+    if (typeof value === "number" || typeof value === "boolean") return escapeHtml(String(value));
+    return escapeHtml(JSON.stringify(value));
+}
+function renderSpreadsheetPreview(payload) {
+    state.selectedFileContentKind = "spreadsheet";
+    const sheetNames = payload.sheet_names || [];
+    const previewRows = payload.preview_rows || [];
+    const columns = previewRows.length ? Object.keys(previewRows[0] || {}) : (payload.columns || []).map((column)=>typeof column === "string" ? column : String(column.name || ""));
+    const workbookSummary = (payload.workbook_sheets || []).map((sheet)=>`
+            <div class="spreadsheet-sheet-chip${sheet.name === payload.sheet ? " active" : ""}">
+                <strong>${escapeHtml(sheet.name)}</strong>
+                <span>${escapeHtml(`${sheet.row_count} rows • ${sheet.column_count} cols`)}</span>
+            </div>
+        `).join("");
+    filePreview.innerHTML = `
+        <div class="spreadsheet-preview">
+            <div class="spreadsheet-preview-header">
+                <div class="spreadsheet-meta-grid">
+                    <div><strong>Rows</strong><span>${escapeHtml(String(payload.row_count || 0))}</span></div>
+                    <div><strong>Columns</strong><span>${escapeHtml(String(payload.column_count || 0))}</span></div>
+                    <div><strong>Type</strong><span>${escapeHtml((payload.file_type || "sheet").toUpperCase())}</span></div>
+                </div>
+                ${sheetNames.length > 1 ? `
+                    <label class="spreadsheet-sheet-picker">
+                        <span>Sheet</span>
+                        <select id="spreadsheetSheetSelect">
+                            ${sheetNames.map((name)=>`<option value="${escapeHtml(name)}"${name === payload.sheet ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+                        </select>
+                    </label>
+                ` : ""}
+            </div>
+            ${workbookSummary ? `<div class="spreadsheet-sheet-list">${workbookSummary}</div>` : ""}
+            ${columns.length ? `
+                <div class="preview-table-shell">
+                    <table class="preview-table">
+                        <thead>
+                            <tr>${columns.map((column)=>`<th>${escapeHtml(column)}</th>`).join("")}</tr>
+                        </thead>
+                        <tbody>
+                            ${previewRows.length ? previewRows.map((row)=>`
+                                <tr>${columns.map((column)=>`<td>${formatSpreadsheetCell(row[column])}</td>`).join("")}</tr>
+                            `).join("") : `<tr><td colspan="${Math.max(columns.length, 1)}">No preview rows available.</td></tr>`}
+                        </tbody>
+                    </table>
+                </div>
+            ` : `<div class="empty-state"><div><div class="empty-state-title">No sheet data</div><p>This spreadsheet does not contain previewable columns.</p></div></div>`}
+        </div>
+    `;
+    const sheetSelect = filePreview.querySelector("#spreadsheetSheetSelect");
+    if (sheetSelect) {
+        sheetSelect.addEventListener("change", ()=>{
+            void openSpreadsheetFile(payload.path, sheetSelect.value);
+        });
+    }
+}
+const RESPONSIVE_HTML_PREVIEW_STYLE = `
+html {
+    box-sizing: border-box;
+    overflow-x: hidden;
+}
+
+*, *::before, *::after {
+    box-sizing: inherit;
+}
+
+body {
+    margin: 0;
+    padding: 16px;
+    max-width: 100%;
+    overflow-x: hidden;
+    background: white;
+}
+
+img,
+svg,
+video,
+canvas,
+iframe,
+embed,
+object {
+    display: block;
+    max-width: 100% !important;
+}
+
+img,
+svg,
+video {
+    height: auto !important;
+}
+
+canvas {
+    height: auto !important;
+}
+
+table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+pre {
+    max-width: 100%;
+    overflow: auto;
+}
+`.trim();
+function buildResponsiveHtmlPreview(rawHtml) {
+    const html = String(rawHtml || "");
+    const viewportMeta = /<meta[^>]+name=["']viewport["']/i.test(html) ? "" : '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">';
+    const previewStyle = `<style id="codex-responsive-preview">${RESPONSIVE_HTML_PREVIEW_STYLE}</style>`;
+    const injectedHead = `${viewportMeta}${previewStyle}`;
+    if (/<head\b/i.test(html)) {
+        return html.replace(/<head([^>]*)>/i, `<head$1>${injectedHead}`);
+    }
+    if (/<html\b/i.test(html)) {
+        return html.replace(/<html([^>]*)>/i, `<html$1><head>${injectedHead}</head>`);
+    }
+    return `<!DOCTYPE html><html><head>${injectedHead}</head><body>${html}</body></html>`;
+}
+async function openSpreadsheetFile(path, sheet = "") {
+    if (!state.currentWorkspaceId) return;
+    const query = sheet ? `&sheet=${encodeURIComponent(sheet)}` : "";
+    const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/spreadsheet?path=${encodeURIComponent(path)}${query}`);
+    renderSpreadsheetPreview(payload);
+}
 function renderPreview(payload) {
     const contentKind = payload.content_kind || "text";
+    state.selectedFileContentKind = contentKind;
     viewerTitle.textContent = payload.path;
     viewerMeta.textContent = `${displayFilePreviewLabel(payload.path, contentKind)} preview`;
     viewerMeta.hidden = false;
@@ -2137,8 +2283,8 @@ function renderPreview(payload) {
         return;
     }
     if (contentKind === "html") {
-        const srcdoc = escapeHtml(payload.content || "");
-        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="" title="${escapeHtml(payload.path)}" srcdoc="${srcdoc}"></iframe>`;
+        const srcdoc = escapeHtml(buildResponsiveHtmlPreview(payload.content || ""));
+        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="allow-scripts" title="${escapeHtml(payload.path)}" srcdoc="${srcdoc}"></iframe>`;
         return;
     }
     if (contentKind === "markdown") {
@@ -2650,6 +2796,11 @@ async function openFile(path) {
     syncShellLayout();
     renderFileList();
     try {
+        if (isSpreadsheetPreviewPath(path)) {
+            await openSpreadsheetFile(path);
+            filePreview.scrollTop = previousPreviewScrollTop;
+            return;
+        }
         const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
         renderPreview(payload);
         filePreview.scrollTop = previousPreviewScrollTop;
@@ -2723,6 +2874,9 @@ function attachEvents() {
     refreshWorkspaceButton.addEventListener("click", ()=>{
         void loadDirectory(state.currentDirectoryPath);
         if (state.viewerMode === "file" && state.selectedFilePath) void openFile(state.selectedFilePath);
+    });
+    openInTabButton.addEventListener("click", ()=>{
+        openSelectedFileInTab();
     });
     downloadFileButton.addEventListener("click", ()=>{
         downloadSelectedFile();

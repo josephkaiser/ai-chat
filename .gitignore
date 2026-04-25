@@ -80,11 +80,13 @@ logs/
 .env
 .env.*
 .env.local
+.runtime-model.env
 !.env.example
 !.env.sample
 !.env.*.example
 !.env.*.sample
 .envrc
+config/model-overrides.local.env
 
 # Secrets / local credentials
 *.pem
