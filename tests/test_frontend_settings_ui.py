@@ -83,6 +83,7 @@ class FrontendSettingsUiTests(unittest.TestCase):
         self.assertIn('meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"', ts)
         self.assertIn('const srcdoc = escapeHtml(buildResponsiveHtmlPreview(payload.content || ""));', ts)
         self.assertIn('sandbox="allow-scripts"', ts)
+        self.assertIn('.replace(/\\n+/g, " ");', ts)
         self.assertIn('const structureMeta = documentStructureMeta(payload);', ts)
         self.assertIn('filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame"', ts)
         self.assertIn('filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<pre class="preview-code">', ts)

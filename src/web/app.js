@@ -1524,7 +1524,7 @@ function renderInlineMarkdown(text) {
         const path = resolveArtifactReferencePath(rawPath);
         const label = path.split("/").pop() || path;
         return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
-    }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n/g, "<br>");
+    }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n+/g, " ");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
 function normalizeCodeLanguage(language) {

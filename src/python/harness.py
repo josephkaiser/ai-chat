@@ -475,6 +475,7 @@ DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_SEMANTIC_L
 DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET = int(os.getenv("DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET", "12000"))
 DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND = int(os.getenv("DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND", "6"))
 DOCUMENT_SUMMARY_MAX_REDUCTION_ROUNDS = int(os.getenv("DOCUMENT_SUMMARY_MAX_REDUCTION_ROUNDS", "6"))
+DOCUMENT_SECTION_TITLE_LIMIT = int(os.getenv("DOCUMENT_SECTION_TITLE_LIMIT", "64"))
 MESSAGE_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("MESSAGE_RETRIEVAL_SEMANTIC_LIMIT", "24"))
 EMBEDDING_TEXT_CHAR_LIMIT = int(os.getenv("EMBEDDING_TEXT_CHAR_LIMIT", "2400"))
 RETRIEVAL_RRF_K = int(os.getenv("RETRIEVAL_RRF_K", "60"))
@@ -4219,6 +4220,7 @@ def current_document_chunk_settings() -> Dict[str, int]:
     return {
         "chunk_target_chars": int(DOCUMENT_CHUNK_TARGET_CHARS),
         "chunk_overlap_chars": int(DOCUMENT_CHUNK_OVERLAP_CHARS),
+        "section_title_limit": int(DOCUMENT_SECTION_TITLE_LIMIT),
     }
 
 
@@ -4228,6 +4230,7 @@ def cached_document_index_matches_settings(source: Optional[Dict[str, Any]]) -> 
     return (
         int(metadata.get("chunk_target_chars", 0) or 0) == DOCUMENT_CHUNK_TARGET_CHARS
         and int(metadata.get("chunk_overlap_chars", 0) or 0) == DOCUMENT_CHUNK_OVERLAP_CHARS
+        and int(metadata.get("section_title_limit", 0) or 0) == DOCUMENT_SECTION_TITLE_LIMIT
     )
 
 
@@ -4643,7 +4646,7 @@ def build_document_chunks(payload: Dict[str, Any]) -> tuple[List[Dict[str, Any]]
             })
             chunk_index += 1
 
-    return chunks, section_titles[:12]
+    return chunks, section_titles[:DOCUMENT_SECTION_TITLE_LIMIT]
 
 
 def delete_document_index(conn: sqlite3.Connection, conversation_id: str, rel_path: str):
@@ -4679,7 +4682,7 @@ def store_document_index(
 ):
     """Persist extracted document metadata and its retrieval chunks."""
     metadata = dict(payload.get("metadata") or {})
-    metadata["section_titles"] = section_titles[:12]
+    metadata["section_titles"] = section_titles[:DOCUMENT_SECTION_TITLE_LIMIT]
     metadata["chunk_count"] = len(chunks)
     metadata.update(current_document_chunk_settings())
     indexed_at = utcnow_iso()
@@ -5447,7 +5450,7 @@ def build_document_summary_batches(
     *,
     char_budget: int = DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET,
 ) -> tuple[List[Dict[str, Any]], List[str]]:
-    """Group indexed attachment chunks into sequential summary batches."""
+    """Group indexed attachment chunks into section-aware summary batches."""
     batches: List[Dict[str, Any]] = []
     source_lines: List[str] = []
     for rel_path in rel_paths:
@@ -5458,37 +5461,70 @@ def build_document_summary_batches(
         chunks = fetch_all_document_chunk_rows(conversation_id, rel_path)
         if not chunks:
             continue
-        current_items: List[str] = []
-        current_chars = 0
-        current_page_start = None
-        current_page_end = None
+        grouped_sections: List[Dict[str, Any]] = []
+        current_section_title = ""
+        current_section_chunks: List[Dict[str, Any]] = []
+
+        def flush_grouped_section() -> None:
+            nonlocal current_section_title, current_section_chunks
+            if not current_section_chunks:
+                return
+            grouped_sections.append({
+                "section_title": current_section_title or str(current_section_chunks[0].get("section_title") or "").strip() or "Document section",
+                "chunks": list(current_section_chunks),
+            })
+            current_section_chunks = []
+            current_section_title = ""
+
         for chunk in chunks:
-            excerpt = format_document_chunk_excerpt_for_summary(rel_path, chunk)
-            excerpt_chars = len(excerpt) + (2 if current_items else 0)
-            if current_items and current_chars + excerpt_chars > max(1200, int(char_budget)):
-                batches.append({
-                    "path": rel_path,
-                    "page_start": current_page_start,
-                    "page_end": current_page_end,
-                    "text": "\n\n".join(current_items),
-                })
-                current_items = []
-                current_chars = 0
-                current_page_start = None
-                current_page_end = None
-            current_items.append(excerpt)
-            current_chars += excerpt_chars
-            page_start = chunk.get("page_start")
-            page_end = chunk.get("page_end")
-            if current_page_start is None and page_start is not None:
-                current_page_start = page_start
-            if page_end is not None:
-                current_page_end = page_end
-            elif page_start is not None:
-                current_page_end = page_start
-        if current_items:
+            chunk_section = str(chunk.get("section_title") or "").strip() or "Document section"
+            if current_section_chunks and chunk_section != current_section_title:
+                flush_grouped_section()
+            if not current_section_chunks:
+                current_section_title = chunk_section
+            current_section_chunks.append(chunk)
+        flush_grouped_section()
+
+        for grouped_section in grouped_sections:
+            current_items: List[str] = []
+            current_chars = 0
+            current_page_start = None
+            current_page_end = None
+            section_title = str(grouped_section.get("section_title") or "").strip() or "Document section"
+            part_index = 1
+            for chunk in grouped_section.get("chunks", []):
+                excerpt = format_document_chunk_excerpt_for_summary(rel_path, chunk)
+                excerpt_chars = len(excerpt) + (2 if current_items else 0)
+                if current_items and current_chars + excerpt_chars > max(1200, int(char_budget)):
+                    batches.append({
+                        "path": rel_path,
+                        "section_title": section_title,
+                        "section_part": part_index,
+                        "page_start": current_page_start,
+                        "page_end": current_page_end,
+                        "text": "\n\n".join(current_items),
+                    })
+                    part_index += 1
+                    current_items = []
+                    current_chars = 0
+                    current_page_start = None
+                    current_page_end = None
+                current_items.append(excerpt)
+                current_chars += excerpt_chars
+                page_start = chunk.get("page_start")
+                page_end = chunk.get("page_end")
+                if current_page_start is None and page_start is not None:
+                    current_page_start = page_start
+                if page_end is not None:
+                    current_page_end = page_end
+                elif page_start is not None:
+                    current_page_end = page_start
+            if not current_items:
+                continue
             batches.append({
                 "path": rel_path,
+                "section_title": section_title,
+                "section_part": part_index,
                 "page_start": current_page_start,
                 "page_end": current_page_end,
                 "text": "\n\n".join(current_items),
@@ -5499,16 +5535,21 @@ def build_document_summary_batches(
 def summarize_document_batch_scope(batch: Dict[str, Any]) -> str:
     """Render a human-readable scope label for one summary batch."""
     path = str(batch.get("path") or "").strip()
+    section_title = str(batch.get("section_title") or "").strip()
+    section_part = int(batch.get("section_part", 0) or 0)
     page_start = batch.get("page_start")
     page_end = batch.get("page_end")
+    scope_parts: List[str] = [part for part in [path, section_title] if part]
     if page_start:
         page_label = (
             f"pages {page_start}-{page_end}"
             if page_end and page_end != page_start
             else f"page {page_start}"
         )
-        return f"{path} ({page_label})"
-    return path or "attachment batch"
+        scope_parts.append(page_label)
+    if section_part > 1:
+        scope_parts.append(f"part {section_part}")
+    return " | ".join(scope_parts) if scope_parts else "attachment batch"
 
 
 def pack_document_context_windows(
@@ -19341,6 +19382,7 @@ async def summarize_attachment_batch_via_llm(
                 f"Current excerpt scope:\n{batch_scope}",
                 "",
                 "Summarize this excerpt for later synthesis.",
+                "If the scope names a document section, preserve that section identity exactly in the summary.",
                 "Return Markdown with these sections:",
                 "## Scope",
                 "## Key Points",
@@ -19393,8 +19435,19 @@ async def synthesize_attachment_summary_via_llm(
     request_text: str,
     source_lines: List[str],
     condensed_summaries: List[str],
+    expected_sections: Optional[List[str]] = None,
 ) -> str:
     """Write the final user-facing summary from condensed attachment notes."""
+    cleaned_sections = [str(item).strip() for item in (expected_sections or []) if str(item).strip()]
+    section_guidance = ""
+    if cleaned_sections and len(cleaned_sections) <= 20:
+        section_guidance = "\n".join([
+            "",
+            "Detected document sections to cover explicitly:",
+            "\n".join(f"- {section}" for section in cleaned_sections),
+            "",
+            "Organize the answer so each detected section is covered once. Do not collapse the list into a smaller arbitrary subset.",
+        ])
     messages = [
         {"role": "system", "content": ATTACHMENT_SUMMARY_SYSTEM_PROMPT},
         {
@@ -19410,6 +19463,7 @@ async def synthesize_attachment_summary_via_llm(
                 "Then provide a comprehensive but readable summary.",
                 "Close with 3-6 concise bullet takeaways.",
                 "Do not mention tool limitations or ask the user to paste the document again.",
+                section_guidance,
                 "",
                 "Condensed summaries:",
                 "\n\n---\n\n".join(summary.strip() for summary in condensed_summaries if summary.strip()),
@@ -19430,6 +19484,17 @@ async def handle_direct_attachment_summary_command(
     """Process long attachment summaries through a deterministic multi-pass loop."""
     cleaned_query = str(query or "").strip() or "Summarize the attached documents."
     batches, source_lines = build_document_summary_batches(conversation_id, attachment_paths)
+    expected_sections: List[str] = []
+    for rel_path in attachment_paths:
+        try:
+            source = ensure_document_index(conversation_id, rel_path)
+        except Exception:
+            continue
+        metadata = dict(source.get("metadata") or {})
+        for section in metadata.get("section_titles", []) or []:
+            cleaned_section = str(section or "").strip()
+            if cleaned_section and cleaned_section not in expected_sections:
+                expected_sections.append(cleaned_section)
     if not batches:
         indexed_sources: List[Dict[str, Any]] = []
         notes: List[str] = []
@@ -19462,6 +19527,7 @@ async def handle_direct_attachment_summary_command(
         workflow_execution.route_metadata["attachment_summary"] = {
             "source_count": len(source_lines),
             "batch_count": len(batches),
+            "section_count": len(expected_sections),
         }
 
     await send_activity_event(
@@ -19531,6 +19597,7 @@ async def handle_direct_attachment_summary_command(
         cleaned_query,
         source_lines,
         current_summaries,
+        expected_sections=expected_sections,
     )
 
 
