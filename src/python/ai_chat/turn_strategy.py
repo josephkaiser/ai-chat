@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 import re
 from typing import Any, Dict, List
 
+from src.python.ai_chat.route_intake import StructuredRouteIntake
+
 
 FILE_CREATION_PHRASES = (
     "create a file",
@@ -249,6 +251,15 @@ class TurnAssessment:
     enabled_tools: List[str] = field(default_factory=list)
     primary_skill: str = "direct_answer"
     execution_style: str = "direct_answer"
+    needs_fresh_info: bool = False
+    needs_search_citations: bool = False
+    is_versioned_release_query: bool = False
+    entity: str = ""
+    time_sensitivity: str = "stable"
+    answer_shape: str = "answer"
+    route_confidence: float = 0.0
+    route_reasoning: str = ""
+    route_intake: Dict[str, Any] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
     def as_metadata(self) -> Dict[str, Any]:
@@ -272,18 +283,24 @@ def build_turn_assessment(
     resume_saved_workspace: bool = False,
     execution_requested: bool = False,
     workspace_run_commands_enabled: bool = False,
+    route_intake: StructuredRouteIntake | None = None,
 ) -> TurnAssessment:
     """Build the explicit decision record for the current turn."""
+    route = route_intake or StructuredRouteIntake()
     compare_to_rag = bool(
         has_attachment_context
         or local_rag_requested
         or "conversation.search_history" in enabled_tools
+        or route.local_rag_requested
     )
-    requires_search = infer_search_required(
-        enabled_tools=enabled_tools,
-        slash_command_name=slash_command_name,
-        local_rag_requested=local_rag_requested,
-        web_search_requested=web_search_requested,
+    requires_search = bool(
+        route.web_search_requested
+        or infer_search_required(
+            enabled_tools=enabled_tools,
+            slash_command_name=slash_command_name,
+            local_rag_requested=local_rag_requested,
+            web_search_requested=web_search_requested,
+        )
     )
     requires_file_creation = infer_file_creation_required(
         message,
@@ -309,6 +326,7 @@ def build_turn_assessment(
     )
     requires_workspace = bool(
         workspace_requested
+        or route.needs_workspace
         or workspace_intent != "none"
         or any(
             tool_name.startswith("workspace.") or tool_name == "spreadsheet.describe"
@@ -344,6 +362,8 @@ def build_turn_assessment(
     notes: List[str] = []
     if compare_to_rag:
         notes.append("local_rag")
+    if route.needs_fresh_info:
+        notes.append("fresh_info")
     if requires_search:
         notes.append("search")
     if requires_file_creation:
@@ -369,6 +389,15 @@ def build_turn_assessment(
         enabled_tools=list(enabled_tools),
         primary_skill=primary_skill,
         execution_style=execution_style,
+        needs_fresh_info=route.needs_fresh_info,
+        needs_search_citations=route.needs_search_citations,
+        is_versioned_release_query=route.is_versioned_release_query,
+        entity=route.entity,
+        time_sensitivity=route.time_sensitivity,
+        answer_shape=route.answer_shape,
+        route_confidence=route.confidence,
+        route_reasoning=route.reasoning,
+        route_intake=route.as_metadata(),
         notes=notes,
     )
 

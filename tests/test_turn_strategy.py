@@ -1,5 +1,6 @@
 import unittest
 
+from src.python.ai_chat.route_intake import StructuredRouteIntake
 from src.python.ai_chat.turn_strategy import build_turn_assessment, format_turn_assessment_summary, infer_explicit_planning_request
 
 
@@ -102,6 +103,35 @@ class TurnStrategyTests(unittest.TestCase):
         self.assertIn("search yes", summary)
         self.assertIn("files yes", summary)
         self.assertIn("review yes", summary)
+
+    def test_structured_route_intake_overrides_search_and_fresh_info_signals(self):
+        assessment = build_turn_assessment(
+            message="can you summarize the changes to nvim 0.12",
+            requested_mode="normal",
+            resolved_mode="normal",
+            workspace_intent="none",
+            enabled_tools=["web.search", "web.fetch_page"],
+            workspace_requested=False,
+            route_intake=StructuredRouteIntake(
+                needs_fresh_info=True,
+                is_versioned_release_query=True,
+                entity="nvim",
+                time_sensitivity="versioned",
+                answer_shape="summary",
+                needs_search_citations=True,
+                web_search_requested=True,
+                reasoning="versioned release summary",
+                confidence=0.92,
+            ),
+        )
+
+        self.assertTrue(assessment.requires_search)
+        self.assertTrue(assessment.needs_fresh_info)
+        self.assertTrue(assessment.needs_search_citations)
+        self.assertTrue(assessment.is_versioned_release_query)
+        self.assertEqual(assessment.entity, "nvim")
+        self.assertEqual(assessment.time_sensitivity, "versioned")
+        self.assertEqual(assessment.answer_shape, "summary")
 
 
 if __name__ == "__main__":
