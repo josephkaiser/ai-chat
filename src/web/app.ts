@@ -1619,7 +1619,8 @@ function renderInlineMarkdown(text: string): string {
         .replace(/`([^`]+)`/g, "<code>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+        .replace(/\n/g, "<br>");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
 
@@ -1733,7 +1734,7 @@ function renderRichText(raw: string): string {
             if (lines.every((line) => /^&gt;\s?/.test(line))) {
                 const quote = lines
                     .map((line) => line.replace(/^&gt;\s?/, ""))
-                    .join("<br>");
+                    .join("\n");
                 return `<blockquote>${renderInlineMarkdown(quote)}</blockquote>`;
             }
 
@@ -1749,11 +1750,11 @@ function renderRichText(raw: string): string {
             if (heading) {
                 const level = Math.min(heading[1].length, 4);
                 const headingHtml = `<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`;
-                const rest = lines.slice(1).join("<br>");
+                const rest = lines.slice(1).join("\n");
                 return rest ? `${headingHtml}<p>${renderInlineMarkdown(rest)}</p>` : headingHtml;
             }
 
-            return `<p>${renderInlineMarkdown(lines.join("<br>"))}</p>`;
+            return `<p>${renderInlineMarkdown(lines.join("\n"))}</p>`;
         })
         .join("");
 
