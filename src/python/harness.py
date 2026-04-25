@@ -264,6 +264,7 @@ from src.python.ai_chat.routing_program import DEFAULT_ROUTE_PROGRAM, RouteProgr
 from src.python.ai_chat.runtime_layers import (
     TURN_KIND_VISIBLE_CHAT,
     build_model_history,
+    compose_model_message,
     compose_runtime_turn,
     normalize_turn_kind,
     visible_message_kind_sql,
@@ -6730,6 +6731,89 @@ def summarize_request_for_plan(message: str, limit: int = 96) -> str:
     return f"{cleaned[: max(0, limit - 3)].rstrip(' ,.;:')}..."
 
 
+TASK_BOARD_REQUEST_CHAR_LIMIT = 520
+TASK_BOARD_FACTS_CHAR_LIMIT = 1400
+TASK_BOARD_NOTE_CHAR_LIMIT = 320
+TASK_BOARD_CODE_OMISSION_NOTE = "Inline code omitted from this task-board summary."
+TASK_BOARD_TOOL_PAYLOAD_PATTERN = re.compile(
+    r"<tool_(?:call|result)>\s*.*?\s*</tool_(?:call|result)>",
+    re.IGNORECASE | re.DOTALL,
+)
+TASK_BOARD_FENCED_CODE_PATTERN = re.compile(r"```[\s\S]*?```")
+TASK_BOARD_INLINE_CODE_PATTERN = re.compile(
+    r"```|<!doctype html|<html\b|<head\b|<body\b|<script\b|<style\b|^\s*<\?xml\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+EVALUATION_REQUEST_PATTERNS = (
+    "is this good",
+    "is this a good",
+    "does this look right",
+    "does this seem right",
+    "what do you think of",
+    "review this",
+    "critique this",
+    "evaluate this",
+    "assess this",
+    "is this a solid",
+)
+EVALUATION_REQUEST_HINTS = {
+    "review",
+    "critique",
+    "evaluate",
+    "assessment",
+    "assess",
+    "feedback",
+    "good",
+    "solid",
+    "taskboard",
+    "task",
+    "board",
+}
+
+
+def compact_task_board_text(
+    value: Any,
+    *,
+    limit: int = TASK_BOARD_NOTE_CHAR_LIMIT,
+    code_omission_note: str = TASK_BOARD_CODE_OMISSION_NOTE,
+) -> str:
+    """Compact task-board fields so they keep progress, not raw code or tool payloads."""
+    cleaned = str(value or "").replace("\r", "\n").strip()
+    if not cleaned:
+        return ""
+    cleaned = strip_stream_special_tokens(cleaned)
+    cleaned = TASK_BOARD_TOOL_PAYLOAD_PATTERN.sub(" ", cleaned)
+    if "Grounded workspace snapshot:" in cleaned:
+        cleaned = cleaned.split("Grounded workspace snapshot:", 1)[0].strip()
+    had_inline_code = bool(TASK_BOARD_INLINE_CODE_PATTERN.search(cleaned))
+    cleaned = TASK_BOARD_FENCED_CODE_PATTERN.sub(" ", cleaned)
+    cleaned = re.sub(r"\[\[artifact:[^\]]+\]\]", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.")
+    if had_inline_code:
+        summary = summarize_request_for_plan(cleaned, limit=max(80, min(limit - 8, 200)))
+        cleaned = " ".join(part for part in (summary, code_omission_note) if part).strip()
+    return truncate_output(cleaned, limit=limit).strip()
+
+
+def request_is_evaluative(message: str) -> bool:
+    """Return whether the user is asking for an assessment rather than execution."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    if any(pattern in text for pattern in EVALUATION_REQUEST_PATTERNS):
+        return True
+    if "?" not in text:
+        return False
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if {"is", "does", "should"} & words and EVALUATION_REQUEST_HINTS & words:
+        return True
+    return bool(
+        {"good", "right", "solid"} & words
+        and {"this", "it", "that"} & words
+        and {"taskboard", "task", "board", "plan", "prompt", "request"} & words
+    )
+
+
 def extract_request_terms_for_plan(message: str, limit: int = 12) -> List[str]:
     """Pick durable request terms that help detect boilerplate planner text."""
     lowered = " ".join((message or "").strip().lower().split())
@@ -7128,8 +7212,11 @@ def format_step_subplan_progress(
     ]
     if completed_summaries:
         progress_lines.append("Completed substep notes:")
-        progress_lines.extend(f"- {summary}" for summary in completed_summaries)
-    progress_note = str(subplan.get("progress_note", "")).strip()
+        progress_lines.extend(
+            f"- {compact_task_board_text(summary, limit=TASK_BOARD_NOTE_CHAR_LIMIT) or '(summary omitted)'}"
+            for summary in completed_summaries
+        )
+    progress_note = compact_task_board_text(subplan.get("progress_note", ""), limit=TASK_BOARD_NOTE_CHAR_LIMIT)
     if progress_note:
         progress_lines.extend([
             "Current progress note:",
@@ -7146,7 +7233,11 @@ def format_step_subplan_progress(
 
 def summarize_completed_step_from_substeps(step: str, substep_summaries: List[str]) -> str:
     """Condense nested substep summaries into the parent build-step summary."""
-    cleaned = [str(item).strip() for item in substep_summaries if str(item).strip()]
+    cleaned: List[str] = []
+    for item in substep_summaries:
+        summary = compact_task_board_text(item, limit=TASK_BOARD_NOTE_CHAR_LIMIT)
+        if summary:
+            cleaned.append(summary)
     if not cleaned:
         return f"Completed build step: {step}"
     joined = " | ".join(cleaned)
@@ -8165,6 +8256,8 @@ def should_auto_execute_workspace_task(
     """Auto-upgrade concrete workspace build requests into the full inspect/plan/build/verify flow."""
     if not features.agent_tools or not features.workspace_write:
         return False
+    if request_is_evaluative(message):
+        return False
     if request_is_about_limitations(message):
         return False
     if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
@@ -8301,6 +8394,16 @@ def format_task_board(
     """Render a durable workspace checklist for the current deep-mode turn."""
     builder_steps = session.plan.get("builder_steps", [])
     verifier_checks = session.plan.get("verifier_checks", [])
+    request_text = compact_task_board_text(
+        session.task_request or session.message,
+        limit=TASK_BOARD_REQUEST_CHAR_LIMIT,
+    ) or "(none)"
+    strategy_text = compact_task_board_text(session.plan.get("strategy", "(none)"), limit=280) or "(none)"
+    deliverable_text = compact_task_board_text(session.plan.get("deliverable", "(none)"), limit=280) or "(none)"
+    workspace_facts = compact_task_board_text(
+        session.workspace_facts,
+        limit=TASK_BOARD_FACTS_CHAR_LIMIT,
+    ) or "(pending)"
 
     def render_items(items: List[str], completed_count: int = 0, active_index: Optional[int] = None) -> List[str]:
         rendered: List[str] = []
@@ -8329,13 +8432,13 @@ def format_task_board(
         "# Task Board",
         "",
         "## Request",
-        session.task_request or session.message or "(none)",
+        request_text,
         "",
         "## Strategy",
-        session.plan.get("strategy", "(none)"),
+        strategy_text,
         "",
         "## Deliverable",
-        session.plan.get("deliverable", "(none)"),
+        deliverable_text,
         "",
         "## Build Checklist",
         *build_lines,
@@ -8344,7 +8447,7 @@ def format_task_board(
         *verify_lines,
         "",
         "## Workspace Facts",
-        session.workspace_facts or "(pending)",
+        workspace_facts,
         "",
         "## Workspace Snapshot",
         format_workspace_snapshot(session.workspace_snapshot),
@@ -8362,7 +8465,10 @@ def format_task_board(
         "## Step Notes",
     ])
     if session.build_step_summaries:
-        lines.extend(f"- {summary}" for summary in session.build_step_summaries)
+        lines.extend(
+            f"- {compact_task_board_text(summary, limit=TASK_BOARD_NOTE_CHAR_LIMIT) or '(summary omitted)'}"
+            for summary in session.build_step_summaries
+        )
     else:
         lines.append("- No build steps completed yet.")
 
@@ -16803,6 +16909,15 @@ def classify_workspace_intent(
         return "focused_read"
 
     words = set(re.findall(r"[a-z0-9_+-]+", text))
+    path_refs = extract_workspace_path_references(message)
+    repo_scope_terms = {"repo", "repository", "codebase", "workspace", "project", "app", "service", "api"}
+    if request_is_evaluative(message):
+        if path_refs:
+            return "focused_read" if len(path_refs) == 1 else "broad_read"
+        if words & repo_scope_terms:
+            return "broad_read"
+        return "none"
+
     read_verbs = {"inspect", "read", "open", "show", "list", "search", "find", "grep", "explain", "review", "render", "preview", "display", "view"}
     write_verbs = {
         "edit", "change", "update", "patch", "refactor", "create", "write", "add",
@@ -16812,8 +16927,6 @@ def classify_workspace_intent(
         "tweak", "adjust", "modify", "improve", "revise",
     }
 
-    path_refs = extract_workspace_path_references(message)
-    repo_scope_terms = {"repo", "repository", "codebase", "workspace", "project", "app", "service", "api"}
     broad_scope = bool(words & repo_scope_terms) or bool(words & WORKSPACE_TEMPLATE_TERMS) or len(path_refs) > 1
 
     if words & WORKSPACE_TEMPLATE_TERMS and (words & repo_scope_terms or "python" in words):
@@ -17894,7 +18007,7 @@ async def deep_inspect_workspace(session: DeepSession) -> str:
         session.draft_response = outcome.final_text
         await persist_task_state(session)
         return session.workspace_facts
-    facts = outcome.final_text.strip()
+    facts = compact_task_board_text(outcome.final_text, limit=TASK_BOARD_FACTS_CHAR_LIMIT)
     snapshot_facts = format_workspace_snapshot(session.workspace_snapshot)
     session.workspace_facts = (
         f"{facts}\n\nGrounded workspace snapshot:\n{snapshot_facts}"
@@ -18187,7 +18300,10 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 if isinstance(path, str) and path not in changed_files:
                     changed_files.append(path)
 
-            substep_summary = outcome.final_text.strip() or f"Completed substep {idx + 1}.{sub_idx + 1}."
+            substep_summary = compact_task_board_text(
+                outcome.final_text,
+                limit=TASK_BOARD_NOTE_CHAR_LIMIT,
+            ) or f"Completed substep {idx + 1}.{sub_idx + 1}."
             if substep_successful_tools == 0:
                 substep_summary = f"{substep_summary} No successful tool actions were recorded for this substep."
 
@@ -19666,10 +19782,9 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         turn_envelope.effective_message,
         history=prior_history,
     ) if not slash_command else turn_envelope.effective_message
-    model_message = (
-        effective_message + str(turn_envelope.model_message[len(turn_envelope.effective_message):])
-        if turn_envelope.model_message.startswith(turn_envelope.effective_message)
-        else turn_envelope.model_message
+    model_message = compose_model_message(
+        effective_message,
+        layers=turn_envelope.layers,
     )
     user_message_id = save_message(
         conv_id,
@@ -19728,6 +19843,12 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     )
     local_rag_requested = should_offer_local_rag(effective_message, features)
     web_search_requested = should_offer_web_search(effective_message, features, history=history)
+    if not slash_command and mode != "deep" and not auto_execute_workspace and not resume_saved_workspace:
+        enabled_tools = select_direct_answer_tools(
+            effective_message,
+            enabled_tools,
+            history=history,
+        )
     tool_policy_trace = build_tool_policy_trace(
         saved_user_message=saved_user_message,
         effective_message=effective_message,

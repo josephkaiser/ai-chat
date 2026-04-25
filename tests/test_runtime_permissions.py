@@ -1246,6 +1246,61 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertEqual(intent, "focused_write")
 
+    def test_classify_workspace_intent_treats_task_board_review_as_read_not_write(self):
+        intent = app.classify_workspace_intent(
+            "Is this a good task board for the request to create an HTML website?\n\n"
+            "Task Board\nRequest\ncreate an html website\n\nVerification Checklist\n[ ] compare output",
+        )
+
+        self.assertEqual(intent, "none")
+
+    def test_should_auto_execute_workspace_task_skips_evaluative_review_requests(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+
+        should_execute = app.should_auto_execute_workspace_task(
+            "conv-taskboard-review",
+            "Is this a good task board for the request to create an HTML website?",
+            features,
+        )
+
+        self.assertFalse(should_execute)
+
+    def test_select_direct_answer_tools_removes_write_tools_for_task_board_review(self):
+        filtered = app.select_direct_answer_tools(
+            "Is this a good task board for the request to create an HTML website?",
+            ["workspace.read_file", "workspace.patch_file", "workspace.run_command"],
+        )
+
+        self.assertEqual(filtered, ["workspace.read_file"])
+
+    def test_format_task_board_omits_inline_code_from_request_and_notes(self):
+        session = app.DeepSession(
+            websocket=None,
+            conversation_id="conv-taskboard",
+            message="",
+            history=[],
+            system_prompt="System",
+            max_tokens=512,
+            features=app.FeatureFlags(),
+            task_request=(
+                "Review this task board.\n\n```html\n<!DOCTYPE html><html><body><h1>Portfolio</h1></body></html>\n```"
+            ),
+            workspace_enabled=True,
+            workspace_facts=(
+                "Observed issue.\n\nGrounded workspace snapshot:\n- Workspace root: /tmp/workspace"
+            ),
+            plan={"strategy": "Check task board quality", "deliverable": "A concise review"},
+            build_step_summaries=[
+                "Implemented the draft.\n\n```html\n<!DOCTYPE html><html><body>hello</body></html>\n```"
+            ],
+            workspace_snapshot={"workspace_root": "/tmp/workspace", "total_files": 0, "user_file_count": 0, "total_dirs": 0, "top_level": [], "sample_paths": []},
+        )
+
+        rendered = app.format_task_board(session)
+
+        self.assertIn("Inline code omitted from this task-board summary.", rendered)
+        self.assertNotIn("<!DOCTYPE html>", rendered)
+
     def test_should_offer_web_search_inherits_offer_for_short_followup(self):
         features = app.FeatureFlags(agent_tools=True, web_search=True)
 

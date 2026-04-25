@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 TurnKind = Literal["visible_chat", "runtime_file"]
 LayerVisibility = Literal["visible", "model_only"]
@@ -70,15 +70,12 @@ def compose_runtime_turn(
         saved_user_message = f"{cleaned_message}\n\n{cleaned_attachment_context}" if cleaned_message else cleaned_attachment_context
 
     effective_message = cleaned_slash_request or saved_user_message
-    model_message = effective_message
-    if cleaned_runtime_context:
-        model_message = f"{effective_message}{cleaned_runtime_context}"
-
     layers: List[RuntimeLayer] = []
     if cleaned_attachment_context:
         layers.append(RuntimeLayer(name="attachments", content=cleaned_attachment_context, visibility="visible"))
     if cleaned_runtime_context:
         layers.append(RuntimeLayer(name="runtime_context", content=cleaned_runtime_context, visibility="model_only"))
+    model_message = compose_model_message(effective_message, layers=layers)
 
     return RuntimeTurnEnvelope(
         turn_kind=normalized_turn_kind,
@@ -91,6 +88,32 @@ def compose_runtime_turn(
         slash_request=cleaned_slash_request,
         layers=layers,
     )
+
+
+def compose_model_message(
+    effective_message: str,
+    *,
+    runtime_context: str = "",
+    layers: Optional[List[RuntimeLayer]] = None,
+) -> str:
+    """Rebuild the model-facing prompt from the latest effective message plus model-only layers."""
+    base = str(effective_message or "").strip()
+    suffixes: List[str] = []
+    if layers is not None:
+        for layer in layers:
+            if getattr(layer, "visibility", "") != "model_only":
+                continue
+            cleaned = str(getattr(layer, "content", "") or "").strip()
+            if cleaned:
+                suffixes.append(cleaned)
+    else:
+        cleaned_runtime_context = str(runtime_context or "").strip()
+        if cleaned_runtime_context:
+            suffixes.append(cleaned_runtime_context)
+
+    parts = [base] if base else []
+    parts.extend(suffixes)
+    return "\n\n".join(parts)
 
 
 def build_model_history(
