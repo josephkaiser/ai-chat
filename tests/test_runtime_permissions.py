@@ -988,6 +988,56 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertTrue(result["rubric"]["basic_structure_present"])
         self.assertTrue(result["verification"]["passed"])
 
+    def test_workspace_get_diagnostics_result_parses_python_syntax_error(self):
+        features = app.FeatureFlags(allowed_commands=["exec:python3"])
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            broken_path = workspace / "broken.py"
+            broken_path.write_text("def broken(:\n    pass\n", encoding="utf-8")
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                result = asyncio.run(
+                    app.workspace_get_diagnostics_result(
+                        "conv-diagnostics",
+                        "broken.py",
+                        features,
+                    )
+                )
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        self.assertEqual(result["path"], "broken.py")
+        self.assertGreaterEqual(result["diagnostic_count"], 1)
+        self.assertGreaterEqual(result["error_count"], 1)
+        self.assertFalse(result["verification"]["passed"])
+        self.assertEqual(result["verification"]["kind"], "diagnostics")
+        self.assertEqual(result["diagnostics"][0]["line"], 1)
+
+    def test_workspace_get_diagnostics_result_rejects_unsupported_file_types(self):
+        features = app.FeatureFlags(allowed_commands=["exec:python3"])
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            target = workspace / "notes.txt"
+            target.write_text("hello\n", encoding="utf-8")
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                with self.assertRaises(ValueError) as exc_info:
+                    asyncio.run(
+                        app.workspace_get_diagnostics_result(
+                            "conv-diagnostics",
+                            "notes.txt",
+                            features,
+                        )
+                    )
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        self.assertIn("No built-in diagnostics checker", str(exc_info.exception))
+
     def test_finalize_verification_trace_marks_written_file_verified_after_passing_checks(self):
         summary = app.finalize_verification_trace({
             "written_paths": ["src/app.py"],
@@ -1013,6 +1063,15 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertFalse(summary["functional"])
         self.assertEqual(summary["checks_total"], 0)
         self.assertEqual(summary["score"], 0)
+
+    def test_allowed_workspace_tools_include_diagnostics_when_run_commands_enabled(self):
+        tools = app.allowed_workspace_tools(
+            app.FeatureFlags(workspace_run_commands=True),
+            include_write=False,
+        )
+
+        self.assertIn("workspace.get_diagnostics", tools)
+        self.assertIn("workspace.run_command", tools)
 
     def test_allowed_workspace_tools_include_html_inspection(self):
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)
