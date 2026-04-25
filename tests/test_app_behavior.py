@@ -199,6 +199,8 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("Match the scale of the change to the current step", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("managed chat-scoped Python environment", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("save it as a workspace file", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("responsive layouts that fit narrow panes and phones", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("workspace viewer, normal desktop browsers, and phones", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertNotIn(".venv", TOOL_USE_SYSTEM_PROMPT)
 
 

@@ -315,10 +315,90 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+MODEL_DEFAULTS_FILE = pathlib.Path(__file__).resolve().parents[3] / "config" / "model-defaults.env"
+MODEL_OVERRIDES_FILE = pathlib.Path(__file__).resolve().parents[3] / "config" / "model-overrides.local.env"
+ORIGINAL_ENV_KEYS = set(os.environ.keys())
+
+
+def load_env_defaults_file(path: pathlib.Path, *, allow_override: bool = False) -> None:
+    """Populate environment variables from a simple KEY=VALUE defaults file."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        if allow_override:
+            if key in ORIGINAL_ENV_KEYS:
+                continue
+            os.environ[key] = value.strip()
+            continue
+        if key in os.environ:
+            continue
+        os.environ[key] = value.strip()
+
+
+load_env_defaults_file(MODEL_DEFAULTS_FILE)
+load_env_defaults_file(MODEL_OVERRIDES_FILE, allow_override=True)
+
+
+def env_truthy(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable using a small truthy set."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_model_args_from_env(prefix: str) -> str:
+    """Build one vLLM argument string from line-by-line env settings."""
+    parts: List[str] = []
+
+    gpu_memory_utilization = os.getenv(f"{prefix}_GPU_MEMORY_UTILIZATION", "").strip()
+    max_model_len = os.getenv(f"{prefix}_MAX_MODEL_LEN", "").strip()
+    max_num_seqs = os.getenv(f"{prefix}_MAX_NUM_SEQS", "").strip()
+    quantization = os.getenv(f"{prefix}_QUANTIZATION", "").strip()
+    swap_space = os.getenv(f"{prefix}_SWAP_SPACE", "").strip()
+    extra_args = os.getenv(f"{prefix}_EXTRA_ARGS", "").strip()
+
+    if gpu_memory_utilization:
+        parts.extend(["--gpu-memory-utilization", gpu_memory_utilization])
+    if max_model_len:
+        parts.extend(["--max-model-len", max_model_len])
+    if env_truthy(f"{prefix}_ENABLE_PREFIX_CACHING"):
+        parts.append("--enable-prefix-caching")
+    if max_num_seqs:
+        parts.extend(["--max-num-seqs", max_num_seqs])
+    if env_truthy(f"{prefix}_ENABLE_CHUNKED_PREFILL"):
+        parts.append("--enable-chunked-prefill")
+    if quantization:
+        parts.extend(["--quantization", quantization])
+    if env_truthy(f"{prefix}_TRUST_REMOTE_CODE"):
+        parts.append("--trust-remote-code")
+    if env_truthy(f"{prefix}_ENFORCE_EAGER"):
+        parts.append("--enforce-eager")
+    if swap_space:
+        parts.extend(["--swap-space", swap_space])
+    if extra_args:
+        try:
+            parts.extend(shlex.split(extra_args))
+        except ValueError:
+            parts.append(extra_args)
+
+    return " ".join(parts)
+
 # --- Runtime configuration (override with env vars; see docs/configuration.md) ---
 DB_PATH = os.getenv("DB_PATH", "/app/data/chat.db")
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-14B-AWQ")
+MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("MODEL_14B_NAME", ""))
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT", str(pathlib.Path("/app/workspaces")))
 RUNS_ROOT = os.getenv("RUNS_ROOT", str(pathlib.Path("/app/runs")))
@@ -326,12 +406,7 @@ MANAGED_PYTHON_ENVS_ROOT = os.getenv("MANAGED_PYTHON_ENVS_ROOT", str(pathlib.Pat
 VOICE_ROOT = os.getenv("VOICE_ROOT", str(pathlib.Path("/app/data/voice")))
 MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/app/data/model_state.json")
 MODEL_14B_NAME = os.getenv("MODEL_14B_NAME", MODEL_NAME)
-MODEL_14B_ARGS = os.getenv(
-    "MODEL_14B_ARGS",
-    "--gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching "
-    "--max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin "
-    "--trust-remote-code --enforce-eager",
-)
+MODEL_14B_ARGS = os.getenv("MODEL_14B_ARGS", "").strip() or build_model_args_from_env("MODEL_14B")
 CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}

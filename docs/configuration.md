@@ -1,22 +1,40 @@
 # Configuration
 
-Edit `docker-compose.yml` to change the model or vLLM settings:
+Edit [config/model-defaults.env](/Users/joe/dev/ai-chat/config/model-defaults.env) to change the safe repo defaults in one place:
 
-```yaml
-vllm:
-  command: >
-    --model Qwen/Qwen3-14B-AWQ
-    --gpu-memory-utilization 0.95
-    --max-model-len 8192
-    --enable-prefix-caching
-    --max-num-seqs 16
-    --enable-chunked-prefill
-    --quantization awq_marlin
-    --trust-remote-code
-    --enforce-eager
+```dotenv
+DEFAULT_MODEL_PROFILE=14b
+MODEL_14B_NAME=Qwen/Qwen3-14B-AWQ
+MODEL_14B_GPU_MEMORY_UTILIZATION=0.95
+MODEL_14B_MAX_MODEL_LEN=8192
+MODEL_14B_ENABLE_PREFIX_CACHING=1
+MODEL_14B_MAX_NUM_SEQS=16
+MODEL_14B_ENABLE_CHUNKED_PREFILL=1
+MODEL_14B_QUANTIZATION=awq_marlin
+MODEL_14B_TRUST_REMOTE_CODE=1
+MODEL_14B_ENFORCE_EAGER=1
+MODEL_14B_SWAP_SPACE=
+MODEL_14B_EXTRA_ARGS=
 ```
 
-Set `MODEL_NAME` in the `chat-app` environment to match.
+`./chat` reads this file, writes the active selection into `.runtime-model.env`, and `chat-app` also loads the same defaults file on startup when explicit environment overrides are absent.
+
+For machine-specific tuning, copy [config/model-overrides.local.env.sample](/Users/joe/dev/ai-chat/config/model-overrides.local.env.sample) to `config/model-overrides.local.env`. That local override file is git-ignored, so it is safe for personal VRAM tuning, host-specific endpoints, and similar machine-only settings.
+
+Load order is:
+
+1. exported process environment
+2. `config/model-overrides.local.env`
+3. `config/model-defaults.env`
+
+This means each tuning knob is a one-line edit. For example:
+
+- change model: `MODEL_14B_NAME=...`
+- change VRAM cap: `MODEL_14B_GPU_MEMORY_UTILIZATION=0.80`
+- change context: `MODEL_14B_MAX_MODEL_LEN=4096`
+- add one-off flags: `MODEL_14B_EXTRA_ARGS=--swap-space 8`
+
+New users can clone the repo and run the app with only the checked-in defaults. You only need the local override file if you want machine-specific customization.
 
 ## Host requirements
 
@@ -33,14 +51,14 @@ Workspace roots are path-backed catalog entries. Managed workspace directories a
 
 The app keeps a single configured `14B` profile. The selected profile is persisted in `/app/data/model_state.json`, and a non-matching loaded model is treated as a custom runtime model.
 
-Example `chat-app` environment:
+The generated runtime env passed into Docker Compose contains the selected model plus the shared profile defaults:
 
 ```yaml
 environment:
   - VLLM_HOST=http://vllm:8000/v1
-  - MODEL_NAME=Qwen/Qwen3-14B-AWQ
-  - MODEL_14B_NAME=Qwen/Qwen3-14B-AWQ
-  - MODEL_14B_ARGS=--gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager
+  - MODEL_NAME=${VLLM_SELECTED_MODEL_NAME}
+  - MODEL_14B_NAME=${MODEL_14B_NAME}
+  - MODEL_14B_ARGS=${MODEL_14B_ARGS}
   - DEFAULT_MODEL_PROFILE=14b
 ```
 

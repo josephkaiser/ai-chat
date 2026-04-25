@@ -413,6 +413,24 @@ body[data-left-sidebar-open="false"] .sidebar {
     font-weight: 700;
 }
 
+.viewer-open-button {
+    min-height: 30px;
+    padding: 0 11px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-meta);
+    font-weight: 700;
+    background: white;
+}
+
+.viewer-open-button:hover,
+.viewer-open-button:focus-visible {
+    border-color: rgba(13, 132, 135, 0.25);
+    color: var(--accent-strong);
+}
+
 .viewer-download-button:hover,
 .viewer-download-button:focus-visible {
     background: var(--accent-strong);
@@ -1564,6 +1582,13 @@ body[data-viewer-mode="file"] .file-browser {
     overflow: hidden;
 }
 
+.preview-table-shell {
+    overflow: auto;
+    border-radius: 16px;
+    border: 1px solid rgba(19, 34, 38, 0.08);
+    background: white;
+}
+
 .preview-table th,
 .preview-table td {
     padding: 7px 8px;
@@ -1571,6 +1596,91 @@ body[data-viewer-mode="file"] .file-browser {
     border: 1px solid rgba(19, 34, 38, 0.09);
     vertical-align: top;
     font-size: var(--fs-meta);
+}
+
+.spreadsheet-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px 14px 24px;
+}
+
+.spreadsheet-preview-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.spreadsheet-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 10px;
+    min-width: min(360px, 100%);
+}
+
+.spreadsheet-meta-grid > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(19, 34, 38, 0.03);
+    border: 1px solid rgba(19, 34, 38, 0.08);
+}
+
+.spreadsheet-meta-grid strong,
+.spreadsheet-sheet-picker span {
+    font-size: var(--fs-label);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+.spreadsheet-sheet-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 180px;
+}
+
+.spreadsheet-sheet-picker select {
+    min-height: 38px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(19, 34, 38, 0.12);
+    background: white;
+    color: var(--text);
+    font: inherit;
+}
+
+.spreadsheet-sheet-list {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.spreadsheet-sheet-chip {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 9px 12px;
+    border-radius: 12px;
+    background: rgba(19, 34, 38, 0.03);
+    border: 1px solid rgba(19, 34, 38, 0.08);
+    font-size: var(--fs-meta);
+    color: var(--muted);
+}
+
+.spreadsheet-sheet-chip.active {
+    background: rgba(13, 132, 135, 0.08);
+    border-color: rgba(13, 132, 135, 0.18);
+}
+
+.spreadsheet-sheet-chip strong {
+    color: var(--text);
+    font-size: var(--fs-body);
 }
 
 .empty-state {

@@ -6,6 +6,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TAILSCALE_LAST_STATUS=""
 STACK_CONTAINERS=(vllm ai-chat-vllm)
 RUNTIME_ENV_FILE="$PROJECT_DIR/.runtime-model.env"
+MODEL_DEFAULTS_FILE="$PROJECT_DIR/config/model-defaults.env"
+MODEL_OVERRIDES_FILE="$PROJECT_DIR/config/model-overrides.local.env"
 MODEL_MARKERS_DIR="$PROJECT_DIR/data/models"
 MODEL_STATE_FILE="$PROJECT_DIR/data/model_state.json"
 HF_CACHE_ROOT="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -14,11 +16,137 @@ FRONTEND_BUNDLE_FILE="$PROJECT_DIR/src/web/app.js"
 FRONTEND_BUILD_SCRIPT="$PROJECT_DIR/scripts/build_frontend.mjs"
 FRONTEND_PACKAGE_FILE="$PROJECT_DIR/package.json"
 FRONTEND_BUNDLE_CHANGED=0
-
-DEFAULT_14B_MODEL_NAME="${MODEL_14B_NAME:-Qwen/Qwen3-14B-AWQ}"
-DEFAULT_14B_MODEL_ARGS="${MODEL_14B_ARGS:---gpu-memory-utilization 0.95 --max-model-len 8192 --enable-prefix-caching --max-num-seqs 16 --enable-chunked-prefill --quantization awq_marlin --trust-remote-code --enforce-eager}"
+declare -A ORIGINAL_ENV_VARS=()
 
 cd "$PROJECT_DIR"
+
+capture_original_env_vars() {
+    local key
+    while IFS='=' read -r key _; do
+        [[ -n "$key" ]] || continue
+        ORIGINAL_ENV_VARS["$key"]=1
+    done < <(env)
+}
+
+load_model_env_file() {
+    local file_path="$1"
+    local allow_override="${2:-0}"
+    if [[ ! -f "$file_path" ]]; then
+        if [[ "$allow_override" == "required" ]]; then
+            echo "ERROR: Missing model defaults file at $file_path" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -n "$line" ]] || continue
+        [[ "$line" != \#* ]] || continue
+        if [[ "$line" != *=* ]]; then
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+
+        if [[ -z "$key" ]]; then
+            continue
+        fi
+        if [[ "$allow_override" == "1" ]]; then
+            if [[ -n "${ORIGINAL_ENV_VARS[$key]:-}" ]]; then
+                continue
+            fi
+            printf -v "$key" '%s' "$value"
+            export "$key"
+            continue
+        fi
+        if [[ -z "${!key:-}" ]]; then
+            printf -v "$key" '%s' "$value"
+            export "$key"
+        fi
+    done < "$file_path"
+}
+
+load_model_defaults() {
+    capture_original_env_vars
+    load_model_env_file "$MODEL_DEFAULTS_FILE" required
+    load_model_env_file "$MODEL_OVERRIDES_FILE" 1
+}
+
+load_model_defaults
+
+DEFAULT_14B_MODEL_NAME="${MODEL_14B_NAME:-}"
+
+if [[ -z "$DEFAULT_14B_MODEL_NAME" ]]; then
+    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_14B_NAME" >&2
+    exit 1
+fi
+
+is_truthy() {
+    local value="${1:-}"
+    value="${value,,}"
+    [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
+build_model_args_from_env() {
+    local prefix="$1"
+    local -a parts=()
+    local gpu_mem max_len max_num_seqs quantization swap_space extra_args
+    local enable_prefix_caching enable_chunked_prefill trust_remote_code enforce_eager
+    local var_name=""
+
+    var_name="${prefix}_GPU_MEMORY_UTILIZATION"
+    gpu_mem="${!var_name:-}"
+    var_name="${prefix}_MAX_MODEL_LEN"
+    max_len="${!var_name:-}"
+    var_name="${prefix}_MAX_NUM_SEQS"
+    max_num_seqs="${!var_name:-}"
+    var_name="${prefix}_QUANTIZATION"
+    quantization="${!var_name:-}"
+    var_name="${prefix}_SWAP_SPACE"
+    swap_space="${!var_name:-}"
+    var_name="${prefix}_EXTRA_ARGS"
+    extra_args="${!var_name:-}"
+    var_name="${prefix}_ENABLE_PREFIX_CACHING"
+    enable_prefix_caching="${!var_name:-}"
+    var_name="${prefix}_ENABLE_CHUNKED_PREFILL"
+    enable_chunked_prefill="${!var_name:-}"
+    var_name="${prefix}_TRUST_REMOTE_CODE"
+    trust_remote_code="${!var_name:-}"
+    var_name="${prefix}_ENFORCE_EAGER"
+    enforce_eager="${!var_name:-}"
+
+    [[ -n "$gpu_mem" ]] && parts+=("--gpu-memory-utilization" "$gpu_mem")
+    [[ -n "$max_len" ]] && parts+=("--max-model-len" "$max_len")
+    if is_truthy "$enable_prefix_caching"; then
+        parts+=("--enable-prefix-caching")
+    fi
+    [[ -n "$max_num_seqs" ]] && parts+=("--max-num-seqs" "$max_num_seqs")
+    if is_truthy "$enable_chunked_prefill"; then
+        parts+=("--enable-chunked-prefill")
+    fi
+    [[ -n "$quantization" ]] && parts+=("--quantization" "$quantization")
+    if is_truthy "$trust_remote_code"; then
+        parts+=("--trust-remote-code")
+    fi
+    if is_truthy "$enforce_eager"; then
+        parts+=("--enforce-eager")
+    fi
+    [[ -n "$swap_space" ]] && parts+=("--swap-space" "$swap_space")
+    [[ -n "$extra_args" ]] && parts+=($extra_args)
+
+    printf '%s' "${parts[*]}"
+}
+
+DEFAULT_14B_MODEL_ARGS="${MODEL_14B_ARGS:-$(build_model_args_from_env MODEL_14B)}"
+
+if [[ -z "$DEFAULT_14B_MODEL_NAME" || -z "$DEFAULT_14B_MODEL_ARGS" ]]; then
+    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_14B_NAME and enough MODEL_14B_* settings to build args" >&2
+    exit 1
+fi
 
 model_profile_keys() {
     printf '%s\n' "14b"
@@ -82,6 +210,20 @@ write_runtime_env_file() {
     model_name="$(model_profile_name "$profile")"
     model_args="$(model_profile_args "$profile")"
     cat >"$RUNTIME_ENV_FILE" <<EOF
+DEFAULT_MODEL_PROFILE=${DEFAULT_MODEL_PROFILE:-14b}
+MODEL_14B_NAME=$DEFAULT_14B_MODEL_NAME
+MODEL_14B_ARGS=$DEFAULT_14B_MODEL_ARGS
+MODEL_14B_GPU_MEMORY_UTILIZATION=${MODEL_14B_GPU_MEMORY_UTILIZATION:-}
+MODEL_14B_MAX_MODEL_LEN=${MODEL_14B_MAX_MODEL_LEN:-}
+MODEL_14B_ENABLE_PREFIX_CACHING=${MODEL_14B_ENABLE_PREFIX_CACHING:-}
+MODEL_14B_MAX_NUM_SEQS=${MODEL_14B_MAX_NUM_SEQS:-}
+MODEL_14B_ENABLE_CHUNKED_PREFILL=${MODEL_14B_ENABLE_CHUNKED_PREFILL:-}
+MODEL_14B_QUANTIZATION=${MODEL_14B_QUANTIZATION:-}
+MODEL_14B_TRUST_REMOTE_CODE=${MODEL_14B_TRUST_REMOTE_CODE:-}
+MODEL_14B_ENFORCE_EAGER=${MODEL_14B_ENFORCE_EAGER:-}
+MODEL_14B_SWAP_SPACE=${MODEL_14B_SWAP_SPACE:-}
+MODEL_14B_EXTRA_ARGS=${MODEL_14B_EXTRA_ARGS:-}
+MODEL_NAME=$model_name
 VLLM_SELECTED_PROFILE=$profile
 VLLM_SELECTED_MODEL_NAME=$model_name
 VLLM_SELECTED_MODEL_ARGS=$model_args
