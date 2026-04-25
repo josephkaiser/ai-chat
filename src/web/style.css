@@ -1265,6 +1265,80 @@ body[data-viewer-mode="file"] .chat-panel {
     width: min(var(--chat-lane-width), calc(100% - 24px));
     max-width: 100%;
     margin: 0 auto;
+    transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.composer.drag-active {
+    border-color: rgba(20, 123, 123, 0.45);
+    background:
+        linear-gradient(180deg, rgba(240, 252, 250, 0.95), rgba(255, 255, 255, 0.98));
+    box-shadow: 0 0 0 3px rgba(20, 123, 123, 0.08);
+}
+
+.composer-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 2px;
+}
+
+.composer-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    padding: 6px 8px;
+    border: 1px solid rgba(20, 123, 123, 0.16);
+    border-radius: 999px;
+    background: rgba(232, 247, 245, 0.92);
+    color: var(--text);
+    font-size: 0.9rem;
+}
+
+.composer-attachment-chip.uploading {
+    border-style: dashed;
+    background: rgba(247, 251, 250, 0.96);
+}
+
+.composer-attachment-kind {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(19, 34, 38, 0.08);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.composer-attachment-name {
+    min-width: 0;
+    max-width: min(38ch, 45vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.composer-attachment-remove {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: rgba(19, 34, 38, 0.08);
+    color: var(--text);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.composer-attachment-remove:hover {
+    background: rgba(19, 34, 38, 0.14);
 }
 
 .composer-runtime {
