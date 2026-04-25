@@ -1383,7 +1383,7 @@ function renderInlineMarkdown(text) {
         const path = resolveArtifactReferencePath(rawPath);
         const label = path.split("/").pop() || path;
         return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
-    }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+    }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n/g, "<br>");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
 function normalizeCodeLanguage(language) {
@@ -1510,7 +1510,7 @@ function renderRichText(raw) {
             return "<hr>";
         }
         if (lines.every((line)=>/^&gt;\s?/.test(line))) {
-            const quote = lines.map((line)=>line.replace(/^&gt;\s?/, "")).join("<br>");
+            const quote = lines.map((line)=>line.replace(/^&gt;\s?/, "")).join("\n");
             return `<blockquote>${renderInlineMarkdown(quote)}</blockquote>`;
         }
         if (lines.every((line)=>/^- /.test(line))) {
@@ -1523,10 +1523,10 @@ function renderRichText(raw) {
         if (heading) {
             const level = Math.min(heading[1].length, 4);
             const headingHtml = `<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`;
-            const rest = lines.slice(1).join("<br>");
+            const rest = lines.slice(1).join("\n");
             return rest ? `${headingHtml}<p>${renderInlineMarkdown(rest)}</p>` : headingHtml;
         }
-        return `<p>${renderInlineMarkdown(lines.join("<br>"))}</p>`;
+        return `<p>${renderInlineMarkdown(lines.join("\n"))}</p>`;
     }).join("");
     return blocks.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index)=>codeBlocks[Number(index)] || "");
 }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import hashlib
 import io
 import json
@@ -447,6 +448,8 @@ TEXT_DOCUMENT_EXTENSIONS = {
 }
 MARKDOWN_EXTENSIONS = {".md", ".markdown", ".rst"}
 HTML_EXTENSIONS = {".htm", ".html"}
+HTML_RENDER_REVIEW_ARTIFACT_DIR = ".ai/render-reviews"
+HTML_RENDER_REVIEW_TIMEOUT_SECONDS = max(2.0, float(os.getenv("HTML_RENDER_REVIEW_TIMEOUT_SECONDS", "12")))
 DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
 BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 ARCHIVE_EXTENSIONS = {".zip"}
@@ -4023,6 +4026,52 @@ def dataframe_column_summaries(df: "pd.DataFrame") -> List[Dict[str, Any]]:
     return columns
 
 
+def _load_delimited_fallback_summary(target: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Try to recover a spreadsheet preview from CSV/TSV-like text with the wrong extension."""
+    try:
+        sample = target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    trimmed = sample.strip()
+    if not trimmed:
+        return None
+
+    preview_sample = "\n".join(trimmed.splitlines()[:12])
+    delimiter = ","
+    try:
+        dialect = csv.Sniffer().sniff(preview_sample, delimiters=",\t;|")
+        delimiter = dialect.delimiter or delimiter
+    except Exception:
+        counts = {
+            ",": preview_sample.count(","),
+            "\t": preview_sample.count("\t"),
+            ";": preview_sample.count(";"),
+            "|": preview_sample.count("|"),
+        }
+        delimiter = max(counts, key=counts.get)
+
+    if preview_sample.count(delimiter) <= 0:
+        return None
+
+    try:
+        df = pd.read_csv(target, sep=delimiter)
+    except Exception:
+        return None
+
+    file_type = "tsv" if delimiter == "\t" else "csv"
+    return {
+        "file_type": file_type,
+        "sheet": pathlib.Path(target.name).name,
+        "sheet_names": [pathlib.Path(target.name).name],
+        "row_count": int(len(df.index)),
+        "column_count": int(len(df.columns)),
+        "columns": dataframe_column_summaries(df),
+        "preview_rows": dataframe_preview_records(df),
+        "format_warning": f"Parsed as {file_type.upper()} text because the file contents did not look like a real workbook.",
+    }
+
+
 def load_spreadsheet_summary(target: pathlib.Path, sheet: Optional[str] = None) -> Dict[str, Any]:
     """Load a spreadsheet-like file and return a compact summary for the model."""
     suffix = target.suffix.lower()
@@ -4046,7 +4095,20 @@ def load_spreadsheet_summary(target: pathlib.Path, sheet: Optional[str] = None) 
             "preview_rows": dataframe_preview_records(df),
         }
 
-    workbook = pd.ExcelFile(target)
+    engine = None
+    if suffix in {".xlsx", ".xlsm"}:
+        engine = "openpyxl"
+    elif suffix == ".xls":
+        engine = "xlrd"
+
+    try:
+        workbook = pd.ExcelFile(target, engine=engine) if engine else pd.ExcelFile(target)
+    except Exception as exc:
+        fallback = _load_delimited_fallback_summary(target)
+        if fallback is not None:
+            return fallback
+        raise ValueError(str(exc)) from exc
+
     sheet_names = workbook.sheet_names
     chosen_sheet = sheet or (sheet_names[0] if sheet_names else None)
     if not chosen_sheet:
@@ -14111,6 +14173,120 @@ class HtmlInspectionParser(HTMLParser):
         self.body_text_parts.append(cleaned)
 
 
+def html_render_review_script_path() -> pathlib.Path:
+    """Return the local helper script used for optional headless HTML review."""
+    return pathlib.Path(__file__).resolve().parents[2] / "scripts" / "inspect_html_render.mjs"
+
+
+def inspect_html_render_artifacts(
+    workspace: pathlib.Path,
+    target: pathlib.Path,
+    rel_path: str,
+) -> Dict[str, Any]:
+    """Optionally inspect rendered HTML with a local headless browser helper."""
+    node_bin = shutil.which("node")
+    if not node_bin:
+        return {"available": False, "reason": "node_unavailable"}
+
+    script_path = html_render_review_script_path()
+    if not script_path.is_file():
+        return {"available": False, "reason": "script_missing"}
+
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", rel_path.replace("/", "__")).strip("._") or "html-review"
+    artifact_dir = (workspace / HTML_RENDER_REVIEW_ARTIFACT_DIR).resolve()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    desktop_path = artifact_dir / f"{safe_stem}-desktop.png"
+    mobile_path = artifact_dir / f"{safe_stem}-mobile.png"
+
+    command = [
+        node_bin,
+        str(script_path),
+        "--input",
+        str(target),
+        "--desktop-shot",
+        str(desktop_path),
+        "--mobile-shot",
+        str(mobile_path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=HTML_RENDER_REVIEW_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "timeout"}
+    except Exception as exc:
+        return {"available": False, "reason": "launch_failed", "error": str(exc)}
+
+    stdout = str(completed.stdout or "").strip()
+    stderr = str(completed.stderr or "").strip()
+    if completed.returncode != 0:
+        return {
+            "available": False,
+            "reason": "script_failed",
+            "error": truncate_output(stderr or stdout, limit=240),
+        }
+
+    try:
+        payload = json.loads(stdout or "{}")
+    except Exception:
+        return {
+            "available": False,
+            "reason": "invalid_json",
+            "error": truncate_output(stdout or stderr, limit=240),
+        }
+
+    if not isinstance(payload, dict):
+        return {"available": False, "reason": "invalid_payload"}
+
+    available = bool(payload.get("available"))
+    screenshots: List[str] = []
+    for item in payload.get("screenshots", []):
+        path_value = ""
+        if isinstance(item, dict):
+            path_value = str(item.get("path") or "").strip()
+        elif isinstance(item, str):
+            path_value = str(item).strip()
+        if not path_value:
+            continue
+        candidate = pathlib.Path(path_value)
+        try:
+            if candidate.is_file():
+                screenshots.append(format_workspace_path(candidate, workspace))
+        except Exception:
+            continue
+
+    normalized = {
+        "available": available,
+        "reason": str(payload.get("reason") or "").strip(),
+        "error": truncate_output(str(payload.get("error") or "").strip(), limit=240),
+        "screenshots": screenshots,
+        "console_errors": [
+            truncate_output(str(item or "").strip(), limit=240)
+            for item in payload.get("console_errors", [])
+            if str(item or "").strip()
+        ][:8] if isinstance(payload.get("console_errors"), list) else [],
+        "page_errors": [
+            truncate_output(str(item or "").strip(), limit=240)
+            for item in payload.get("page_errors", [])
+            if str(item or "").strip()
+        ][:8] if isinstance(payload.get("page_errors"), list) else [],
+        "failed_requests": [
+            truncate_output(str(item or "").strip(), limit=240)
+            for item in payload.get("failed_requests", [])
+            if str(item or "").strip()
+        ][:8] if isinstance(payload.get("failed_requests"), list) else [],
+        "desktop": payload.get("desktop") if isinstance(payload.get("desktop"), dict) else {},
+        "mobile": payload.get("mobile") if isinstance(payload.get("mobile"), dict) else {},
+        "has_horizontal_overflow": bool(payload.get("has_horizontal_overflow")),
+        "visible_text_preview": truncate_output(str(payload.get("visible_text_preview") or "").strip(), limit=260),
+    }
+    return normalized
+
+
 def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[str, Any]:
     """Inspect a saved HTML file and return a lightweight visual-quality rubric."""
     workspace = get_workspace_path(conversation_id)
@@ -14153,6 +14329,18 @@ def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[s
     if parser.heading_count == 0 and body_text_length >= 120:
         issues.append("No headings detected; the visual hierarchy may feel flat.")
 
+    render_review = inspect_html_render_artifacts(workspace, target, format_workspace_path(target, workspace))
+    render_available = bool(render_review.get("available"))
+    if render_available:
+        if render_review.get("has_horizontal_overflow"):
+            issues.append("Rendered review detected horizontal overflow in at least one viewport.")
+        if render_review.get("console_errors"):
+            issues.append("Rendered review detected browser console errors.")
+        if render_review.get("page_errors"):
+            issues.append("Rendered review detected page-level JavaScript errors.")
+        if render_review.get("failed_requests"):
+            issues.append("Rendered review detected failed asset or page requests.")
+
     summary_parts = [
         f"{'Responsive' if parser.has_viewport_meta else 'Non-responsive'} HTML",
         f"{body_text_length} chars of visible text",
@@ -14184,12 +14372,28 @@ def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[s
         "inline_style_count": parser.inline_style_count,
         "button_count": parser.button_count,
         "form_count": parser.form_count,
+        "render_review_available": render_available,
+        "render_review_reason": str(render_review.get("reason") or "").strip(),
+        "render_review_error": str(render_review.get("error") or "").strip(),
+        "screenshot_paths": list(render_review.get("screenshots", [])) if isinstance(render_review.get("screenshots"), list) else [],
+        "console_errors": list(render_review.get("console_errors", [])) if isinstance(render_review.get("console_errors"), list) else [],
+        "page_errors": list(render_review.get("page_errors", [])) if isinstance(render_review.get("page_errors"), list) else [],
+        "failed_requests": list(render_review.get("failed_requests", [])) if isinstance(render_review.get("failed_requests"), list) else [],
+        "has_horizontal_overflow": bool(render_review.get("has_horizontal_overflow")),
+        "desktop_viewport": dict(render_review.get("desktop", {})) if isinstance(render_review.get("desktop"), dict) else {},
+        "mobile_viewport": dict(render_review.get("mobile", {})) if isinstance(render_review.get("mobile"), dict) else {},
         "issues": issues,
         "rubric": {
             "responsive_ready": parser.has_viewport_meta,
             "visible_content": body_text_length >= 40 or visual_primitives > 0,
             "visual_primitives_present": visual_primitives > 0,
             "basic_structure_present": parser.has_body and (semantic_sections > 0 or parser.div_count > 0),
+            "render_review_passed": render_available and not (
+                render_review.get("has_horizontal_overflow")
+                or render_review.get("console_errors")
+                or render_review.get("page_errors")
+                or render_review.get("failed_requests")
+            ),
         },
     }
 

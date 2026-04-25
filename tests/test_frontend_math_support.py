@@ -20,6 +20,8 @@ class FrontendMathSupportTests(unittest.TestCase):
         self.assertIn("function renderDisplayMathExpression(", ts)
         self.assertIn("function renderMathBlock(", ts)
         self.assertIn("function extractInlineMathSegments(", ts)
+        self.assertIn('.replace(/\\n/g, "<br>")', ts)
+        self.assertIn('renderInlineMarkdown(lines.join("\\n"))', ts)
         self.assertIn('if (["latex", "tex", "math"].includes(normalized)) return "latex";', ts)
         self.assertIn("if (normalizedLanguage === \"latex\") {", ts)
         self.assertIn("codeBlocks.push(renderDisplayMathExpression(cleanCode));", ts)

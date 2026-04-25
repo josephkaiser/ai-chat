@@ -1,8 +1,12 @@
+import os
 import pathlib
 import tempfile
 import unittest
 import zipfile
 
+os.environ.setdefault("MODEL_14B_NAME", "test-model")
+
+import app
 from src.python.ai_chat.prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
 import src.python.ai_chat.workspace_reader as workspace_reader
 
@@ -169,6 +173,16 @@ class AppBehaviorTests(unittest.TestCase):
                 truncate_output_func=lambda text, _limit: text,
             )
         self.assertIn("File too large", str(exc_info.exception))
+
+    @unittest.skipIf(app.pd is None, "pandas is not installed")
+    def test_mislabeled_xlsx_falls_back_to_delimited_preview(self):
+        target = self._write_text("table.xlsx", "Name,Age,City\nAlice,30,Paris\nBob,25,Berlin\n")
+        payload = app.load_spreadsheet_summary(target)
+        self.assertEqual(payload["file_type"], "csv")
+        self.assertEqual(payload["row_count"], 2)
+        self.assertEqual(payload["column_count"], 3)
+        self.assertEqual(payload["preview_rows"][0]["Name"], "Alice")
+        self.assertIn("format_warning", payload)
 
     def test_hard_limit_message_drops_step_confirmation_language(self):
         message = workspace_reader.build_tool_loop_hard_limit_message("Updated `plan.json` and inspected `DESIGN.md`.")
