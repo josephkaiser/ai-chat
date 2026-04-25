@@ -204,6 +204,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("make measurable progress or finish", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("use it instead of claiming you cannot run code", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("instead of giving local setup or run instructions back to the user", TOOL_USE_SYSTEM_PROMPT)
+        self.assertIn("workspace.inspect_document", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("specific output shape", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("more illustrative output artifact", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertIn("short sequence, table, chart", TOOL_USE_SYSTEM_PROMPT)

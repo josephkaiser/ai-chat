@@ -151,6 +151,7 @@ Rules:
 - After each tool result, reassess whether to inspect more, create or update artifacts, patch code, verify, or finish.
 - Do not optimize for tiny edits; choose the scale that materially advances the request and can still be verified.
 - Use `workspace.grep` for workspace code/text search before opening files one by one.
+- Use `workspace.inspect_document` when the user asks about a long document, PDF, notes file, or code file and you need structure, sections, or opening previews before drilling in.
 - A single main artifact in the workspace is fine when it fully solves the request, but create supporting files whenever they materially help or are required for the result to work.
 - For Python dependency work, use normal pip/python commands; the server may route them into a managed chat-scoped Python environment outside the workspace.
 - When you create a multi-file deliverable, prefer writing the files, listing the main paths briefly, and running a lightweight verification command when possible.
