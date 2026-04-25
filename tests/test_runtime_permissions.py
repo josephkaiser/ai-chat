@@ -752,6 +752,33 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertTrue(app.should_use_workspace_tools("conv-avgo", message, features))
         self.assertTrue(app.should_auto_execute_workspace_task("conv-avgo", message, features))
 
+    def test_autonomy_preference_is_detected_from_recent_user_history(self):
+        prefers = app.conversation_prefers_autonomous_progress(
+            "tighten the layout and improve the portfolio page",
+            history=[
+                {"role": "assistant", "content": "I can keep iterating on the page if you want."},
+                {"role": "user", "content": "yea i want to push the model to make changes and improve things and just go off and make progress if it has a clear plan"},
+            ],
+        )
+
+        self.assertTrue(prefers)
+
+    def test_should_preview_deep_plan_respects_autonomy_preference(self):
+        session = app.DeepSession(
+            websocket=None,
+            conversation_id="conv-autonomy",
+            message="plan how to improve the portfolio page",
+            history=[
+                {"role": "user", "content": "go ahead and make progress if you have a clear plan"},
+            ],
+            system_prompt="System",
+            max_tokens=512,
+            features=app.FeatureFlags(agent_tools=True, workspace_write=True),
+            workspace_enabled=True,
+        )
+
+        self.assertFalse(app.should_preview_deep_plan(session))
+
     def test_scraper_request_prefers_code_tools_over_implicit_web_search(self):
         message = "Write a Python script to scrape a website and save the results to CSV."
         features = app.FeatureFlags(
@@ -879,6 +906,32 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertGreaterEqual(result["artifacts_detected"], 2)
         self.assertEqual(result["items"][0]["path"], "plot.png")
 
+    def test_workspace_run_command_result_marks_verification_commands(self):
+        python_cmd = "python.exe" if app.os.name == "nt" else "python3"
+        features = app.FeatureFlags(allowed_commands=[f"exec:{pathlib.Path(python_cmd).name.lower()}"])
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            (workspace / "demo.py").write_text("print('ok')\n", encoding="utf-8")
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                result = asyncio.run(
+                    app.workspace_run_command_result(
+                        "conv-verify",
+                        [python_cmd, "-m", "py_compile", "demo.py"],
+                        ".",
+                        features,
+                    )
+                )
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        verification = result.get("verification", {})
+        self.assertTrue(verification)
+        self.assertTrue(verification["passed"])
+        self.assertEqual(verification["kind"], "syntax")
+
     def test_workspace_inspect_html_result_flags_missing_viewport(self):
         with tempfile.TemporaryDirectory() as tempdir:
             workspace = pathlib.Path(tempdir)
@@ -898,6 +951,7 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertFalse(result["has_viewport_meta"])
         self.assertTrue(any("viewport" in issue.lower() for issue in result["issues"]))
         self.assertIn("responsive_ready", result["rubric"])
+        self.assertFalse(result["verification"]["passed"])
 
     def test_workspace_inspect_html_result_accepts_richer_html(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -932,6 +986,33 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(result["svg_count"], 1)
         self.assertTrue(result["rubric"]["visible_content"])
         self.assertTrue(result["rubric"]["basic_structure_present"])
+        self.assertTrue(result["verification"]["passed"])
+
+    def test_finalize_verification_trace_marks_written_file_verified_after_passing_checks(self):
+        summary = app.finalize_verification_trace({
+            "written_paths": ["src/app.py"],
+            "checks": [
+                {"kind": "syntax", "passed": True, "auto_generated": True},
+                {"kind": "tests", "passed": True, "auto_generated": True},
+            ],
+        })
+
+        self.assertEqual(summary["status"], "verified")
+        self.assertTrue(summary["functional"])
+        self.assertEqual(summary["checks_total"], 2)
+        self.assertEqual(summary["checks_passed"], 2)
+        self.assertEqual(summary["score"], 100)
+
+    def test_finalize_verification_trace_marks_written_file_unverified_without_checks(self):
+        summary = app.finalize_verification_trace({
+            "written_paths": ["src/app.py"],
+            "checks": [],
+        })
+
+        self.assertEqual(summary["status"], "unverified")
+        self.assertFalse(summary["functional"])
+        self.assertEqual(summary["checks_total"], 0)
+        self.assertEqual(summary["score"], 0)
 
     def test_allowed_workspace_tools_include_html_inspection(self):
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)

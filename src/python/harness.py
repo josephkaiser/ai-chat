@@ -460,6 +460,7 @@ TEXT_DOCUMENT_EXTENSIONS = {
 MARKDOWN_EXTENSIONS = {".md", ".markdown", ".rst"}
 HTML_EXTENSIONS = {".htm", ".html"}
 HTML_RENDER_REVIEW_ARTIFACT_DIR = ".ai/render-reviews"
+VERIFICATION_REPORT_ARTIFACT_DIR = ".ai/verifications"
 HTML_RENDER_REVIEW_TIMEOUT_SECONDS = max(2.0, float(os.getenv("HTML_RENDER_REVIEW_TIMEOUT_SECONDS", "12")))
 DELIMITED_TEXT_EXTENSIONS = {".csv", ".tsv"}
 BINARY_SPREADSHEET_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
@@ -3290,7 +3291,7 @@ def record_workflow_step(
     auto_generated: bool = False,
 ) -> None:
     """Track successful tool outputs for the current turn only."""
-    del step_name, latency_ms, auto_generated
+    del step_name, latency_ms
     if not execution:
         return
     execution.tool_count += 1
@@ -3306,6 +3307,106 @@ def record_workflow_step(
             item_path = str((item or {}).get("path", "")).strip() if isinstance(item, dict) else ""
             if item_path and item_path not in execution.artifact_paths:
                 execution.artifact_paths.append(item_path)
+
+    verification = execution.route_metadata.setdefault("verification", {
+        "written_paths": [],
+        "checks": [],
+        "checks_total": 0,
+        "checks_passed": 0,
+        "checks_failed": 0,
+        "auto_checks": 0,
+    })
+    if not isinstance(verification, dict):
+        return
+
+    if result.get("ok") and tool_name == "workspace.patch_file" and path:
+        written_paths = verification.setdefault("written_paths", [])
+        if isinstance(written_paths, list) and path not in written_paths:
+            written_paths.append(path)
+
+    verification_payload = None
+    if result.get("ok") and tool_name == "workspace.run_command":
+        verification_payload = build_run_command_verification_payload(
+            call.get("arguments", {}).get("command", []),
+            payload,
+            label=str(call.get("arguments", {}).get("label", "") or ""),
+            phase=str(call.get("arguments", {}).get("phase", "") or ""),
+            auto_generated=auto_generated,
+        )
+    elif result.get("ok") and tool_name == "workspace.inspect_html":
+        verification_payload = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
+
+    if verification_payload:
+        checks = verification.setdefault("checks", [])
+        if isinstance(checks, list):
+            checks.append(dict(verification_payload))
+        verification["checks_total"] = int(verification.get("checks_total", 0) or 0) + 1
+        if verification_payload.get("passed"):
+            verification["checks_passed"] = int(verification.get("checks_passed", 0) or 0) + 1
+        else:
+            verification["checks_failed"] = int(verification.get("checks_failed", 0) or 0) + 1
+        if verification_payload.get("auto_generated"):
+            verification["auto_checks"] = int(verification.get("auto_checks", 0) or 0) + 1
+
+
+def finalize_verification_trace(trace: Any) -> Dict[str, Any]:
+    """Compute a stable quantitative summary for one turn's deterministic verification checks."""
+    payload = dict(trace or {}) if isinstance(trace, dict) else {}
+    written_paths = [
+        str(item).strip()
+        for item in payload.get("written_paths", [])
+        if str(item).strip()
+    ] if isinstance(payload.get("written_paths"), list) else []
+    checks = [dict(item) for item in payload.get("checks", []) if isinstance(item, dict)] if isinstance(payload.get("checks"), list) else []
+    checks_total = len(checks)
+    checks_passed = sum(1 for item in checks if item.get("passed"))
+    checks_failed = max(0, checks_total - checks_passed)
+    auto_checks = sum(1 for item in checks if item.get("auto_generated"))
+    score = int(round((checks_passed / checks_total) * 100)) if checks_total else 0
+    if checks_failed:
+        status = "failed"
+        functional = False
+    elif written_paths and checks_passed:
+        status = "verified"
+        functional = True
+    elif written_paths:
+        status = "unverified"
+        functional = False
+    elif checks_passed:
+        status = "passed"
+        functional = True
+    else:
+        status = "not_needed"
+        functional = None
+    return {
+        "status": status,
+        "functional": functional,
+        "score": score,
+        "written_paths": written_paths,
+        "checks": checks,
+        "checks_total": checks_total,
+        "checks_passed": checks_passed,
+        "checks_failed": checks_failed,
+        "auto_checks": auto_checks,
+    }
+
+
+def write_turn_verification_report(
+    conversation_id: str,
+    verification: Dict[str, Any],
+    *,
+    assistant_message_id: int,
+) -> str:
+    """Persist the latest deterministic verification report into the workspace."""
+    workspace = get_workspace_path(conversation_id)
+    report_dir = workspace / VERIFICATION_REPORT_ARTIFACT_DIR
+    report_dir.mkdir(parents=True, exist_ok=True)
+    latest_path = report_dir / "latest.json"
+    versioned_path = report_dir / f"msg{max(1, int(assistant_message_id))}.json"
+    serialized = json.dumps(verification, ensure_ascii=False, indent=2)
+    latest_path.write_text(serialized, encoding="utf-8")
+    versioned_path.write_text(serialized, encoding="utf-8")
+    return format_workspace_path(versioned_path, workspace)
 
 
 def finalize_workflow_execution(
@@ -8188,6 +8289,45 @@ def is_bare_plan_execution_request(message: str) -> bool:
     return len(text) <= 120 and not any(marker in text for marker in structural_markers)
 
 
+AUTONOMOUS_PROGRESS_MARKERS = (
+    "go ahead",
+    "just do it",
+    "run with it",
+    "take initiative",
+    "keep going",
+    "keep making progress",
+    "make progress",
+    "go off and make progress",
+    "continue autonomously",
+    "work autonomously",
+    "don't ask me between steps",
+    "dont ask me between steps",
+    "don't stop to ask",
+    "dont stop to ask",
+    "no need to ask before each step",
+    "if you have a clear plan",
+    "if it has a clear plan",
+)
+
+
+def conversation_prefers_autonomous_progress(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether the user has explicitly authorized autonomous progress nearby in the thread."""
+    candidates: List[str] = [normalize_turn_message(message)]
+    for item in reversed(list(history or [])[-8:]):
+        if str(item.get("role", "")).strip() != "user":
+            continue
+        candidates.append(normalize_turn_message(item.get("content", "")))
+    for text in candidates:
+        if not text:
+            continue
+        if any(marker in text for marker in AUTONOMOUS_PROGRESS_MARKERS):
+            return True
+    return False
+
+
 def request_is_about_limitations(message: str) -> bool:
     """Return whether the user is explicitly asking about support, errors, or blockers."""
     text = " ".join((message or "").strip().lower().split())
@@ -8269,6 +8409,8 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
         return False
     if session.execution_requested or session.auto_execute:
         return False
+    if conversation_prefers_autonomous_progress(session.message, history=session.history):
+        return False
     if infer_explicit_planning_request(session.message):
         return True
     return classify_workspace_intent(session.message, history=session.history) in {"focused_write", "broad_write"}
@@ -8292,6 +8434,8 @@ def should_auto_execute_workspace_task(
     intent = classify_workspace_intent(message, history=history)
     if intent not in {"focused_write", "broad_write"}:
         return False
+    if conversation_prefers_autonomous_progress(message, history=history):
+        return True
     return should_use_workspace_tools(conversation_id, message, features, history=history)
 
 
@@ -9141,6 +9285,20 @@ async def complete_successful_turn(
         logger.warning("Failed to persist assistant message for %s: %s", conversation_id, exc)
 
     try:
+        if workflow_execution and assistant_message_id is not None:
+            verification = finalize_verification_trace(
+                workflow_execution.route_metadata.get("verification")
+            )
+            if verification.get("status") != "not_needed":
+                workflow_execution.route_metadata["verification"] = verification
+                try:
+                    workflow_execution.route_metadata["verification_report_path"] = write_turn_verification_report(
+                        conversation_id,
+                        verification,
+                        assistant_message_id=assistant_message_id,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to persist verification report for %s: %s", conversation_id, exc)
         finalize_workflow_execution(
             workflow_execution,
             assistant_message_id=assistant_message_id,
@@ -13126,12 +13284,16 @@ async def file_session_background_worker() -> None:
 
 
 @app.get("/api/workspaces/{workspace_id}/files")
-async def list_workspace_files_by_workspace(workspace_id: str, path: str = ""):
+async def list_workspace_files_by_workspace(workspace_id: str, path: str = "", response: Response = None):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
     return list_workspace_files_for_workspace(workspace_id, path)
 
 
 @app.get("/api/workspaces/{workspace_id}/file")
-async def read_workspace_file_by_workspace(workspace_id: str, path: str):
+async def read_workspace_file_by_workspace(workspace_id: str, path: str, response: Response = None):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
     return read_workspace_file_for_workspace(workspace_id, path)
 
 
@@ -13300,7 +13462,7 @@ async def view_workspace_file_by_workspace(workspace_id: str, path: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-    return FileResponse(target, media_type=media_type)
+    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/workspaces/{workspace_id}/file/download")
@@ -13387,7 +13549,9 @@ async def list_workspace_files(conversation_id: str, path: str = ""):
 
 
 @app.get("/api/workspace/{conversation_id}/file")
-async def read_workspace_file(conversation_id: str, path: str):
+async def read_workspace_file(conversation_id: str, path: str, response: Response = None):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
     workspace_id = get_workspace_id_for_conversation(conversation_id)
     return read_workspace_file_for_workspace(workspace_id, path, conversation_id=conversation_id)
 
@@ -14057,6 +14221,126 @@ def workspace_render_result(conversation_id: str, html: str, title: str = "") ->
     }
 
 
+VERIFICATION_COMMAND_PREFIXES = {
+    "pytest",
+    "python",
+    "python3",
+    "node",
+    "npm",
+    "npx",
+    "tsc",
+    "cargo",
+    "go",
+    "mvn",
+    "gradle",
+    "dotnet",
+    "gcc",
+    "g++",
+}
+
+VERIFICATION_COMMAND_MARKERS = (
+    "--check",
+    "--noemit",
+    "-m py_compile",
+    " py_compile",
+    "pytest",
+    "npm run test",
+    "npm run lint",
+    "npm run build",
+    "npm run typecheck",
+    "tsc --noemit",
+    "cargo check",
+    "cargo test",
+    "go test",
+    "mvn test",
+    "gradle test",
+    "dotnet test",
+    "dotnet build",
+    "-fsyntax-only",
+)
+
+
+def command_looks_like_verification(command: Any, label: str = "", phase: str = "") -> bool:
+    """Return whether one command is acting as a deterministic verification check."""
+    normalized_phase = str(phase or "").strip().lower()
+    if normalized_phase == "verify":
+        return True
+    command_preview = command_preview_text(command, limit=240).lower()
+    label_preview = str(label or "").strip().lower()
+    if label_preview.startswith("auto-verify") or "verify" in label_preview:
+        return True
+    command_list = command if isinstance(command, list) else []
+    head = pathlib.Path(str(command_list[0] or "")).name.lower() if command_list else ""
+    if head in VERIFICATION_COMMAND_PREFIXES and any(marker in command_preview for marker in VERIFICATION_COMMAND_MARKERS):
+        return True
+    return False
+
+
+def infer_verification_kind(command: Any, label: str = "") -> str:
+    """Classify one deterministic verification command into a small stable kind."""
+    preview = f"{command_preview_text(command, limit=240)} {str(label or '').strip()}".lower()
+    if "pytest" in preview or " cargo test" in preview or " go test" in preview or " mvn test" in preview or " gradle test" in preview or " dotnet test" in preview:
+        return "tests"
+    if "lint" in preview:
+        return "lint"
+    if "build" in preview:
+        return "build"
+    if "typecheck" in preview or "tsc --noemit" in preview or "cargo check" in preview or "py_compile" in preview or "--check" in preview or "-fsyntax-only" in preview:
+        return "syntax"
+    return "command"
+
+
+def build_run_command_verification_payload(
+    command: Any,
+    result: Dict[str, Any],
+    *,
+    label: str = "",
+    phase: str = "",
+    auto_generated: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Summarize one command result as a deterministic verification check when appropriate."""
+    if not command_looks_like_verification(command, label=label, phase=phase):
+        return None
+    returncode = int(result.get("returncode", 0) or 0)
+    return {
+        "tool": "workspace.run_command",
+        "kind": infer_verification_kind(command, label=label),
+        "label": str(label or command_preview_text(command)).strip() or "Verification command",
+        "command": command_preview_text(command, limit=240),
+        "cwd": str(result.get("cwd", "") or "").strip(),
+        "passed": returncode == 0,
+        "returncode": returncode,
+        "phase": str(phase or "verify").strip() or "verify",
+        "auto_generated": bool(auto_generated),
+        "artifacts_detected": int(result.get("artifacts_detected", 0) or 0),
+        "path": str(result.get("path", "") or "").strip(),
+    }
+
+
+def build_html_verification_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize HTML inspection into a deterministic verification check."""
+    issues = result.get("issues", []) if isinstance(result.get("issues"), list) else []
+    rubric = result.get("rubric", {}) if isinstance(result.get("rubric"), dict) else {}
+    passed = bool(
+        rubric.get("responsive_ready")
+        and rubric.get("visible_content")
+        and rubric.get("basic_structure_present")
+        and not issues
+    )
+    return {
+        "tool": "workspace.inspect_html",
+        "kind": "html_review",
+        "label": f"HTML review for {str(result.get('path', '') or '').strip() or 'HTML file'}",
+        "passed": passed,
+        "issue_count": len(issues),
+        "path": str(result.get("path", "") or "").strip(),
+        "responsive_ready": bool(rubric.get("responsive_ready")),
+        "visible_content": bool(rubric.get("visible_content")),
+        "basic_structure_present": bool(rubric.get("basic_structure_present")),
+        "render_review_passed": bool(rubric.get("render_review_passed")),
+    }
+
+
 async def workspace_run_command_result(
     conversation_id: str,
     command: Any,
@@ -14121,7 +14405,7 @@ async def workspace_run_command_result(
     primary_path = str((primary_artifact or {}).get("path", "")).strip()
     primary_kind = str((primary_artifact or {}).get("content_kind", "")).strip().lower()
     open_path = primary_path if primary_path and is_previewable_workspace_kind(primary_kind) else ""
-    return {
+    payload = {
         "stdout": truncate_output(stdout.decode("utf-8", errors="replace")),
         "stderr": truncate_output(stderr.decode("utf-8", errors="replace")),
         "returncode": process.returncode,
@@ -14131,6 +14415,10 @@ async def workspace_run_command_result(
         "items": artifact_items,
         "artifacts_detected": len(artifact_items),
     }
+    verification = build_run_command_verification_payload(command, payload)
+    if verification:
+        payload["verification"] = verification
+    return payload
 
 def conversation_search_history_result(
     conversation_id: str,
@@ -14777,7 +15065,7 @@ def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[s
     if semantic_sections:
         summary_parts.append(f"{semantic_sections} semantic section(s)")
 
-    return {
+    result = {
         "path": format_workspace_path(target, workspace),
         "title": title,
         "summary": ", ".join(summary_parts),
@@ -14823,6 +15111,8 @@ def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[s
             ),
         },
     }
+    result["verification"] = build_html_verification_payload(result)
+    return result
 
 
 def build_query_excerpt(content: str, query: str, window: int = 220) -> str:
@@ -15528,6 +15818,7 @@ def tool_result_preview(
         returncode = int(payload.get("returncode", 0) or 0)
         cwd = tool_path_preview(payload.get("cwd", arguments.get("cwd", ".")), ".")
         command = command_preview_text(arguments.get("command", []))
+        verification = payload.get("verification", {}) if isinstance(payload.get("verification"), dict) else {}
         artifact_items = [item for item in payload.get("items", []) if isinstance(item, dict)]
         artifact_preview = ""
         if artifact_items:
@@ -15546,6 +15837,10 @@ def tool_result_preview(
                         f" and created {len(artifact_items)} artifacts "
                         f"including {preview_paths[0]} and {preview_paths[1]}"
                     )
+        if verification:
+            verdict = "passed" if verification.get("passed") else f"failed (exit {returncode})"
+            label = compact_tool_text(verification.get("label", command), limit=96) or command
+            return f"Verification {verdict}: {label} in {cwd}{artifact_preview}"
         if returncode == 0:
             return f"Ran {command} in {cwd}{artifact_preview}"
         return f"Ran {command} in {cwd}{artifact_preview} (exit {returncode})"
@@ -15595,6 +15890,11 @@ def tool_result_preview(
 
     if name == "workspace.inspect_html" or "has_viewport_meta" in payload:
         path = tool_path_preview(payload.get("path", arguments.get("path", "")), "HTML file")
+        verification = payload.get("verification", {}) if isinstance(payload.get("verification"), dict) else {}
+        if verification:
+            if verification.get("passed"):
+                return f"Verification passed: HTML review for {path}"
+            return f"Verification failed: HTML review for {path} ({pluralize_tool_count(verification.get('issue_count', 0), 'issue')})"
         issue_count = len(payload.get("issues", [])) if isinstance(payload.get("issues", []), list) else 0
         if issue_count:
             return f"Reviewed {path} ({pluralize_tool_count(issue_count, 'issue')})"
@@ -16040,6 +16340,25 @@ def build_permission_denied_result(
     }
 
 
+def build_tool_result_followup_message(result: Dict[str, Any]) -> str:
+    """Render the tool result plus any targeted retry guidance for the model."""
+    base = "<tool_result>\n" + json.dumps(result, ensure_ascii=False) + "\n</tool_result>"
+    if result.get("ok"):
+        return base
+
+    details = result.get("details", {})
+    if isinstance(details, dict) and details.get("type") == "patch_mismatch":
+        path = str(details.get("path") or "").strip() or "the file"
+        return (
+            base
+            + "\nThe patch did not match the current contents of "
+            + path
+            + ". Read the live file again before attempting another patch. "
+              "Do not reuse stale old_text. Prefer a smaller exact-match edit after re-reading the file."
+        )
+    return base
+
+
 async def ensure_tool_permission(
     websocket: WebSocket,
     conversation_id: str,
@@ -16294,9 +16613,8 @@ async def run_tool_loop(
             messages.append({
                 "role": "user",
                 "content": (
-                    "<tool_result>\n"
-                    + json.dumps(disallowed_result, ensure_ascii=False)
-                    + "\n</tool_result>\n"
+                    build_tool_result_followup_message(disallowed_result)
+                    + "\n"
                     + "Use only the allowed tools for this phase, or answer directly if no more tools are needed."
                 ),
             })
@@ -16437,7 +16755,7 @@ async def run_tool_loop(
         messages.append({"role": "assistant", "content": cleaned})
         messages.append({
             "role": "user",
-            "content": "<tool_result>\n" + json.dumps(result, ensure_ascii=False) + "\n</tool_result>",
+            "content": build_tool_result_followup_message(result),
         })
 
         if (
@@ -16445,10 +16763,83 @@ async def run_tool_loop(
             and auto_verify_runs < AUTO_VERIFY_MAX_RUNS
             and result.get("ok")
             and call["name"] == "workspace.patch_file"
-            and (not allowed_tools or "workspace.run_command" in allowed_tools)
         ):
             patched_path = str(result.get("result", {}).get("path", "")).strip()
-            auto_plan = infer_auto_command_plan(conversation_id, patched_path) if patched_path else []
+            patched_suffix = pathlib.PurePosixPath(patched_path).suffix.lower() if patched_path else ""
+            if (
+                patched_path
+                and patched_suffix in HTML_EXTENSIONS
+                and (not allowed_tools or "workspace.inspect_html" in allowed_tools)
+                and auto_verify_runs < AUTO_VERIFY_MAX_RUNS
+            ):
+                auto_verify_runs += 1
+                html_call = {
+                    "id": f"{call['id']}_auto_html_review",
+                    "name": "workspace.inspect_html",
+                    "arguments": {"path": patched_path},
+                }
+                html_label = f"Auto-review HTML for {patched_path}"
+                await websocket.send_json({
+                    "type": "tool_start",
+                    "name": html_call["name"],
+                    "content": f"{status_prefix}{html_label}",
+                    "arguments": html_call["arguments"],
+                })
+                await send_activity_event(
+                    websocket,
+                    "verify",
+                    tool_activity_label(html_call["name"]),
+                    f"{status_prefix}{html_label}",
+                    step_label=activity_step_label,
+                )
+                html_started = time.perf_counter()
+                html_result = await execute_tool_call(conversation_id, html_call, features)
+                html_latency_ms = int((time.perf_counter() - html_started) * 1000)
+                html_result_summary = tool_result_preview(html_result, html_call["name"], html_call.get("arguments", {}))
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "name": html_call["name"],
+                    "ok": html_result.get("ok", False),
+                    "content": f"{status_prefix}{html_result_summary}",
+                    "arguments": html_call["arguments"],
+                    "payload": html_result.get("result", {}) if html_result.get("ok") else {
+                        "error": html_result.get("error", "Tool failed"),
+                    },
+                })
+                await send_activity_event(
+                    websocket,
+                    "verify" if html_result.get("ok") else "error",
+                    tool_activity_label(html_call["name"]),
+                    f"{status_prefix}{html_result_summary}",
+                    step_label=activity_step_label,
+                )
+                tool_results.append({
+                    "call": html_call,
+                    "result": html_result,
+                    "auto_generated": True,
+                })
+                record_workflow_step(
+                    workflow_execution,
+                    step_name=activity_step_label or "auto_verify_html",
+                    call=html_call,
+                    result=html_result,
+                    latency_ms=html_latency_ms,
+                    auto_generated=True,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "The system ran an automatic HTML review after the patch.\n"
+                        + build_tool_result_followup_message(html_result)
+                    ),
+                })
+                if not html_result.get("ok"):
+                    continue
+
+            if not allowed_tools or "workspace.run_command" in allowed_tools:
+                auto_plan = infer_auto_command_plan(conversation_id, patched_path) if patched_path else []
+            else:
+                auto_plan = []
             for plan_index, auto_spec in enumerate(auto_plan, start=1):
                 if auto_verify_runs >= AUTO_VERIFY_MAX_RUNS:
                     break
@@ -16468,6 +16859,9 @@ async def run_tool_loop(
                     "arguments": {
                         "command": auto_spec["command"],
                         "cwd": auto_spec.get("cwd", "."),
+                        "label": str(auto_spec.get("label", "") or ""),
+                        "phase": auto_phase,
+                        "auto_verify": True,
                     },
                 }
                 auto_label = auto_spec.get("label", tool_status_summary(auto_call["name"], auto_call["arguments"]))
@@ -16522,9 +16916,7 @@ async def run_tool_loop(
                     "role": "user",
                     "content": (
                         f"The system ran an automatic {auto_phase} command after the patch.\n"
-                        "<tool_result>\n"
-                        + json.dumps(auto_result, ensure_ascii=False)
-                        + "\n</tool_result>"
+                        + build_tool_result_followup_message(auto_result)
                     ),
                 })
                 if not auto_result.get("ok"):
@@ -17215,6 +17607,9 @@ def build_structured_task_plan(context: TaskContext) -> List[TaskStep]:
             args={
                 "command": list(auto_spec.get("command", [])),
                 "cwd": str(auto_spec.get("cwd", ".") or "."),
+                "label": str(auto_spec.get("label", "") or ""),
+                "phase": auto_phase,
+                "auto_verify": True,
             },
         ))
     if finish_step is not None:
@@ -18939,6 +19334,38 @@ async def orchestrated_chat(
     return await orchestrate_deep_session(session, callbacks)
 
 
+async def continue_prepared_turn_in_workspace_execution(
+    websocket: WebSocket,
+    prepared: PreparedTurnRequest,
+    *,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> str:
+    """Continue the current turn in deep workspace-execution mode."""
+    await send_activity_event(
+        websocket,
+        "evaluate",
+        "Escalate",
+        "Switching from answer mode into workspace execution because the next step needs file changes.",
+    )
+    full_response = await orchestrated_chat(
+        websocket,
+        prepared.conversation_id,
+        prepared.model_message,
+        prepared.model_history,
+        prepared.system_prompt,
+        prepared.max_tokens,
+        prepared.features,
+        auto_execute=True,
+        plan_override_builder_steps=prepared.plan_override_builder_steps,
+        workflow_execution=workflow_execution,
+    )
+    return ensure_nonempty_turn_response(
+        full_response,
+        prepared.conversation_id,
+        prepared.effective_message,
+    )
+
+
 def build_seeded_tool_history(
     history: List[Dict[str, str]],
     user_message: str,
@@ -20336,18 +20763,25 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         activity_phase="respond",
                     ),
                 )
-                full_response = finalize_model_response_text(
-                    tool_outcome.final_text,
-                    effective_message,
-                    history=history,
-                    features=features,
-                    tool_results=tool_outcome.tool_results,
-                )
-                full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 if not response_started:
                     mark_foreground_job("running")
                     await websocket.send_json({'type': 'start'})
                     response_started = True
+                if tool_outcome.requested_phase_upgrade == "workspace_execution":
+                    full_response = await continue_prepared_turn_in_workspace_execution(
+                        websocket,
+                        prepared,
+                        workflow_execution=workflow_execution,
+                    )
+                else:
+                    full_response = finalize_model_response_text(
+                        tool_outcome.final_text,
+                        effective_message,
+                        history=history,
+                        features=features,
+                        tool_results=tool_outcome.tool_results,
+                    )
+                    full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
             else:
                 messages = [{'role': 'system', 'content': system_prompt}]
@@ -20362,6 +20796,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     start_output=not response_started,
                 )
                 response_started = True
+                escalated_to_workspace_execution = False
                 recovery_tools = direct_response_tool_recovery_candidates(
                     conv_id,
                     effective_message,
@@ -20403,16 +20838,26 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                             activity_phase="respond",
                         ),
                     )
-                    full_response = tool_outcome.final_text
-                    direct_tool_results = list(tool_outcome.tool_results)
-                full_response = finalize_model_response_text(
-                    full_response,
-                    effective_message,
-                    history=history,
-                    features=features,
-                    tool_results=direct_tool_results,
-                )
-                full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
+                    if tool_outcome.requested_phase_upgrade == "workspace_execution":
+                        full_response = await continue_prepared_turn_in_workspace_execution(
+                            websocket,
+                            prepared,
+                            workflow_execution=workflow_execution,
+                        )
+                        escalated_to_workspace_execution = True
+                        direct_tool_results = []
+                    else:
+                        full_response = tool_outcome.final_text
+                        direct_tool_results = list(tool_outcome.tool_results)
+                if not escalated_to_workspace_execution:
+                    full_response = finalize_model_response_text(
+                        full_response,
+                        effective_message,
+                        history=history,
+                        features=features,
+                        tool_results=direct_tool_results,
+                    )
+                    full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
             mark_foreground_job("completed")
             await complete_successful_turn(

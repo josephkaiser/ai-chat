@@ -1,3 +1,4 @@
+import asyncio
 import os
 import pathlib
 import tempfile
@@ -190,6 +191,22 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("Say continue", message)
         self.assertNotIn("Would you like me to continue", message)
 
+    def test_patch_mismatch_followup_message_tells_model_to_reread_file(self):
+        message = app.build_tool_result_followup_message({
+            "id": "call_patch_1",
+            "ok": False,
+            "error": "edit 1 expected 1 match(es) for old_text, found 0",
+            "details": {
+                "type": "patch_mismatch",
+                "path": "src/web/index.html",
+            },
+        })
+
+        self.assertIn("<tool_result>", message)
+        self.assertIn("Read the live file again before attempting another patch.", message)
+        self.assertIn("Do not reuse stale old_text.", message)
+        self.assertIn("src/web/index.html", message)
+
     def test_default_prompt_no_longer_instructs_step_by_step_confirmation(self):
         self.assertNotIn("ask a short yes-or-no question", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Keep the visible answer brief", DEFAULT_SYSTEM_PROMPT)
@@ -217,6 +234,204 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("responsive layouts that fit narrow panes and phones", TOOL_USE_SYSTEM_PROMPT)
         self.assertIn("workspace viewer, normal desktop browsers, and phones", DEEP_BUILD_SYSTEM_PROMPT)
         self.assertNotIn(".venv", TOOL_USE_SYSTEM_PROMPT)
+
+    def test_continue_prepared_turn_in_workspace_execution_uses_build_flow(self):
+        original_send_activity_event = app.send_activity_event
+        original_orchestrated_chat = app.orchestrated_chat
+
+        class DummyWebSocket:
+            async def send_json(self, _payload):
+                return None
+
+        recorded_events = []
+
+        async def fake_send_activity_event(websocket, phase, title, content, **kwargs):
+            recorded_events.append((phase, title, content))
+
+        async def fake_orchestrated_chat(
+            websocket,
+            conversation_id,
+            message,
+            history,
+            system_prompt,
+            max_tokens,
+            features,
+            auto_execute=False,
+            plan_override_builder_steps=None,
+            workflow_execution=None,
+        ):
+            self.assertEqual(conversation_id, "conv-escalate")
+            self.assertEqual(message, "show me a one-file toy operating system example")
+            self.assertTrue(auto_execute)
+            self.assertEqual(plan_override_builder_steps, [])
+            return "Created `toy_kernel.c` in the workspace."
+
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-escalate",
+            active_file_path="",
+            turn_kind=app.TURN_KIND_VISIBLE_CHAT,
+            user_message_id=1,
+            saved_user_message="show me a one-file toy operating system example",
+            effective_message="show me a one-file toy operating system example",
+            model_message="show me a one-file toy operating system example",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True, workspace_write=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="none",
+            tool_policy_trace={},
+            enabled_tools=["conversation.search_history"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                execution_style="direct_answer",
+                workspace_intent="none",
+                enabled_tools=["conversation.search_history"],
+            ),
+            attachment_paths=[],
+        )
+
+        try:
+            app.send_activity_event = fake_send_activity_event
+            app.orchestrated_chat = fake_orchestrated_chat
+            response = asyncio.run(
+                app.continue_prepared_turn_in_workspace_execution(
+                    DummyWebSocket(),
+                    prepared,
+                )
+            )
+        finally:
+            app.send_activity_event = original_send_activity_event
+            app.orchestrated_chat = original_orchestrated_chat
+
+        self.assertEqual(response, "Created `toy_kernel.c` in the workspace.")
+        self.assertEqual(
+            recorded_events,
+            [(
+                "evaluate",
+                "Escalate",
+                "Switching from answer mode into workspace execution because the next step needs file changes.",
+            )],
+        )
+
+    def test_process_chat_turn_escalates_workspace_upgrade_instead_of_leaking_internal_message(self):
+        original_prepare_turn_request = app.prepare_turn_request
+        original_run_resumable_tool_loop = app.run_resumable_tool_loop
+        original_orchestrated_chat = app.orchestrated_chat
+        original_create_workflow_execution = app.create_workflow_execution
+        original_complete_successful_turn = app.complete_successful_turn
+
+        class DummyWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-upgrade",
+            active_file_path="",
+            turn_kind=app.TURN_KIND_VISIBLE_CHAT,
+            user_message_id=1,
+            saved_user_message="like just a 1 file example operating system toy example?",
+            effective_message="like just a 1 file example operating system toy example?",
+            model_message="like just a 1 file example operating system toy example?",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True, workspace_write=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="none",
+            tool_policy_trace={},
+            enabled_tools=["conversation.search_history"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                execution_style="direct_answer",
+                workspace_intent="none",
+                enabled_tools=["conversation.search_history"],
+            ),
+            attachment_paths=[],
+        )
+
+        async def fake_prepare_turn_request(_data):
+            return prepared
+
+        async def fake_run_resumable_tool_loop(*args, **kwargs):
+            return app.ToolLoopOutcome(
+                final_text=(
+                    "The next step needs workspace execution because it requested workspace.patch_file. "
+                    "Switch into the build flow and continue from the current task."
+                ),
+                requested_phase_upgrade="workspace_execution",
+                requested_tool_name="workspace.patch_file",
+            )
+
+        async def fake_orchestrated_chat(
+            websocket,
+            conversation_id,
+            message,
+            history,
+            system_prompt,
+            max_tokens,
+            features,
+            auto_execute=False,
+            plan_override_builder_steps=None,
+            workflow_execution=None,
+        ):
+            self.assertEqual(conversation_id, "conv-upgrade")
+            self.assertTrue(auto_execute)
+            return "Created `toy_kernel.c` in the workspace."
+
+        def fake_create_workflow_execution(*args, **kwargs):
+            return None
+
+        async def fake_complete_successful_turn(*args, **kwargs):
+            return None
+
+        websocket = DummyWebSocket()
+        try:
+            app.prepare_turn_request = fake_prepare_turn_request
+            app.run_resumable_tool_loop = fake_run_resumable_tool_loop
+            app.orchestrated_chat = fake_orchestrated_chat
+            app.create_workflow_execution = fake_create_workflow_execution
+            app.complete_successful_turn = fake_complete_successful_turn
+            asyncio.run(
+                app.process_chat_turn(
+                    websocket,
+                    {
+                        "conversation_id": "conv-upgrade",
+                        "message": "like just a 1 file example operating system toy example?",
+                    },
+                )
+            )
+        finally:
+            app.prepare_turn_request = original_prepare_turn_request
+            app.run_resumable_tool_loop = original_run_resumable_tool_loop
+            app.orchestrated_chat = original_orchestrated_chat
+            app.create_workflow_execution = original_create_workflow_execution
+            app.complete_successful_turn = original_complete_successful_turn
+
+        final_replacements = [payload for payload in websocket.sent if payload.get("type") == "final_replace"]
+        self.assertEqual(len(final_replacements), 1)
+        self.assertEqual(final_replacements[0]["content"], "Created `toy_kernel.c` in the workspace.")
+        joined_payloads = "\n".join(str(payload) for payload in websocket.sent)
+        self.assertNotIn("The next step needs workspace execution", joined_payloads)
 
 
 if __name__ == "__main__":

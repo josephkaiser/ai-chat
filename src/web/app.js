@@ -42,7 +42,8 @@ const state = {
     pendingAttachments: [],
     composerUploadingCount: 0,
     composerDropActive: false,
-    activeStreamConversationId: ""
+    activeStreamConversationId: "",
+    activePreviewNonce: ""
 };
 function query(selector) {
     const element = document.querySelector(selector);
@@ -379,8 +380,16 @@ function parentDirectory(path) {
     parts.pop();
     return parts.length ? parts.join("/") : ".";
 }
-function fileViewUrl(path) {
-    return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
+function withCacheBust(url, nonce = "") {
+    if (!nonce) return url;
+    const joiner = url.includes("?") ? "&" : "?";
+    return `${url}${joiner}_=${encodeURIComponent(nonce)}`;
+}
+function fileViewUrl(path, nonce = "") {
+    return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`, nonce);
+}
+function workspaceFileApiUrl(path, nonce = "") {
+    return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`, nonce);
 }
 function downloadSelectedFile() {
     if (!state.currentWorkspaceId || !state.selectedFilePath) return;
@@ -394,7 +403,7 @@ function downloadSelectedFile() {
 }
 function openSelectedFileInTab() {
     if (!state.currentWorkspaceId || !state.selectedFilePath) return;
-    window.open(fileViewUrl(state.selectedFilePath), "_blank", "noopener");
+    window.open(fileViewUrl(state.selectedFilePath, String(Date.now())), "_blank", "noopener");
 }
 function inferredPreviewLanguage(path) {
     const extension = artifactFileExtension(path);
@@ -2508,11 +2517,11 @@ function renderPreview(payload) {
     }
     viewerMeta.hidden = false;
     if (contentKind === "image") {
-        filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}">`;
+        filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path, state.activePreviewNonce)}">`;
         return;
     }
     if (contentKind === "pdf") {
-        filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}"></iframe>`;
+        filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path, state.activePreviewNonce)}"></iframe>`;
         return;
     }
     if (contentKind === "html") {
@@ -2648,7 +2657,11 @@ function openFileTree() {
     renderFileList();
 }
 async function fetchJson(url, init) {
-    const response = await fetch(url, init);
+    const requestInit = {
+        cache: "no-store",
+        ...init
+    };
+    const response = await fetch(url, requestInit);
     const data = await response.json().catch(()=>({}));
     if (!response.ok) {
         const message = typeof data.detail === "string" ? data.detail : `Request failed: ${response.status}`;
@@ -3156,7 +3169,7 @@ async function loadDirectory(path) {
         renderPreviewEmpty("No workspace", "Create or select a workspace first.");
         return;
     }
-    const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/files?path=${encodeURIComponent(path)}`);
+    const payload = await fetchJson(withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/files?path=${encodeURIComponent(path)}`, String(Date.now())));
     state.currentDirectoryPath = payload.path || ".";
     state.fileItems = payload.items || [];
     renderFileList();
@@ -3166,6 +3179,7 @@ async function openFile(path) {
     const samePath = state.selectedFilePath === path;
     const previousPreviewScrollTop = samePath ? filePreview.scrollTop : 0;
     state.selectedFilePath = path;
+    state.activePreviewNonce = String(Date.now());
     if (isMobileViewport()) {
         state.leftSidebarOpen = false;
     }
@@ -3178,7 +3192,7 @@ async function openFile(path) {
             filePreview.scrollTop = previousPreviewScrollTop;
             return;
         }
-        const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`);
+        const payload = await fetchJson(workspaceFileApiUrl(path, state.activePreviewNonce));
         renderPreview(payload);
         filePreview.scrollTop = previousPreviewScrollTop;
     } catch (error) {
@@ -3249,8 +3263,12 @@ function attachEvents() {
         void loadContextEvalReport();
     });
     refreshWorkspaceButton.addEventListener("click", ()=>{
-        void loadDirectory(state.currentDirectoryPath);
-        if (state.viewerMode === "file" && state.selectedFilePath) void openFile(state.selectedFilePath);
+        void (async ()=>{
+            await loadDirectory(state.currentDirectoryPath);
+            if (state.viewerMode === "file" && state.selectedFilePath) {
+                await openFile(state.selectedFilePath);
+            }
+        })();
     });
     openInTabButton.addEventListener("click", ()=>{
         openSelectedFileInTab();
