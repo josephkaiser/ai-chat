@@ -4,17 +4,17 @@ Edit [config/model-defaults.env](/Users/joe/dev/ai-chat/config/model-defaults.en
 
 ```dotenv
 DEFAULT_MODEL_PROFILE=14b
-MODEL_14B_NAME=Qwen/Qwen3-14B-AWQ
-MODEL_14B_GPU_MEMORY_UTILIZATION=0.95
-MODEL_14B_MAX_MODEL_LEN=8192
-MODEL_14B_ENABLE_PREFIX_CACHING=1
-MODEL_14B_MAX_NUM_SEQS=16
-MODEL_14B_ENABLE_CHUNKED_PREFILL=1
-MODEL_14B_QUANTIZATION=awq_marlin
-MODEL_14B_TRUST_REMOTE_CODE=1
-MODEL_14B_ENFORCE_EAGER=1
-MODEL_14B_SWAP_SPACE=
-MODEL_14B_EXTRA_ARGS=
+MODEL_NAME=Qwen/Qwen3-14B-AWQ
+MODEL_GPU_MEMORY_UTILIZATION=0.75
+MODEL_MAX_MODEL_LEN=4096
+MODEL_ENABLE_PREFIX_CACHING=1
+MODEL_MAX_NUM_SEQS=1
+MODEL_ENABLE_CHUNKED_PREFILL=1
+MODEL_QUANTIZATION=awq_marlin
+MODEL_TRUST_REMOTE_CODE=1
+MODEL_ENFORCE_EAGER=1
+MODEL_SWAP_SPACE=
+MODEL_EXTRA_ARGS=
 ```
 
 `./chat` reads this file, writes the active selection into `.runtime-model.env`, and `chat-app` also loads the same defaults file on startup when explicit environment overrides are absent.
@@ -29,10 +29,11 @@ Load order is:
 
 This means each tuning knob is a one-line edit. For example:
 
-- change model: `MODEL_14B_NAME=...`
-- change VRAM cap: `MODEL_14B_GPU_MEMORY_UTILIZATION=0.80`
-- change context: `MODEL_14B_MAX_MODEL_LEN=4096`
-- add one-off flags: `MODEL_14B_EXTRA_ARGS=--swap-space 8`
+- change model: `MODEL_NAME=...`
+- change VRAM cap: `MODEL_GPU_MEMORY_UTILIZATION=0.80`
+- change context: `MODEL_MAX_MODEL_LEN=4096`
+- change concurrency: `MODEL_MAX_NUM_SEQS=1`
+- add one-off flags: `MODEL_EXTRA_ARGS=--swap-space 8`
 
 New users can clone the repo and run the app with only the checked-in defaults. You only need the local override file if you want machine-specific customization.
 
@@ -47,9 +48,17 @@ The checked-in Docker setup assumes a local host that can run GPU-backed vLLM:
 
 Workspace roots are path-backed catalog entries. Managed workspace directories are typically bind-mounted under `./workspaces`, while legacy hosted runs may still exist under `./runs` after migration.
 
-## Model profiles
+## Runtime model tuning
 
-The app keeps a single configured `14B` profile. The selected profile is persisted in `/app/data/model_state.json`, and a non-matching loaded model is treated as a custom runtime model.
+The public config surface is now generic `MODEL_*` tuning knobs. The launcher still keeps a lightweight internal `14b` state key for backward compatibility, but the intended user-facing interface is:
+
+- choose `MODEL_NAME`
+- tune `MODEL_GPU_MEMORY_UTILIZATION`
+- tune `MODEL_MAX_MODEL_LEN`
+- tune `MODEL_MAX_NUM_SEQS`
+- add one-off flags with `MODEL_EXTRA_ARGS`
+
+Legacy `MODEL_14B_*` overrides are still accepted as compatibility fallbacks, but new configs should prefer the generic names.
 
 The generated runtime env passed into Docker Compose contains the selected model plus the shared profile defaults:
 
@@ -57,8 +66,7 @@ The generated runtime env passed into Docker Compose contains the selected model
 environment:
   - VLLM_HOST=http://vllm:8000/v1
   - MODEL_NAME=${VLLM_SELECTED_MODEL_NAME}
-  - MODEL_14B_NAME=${MODEL_14B_NAME}
-  - MODEL_14B_ARGS=${MODEL_14B_ARGS}
+  - MODEL_ARGS=${VLLM_SELECTED_MODEL_ARGS}
   - DEFAULT_MODEL_PROFILE=14b
 ```
 
@@ -85,8 +93,8 @@ The Docker image launches through `app.py`, which immediately hands off to `src/
 
 ## Launcher notes
 
-- `./chat install` is non-interactive and prepares the current runtime profile or `DEFAULT_MODEL_PROFILE` (falling back to `14b`).
-- `./chat start` is non-interactive and reuses the installed/default downloaded profile.
+- `./chat install` is non-interactive and prepares the currently configured model tune.
+- `./chat start` is non-interactive and reuses the installed/configured model tune.
 - The launcher accepts chained commands in one invocation, so `./chat install start` and `./chat stop install start` run sequentially.
 
 ## GPU configurations
