@@ -360,6 +360,15 @@ def env_truthy(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def first_env_value(*names: str) -> str:
+    """Return the first non-empty environment value from the provided keys."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return ""
+
+
 def build_model_args_from_env(prefix: str) -> str:
     """Build one vLLM argument string from line-by-line env settings."""
     parts: List[str] = []
@@ -400,16 +409,17 @@ def build_model_args_from_env(prefix: str) -> str:
 # --- Runtime configuration (override with env vars; see docs/configuration.md) ---
 DB_PATH = os.getenv("DB_PATH", "/app/data/chat.db")
 VLLM_HOST = os.getenv("VLLM_HOST", "http://vllm:8000/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("MODEL_14B_NAME", ""))
+MODEL_NAME = first_env_value("MODEL_NAME", "MODEL_14B_NAME")
 HF_CACHE_PATH = os.getenv("HF_CACHE_PATH", "/cache/huggingface")
 WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT", str(pathlib.Path("/app/workspaces")))
 RUNS_ROOT = os.getenv("RUNS_ROOT", str(pathlib.Path("/app/runs")))
 MANAGED_PYTHON_ENVS_ROOT = os.getenv("MANAGED_PYTHON_ENVS_ROOT", str(pathlib.Path("/app/python-envs")))
 VOICE_ROOT = os.getenv("VOICE_ROOT", str(pathlib.Path("/app/data/voice")))
 MODEL_STATE_PATH = os.getenv("MODEL_STATE_PATH", "/app/data/model_state.json")
-MODEL_14B_NAME = os.getenv("MODEL_14B_NAME", MODEL_NAME)
-MODEL_14B_ARGS = os.getenv("MODEL_14B_ARGS", "").strip() or build_model_args_from_env("MODEL_14B")
-CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_14B_ARGS)
+MODEL_ARGS = first_env_value("MODEL_ARGS", "MODEL_14B_ARGS") or build_model_args_from_env("MODEL") or build_model_args_from_env("MODEL_14B")
+MODEL_14B_NAME = first_env_value("MODEL_14B_NAME") or MODEL_NAME
+MODEL_14B_ARGS = first_env_value("MODEL_14B_ARGS") or MODEL_ARGS
+CUSTOM_MODEL_ARGS = os.getenv("CUSTOM_MODEL_ARGS", MODEL_ARGS)
 DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower()
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -607,7 +617,7 @@ def build_model_profile(
 def build_configured_model_profiles() -> Dict[str, Dict[str, Any]]:
     """Build the configured model profile table from environment defaults."""
     configured = [
-        ("14b", MODEL_14B_NAME, MODEL_14B_ARGS, "14B", False),
+        ("14b", MODEL_NAME, MODEL_ARGS, "Configured", False),
     ]
     profiles: Dict[str, Dict[str, Any]] = {}
     for key, name, args, label, fast_path in configured:
@@ -736,7 +746,7 @@ def build_vllm_command(profile_key: Optional[str] = None, model_name: Optional[s
 
 
 logger.info(f"Using vLLM at {VLLM_HOST} with model {get_active_model_name()}")
-logger.info("Available model profiles: %s", ", ".join(f"{key}={value['name']}" for key, value in MODEL_PROFILES.items()))
+logger.info("Configured models: %s", ", ".join(f"{key}={value['name']}" for key, value in MODEL_PROFILES.items()))
 logger.info("Workspace root: %s", WORKSPACE_ROOT)
 
 HOSTNAME_ADJECTIVES = (
@@ -20067,7 +20077,7 @@ async def startup_event():
     ensure_frontend_bundle()
     logger.info("=" * 60)
     logger.info("AI Chat Application Starting...")
-    logger.info(f"Selected model profile: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
+    logger.info(f"Selected model tune: {ACTIVE_MODEL_PROFILE} ({get_active_model_name()})")
     logger.info(f"vLLM: {VLLM_HOST}")
     logger.info("=" * 60)
 

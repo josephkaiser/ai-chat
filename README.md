@@ -21,8 +21,8 @@ After cloning the repo, `./chat` is the primary way to install and run the app:
 
 What these do:
 
-- `./chat install` pulls the vLLM image, builds the app container, rebuilds the frontend bundle when needed, and prepares the default model.
-- `./chat start` starts the stack using the installed/default model profile.
+- `./chat install` pulls the vLLM image, builds the app container, rebuilds the frontend bundle when needed, and prepares the configured model.
+- `./chat start` starts the stack using the current model tune from your config.
 - `./chat open` opens the best available browser URL.
 
 Useful commands:
@@ -47,7 +47,7 @@ The default setup is aimed at a machine that can run vLLM locally.
 
 - Docker with the `docker compose` plugin
 - NVIDIA GPU support available to Docker
-- About 24 GB VRAM recommended for the default `14B` profile
+- About 24 GB VRAM recommended for the default checked-in tune
 - Enough SSD space for Docker images, model cache, and app data
 - Internet access for initial image pulls, model downloads, and optional web search
 - A modern browser for the UI

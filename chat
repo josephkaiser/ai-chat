@@ -78,10 +78,21 @@ load_model_defaults() {
 
 load_model_defaults
 
-DEFAULT_14B_MODEL_NAME="${MODEL_14B_NAME:-}"
+first_nonempty() {
+    local value=""
+    for value in "$@"; do
+        if [[ -n "${value:-}" ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    printf '%s\n' ""
+}
 
-if [[ -z "$DEFAULT_14B_MODEL_NAME" ]]; then
-    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_14B_NAME" >&2
+DEFAULT_MODEL_NAME="$(first_nonempty "${MODEL_NAME:-}" "${MODEL_14B_NAME:-}")"
+
+if [[ -z "$DEFAULT_MODEL_NAME" ]]; then
+    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_NAME" >&2
     exit 1
 fi
 
@@ -141,10 +152,14 @@ build_model_args_from_env() {
     printf '%s' "${parts[*]}"
 }
 
-DEFAULT_14B_MODEL_ARGS="${MODEL_14B_ARGS:-$(build_model_args_from_env MODEL_14B)}"
+DEFAULT_MODEL_ARGS="$(first_nonempty \
+    "${MODEL_ARGS:-}" \
+    "${MODEL_14B_ARGS:-}" \
+    "$(build_model_args_from_env MODEL)" \
+    "$(build_model_args_from_env MODEL_14B)")"
 
-if [[ -z "$DEFAULT_14B_MODEL_NAME" || -z "$DEFAULT_14B_MODEL_ARGS" ]]; then
-    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_14B_NAME and enough MODEL_14B_* settings to build args" >&2
+if [[ -z "$DEFAULT_MODEL_NAME" || -z "$DEFAULT_MODEL_ARGS" ]]; then
+    echo "ERROR: $MODEL_DEFAULTS_FILE must define MODEL_NAME and enough MODEL_* settings to build args" >&2
     exit 1
 fi
 
@@ -161,14 +176,14 @@ model_profile_label() {
 
 model_profile_name() {
     case "$1" in
-        14b) printf '%s\n' "$DEFAULT_14B_MODEL_NAME" ;;
+        14b) printf '%s\n' "$DEFAULT_MODEL_NAME" ;;
         *) return 1 ;;
     esac
 }
 
 model_profile_args() {
     case "$1" in
-        14b) printf '%s\n' "$DEFAULT_14B_MODEL_ARGS" ;;
+        14b) printf '%s\n' "$DEFAULT_MODEL_ARGS" ;;
         *) return 1 ;;
     esac
 }
@@ -211,18 +226,30 @@ write_runtime_env_file() {
     model_args="$(model_profile_args "$profile")"
     cat >"$RUNTIME_ENV_FILE" <<EOF
 DEFAULT_MODEL_PROFILE=${DEFAULT_MODEL_PROFILE:-14b}
-MODEL_14B_NAME=$DEFAULT_14B_MODEL_NAME
-MODEL_14B_ARGS=$DEFAULT_14B_MODEL_ARGS
-MODEL_14B_GPU_MEMORY_UTILIZATION=${MODEL_14B_GPU_MEMORY_UTILIZATION:-}
-MODEL_14B_MAX_MODEL_LEN=${MODEL_14B_MAX_MODEL_LEN:-}
-MODEL_14B_ENABLE_PREFIX_CACHING=${MODEL_14B_ENABLE_PREFIX_CACHING:-}
-MODEL_14B_MAX_NUM_SEQS=${MODEL_14B_MAX_NUM_SEQS:-}
-MODEL_14B_ENABLE_CHUNKED_PREFILL=${MODEL_14B_ENABLE_CHUNKED_PREFILL:-}
-MODEL_14B_QUANTIZATION=${MODEL_14B_QUANTIZATION:-}
-MODEL_14B_TRUST_REMOTE_CODE=${MODEL_14B_TRUST_REMOTE_CODE:-}
-MODEL_14B_ENFORCE_EAGER=${MODEL_14B_ENFORCE_EAGER:-}
-MODEL_14B_SWAP_SPACE=${MODEL_14B_SWAP_SPACE:-}
-MODEL_14B_EXTRA_ARGS=${MODEL_14B_EXTRA_ARGS:-}
+MODEL_NAME=$DEFAULT_MODEL_NAME
+MODEL_ARGS=$DEFAULT_MODEL_ARGS
+MODEL_GPU_MEMORY_UTILIZATION=$(first_nonempty "${MODEL_GPU_MEMORY_UTILIZATION:-}" "${MODEL_14B_GPU_MEMORY_UTILIZATION:-}")
+MODEL_MAX_MODEL_LEN=$(first_nonempty "${MODEL_MAX_MODEL_LEN:-}" "${MODEL_14B_MAX_MODEL_LEN:-}")
+MODEL_ENABLE_PREFIX_CACHING=$(first_nonempty "${MODEL_ENABLE_PREFIX_CACHING:-}" "${MODEL_14B_ENABLE_PREFIX_CACHING:-}")
+MODEL_MAX_NUM_SEQS=$(first_nonempty "${MODEL_MAX_NUM_SEQS:-}" "${MODEL_14B_MAX_NUM_SEQS:-}")
+MODEL_ENABLE_CHUNKED_PREFILL=$(first_nonempty "${MODEL_ENABLE_CHUNKED_PREFILL:-}" "${MODEL_14B_ENABLE_CHUNKED_PREFILL:-}")
+MODEL_QUANTIZATION=$(first_nonempty "${MODEL_QUANTIZATION:-}" "${MODEL_14B_QUANTIZATION:-}")
+MODEL_TRUST_REMOTE_CODE=$(first_nonempty "${MODEL_TRUST_REMOTE_CODE:-}" "${MODEL_14B_TRUST_REMOTE_CODE:-}")
+MODEL_ENFORCE_EAGER=$(first_nonempty "${MODEL_ENFORCE_EAGER:-}" "${MODEL_14B_ENFORCE_EAGER:-}")
+MODEL_SWAP_SPACE=$(first_nonempty "${MODEL_SWAP_SPACE:-}" "${MODEL_14B_SWAP_SPACE:-}")
+MODEL_EXTRA_ARGS=$(first_nonempty "${MODEL_EXTRA_ARGS:-}" "${MODEL_14B_EXTRA_ARGS:-}")
+MODEL_14B_NAME=$DEFAULT_MODEL_NAME
+MODEL_14B_ARGS=$DEFAULT_MODEL_ARGS
+MODEL_14B_GPU_MEMORY_UTILIZATION=$(first_nonempty "${MODEL_GPU_MEMORY_UTILIZATION:-}" "${MODEL_14B_GPU_MEMORY_UTILIZATION:-}")
+MODEL_14B_MAX_MODEL_LEN=$(first_nonempty "${MODEL_MAX_MODEL_LEN:-}" "${MODEL_14B_MAX_MODEL_LEN:-}")
+MODEL_14B_ENABLE_PREFIX_CACHING=$(first_nonempty "${MODEL_ENABLE_PREFIX_CACHING:-}" "${MODEL_14B_ENABLE_PREFIX_CACHING:-}")
+MODEL_14B_MAX_NUM_SEQS=$(first_nonempty "${MODEL_MAX_NUM_SEQS:-}" "${MODEL_14B_MAX_NUM_SEQS:-}")
+MODEL_14B_ENABLE_CHUNKED_PREFILL=$(first_nonempty "${MODEL_ENABLE_CHUNKED_PREFILL:-}" "${MODEL_14B_ENABLE_CHUNKED_PREFILL:-}")
+MODEL_14B_QUANTIZATION=$(first_nonempty "${MODEL_QUANTIZATION:-}" "${MODEL_14B_QUANTIZATION:-}")
+MODEL_14B_TRUST_REMOTE_CODE=$(first_nonempty "${MODEL_TRUST_REMOTE_CODE:-}" "${MODEL_14B_TRUST_REMOTE_CODE:-}")
+MODEL_14B_ENFORCE_EAGER=$(first_nonempty "${MODEL_ENFORCE_EAGER:-}" "${MODEL_14B_ENFORCE_EAGER:-}")
+MODEL_14B_SWAP_SPACE=$(first_nonempty "${MODEL_SWAP_SPACE:-}" "${MODEL_14B_SWAP_SPACE:-}")
+MODEL_14B_EXTRA_ARGS=$(first_nonempty "${MODEL_EXTRA_ARGS:-}" "${MODEL_14B_EXTRA_ARGS:-}")
 MODEL_NAME=$model_name
 VLLM_SELECTED_PROFILE=$profile
 VLLM_SELECTED_MODEL_NAME=$model_name

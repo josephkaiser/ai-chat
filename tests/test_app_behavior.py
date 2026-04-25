@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import zipfile
 
-os.environ.setdefault("MODEL_14B_NAME", "test-model")
+os.environ.setdefault("MODEL_NAME", "test-model")
 
 import app
 from src.python.ai_chat.prompts import DEFAULT_SYSTEM_PROMPT, TOOL_USE_SYSTEM_PROMPT, DEEP_BUILD_SYSTEM_PROMPT, DEEP_INSPECT_SYSTEM_PROMPT
