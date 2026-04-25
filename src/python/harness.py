@@ -33,6 +33,7 @@ import uuid
 import venv
 import zipfile
 from html import escape, unescape
+from html.parser import HTMLParser
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -5857,6 +5858,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.list_files {"path":"."}
 - workspace.grep {"query":"FeatureFlags","path":".","glob":"*.py","limit":20}
 - workspace.read_file {"path":"src/python/harness.py"}
+- workspace.inspect_html {"path":"src/web/index.html"}
 - workspace.patch_file {"path":"src/python/harness.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
@@ -5872,12 +5874,14 @@ Constraints:
 - Paths are always relative to the current conversation workspace.
 - workspace.list_files hides dot-prefixed files unless you explicitly target a hidden path.
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
+- workspace.inspect_html reviews a saved HTML file and returns structural/rubric issues such as missing viewport metadata, sparse layout, or missing headings.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
 - For Python dependencies, use pip installs normally; the server will place them into a managed chat-scoped Python environment outside the workspace and make later Python commands use it when available.
 - When choosing Python packages or troubleshooting installs, use web.search or web.fetch_page to verify current package names, docs, and examples when helpful.
 - If workspace.run_command is available for this turn, use it instead of claiming you cannot run code, install packages, convert files, or inspect real command output.
 - workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
+- For HTML, dashboard, mini-app, landing-page, or visualization work, inspect the saved HTML with `workspace.inspect_html` after edits so you can critique responsiveness, structure, and likely blank-page issues before finishing.
 - When you generate a chart, plot, screenshot, PDF, or other visual result, save it as a workspace file such as PNG, SVG, HTML, or PDF so the UI can surface it as an artifact.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
 - conversation.search_history searches the current conversation only.
@@ -10619,6 +10623,7 @@ def allowed_workspace_tools(
 ) -> List[str]:
     """Return workspace tools allowed by the current per-turn approvals."""
     allowed = ["workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"]
+    allowed.append("workspace.inspect_html")
     if include_render:
         allowed.append("workspace.render")
     if features.workspace_write and include_write:
@@ -13052,6 +13057,7 @@ SUPPORTED_TOOL_NAMES = {
     "workspace.list_files",
     "workspace.grep",
     "workspace.read_file",
+    "workspace.inspect_html",
     "workspace.patch_file",
     "workspace.run_command",
     "workspace.render",
@@ -13063,7 +13069,7 @@ SUPPORTED_TOOL_NAMES = {
 
 SUPPORTED_TOOL_NAME_PATTERN = re.compile(
     r'"name"\s*:\s*"(?P<name>'
-    r'workspace\.(?:list_files|grep|read_file|patch_file|run_command|render)'
+    r'workspace\.(?:list_files|grep|read_file|inspect_html|patch_file|run_command|render)'
     r'|spreadsheet\.describe'
     r'|conversation\.search_history'
     r'|web\.(?:search|fetch_page)'
@@ -14027,6 +14033,167 @@ def html_to_text_content(html: str) -> str:
     return cleaned.strip()
 
 
+class HtmlInspectionParser(HTMLParser):
+    """Collect lightweight structural facts from an HTML document."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.in_title = False
+        self.title_parts: List[str] = []
+        self.has_body = False
+        self.has_viewport_meta = False
+        self.script_count = 0
+        self.style_block_count = 0
+        self.inline_style_count = 0
+        self.heading_count = 0
+        self.main_count = 0
+        self.section_count = 0
+        self.article_count = 0
+        self.div_count = 0
+        self.canvas_count = 0
+        self.svg_count = 0
+        self.image_count = 0
+        self.button_count = 0
+        self.form_count = 0
+        self.link_stylesheet_count = 0
+        self.body_text_parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        attr_map = {str(key or "").lower(): str(value or "") for key, value in attrs}
+        tag_name = str(tag or "").lower()
+        if tag_name == "title":
+            self.in_title = True
+        elif tag_name == "body":
+            self.has_body = True
+        elif tag_name == "meta":
+            if attr_map.get("name", "").strip().lower() == "viewport":
+                self.has_viewport_meta = True
+        elif tag_name == "script":
+            self.script_count += 1
+        elif tag_name == "style":
+            self.style_block_count += 1
+        elif re.fullmatch(r"h[1-6]", tag_name):
+            self.heading_count += 1
+        elif tag_name == "main":
+            self.main_count += 1
+        elif tag_name == "section":
+            self.section_count += 1
+        elif tag_name == "article":
+            self.article_count += 1
+        elif tag_name == "div":
+            self.div_count += 1
+        elif tag_name == "canvas":
+            self.canvas_count += 1
+        elif tag_name == "svg":
+            self.svg_count += 1
+        elif tag_name == "img":
+            self.image_count += 1
+        elif tag_name == "button":
+            self.button_count += 1
+        elif tag_name == "form":
+            self.form_count += 1
+        elif tag_name == "link" and attr_map.get("rel", "").strip().lower() == "stylesheet":
+            self.link_stylesheet_count += 1
+        if "style" in attr_map and attr_map["style"].strip():
+            self.inline_style_count += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if str(tag or "").lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        cleaned = re.sub(r"\s+", " ", str(data or "")).strip()
+        if not cleaned:
+            return
+        if self.in_title:
+            self.title_parts.append(cleaned)
+            return
+        self.body_text_parts.append(cleaned)
+
+
+def workspace_inspect_html_result(conversation_id: str, rel_path: str) -> Dict[str, Any]:
+    """Inspect a saved HTML file and return a lightweight visual-quality rubric."""
+    workspace = get_workspace_path(conversation_id)
+    target = resolve_workspace_relative_path(conversation_id, rel_path)
+    if not target.is_file():
+        raise ValueError("File not found")
+    if target.suffix.lower() not in HTML_EXTENSIONS:
+        raise ValueError("path must point to an HTML file")
+    if target.stat().st_size > WORKSPACE_FILE_SIZE_LIMIT:
+        raise ValueError("File too large (max 1MB)")
+
+    raw = target.read_text(encoding="utf-8", errors="replace")
+    parser = HtmlInspectionParser()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        pass
+
+    title = " ".join(part for part in parser.title_parts if part).strip()
+    body_text = html_to_text_content(raw)
+    body_text_length = len(body_text)
+    visible_text_preview = truncate_output(body_text, limit=260)
+    visual_primitives = parser.canvas_count + parser.svg_count + parser.image_count
+    semantic_sections = parser.main_count + parser.section_count + parser.article_count
+
+    issues: List[str] = []
+    if not parser.has_viewport_meta:
+        issues.append("Missing viewport meta tag for responsive rendering.")
+    if not title:
+        issues.append("Missing <title>; the document will be harder to identify in previews and tabs.")
+    if not parser.has_body:
+        issues.append("Missing <body> element.")
+    if body_text_length < 40 and visual_primitives == 0:
+        issues.append("Very little visible content; the page may render as mostly blank.")
+    if visual_primitives == 0 and semantic_sections == 0 and parser.div_count < 2:
+        issues.append("No obvious visual or structural sections; the layout may be too sparse to evaluate well.")
+    if parser.inline_style_count >= 12 and parser.style_block_count == 0 and parser.link_stylesheet_count == 0:
+        issues.append("Heavy inline styling; consider consolidating layout and visual rules into a <style> block.")
+    if parser.heading_count == 0 and body_text_length >= 120:
+        issues.append("No headings detected; the visual hierarchy may feel flat.")
+
+    summary_parts = [
+        f"{'Responsive' if parser.has_viewport_meta else 'Non-responsive'} HTML",
+        f"{body_text_length} chars of visible text",
+    ]
+    if visual_primitives:
+        summary_parts.append(f"{visual_primitives} visual primitive(s)")
+    if semantic_sections:
+        summary_parts.append(f"{semantic_sections} semantic section(s)")
+
+    return {
+        "path": format_workspace_path(target, workspace),
+        "title": title,
+        "summary": ", ".join(summary_parts),
+        "has_viewport_meta": parser.has_viewport_meta,
+        "has_body": parser.has_body,
+        "body_text_length": body_text_length,
+        "visible_text_preview": visible_text_preview,
+        "heading_count": parser.heading_count,
+        "main_count": parser.main_count,
+        "section_count": parser.section_count,
+        "article_count": parser.article_count,
+        "div_count": parser.div_count,
+        "canvas_count": parser.canvas_count,
+        "svg_count": parser.svg_count,
+        "image_count": parser.image_count,
+        "script_count": parser.script_count,
+        "style_block_count": parser.style_block_count,
+        "link_stylesheet_count": parser.link_stylesheet_count,
+        "inline_style_count": parser.inline_style_count,
+        "button_count": parser.button_count,
+        "form_count": parser.form_count,
+        "issues": issues,
+        "rubric": {
+            "responsive_ready": parser.has_viewport_meta,
+            "visible_content": body_text_length >= 40 or visual_primitives > 0,
+            "visual_primitives_present": visual_primitives > 0,
+            "basic_structure_present": parser.has_body and (semantic_sections > 0 or parser.div_count > 0),
+        },
+    }
+
+
 def build_query_excerpt(content: str, query: str, window: int = 220) -> str:
     """Extract a focused snippet around the first query-token match."""
     text = re.sub(r"\s+", " ", str(content or "")).strip()
@@ -14647,6 +14814,8 @@ def tool_activity_label(name: str) -> str:
     """Map tool names to compact UI activity labels."""
     if name == "workspace.run_command":
         return "Command"
+    if name == "workspace.inspect_html":
+        return "Review"
     if name in {"workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"}:
         return "Explore"
     if name == "workspace.patch_file":
@@ -14670,6 +14839,8 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
         return f"Searching {target} for {query or 'text'}"
     if name == "workspace.read_file":
         return f"Opening {tool_path_preview(arguments.get('path', ''), 'file')}"
+    if name == "workspace.inspect_html":
+        return f"Reviewing {tool_path_preview(arguments.get('path', ''), 'HTML file')}"
     if name == "workspace.patch_file":
         return f"Editing {tool_path_preview(arguments.get('path', ''), 'file')}"
     if name == "workspace.run_command":
@@ -14774,6 +14945,13 @@ def tool_result_preview(
         lines = int(payload.get("lines", 0) or 0)
         line_note = f" ({pluralize_tool_count(lines, 'line')})" if lines else ""
         return f"Opened {path}{line_note}"
+
+    if name == "workspace.inspect_html" or "has_viewport_meta" in payload:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "HTML file")
+        issue_count = len(payload.get("issues", [])) if isinstance(payload.get("issues", []), list) else 0
+        if issue_count:
+            return f"Reviewed {path} ({pluralize_tool_count(issue_count, 'issue')})"
+        return f"Reviewed {path} (no obvious structural issues)"
 
     if name == "workspace.render" or payload.get("render"):
         return f"Rendered {tool_path_preview(payload.get('path', 'preview'), 'preview')} in the workspace viewer"
@@ -15130,6 +15308,11 @@ async def execute_tool_call(
             if not path:
                 raise ValueError("path is required")
             result = workspace_read_file_result(conversation_id, path)
+        elif name == "workspace.inspect_html":
+            path = str(arguments.get("path", "")).strip()
+            if not path:
+                raise ValueError("path is required")
+            result = workspace_inspect_html_result(conversation_id, path)
         elif name == "workspace.patch_file":
             path = str(arguments.get("path", "")).strip()
             if not path:

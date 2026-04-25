@@ -858,6 +858,68 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(result["open_path"], "plot.png")
         self.assertGreaterEqual(result["artifacts_detected"], 2)
         self.assertEqual(result["items"][0]["path"], "plot.png")
+
+    def test_workspace_inspect_html_result_flags_missing_viewport(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            html_path = workspace / "demo.html"
+            html_path.write_text(
+                "<!DOCTYPE html><html><head><title>Demo</title></head><body><div>Hi</div></body></html>",
+                encoding="utf-8",
+            )
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                result = app.workspace_inspect_html_result("conv-html", "demo.html")
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        self.assertEqual(result["path"], "demo.html")
+        self.assertFalse(result["has_viewport_meta"])
+        self.assertTrue(any("viewport" in issue.lower() for issue in result["issues"]))
+        self.assertIn("responsive_ready", result["rubric"])
+
+    def test_workspace_inspect_html_result_accepts_richer_html(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = pathlib.Path(tempdir)
+            html_path = workspace / "landing.html"
+            html_path.write_text(
+                """<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Landing</title>
+    <style>body { font-family: sans-serif; }</style>
+  </head>
+  <body>
+    <main>
+      <h1>Hello</h1>
+      <section><p>This is a richer page with enough visible content to review.</p></section>
+      <svg viewBox="0 0 10 10"></svg>
+    </main>
+  </body>
+</html>""",
+                encoding="utf-8",
+            )
+            original_get_workspace_path = app.get_workspace_path
+            try:
+                app.get_workspace_path = lambda _conversation_id, create=True: workspace
+                result = app.workspace_inspect_html_result("conv-html", "landing.html")
+            finally:
+                app.get_workspace_path = original_get_workspace_path
+
+        self.assertTrue(result["has_viewport_meta"])
+        self.assertEqual(result["svg_count"], 1)
+        self.assertTrue(result["rubric"]["visible_content"])
+        self.assertTrue(result["rubric"]["basic_structure_present"])
+
+    def test_allowed_workspace_tools_include_html_inspection(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+        allowed = app.allowed_workspace_tools(features, include_write=True, include_render=True)
+
+        self.assertIn("workspace.inspect_html", allowed)
+        self.assertIn("workspace.patch_file", allowed)
+        self.assertIn("workspace.render", allowed)
         self.assertEqual(result["items"][0]["content_kind"], "image")
         self.assertEqual(result["items"][1]["path"], "notes.txt")
 
