@@ -1130,6 +1130,25 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertEqual(cleaned, message)
 
+    def test_finalize_model_response_keeps_verified_workspace_write_claims(self):
+        response = "I created `portfolio.html` in the workspace."
+        tool_results = [
+            {
+                "call": {"name": "workspace.run_command"},
+                "result": {"ok": True, "result": {"path": "portfolio.html", "items": []}},
+            }
+        ]
+
+        cleaned = app.finalize_model_response_text(
+            response,
+            "create an html website",
+            history=[],
+            features=app.FeatureFlags(agent_tools=True, workspace_write=True),
+            tool_results=tool_results,
+        )
+
+        self.assertEqual(cleaned, response)
+
     def test_truthfulness_filter_strips_unverified_artifact_reference(self):
         cleaned = app.strip_unverified_workspace_write_claims("[[artifact:workspace/simple_script.py]]")
 

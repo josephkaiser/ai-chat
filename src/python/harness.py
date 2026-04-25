@@ -5980,6 +5980,33 @@ def strip_unverified_workspace_write_claims(message: str, tool_results: Optional
     )
 
 
+def finalize_model_response_text(
+    response_text: str,
+    request_text: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    features: Optional[FeatureFlags] = None,
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Normalize one model draft against verified tool outcomes before delivery."""
+    cleaned = str(response_text or "")
+    leaked_call = extract_leaked_tool_call(cleaned)
+    if leaked_call:
+        logger.warning(
+            "Recovered leaked tool payload in final response draft: %s",
+            leaked_call.get("name", ""),
+        )
+        cleaned = format_leaked_tool_call_message(leaked_call, features or FeatureFlags())
+    cleaned = strip_unverified_workspace_write_claims(cleaned, tool_results)
+    cleaned = maybe_attach_inline_code_artifact_reference(
+        cleaned,
+        request_text,
+        history=history,
+        tool_results=tool_results,
+    )
+    return cleaned
+
+
 INLINE_CODE_ARTIFACT_EXTENSION_MAP = {
     "c": "c",
     "h": "h",
@@ -20309,11 +20336,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         activity_phase="respond",
                     ),
                 )
-                full_response = tool_outcome.final_text
-                full_response = maybe_attach_inline_code_artifact_reference(
-                    full_response,
+                full_response = finalize_model_response_text(
+                    tool_outcome.final_text,
                     effective_message,
                     history=history,
+                    features=features,
                     tool_results=tool_outcome.tool_results,
                 )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
@@ -20327,6 +20354,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 for msg in model_history:
                     messages.append({'role': msg['role'], 'content': msg['content']})
                 mark_foreground_job("running")
+                direct_tool_results: List[Dict[str, Any]] = []
                 full_response = await stream_chat_response(
                     websocket,
                     messages,
@@ -20376,19 +20404,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         ),
                     )
                     full_response = tool_outcome.final_text
-                leaked_call = extract_leaked_tool_call(full_response)
-                if leaked_call:
-                    logger.warning(
-                        "Recovered leaked tool payload in direct response for conv %s: %s",
-                        conv_id,
-                        leaked_call.get("name", ""),
-                    )
-                    full_response = format_leaked_tool_call_message(leaked_call, features)
-                full_response = strip_unverified_workspace_write_claims(full_response)
-                full_response = maybe_attach_inline_code_artifact_reference(
+                    direct_tool_results = list(tool_outcome.tool_results)
+                full_response = finalize_model_response_text(
                     full_response,
                     effective_message,
                     history=history,
+                    features=features,
+                    tool_results=direct_tool_results,
                 )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
                 await send_final_replacement(websocket, full_response)
