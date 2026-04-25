@@ -1832,6 +1832,64 @@ body[data-viewer-mode="file"] .viewer-panel {
     }
 }
 
+@media (max-width: 1320px) and (min-width: 721px) {
+    :root {
+        --sidebar-width: 192px;
+        --chat-lane-width: 700px;
+        --viewer-width: min(52vw, 720px);
+    }
+
+    .sidebar {
+        grid-template-columns: 24px minmax(0, 1fr);
+        gap: 6px;
+        padding: 6px 6px 6px 4px;
+    }
+
+    .sidebar-brand {
+        padding-top: 2px;
+    }
+
+    .sidebar-brand h1,
+    .panel-header h2 {
+        font-size: 0.88rem;
+    }
+
+    .sidebar-content {
+        gap: 6px;
+    }
+
+    .sidebar-panel {
+        gap: 3px;
+    }
+
+    .conversation-item,
+    .file-item {
+        padding: 4px 8px;
+    }
+
+    .conversation-title {
+        font-size: 0.75rem;
+    }
+
+    .chat-messages {
+        gap: 10px;
+        padding-top: 10px;
+        padding-bottom: 16px;
+    }
+
+    .composer {
+        width: min(var(--chat-lane-width), calc(100% - 18px));
+    }
+
+    .empty-state {
+        padding: 24px 16px;
+    }
+
+    .empty-state-title {
+        font-size: 1.65rem;
+    }
+}
+
 @media (max-width: 720px) {
     body {
         overflow: hidden;
