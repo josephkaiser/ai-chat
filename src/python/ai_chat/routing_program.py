@@ -1,10 +1,11 @@
-"""Routing-program seam for heuristic today, DSPy later."""
+"""Routing-program seam for the structured top-level turn router."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
+from src.python.ai_chat.route_intake import StructuredRouteIntake
 from src.python.ai_chat.turn_strategy import TurnAssessment, build_turn_assessment
 
 
@@ -26,6 +27,7 @@ class RouteProgramInputs:
     resume_saved_workspace: bool = False
     execution_requested: bool = False
     workspace_run_commands_enabled: bool = False
+    route_intake: Optional[StructuredRouteIntake] = None
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,7 @@ class RouteProgramOutput:
 
 
 class HeuristicRouteProgram:
-    """Heuristic routing implementation with the same shape a DSPy program can later adopt."""
+    """Route assessment implementation fed by structured intake plus strategy helpers."""
 
     def run(self, inputs: RouteProgramInputs) -> RouteProgramOutput:
         return RouteProgramOutput(
@@ -55,6 +57,7 @@ class HeuristicRouteProgram:
                 resume_saved_workspace=inputs.resume_saved_workspace,
                 execution_requested=inputs.execution_requested,
                 workspace_run_commands_enabled=inputs.workspace_run_commands_enabled,
+                route_intake=inputs.route_intake,
             )
         )
 

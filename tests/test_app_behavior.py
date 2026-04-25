@@ -453,6 +453,66 @@ class AppBehaviorTests(unittest.TestCase):
         joined_payloads = "\n".join(str(payload) for payload in websocket.sent)
         self.assertNotIn("The next step needs workspace execution", joined_payloads)
 
+    def test_resolve_route_intake_for_turn_uses_structured_llm_pass(self):
+        original_infer = app.infer_structured_route_intake_via_llm
+        try:
+            async def fake_infer(**kwargs):
+                self.assertEqual(kwargs["message"], "can you summarize the changes to nvim 0.12")
+                return app.StructuredRouteIntake(
+                    needs_fresh_info=True,
+                    is_versioned_release_query=True,
+                    entity="nvim",
+                    time_sensitivity="versioned",
+                    answer_shape="summary",
+                    needs_search_citations=True,
+                    web_search_requested=True,
+                    reasoning="versioned release summary",
+                    confidence=0.94,
+                )
+
+            app.infer_structured_route_intake_via_llm = fake_infer
+            route = asyncio.run(
+                app.resolve_route_intake_for_turn(
+                    "conv-route",
+                    "can you summarize the changes to nvim 0.12",
+                    app.FeatureFlags(agent_tools=True, web_search=True),
+                    history=[],
+                )
+            )
+        finally:
+            app.infer_structured_route_intake_via_llm = original_infer
+
+        self.assertTrue(route.web_search_requested)
+        self.assertTrue(route.needs_fresh_info)
+        self.assertTrue(route.is_versioned_release_query)
+        self.assertEqual(route.entity, "nvim")
+        self.assertEqual(route.answer_shape, "summary")
+
+    def test_resolve_route_intake_for_turn_preserves_explicit_web_search_rail(self):
+        original_infer = app.infer_structured_route_intake_via_llm
+        try:
+            async def fake_infer(**kwargs):
+                return app.StructuredRouteIntake(
+                    answer_shape="summary",
+                    reasoning="bad miss",
+                    confidence=0.71,
+                )
+
+            app.infer_structured_route_intake_via_llm = fake_infer
+            route = asyncio.run(
+                app.resolve_route_intake_for_turn(
+                    "conv-route",
+                    "search the web for current sources on nvim 0.12 changes",
+                    app.FeatureFlags(agent_tools=True, web_search=True),
+                    history=[],
+                )
+            )
+        finally:
+            app.infer_structured_route_intake_via_llm = original_infer
+
+        self.assertTrue(route.web_search_requested)
+        self.assertTrue(route.needs_fresh_info)
+
 
 if __name__ == "__main__":
     unittest.main()

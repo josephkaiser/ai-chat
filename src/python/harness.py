@@ -272,6 +272,10 @@ from src.python.ai_chat.prompts import (
     STEP_DECOMPOSE_SYSTEM_PROMPT,
     TOOL_USE_SYSTEM_PROMPT,
 )
+from src.python.ai_chat.route_intake import (
+    StructuredRouteIntake,
+    normalize_structured_route_intake,
+)
 from src.python.ai_chat.routing_program import DEFAULT_ROUTE_PROGRAM, RouteProgramInputs
 from src.python.ai_chat.runtime_layers import (
     TURN_KIND_VISIBLE_CHAT,
@@ -3115,6 +3119,7 @@ def build_tool_policy_trace(
     enabled_tools: List[str],
     auto_execute_workspace: bool,
     resume_saved_workspace: bool,
+    route_intake: Optional[StructuredRouteIntake] = None,
 ) -> Dict[str, Any]:
     """Summarize why tool lanes were or were not exposed for one turn."""
     tool_names = [str(name).strip() for name in enabled_tools if str(name).strip()]
@@ -3129,6 +3134,7 @@ def build_tool_policy_trace(
         "web_search_requested": bool(web_search_requested),
         "auto_execute_workspace": bool(auto_execute_workspace),
         "resume_saved_workspace": bool(resume_saved_workspace),
+        "route_intake": route_intake.as_metadata() if route_intake else {},
         "enabled_tools": tool_names,
         "has_workspace_tools": any(name.startswith("workspace.") or name == "spreadsheet.describe" for name in tool_names),
         "has_web_tools": any(name.startswith("web.") for name in tool_names),
@@ -6456,6 +6462,7 @@ class PreparedTurnRequest:
     repo_bootstrapped: bool
     repo_bootstrap_summary: str
     assessment: TurnAssessment
+    route_intake: StructuredRouteIntake = field(default_factory=StructuredRouteIntake)
     attachment_paths: List[str] = field(default_factory=list)
 
 
@@ -17707,36 +17714,21 @@ def select_enabled_tools(
     message: str,
     features: FeatureFlags,
     history: Optional[List[Dict[str, str]]] = None,
+    route_intake: Optional[StructuredRouteIntake] = None,
 ) -> List[str]:
     """Return the small set of tools worth exposing for this request."""
-    allowed: List[str] = []
-    intent = classify_workspace_intent(message, history=history)
-    render_requested = should_offer_workspace_render(message, history, features)
-    workspace_requested = render_requested or should_use_workspace_tools(conversation_id, message, features, history=history) or (
-        features.agent_tools
-        and features.workspace_write
-        and intent in {"focused_write", "broad_write"}
+    intake = route_intake or build_heuristic_route_intake(
+        conversation_id,
+        message,
+        features,
+        history=history,
     )
-    if workspace_requested:
-        if intent == "focused_read":
-            path_refs = extract_workspace_path_references(message)
-            if path_refs and any(pathlib.Path(path).suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS for path in path_refs):
-                allowed.append("spreadsheet.describe")
-            allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
-        elif intent == "focused_write":
-            allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
-        else:
-            allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
-    if should_offer_local_rag(message, features):
-        allowed.append("conversation.search_history")
-    if should_offer_web_search(message, features, history=history):
-        allowed.append("web.search")
-        allowed.append("web.fetch_page")
-    deduped: List[str] = []
-    for tool_name in allowed:
-        if tool_name not in deduped:
-            deduped.append(tool_name)
-    return deduped
+    return select_enabled_tools_from_route_intake(
+        conversation_id,
+        message,
+        features,
+        intake,
+    )
 
 
 def workspace_has_content(conversation_id: str) -> bool:
@@ -18535,6 +18527,390 @@ def should_offer_web_search(
     ):
         return True
     return bool(words & WEB_SEARCH_HINTS)
+
+
+ROUTE_INTAKE_SYSTEM_PROMPT = """Return one JSON object and nothing else.
+You are the first-pass router for a local coding and research assistant.
+
+Decide what the request fundamentally needs before any tool loop begins.
+
+Output this exact schema:
+{
+  "needs_fresh_info": boolean,
+  "is_versioned_release_query": boolean,
+  "entity": string,
+  "time_sensitivity": "stable" | "current" | "recent" | "versioned" | "historical",
+  "answer_shape": "answer" | "summary" | "comparison" | "explanation" | "instructions" | "edit" | "build" | "review" | "search",
+  "needs_workspace": boolean,
+  "needs_artifact": boolean,
+  "needs_search_citations": boolean,
+  "workspace_intent_hint": "none" | "focused_read" | "broad_read" | "focused_write" | "broad_write",
+  "render_requested": boolean,
+  "local_rag_requested": boolean,
+  "web_search_requested": boolean,
+  "reasoning": string,
+  "confidence": number
+}
+
+Rules:
+- Set web_search_requested true when the user needs current public information, recent/versioned release changes, external citations, or web sources.
+- Set local_rag_requested true when the answer should search earlier chat context or attached/local document context rather than the public web.
+- Set needs_workspace true when the answer depends on inspecting, editing, creating, or rendering local workspace files.
+- Set needs_artifact true when the user wants a file, rendered page, generated code artifact, or downloadable output.
+- Prefer workspace_intent_hint=focused_read for inspecting one file/document, broad_read for repo/project review, focused_write for a targeted file change or one new file, broad_write for multi-file or repo-scale work.
+- A vague request like "show me a minimal file example" can still need_workspace and needs_artifact if the user is asking the app to create a file they can view or download.
+- For versioned release-note queries like "changes to nvim 0.12", set needs_fresh_info=true, is_versioned_release_query=true, web_search_requested=true, and answer_shape="summary".
+- Do not ask for workspace access just because code could be illustrative if the user only wants an explanation in chat.
+"""
+
+
+def infer_answer_shape_heuristic(message: str, workspace_intent: str = "none") -> str:
+    """Fallback answer-shape guess when structured intake is unavailable."""
+    text = " ".join((message or "").strip().lower().split())
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    if {"summarize", "summarise", "summary"} & words:
+        return "summary"
+    if {"compare", "comparison", "versus", "vs"} & words:
+        return "comparison"
+    if {"review", "audit"} & words:
+        return "review"
+    if workspace_intent in {"focused_write", "broad_write"}:
+        return "build" if {"create", "build", "scaffold", "generate", "make"} & words else "edit"
+    if any(text.startswith(prefix) for prefix in ("how to ", "how do ", "how can ", "steps to ", "guide me")):
+        return "instructions"
+    if any(text.startswith(prefix) for prefix in ("what is ", "why ", "explain ", "tell me about ")):
+        return "explanation"
+    return "answer"
+
+
+def infer_route_entity_heuristic(message: str) -> str:
+    """Extract a lightweight entity hint from the request for routing metadata."""
+    text = " ".join((message or "").strip().split())
+    lowered = text.lower()
+    patterns = (
+        r"(?:changes to|what changed in|release notes for|changelog for|updates to)\s+([a-z0-9_.+/#-]+(?:\s+[a-z0-9_.+/#-]+){0,3})",
+        r"([a-z0-9_.+/#-]+)\s+\d+\.\d+(?:\.\d+)?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, lowered, re.IGNORECASE)
+        if match:
+            return str(match.group(1) or "").strip(" .,:;!?")
+    return ""
+
+
+def build_heuristic_route_intake(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    active_file_path: str = "",
+    attachments: Optional[List[str]] = None,
+) -> StructuredRouteIntake:
+    """Build the old lexical routing guess as a structured fallback object."""
+    attachments = list(attachments or [])
+    workspace_intent = classify_workspace_intent(message, history=history)
+    render_requested = should_offer_workspace_render(message, history, features)
+    workspace_requested = render_requested or should_use_workspace_tools(
+        conversation_id,
+        message,
+        features,
+        history=history,
+    )
+    local_rag_requested = should_offer_local_rag(message, features)
+    web_search_requested = should_offer_web_search(message, features, history=history)
+    text = " ".join((message or "").strip().lower().split())
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    is_versioned_release_query = bool(
+        re.search(r"\b\d+\.\d+(?:\.\d+)?\b", text)
+        and {"change", "changes", "changelog", "release", "released", "version", "update", "updates"} & words
+    )
+    needs_search_citations = explicit_web_search_requested(message) and bool(
+        {"citation", "citations", "source", "sources", "reference", "references"} & words
+    )
+    needs_artifact = bool(
+        render_requested
+        or active_file_path
+        or attachments
+        or workspace_intent in {"focused_write", "broad_write"}
+        or request_prefers_illustrative_output(message)
+        or {"file", "files", "download", "artifact", "html", "page", "site"} & words
+        and {"create", "build", "generate", "make", "write", "show"} & words
+    )
+    time_sensitivity = (
+        "versioned" if is_versioned_release_query else
+        "current" if web_search_requested else
+        "stable"
+    )
+    reasoning = "heuristic_fallback"
+    return StructuredRouteIntake(
+        needs_fresh_info=bool(web_search_requested or is_versioned_release_query),
+        is_versioned_release_query=is_versioned_release_query,
+        entity=infer_route_entity_heuristic(message),
+        time_sensitivity=time_sensitivity,
+        answer_shape=infer_answer_shape_heuristic(message, workspace_intent),
+        needs_workspace=bool(workspace_requested or workspace_intent != "none"),
+        needs_artifact=needs_artifact,
+        needs_search_citations=needs_search_citations,
+        workspace_intent_hint=workspace_intent,
+        render_requested=render_requested,
+        local_rag_requested=local_rag_requested,
+        web_search_requested=web_search_requested,
+        reasoning=reasoning,
+        confidence=0.35,
+    )
+
+
+def route_intake_is_empty(route: StructuredRouteIntake) -> bool:
+    """Return whether the structured intake contains any meaningful signal."""
+    return not any((
+        route.needs_fresh_info,
+        route.is_versioned_release_query,
+        route.entity,
+        route.needs_workspace,
+        route.needs_artifact,
+        route.needs_search_citations,
+        route.render_requested,
+        route.local_rag_requested,
+        route.web_search_requested,
+        route.reasoning,
+        route.workspace_intent_hint != "none",
+        route.answer_shape != "answer",
+        route.time_sensitivity != "stable",
+    ))
+
+
+def route_intake_for_slash_command(name: str) -> StructuredRouteIntake:
+    """Map explicit slash commands to a deterministic route intake."""
+    slash_name = str(name or "").strip().lower()
+    if slash_name == "search":
+        return StructuredRouteIntake(
+            needs_fresh_info=True,
+            time_sensitivity="current",
+            answer_shape="search",
+            needs_search_citations=True,
+            web_search_requested=True,
+            reasoning="explicit_slash_search",
+            confidence=1.0,
+        )
+    if slash_name == "grep":
+        return StructuredRouteIntake(
+            answer_shape="search",
+            needs_workspace=True,
+            workspace_intent_hint="focused_read",
+            reasoning="explicit_slash_grep",
+            confidence=1.0,
+        )
+    if slash_name == "plan":
+        return StructuredRouteIntake(
+            answer_shape="build",
+            needs_workspace=True,
+            workspace_intent_hint="broad_write",
+            needs_artifact=True,
+            reasoning="explicit_slash_plan",
+            confidence=1.0,
+        )
+    if slash_name == "code":
+        return StructuredRouteIntake(
+            answer_shape="build",
+            needs_workspace=True,
+            workspace_intent_hint="focused_write",
+            needs_artifact=True,
+            reasoning="explicit_slash_code",
+            confidence=1.0,
+        )
+    return StructuredRouteIntake()
+
+
+def format_route_history_excerpt(
+    history: Optional[List[Dict[str, str]]],
+    *,
+    limit: int = 4,
+    max_chars_per_item: int = 280,
+) -> str:
+    """Render a compact recent-history excerpt for the route-intake model pass."""
+    if not history:
+        return "(none)"
+    lines: List[str] = []
+    for item in history[-limit:]:
+        role = str(item.get("role", "") or "").strip().lower() or "unknown"
+        content = " ".join(str(item.get("content", "") or "").split())
+        if not content:
+            continue
+        if len(content) > max_chars_per_item:
+            content = content[: max_chars_per_item - 3].rstrip() + "..."
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+async def infer_structured_route_intake_via_llm(
+    *,
+    message: str,
+    history: Optional[List[Dict[str, str]]],
+    features: FeatureFlags,
+    active_file_path: str = "",
+    attachments: Optional[List[str]] = None,
+) -> StructuredRouteIntake:
+    """Use a lightweight LLM pass to infer structured routing intent."""
+    attachments = list(attachments or [])
+    route_messages = [
+        {"role": "system", "content": ROUTE_INTAKE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Current request:\n{message}\n\n"
+                f"Recent history:\n{format_route_history_excerpt(history)}\n\n"
+                "Context:\n"
+                f"- active_file_path: {active_file_path or '(none)'}\n"
+                f"- attachment_count: {len(attachments)}\n"
+                f"- web_search_available: {str(bool(features.web_search)).lower()}\n"
+                f"- local_rag_available: {str(bool(features.local_rag)).lower()}\n"
+                f"- workspace_tools_available: {str(bool(features.agent_tools)).lower()}\n"
+                f"- workspace_write_available: {str(bool(features.workspace_write)).lower()}\n"
+            ),
+        },
+    ]
+    raw = await vllm_chat_complete(route_messages, max_tokens=320, temperature=0.0)
+    return normalize_structured_route_intake(parse_json_object(raw))
+
+
+def merge_route_intake_with_safety_rails(
+    candidate: StructuredRouteIntake,
+    fallback: StructuredRouteIntake,
+    *,
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> StructuredRouteIntake:
+    """Use the structured intake as the main signal while preserving explicit rails."""
+    route = normalize_structured_route_intake(candidate)
+    if route_intake_is_empty(route):
+        return fallback
+
+    merged = route.as_metadata()
+    text = " ".join((message or "").strip().lower().split())
+
+    if merged.get("needs_search_citations"):
+        merged["web_search_requested"] = True
+    if merged.get("web_search_requested") or merged.get("is_versioned_release_query"):
+        merged["needs_fresh_info"] = True
+    if merged.get("needs_workspace") and merged.get("workspace_intent_hint") == "none":
+        merged["workspace_intent_hint"] = (
+            fallback.workspace_intent_hint
+            if fallback.workspace_intent_hint != "none"
+            else ("focused_write" if merged.get("needs_artifact") else "focused_read")
+        )
+
+    if explicit_web_search_requested(message) or is_contextual_followup_for_web_search(message, history):
+        merged["web_search_requested"] = True
+        merged["needs_fresh_info"] = True
+        if merged.get("time_sensitivity") == "stable":
+            merged["time_sensitivity"] = "current"
+    if explicit_history_lookup_requested(message):
+        merged["local_rag_requested"] = True
+    if message_requests_workspace_render(message) or is_contextual_followup_for_render(message, history):
+        merged["render_requested"] = True
+        merged["needs_workspace"] = True
+        if merged.get("workspace_intent_hint") == "none":
+            merged["workspace_intent_hint"] = "focused_read"
+    if (
+        is_affirmative_workspace_save_followup(message, history)
+        or is_contextual_followup_for_workspace_edit(message, history)
+        or is_contextual_followup_for_execution(message, history)
+        or extract_artifact_references(message)
+        or any(marker in text for marker in ATTACHMENT_CONTEXT_MARKERS)
+    ):
+        merged["needs_workspace"] = True
+        if merged.get("workspace_intent_hint") == "none":
+            merged["workspace_intent_hint"] = fallback.workspace_intent_hint or "focused_write"
+
+    if not str(merged.get("entity", "") or "").strip() and fallback.entity:
+        merged["entity"] = fallback.entity
+    if merged.get("needs_fresh_info") and merged.get("time_sensitivity") == "stable":
+        merged["time_sensitivity"] = fallback.time_sensitivity if fallback.time_sensitivity != "stable" else "current"
+    return normalize_structured_route_intake(merged)
+
+
+async def resolve_route_intake_for_turn(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    active_file_path: str = "",
+    attachments: Optional[List[str]] = None,
+    slash_command_name: str = "",
+) -> StructuredRouteIntake:
+    """Resolve one structured route intake, using heuristics only as fallback rails."""
+    slash_route = route_intake_for_slash_command(slash_command_name)
+    if not route_intake_is_empty(slash_route):
+        return slash_route
+
+    fallback = build_heuristic_route_intake(
+        conversation_id,
+        message,
+        features,
+        history=history,
+        active_file_path=active_file_path,
+        attachments=attachments,
+    )
+    try:
+        candidate = await infer_structured_route_intake_via_llm(
+            message=message,
+            history=history,
+            features=features,
+            active_file_path=active_file_path,
+            attachments=attachments,
+        )
+    except Exception as exc:
+        logger.debug("Structured route intake fallback for %s: %s", conversation_id, exc)
+        return fallback
+    return merge_route_intake_with_safety_rails(
+        candidate,
+        fallback,
+        message=message,
+        history=history,
+    )
+
+
+def select_enabled_tools_from_route_intake(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    route_intake: StructuredRouteIntake,
+) -> List[str]:
+    """Expose tools from a structured route intake instead of recomputing heuristics."""
+    del conversation_id
+    allowed: List[str] = []
+    intent = str(route_intake.workspace_intent_hint or "none")
+    render_requested = bool(route_intake.render_requested)
+    workspace_requested = bool(
+        route_intake.needs_workspace
+        or render_requested
+        or (
+            features.agent_tools
+            and features.workspace_write
+            and intent in {"focused_write", "broad_write"}
+        )
+    )
+    if workspace_requested and features.agent_tools:
+        if intent == "focused_read":
+            path_refs = extract_workspace_path_references(message)
+            if path_refs and any(pathlib.Path(path).suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS for path in path_refs):
+                allowed.append("spreadsheet.describe")
+            allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
+        elif intent in {"focused_write", "broad_write"}:
+            allowed.extend(allowed_workspace_tools(features, include_write=True, include_render=render_requested))
+        else:
+            allowed.extend(allowed_workspace_tools(features, include_write=False, include_render=render_requested))
+    if route_intake.local_rag_requested and features.local_rag:
+        allowed.append("conversation.search_history")
+    if route_intake.web_search_requested and features.web_search:
+        allowed.extend(["web.search", "web.fetch_page"])
+    deduped: List[str] = []
+    for tool_name in allowed:
+        if tool_name not in deduped:
+            deduped.append(tool_name)
+    return deduped
 
 
 def select_direct_answer_tools(
@@ -20525,10 +20901,25 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     mode = "deep" if requested_mode == "deep" else "chat"
     agent_params = get_agent_llm_params()
     max_tokens = agent_params["max_tokens"]
-    workspace_intent = classify_workspace_intent(effective_message, history=history)
-    render_requested = should_offer_workspace_render(effective_message, history, features)
+    route_intake = await resolve_route_intake_for_turn(
+        conv_id,
+        effective_message,
+        features,
+        history=history,
+        active_file_path=active_file_path,
+        attachments=attachments,
+        slash_command_name=(slash_command or {}).get("name", ""),
+    )
+    workspace_intent = str(route_intake.workspace_intent_hint or "none")
+    render_requested = bool(route_intake.render_requested)
     enabled_tools = (
-        select_enabled_tools(conv_id, effective_message, features, history=history)
+        select_enabled_tools(
+            conv_id,
+            effective_message,
+            features,
+            history=history,
+            route_intake=route_intake,
+        )
         if TOOL_LOOP_ENABLED else []
     )
 
@@ -20544,12 +20935,12 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         )
     )
     workspace_requested = (
-        should_use_workspace_tools(conv_id, effective_message, features, history=history)
+        bool(route_intake.needs_workspace)
         or auto_execute_workspace
         or resume_saved_workspace
     )
-    local_rag_requested = should_offer_local_rag(effective_message, features)
-    web_search_requested = should_offer_web_search(effective_message, features, history=history)
+    local_rag_requested = bool(route_intake.local_rag_requested)
+    web_search_requested = bool(route_intake.web_search_requested)
     if not slash_command and mode != "deep" and not auto_execute_workspace and not resume_saved_workspace:
         enabled_tools = select_direct_answer_tools(
             effective_message,
@@ -20567,6 +20958,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         enabled_tools=enabled_tools,
         auto_execute_workspace=auto_execute_workspace,
         resume_saved_workspace=resume_saved_workspace,
+        route_intake=route_intake,
     )
     assessment = DEFAULT_ROUTE_PROGRAM.run(RouteProgramInputs(
         message=effective_message,
@@ -20583,6 +20975,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         resume_saved_workspace=resume_saved_workspace,
         execution_requested=is_explicit_plan_execution_request(effective_message),
         workspace_run_commands_enabled=features.workspace_run_commands,
+        route_intake=route_intake,
     )).assessment
     promoted_to_planning = False
     if (
@@ -20611,6 +21004,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
             resume_saved_workspace=resume_saved_workspace,
             execution_requested=is_explicit_plan_execution_request(effective_message),
             workspace_run_commands_enabled=features.workspace_run_commands,
+            route_intake=route_intake,
         )).assessment
 
     return PreparedTurnRequest(
@@ -20639,6 +21033,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         repo_bootstrapped=repo_bootstrapped,
         repo_bootstrap_summary=repo_bootstrap_summary,
         assessment=assessment,
+        route_intake=route_intake,
         attachment_paths=list(attachments),
     )
 
@@ -20772,10 +21167,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             prepared.user_message_id,
             "chat_turn",
             {
-                "assessment": prepared.assessment.as_metadata(),
-                "tool_policy": dict(prepared.tool_policy_trace),
-            },
-        )
+            "assessment": prepared.assessment.as_metadata(),
+            "route_intake": prepared.route_intake.as_metadata(),
+            "tool_policy": dict(prepared.tool_policy_trace),
+        },
+    )
 
         if prepared.repo_bootstrapped and prepared.repo_bootstrap_summary:
             await send_activity_event(
