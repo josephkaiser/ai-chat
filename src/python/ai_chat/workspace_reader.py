@@ -192,6 +192,23 @@ def build_text_file_result(
     }
 
 
+def merge_document_outline(
+    payload: Dict[str, Any],
+    outline_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(outline_payload, dict):
+        return payload
+    for key in ("title", "extractor", "page_count", "section_titles", "chunk_count", "line_count", "opening_preview", "preview_chunks", "summary"):
+        value = outline_payload.get(key)
+        if value in (None, "", [], {}):
+            continue
+        payload[key] = value
+    metadata = outline_payload.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        payload["metadata"] = metadata
+    return payload
+
+
 def build_workspace_file_result(
     target: pathlib.Path,
     *,
@@ -235,6 +252,19 @@ def build_workspace_file_result(
             limit=text_limit,
             truncate_output_func=truncate_output_func,
         )
+        if conversation_id:
+            try:
+                payload = merge_document_outline(
+                    payload,
+                    document_preview_builder(
+                        target,
+                        conversation_id=conversation_id,
+                        rel_path=resolved_rel_path,
+                        limit=text_limit or len(str(payload.get("content") or "")) or 1,
+                    ),
+                )
+            except Exception:
+                pass
 
     payload.update({
         "content_kind": workspace_file_content_kind(target),

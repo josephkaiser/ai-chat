@@ -37,6 +37,22 @@ interface WorkspaceFilePayload {
     content_kind: string;
     editable?: boolean;
     default_view?: string;
+    title?: string;
+    file_type?: string;
+    extractor?: string;
+    page_count?: number | null;
+    chunk_count?: number | null;
+    line_count?: number | null;
+    opening_preview?: string;
+    summary?: string;
+    section_titles?: string[];
+    preview_chunks?: Array<{
+        chunk_index: number;
+        page_start?: number | null;
+        page_end?: number | null;
+        section_title?: string;
+        text?: string;
+    }>;
     entries?: Array<{
         path: string;
         is_dir: boolean;
@@ -2866,6 +2882,10 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     state.selectedFileContentKind = contentKind;
     viewerTitle.textContent = payload.path;
     viewerMeta.textContent = `${displayFilePreviewLabel(payload.path, contentKind)} preview`;
+    const structureMeta = documentStructureMeta(payload);
+    if (structureMeta) {
+        viewerMeta.textContent = `${viewerMeta.textContent} • ${structureMeta}`;
+    }
     viewerMeta.hidden = false;
 
     if (contentKind === "image") {
@@ -2874,7 +2894,7 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     }
 
     if (contentKind === "pdf") {
-        filePreview.innerHTML = `<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}"></iframe>`;
+        filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}"></iframe>`;
         return;
     }
 
@@ -2925,19 +2945,114 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     if (contentKind === "text") {
         if (shouldRenderTextAsMarkdown(payload.path || "", payload.content || "")) {
             viewerMeta.textContent = "Markdown preview";
-            filePreview.innerHTML = `<div class="preview-markdown rich-text">${renderRichText(payload.content || "")}</div>`;
+            if (structureMeta) {
+                viewerMeta.textContent = `${viewerMeta.textContent} • ${structureMeta}`;
+            }
+            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderRichText(payload.content || "")}</div>`;
             bindArtifactLinks(filePreview);
             return;
         }
         if (shouldRenderTextAsCode(payload.path || "")) {
             const language = inferredPreviewLanguage(payload.path || "");
-            filePreview.innerHTML = `<div class="preview-markdown rich-text">${renderRichText(`\`\`\`${language}\n${payload.content || ""}\n\`\`\``)}</div>`;
+            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderRichText(`\`\`\`${language}\n${payload.content || ""}\n\`\`\``)}</div>`;
             bindArtifactLinks(filePreview);
             return;
         }
     }
 
-    filePreview.innerHTML = `<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
+    filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<pre class="preview-code">${escapeHtml(payload.content || "")}</pre>`;
+}
+
+function documentStructureMeta(payload: WorkspaceFilePayload): string {
+    const parts: string[] = [];
+    if (typeof payload.page_count === "number" && payload.page_count > 0) {
+        parts.push(`${payload.page_count} page${payload.page_count === 1 ? "" : "s"}`);
+    }
+    const sectionCount = Array.isArray(payload.section_titles) ? payload.section_titles.filter(Boolean).length : 0;
+    if (sectionCount > 0) {
+        parts.push(`${sectionCount} section${sectionCount === 1 ? "" : "s"}`);
+    }
+    if (typeof payload.chunk_count === "number" && payload.chunk_count > 0) {
+        parts.push(`${payload.chunk_count} chunk${payload.chunk_count === 1 ? "" : "s"}`);
+    }
+    return parts.join(" • ");
+}
+
+function formatPreviewChunkLabel(chunk: NonNullable<WorkspaceFilePayload["preview_chunks"]>[number]): string {
+    const parts: string[] = [];
+    const title = String(chunk.section_title || "").trim();
+    if (title) {
+        parts.push(title);
+    }
+    const pageStart = typeof chunk.page_start === "number" ? chunk.page_start : null;
+    const pageEnd = typeof chunk.page_end === "number" ? chunk.page_end : null;
+    if (pageStart && pageEnd && pageStart !== pageEnd) {
+        parts.push(`pages ${pageStart}-${pageEnd}`);
+    } else if (pageStart) {
+        parts.push(`page ${pageStart}`);
+    }
+    if (!parts.length) {
+        parts.push(`Chunk ${Number(chunk.chunk_index || 0) + 1}`);
+    }
+    return parts.join(" • ");
+}
+
+function renderDocumentStructurePanel(payload: WorkspaceFilePayload): string {
+    const sections = Array.isArray(payload.section_titles)
+        ? payload.section_titles.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 10)
+        : [];
+    const previewChunks = Array.isArray(payload.preview_chunks)
+        ? payload.preview_chunks.filter((chunk) => chunk && String(chunk.text || "").trim()).slice(0, 3)
+        : [];
+    const openingPreview = String(payload.opening_preview || "").trim();
+    const summary = String(payload.summary || "").trim();
+    const hasStructure = Boolean(summary || sections.length || openingPreview || previewChunks.length);
+    if (!hasStructure) {
+        return "";
+    }
+
+    const statItems = [
+        typeof payload.page_count === "number" && payload.page_count > 0
+            ? `<span class="document-structure-stat">${payload.page_count} page${payload.page_count === 1 ? "" : "s"}</span>`
+            : "",
+        typeof payload.chunk_count === "number" && payload.chunk_count > 0
+            ? `<span class="document-structure-stat">${payload.chunk_count} chunk${payload.chunk_count === 1 ? "" : "s"}</span>`
+            : "",
+        typeof payload.line_count === "number" && payload.line_count > 0
+            ? `<span class="document-structure-stat">${payload.line_count.toLocaleString()} lines</span>`
+            : "",
+        String(payload.extractor || "").trim()
+            ? `<span class="document-structure-stat">${escapeHtml(String(payload.extractor || "").trim())}</span>`
+            : "",
+    ].filter(Boolean).join("");
+
+    const sectionHtml = sections.length
+        ? `<div class="document-structure-sections">${sections.map((section) => `<span class="document-structure-section">${escapeHtml(section)}</span>`).join("")}</div>`
+        : "";
+    const openingHtml = openingPreview
+        ? `<div class="document-structure-opening">${escapeHtml(openingPreview)}</div>`
+        : "";
+    const chunkHtml = previewChunks.length
+        ? `<div class="document-structure-chunks">${previewChunks.map((chunk) => `
+            <article class="document-structure-chunk">
+                <div class="document-structure-chunk-label">${escapeHtml(formatPreviewChunkLabel(chunk))}</div>
+                <div class="document-structure-chunk-text">${escapeHtml(String(chunk.text || "").trim())}</div>
+            </article>
+        `).join("")}</div>`
+        : "";
+
+    return `
+        <section class="document-structure-panel">
+            <div class="document-structure-header">
+                <div class="document-structure-kicker">Document structure</div>
+                ${summary ? `<div class="document-structure-summary">${escapeHtml(summary)}</div>` : ""}
+                ${statItems ? `<div class="document-structure-stats">${statItems}</div>` : ""}
+            </div>
+            ${sectionHtml}
+            ${openingHtml}
+            ${chunkHtml}
+        </section>
+    `;
 }
 
 function closeViewer(): void {

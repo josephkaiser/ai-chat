@@ -44,6 +44,11 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertTrue(features.auto_approve_tool_permissions)
         self.assertFalse(features.web_search)
 
+    def test_allowed_workspace_tools_include_document_inspection(self):
+        allowed = app.allowed_workspace_tools(app.FeatureFlags(agent_tools=True))
+
+        self.assertIn("workspace.inspect_document", allowed)
+
     def test_missing_optional_dependency_only_accepts_missing_target_package(self):
         nested = ModuleNotFoundError("missing nested")
         nested.name = "fastapi.routing"
@@ -73,6 +78,21 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(request.key, "tool:workspace.grep")
         self.assertEqual(request.approval_target, "tool")
         self.assertIn("search", request.content.lower())
+
+    def test_workspace_inspect_document_permission_is_workspace_read(self):
+        request = app.build_tool_permission_request(
+            "conv-doc",
+            {
+                "id": "call-doc",
+                "name": "workspace.inspect_document",
+                "arguments": {"path": "papers/perelman.pdf"},
+            },
+        )
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.key, "tool:workspace")
+        self.assertEqual(request.approval_target, "tool")
+        self.assertIn("papers/perelman.pdf", request.content)
 
     def test_normalize_attachment_paths_for_workspace_deduplicates_and_normalizes(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -1516,6 +1536,77 @@ class RuntimePermissionTests(unittest.TestCase):
         )
 
         self.assertFalse(app.should_route_prepared_turn_via_direct_search(prepared))
+
+    def test_attachment_summary_route_handles_attachment_overview_turns(self):
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-doc",
+            active_file_path="",
+            turn_kind="visible_chat",
+            user_message_id=3,
+            saved_user_message="can you read this pdf and summarize it for me?",
+            effective_message="can you read this pdf and summarize it for me?",
+            model_message="can you read this pdf and summarize it for me?",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="focused_read",
+            tool_policy_trace={},
+            enabled_tools=[],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                execution_style="direct_answer",
+                workspace_intent="focused_read",
+            ),
+            attachment_paths=["papers/perelman.pdf"],
+        )
+
+        self.assertTrue(app.should_route_prepared_turn_via_attachment_summary(prepared))
+
+    def test_attachment_summary_route_does_not_hijack_workspace_edit_turns(self):
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-doc-edit",
+            active_file_path="",
+            turn_kind="visible_chat",
+            user_message_id=4,
+            saved_user_message="summarize this pdf and patch notes.md",
+            effective_message="summarize this pdf and patch notes.md",
+            model_message="summarize this pdf and patch notes.md",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True, workspace_write=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="focused_write",
+            tool_policy_trace={},
+            enabled_tools=["workspace.patch_file"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                execution_style="plan_execution",
+                workspace_intent="focused_write",
+                enabled_tools=["workspace.patch_file"],
+            ),
+            attachment_paths=["papers/perelman.pdf"],
+        )
+
+        self.assertFalse(app.should_route_prepared_turn_via_attachment_summary(prepared))
 
     def test_handle_direct_search_prefetches_fact_pages_and_answers_directly(self):
         original_emit_direct_tool_call = app.emit_direct_tool_call

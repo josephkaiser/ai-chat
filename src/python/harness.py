@@ -472,6 +472,9 @@ DOCUMENT_RETRIEVAL_CONTEXT_BUDGET = int(os.getenv("DOCUMENT_RETRIEVAL_CONTEXT_BU
 DOCUMENT_RETRIEVAL_MAX_WINDOWS = int(os.getenv("DOCUMENT_RETRIEVAL_MAX_WINDOWS", "4"))
 DOCUMENT_RETRIEVAL_FTS_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_FTS_LIMIT", "18"))
 DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("DOCUMENT_RETRIEVAL_SEMANTIC_LIMIT", "32"))
+DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET = int(os.getenv("DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET", "12000"))
+DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND = int(os.getenv("DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND", "6"))
+DOCUMENT_SUMMARY_MAX_REDUCTION_ROUNDS = int(os.getenv("DOCUMENT_SUMMARY_MAX_REDUCTION_ROUNDS", "6"))
 MESSAGE_RETRIEVAL_SEMANTIC_LIMIT = int(os.getenv("MESSAGE_RETRIEVAL_SEMANTIC_LIMIT", "24"))
 EMBEDDING_TEXT_CHAR_LIMIT = int(os.getenv("EMBEDDING_TEXT_CHAR_LIMIT", "2400"))
 RETRIEVAL_RRF_K = int(os.getenv("RETRIEVAL_RRF_K", "60"))
@@ -5121,6 +5124,36 @@ def fetch_document_chunk_rows(
     ]
 
 
+def fetch_all_document_chunk_rows(
+    conversation_id: str,
+    rel_path: str,
+) -> List[Dict[str, Any]]:
+    """Fetch every stored chunk for one indexed document."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            '''SELECT id, path, chunk_index, page_start, page_end, section_title, content
+               FROM document_chunks
+               WHERE conversation_id = ? AND path = ?
+               ORDER BY chunk_index ASC''',
+            (conversation_id, rel_path),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": row[0],
+            "path": row[1],
+            "chunk_index": int(row[2] or 0),
+            "page_start": row[3],
+            "page_end": row[4],
+            "section_title": row[5] or "",
+            "content": row[6] or "",
+        }
+        for row in rows
+    ]
+
+
 def tokenize_retrieval_text(text: str) -> List[str]:
     """Normalize free text into lowercase retrieval tokens."""
     return [token for token in re.findall(r"[A-Za-z0-9_]+", str(text or "").lower()) if len(token) >= 2]
@@ -5388,6 +5421,96 @@ def build_document_overview_entries(conversation_id: str, rel_paths: List[str], 
     return entries
 
 
+def format_document_chunk_excerpt_for_summary(path: str, chunk: Dict[str, Any]) -> str:
+    """Render one indexed document chunk into a compact labeled excerpt."""
+    section = str(chunk.get("section_title") or "").strip() or "Document excerpt"
+    page_start = chunk.get("page_start")
+    page_end = chunk.get("page_end")
+    page_label = ""
+    if page_start:
+        page_label = (
+            f"pages {page_start}-{page_end}"
+            if page_end and page_end != page_start
+            else f"page {page_start}"
+        )
+    header_parts = [path, section]
+    if page_label:
+        header_parts.append(page_label)
+    header = " | ".join(part for part in header_parts if part)
+    body = truncate_output(str(chunk.get("content") or "").strip(), limit=max(600, DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET))
+    return f"[{header}]\n{body}".strip()
+
+
+def build_document_summary_batches(
+    conversation_id: str,
+    rel_paths: List[str],
+    *,
+    char_budget: int = DOCUMENT_SUMMARY_BATCH_CHAR_BUDGET,
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Group indexed attachment chunks into sequential summary batches."""
+    batches: List[Dict[str, Any]] = []
+    source_lines: List[str] = []
+    for rel_path in rel_paths:
+        source = ensure_document_index(conversation_id, rel_path)
+        source_lines.append(format_document_source_line(source))
+        if source.get("status") != "ready":
+            continue
+        chunks = fetch_all_document_chunk_rows(conversation_id, rel_path)
+        if not chunks:
+            continue
+        current_items: List[str] = []
+        current_chars = 0
+        current_page_start = None
+        current_page_end = None
+        for chunk in chunks:
+            excerpt = format_document_chunk_excerpt_for_summary(rel_path, chunk)
+            excerpt_chars = len(excerpt) + (2 if current_items else 0)
+            if current_items and current_chars + excerpt_chars > max(1200, int(char_budget)):
+                batches.append({
+                    "path": rel_path,
+                    "page_start": current_page_start,
+                    "page_end": current_page_end,
+                    "text": "\n\n".join(current_items),
+                })
+                current_items = []
+                current_chars = 0
+                current_page_start = None
+                current_page_end = None
+            current_items.append(excerpt)
+            current_chars += excerpt_chars
+            page_start = chunk.get("page_start")
+            page_end = chunk.get("page_end")
+            if current_page_start is None and page_start is not None:
+                current_page_start = page_start
+            if page_end is not None:
+                current_page_end = page_end
+            elif page_start is not None:
+                current_page_end = page_start
+        if current_items:
+            batches.append({
+                "path": rel_path,
+                "page_start": current_page_start,
+                "page_end": current_page_end,
+                "text": "\n\n".join(current_items),
+            })
+    return batches, source_lines
+
+
+def summarize_document_batch_scope(batch: Dict[str, Any]) -> str:
+    """Render a human-readable scope label for one summary batch."""
+    path = str(batch.get("path") or "").strip()
+    page_start = batch.get("page_start")
+    page_end = batch.get("page_end")
+    if page_start:
+        page_label = (
+            f"pages {page_start}-{page_end}"
+            if page_end and page_end != page_start
+            else f"page {page_start}"
+        )
+        return f"{path} ({page_label})"
+    return path or "attachment batch"
+
+
 def pack_document_context_windows(
     conversation_id: str,
     ranked_candidates: List[Dict[str, Any]],
@@ -5559,6 +5682,18 @@ def build_document_preview_result(
         preview_text = "\n\n".join(str(row.get("content") or "").strip() for row in chunk_rows if str(row.get("content") or "").strip())
         preview_text = truncate_output(preview_text, limit=limit)
         metadata = source.get("metadata") or {}
+        section_titles = [str(item).strip() for item in metadata.get("section_titles", []) if str(item).strip()]
+        preview_chunks = [
+            {
+                "chunk_index": int(row.get("chunk_index", 0) or 0),
+                "page_start": row.get("page_start"),
+                "page_end": row.get("page_end"),
+                "section_title": str(row.get("section_title") or "").strip(),
+                "text": truncate_output(str(row.get("content") or "").strip(), limit=320),
+            }
+            for row in chunk_rows
+            if str(row.get("content") or "").strip()
+        ]
         return {
             "path": rel_path,
             "content": preview_text,
@@ -5569,6 +5704,32 @@ def build_document_preview_result(
             "page_count": source.get("page_count"),
             "title": source.get("title") or target.name,
             "metadata": metadata,
+            "section_titles": section_titles[:24],
+            "chunk_count": int(metadata.get("chunk_count", len(chunk_rows)) or 0),
+            "line_count": metadata.get("line_count"),
+            "opening_preview": preview_text,
+            "preview_chunks": preview_chunks,
+            "summary": ", ".join(
+                part for part in [
+                    str(source.get("file_type") or "").strip() or "document",
+                    (
+                        f"{int(source.get('page_count') or 0)} pages"
+                        if source.get("page_count")
+                        else ""
+                    ),
+                    (
+                        f"{len(section_titles)} sections"
+                        if section_titles
+                        else ""
+                    ),
+                    (
+                        f"{int(metadata.get('chunk_count', 0) or 0)} chunks"
+                        if metadata.get("chunk_count")
+                        else ""
+                    ),
+                ]
+                if part
+            ),
         }
 
     payload = extract_document_payload(target)
@@ -5934,6 +6095,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.list_files {"path":"."}
 - workspace.grep {"query":"FeatureFlags","path":".","glob":"*.py","limit":20}
 - workspace.read_file {"path":"src/python/harness.py"}
+- workspace.inspect_document {"path":"papers/perelman.pdf"}
 - workspace.inspect_html {"path":"src/web/index.html"}
 - workspace.patch_file {"path":"src/python/harness.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
@@ -5950,6 +6112,7 @@ Constraints:
 - Paths are always relative to the current conversation workspace.
 - workspace.list_files hides dot-prefixed files unless you explicitly target a hidden path.
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
+- workspace.inspect_document extracts document structure such as page counts, section titles, chunk previews, and opening summaries for PDFs, text docs, and code-like files.
 - workspace.inspect_html reviews a saved HTML file and returns structural/rubric issues such as missing viewport metadata, sparse layout, or missing headings.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
@@ -6179,6 +6342,7 @@ class PreparedTurnRequest:
     repo_bootstrapped: bool
     repo_bootstrap_summary: str
     assessment: TurnAssessment
+    attachment_paths: List[str] = field(default_factory=list)
 
 
 def normalize_requested_mode(value: Any) -> str:
@@ -6323,7 +6487,7 @@ def build_tool_permission_request(
             preview=preview,
         )
 
-    if name in {"workspace.list_files", "workspace.read_file", "spreadsheet.describe"}:
+    if name in {"workspace.list_files", "workspace.read_file", "workspace.inspect_document", "spreadsheet.describe"}:
         path_preview = tool_path_preview(arguments.get("path", "."), ".")
         return PermissionApprovalRequest(
             key="tool:workspace",
@@ -10703,6 +10867,7 @@ def allowed_workspace_tools(
 ) -> List[str]:
     """Return workspace tools allowed by the current per-turn approvals."""
     allowed = ["workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"]
+    allowed.append("workspace.inspect_document")
     allowed.append("workspace.inspect_html")
     if include_render:
         allowed.append("workspace.render")
@@ -13137,6 +13302,7 @@ SUPPORTED_TOOL_NAMES = {
     "workspace.list_files",
     "workspace.grep",
     "workspace.read_file",
+    "workspace.inspect_document",
     "workspace.inspect_html",
     "workspace.patch_file",
     "workspace.run_command",
@@ -13149,7 +13315,7 @@ SUPPORTED_TOOL_NAMES = {
 
 SUPPORTED_TOOL_NAME_PATTERN = re.compile(
     r'"name"\s*:\s*"(?P<name>'
-    r'workspace\.(?:list_files|grep|read_file|inspect_html|patch_file|run_command|render)'
+    r'workspace\.(?:list_files|grep|read_file|inspect_document|inspect_html|patch_file|run_command|render)'
     r'|spreadsheet\.describe'
     r'|conversation\.search_history'
     r'|web\.(?:search|fetch_page)'
@@ -13465,6 +13631,75 @@ def workspace_read_file_result(conversation_id: str, rel_path: str) -> Dict[str,
         rel_path=rel_file_path,
         text_limit=TOOL_RESULT_TEXT_LIMIT,
     )
+
+
+def workspace_inspect_document_result(conversation_id: str, rel_path: str) -> Dict[str, Any]:
+    """Inspect one document or text/code file and return structural metadata plus previews."""
+    workspace = get_workspace_path(conversation_id)
+    target = resolve_workspace_relative_path(conversation_id, rel_path)
+    if not target.is_file():
+        raise ValueError("File not found")
+    rel_file_path = format_workspace_path(target, workspace)
+    source = ensure_document_index(conversation_id, rel_file_path)
+
+    metadata = dict(source.get("metadata") or {})
+    chunks = fetch_all_document_chunk_rows(conversation_id, rel_file_path)[:6]
+    section_titles = [str(item).strip() for item in metadata.get("section_titles", []) if str(item).strip()]
+    preview_chunks = [
+        {
+            "chunk_index": int(chunk.get("chunk_index", 0) or 0),
+            "page_start": chunk.get("page_start"),
+            "page_end": chunk.get("page_end"),
+            "section_title": str(chunk.get("section_title") or "").strip(),
+            "text": truncate_output(str(chunk.get("content") or "").strip(), limit=420),
+        }
+        for chunk in chunks
+    ]
+    overview_entries = build_document_overview_entries(
+        conversation_id,
+        [rel_file_path],
+        char_budget=min(2200, DOCUMENT_RETRIEVAL_CONTEXT_BUDGET),
+    )
+    opening_preview = ""
+    if overview_entries:
+        opening_preview = truncate_output(str(overview_entries[0].get("text") or "").strip(), limit=1200)
+    elif preview_chunks:
+        opening_preview = truncate_output(str(preview_chunks[0].get("text") or "").strip(), limit=1200)
+
+    return {
+        "path": rel_file_path,
+        "title": str(source.get("title") or target.name).strip(),
+        "file_type": str(source.get("file_type") or "").strip() or classify_workspace_file_kind(target.name),
+        "extractor": str(source.get("extractor") or "").strip(),
+        "status": str(source.get("status") or "").strip() or "ready",
+        "page_count": source.get("page_count"),
+        "section_titles": section_titles[:24],
+        "chunk_count": int(metadata.get("chunk_count", len(chunks)) or 0),
+        "line_count": metadata.get("line_count"),
+        "opening_preview": opening_preview,
+        "preview_chunks": preview_chunks,
+        "summary": ", ".join(
+            part for part in [
+                str(source.get("file_type") or "").strip() or "document",
+                (
+                    f"{int(source.get('page_count') or 0)} pages"
+                    if source.get("page_count")
+                    else ""
+                ),
+                (
+                    f"{len(section_titles)} sections"
+                    if section_titles
+                    else ""
+                ),
+                (
+                    f"{int(metadata.get('chunk_count', 0) or 0)} chunks"
+                    if metadata.get("chunk_count")
+                    else ""
+                ),
+            ]
+            if part
+        ),
+    }
 
 
 def spreadsheet_describe_result(conversation_id: str, rel_path: str, sheet: Optional[str] = None) -> Dict[str, Any]:
@@ -15036,6 +15271,8 @@ def tool_activity_label(name: str) -> str:
     """Map tool names to compact UI activity labels."""
     if name == "workspace.run_command":
         return "Command"
+    if name == "workspace.inspect_document":
+        return "Review"
     if name == "workspace.inspect_html":
         return "Review"
     if name in {"workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"}:
@@ -15061,6 +15298,8 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
         return f"Searching {target} for {query or 'text'}"
     if name == "workspace.read_file":
         return f"Opening {tool_path_preview(arguments.get('path', ''), 'file')}"
+    if name == "workspace.inspect_document":
+        return f"Inspecting {tool_path_preview(arguments.get('path', ''), 'document')}"
     if name == "workspace.inspect_html":
         return f"Reviewing {tool_path_preview(arguments.get('path', ''), 'HTML file')}"
     if name == "workspace.patch_file":
@@ -15167,6 +15406,18 @@ def tool_result_preview(
         lines = int(payload.get("lines", 0) or 0)
         line_note = f" ({pluralize_tool_count(lines, 'line')})" if lines else ""
         return f"Opened {path}{line_note}"
+
+    if name == "workspace.inspect_document" or "section_titles" in payload:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "document")
+        section_count = len(payload.get("section_titles", [])) if isinstance(payload.get("section_titles", []), list) else 0
+        page_count = int(payload.get("page_count", 0) or 0)
+        detail_parts = []
+        if page_count:
+            detail_parts.append(pluralize_tool_count(page_count, "page"))
+        if section_count:
+            detail_parts.append(pluralize_tool_count(section_count, "section"))
+        detail_note = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        return f"Inspected {path}{detail_note}"
 
     if name == "workspace.inspect_html" or "has_viewport_meta" in payload:
         path = tool_path_preview(payload.get("path", arguments.get("path", "")), "HTML file")
@@ -15530,6 +15781,11 @@ async def execute_tool_call(
             if not path:
                 raise ValueError("path is required")
             result = workspace_read_file_result(conversation_id, path)
+        elif name == "workspace.inspect_document":
+            path = str(arguments.get("path", "")).strip()
+            if not path:
+                raise ValueError("path is required")
+            result = workspace_inspect_document_result(conversation_id, path)
         elif name == "workspace.inspect_html":
             path = str(arguments.get("path", "")).strip()
             if not path:
@@ -18534,6 +18790,12 @@ DIRECT_SEARCH_ANSWER_SYSTEM_PROMPT = (
     "Use concise Markdown citations with the provided URLs. "
     "Do not tell the user to check the links themselves unless the evidence truly does not contain the requested fact."
 )
+ATTACHMENT_SUMMARY_SYSTEM_PROMPT = (
+    "You are processing attached documents that have already been extracted into text. "
+    "Work only from the provided excerpts and summaries. "
+    "Be explicit about coverage, uncertainty, and major themes. "
+    "Do not claim you cannot access the document when excerpts are present."
+)
 
 
 def direct_search_query_prefers_fact_extraction(query: str) -> bool:
@@ -19046,6 +19308,232 @@ def should_route_prepared_turn_via_direct_search(prepared: PreparedTurnRequest) 
     return any(tool_name.startswith("web.") for tool_name in prepared.enabled_tools)
 
 
+def should_route_prepared_turn_via_attachment_summary(prepared: PreparedTurnRequest) -> bool:
+    """Use a deterministic summarize-pass for attachment-heavy overview requests."""
+    if prepared.slash_command:
+        return False
+    if prepared.auto_execute_workspace or prepared.resume_saved_workspace:
+        return False
+    if not prepared.attachment_paths:
+        return False
+    if str(prepared.workspace_intent or "none") not in {"none", "focused_read"}:
+        return False
+    return is_overview_attachment_request(prepared.effective_message)
+
+
+async def summarize_attachment_batch_via_llm(
+    request_text: str,
+    source_lines: List[str],
+    batch_scope: str,
+    batch_text: str,
+) -> str:
+    """Summarize one extracted attachment batch into a reusable intermediate note."""
+    messages = [
+        {"role": "system", "content": ATTACHMENT_SUMMARY_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "\n".join([
+                f"User request:\n{request_text}",
+                "",
+                "Available attachment sources:",
+                "\n".join(f"- {line}" for line in source_lines[:8]) or "- (none)",
+                "",
+                f"Current excerpt scope:\n{batch_scope}",
+                "",
+                "Summarize this excerpt for later synthesis.",
+                "Return Markdown with these sections:",
+                "## Scope",
+                "## Key Points",
+                "## Important Details",
+                "## Caveats",
+                "",
+                "Excerpt:",
+                batch_text,
+            ]),
+        },
+    ]
+    raw = await vllm_chat_complete(messages, max_tokens=420, temperature=0.1)
+    return strip_stream_special_tokens(raw).strip()
+
+
+async def condense_attachment_summaries_via_llm(
+    request_text: str,
+    source_lines: List[str],
+    round_index: int,
+    summaries: List[str],
+) -> str:
+    """Compress several intermediate summaries into one higher-level summary."""
+    messages = [
+        {"role": "system", "content": ATTACHMENT_SUMMARY_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "\n".join([
+                f"User request:\n{request_text}",
+                "",
+                "Available attachment sources:",
+                "\n".join(f"- {line}" for line in source_lines[:8]) or "- (none)",
+                "",
+                f"These are round {round_index} intermediate summaries from different parts of the attached documents.",
+                "Merge them into one concise but information-dense Markdown summary with:",
+                "## Coverage",
+                "## Main Themes",
+                "## Important Details",
+                "## Caveats",
+                "",
+                "Intermediate summaries:",
+                "\n\n---\n\n".join(summary.strip() for summary in summaries if summary.strip()),
+            ]),
+        },
+    ]
+    raw = await vllm_chat_complete(messages, max_tokens=520, temperature=0.1)
+    return strip_stream_special_tokens(raw).strip()
+
+
+async def synthesize_attachment_summary_via_llm(
+    request_text: str,
+    source_lines: List[str],
+    condensed_summaries: List[str],
+) -> str:
+    """Write the final user-facing summary from condensed attachment notes."""
+    messages = [
+        {"role": "system", "content": ATTACHMENT_SUMMARY_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "\n".join([
+                f"User request:\n{request_text}",
+                "",
+                "Available attachment sources:",
+                "\n".join(f"- {line}" for line in source_lines[:8]) or "- (none)",
+                "",
+                "Write a useful final answer for the user.",
+                "Start with a short coverage sentence that makes it clear this summary is based on the extracted document text.",
+                "Then provide a comprehensive but readable summary.",
+                "Close with 3-6 concise bullet takeaways.",
+                "Do not mention tool limitations or ask the user to paste the document again.",
+                "",
+                "Condensed summaries:",
+                "\n\n---\n\n".join(summary.strip() for summary in condensed_summaries if summary.strip()),
+            ]),
+        },
+    ]
+    raw = await vllm_chat_complete(messages, max_tokens=900, temperature=0.15)
+    return strip_stream_special_tokens(raw).strip()
+
+
+async def handle_direct_attachment_summary_command(
+    websocket: WebSocket,
+    conversation_id: str,
+    query: str,
+    attachment_paths: List[str],
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+) -> str:
+    """Process long attachment summaries through a deterministic multi-pass loop."""
+    cleaned_query = str(query or "").strip() or "Summarize the attached documents."
+    batches, source_lines = build_document_summary_batches(conversation_id, attachment_paths)
+    if not batches:
+        indexed_sources: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        for rel_path in attachment_paths[:MAX_ATTACHMENTS_PER_MESSAGE]:
+            try:
+                source = ensure_document_index(conversation_id, rel_path)
+            except Exception as exc:
+                notes.append(f"- {rel_path}: {exc}")
+                continue
+            indexed_sources.append(source)
+            if source.get("status") != "ready":
+                notes.append(
+                    f"- {rel_path}: {source.get('error') or 'no extractable text was found'}"
+                )
+        if workflow_execution:
+            workflow_execution.route_metadata["attachment_summary"] = {
+                "source_count": len(indexed_sources),
+                "batch_count": 0,
+                "notes": list(notes),
+            }
+        if notes:
+            return (
+                "I tried to process the attached document, but there was no usable extracted text for a full summary.\n\n"
+                "Parsing notes:\n"
+                + "\n".join(notes[:MAX_ATTACHMENTS_PER_MESSAGE])
+            )
+        return "I couldn’t find extractable document text for a comprehensive summary."
+
+    if workflow_execution:
+        workflow_execution.route_metadata["attachment_summary"] = {
+            "source_count": len(source_lines),
+            "batch_count": len(batches),
+        }
+
+    await send_activity_event(
+        websocket,
+        "inspect",
+        "Document Pass",
+        f"Indexed {len(source_lines)} attachment source{'s' if len(source_lines) != 1 else ''} into {len(batches)} summary batch{'es' if len(batches) != 1 else ''}.",
+    )
+
+    current_summaries: List[str] = []
+    total_batches = len(batches)
+    for index, batch in enumerate(batches, start=1):
+        batch_scope = summarize_document_batch_scope(batch)
+        await send_activity_event(
+            websocket,
+            "analyze",
+            "Document Batch",
+            f"Processing batch {index}/{total_batches}: {batch_scope}",
+        )
+        current_summaries.append(
+            await summarize_attachment_batch_via_llm(
+                cleaned_query,
+                source_lines,
+                batch_scope,
+                str(batch.get("text") or ""),
+            )
+        )
+
+    round_index = 1
+    while len(current_summaries) > DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND and round_index <= DOCUMENT_SUMMARY_MAX_REDUCTION_ROUNDS:
+        next_round: List[str] = []
+        groups = [
+            current_summaries[start:start + DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND]
+            for start in range(0, len(current_summaries), DOCUMENT_SUMMARY_MAX_BATCHES_PER_ROUND)
+        ]
+        await send_activity_event(
+            websocket,
+            "synthesize",
+            "Document Reduce",
+            f"Condensing {len(current_summaries)} intermediate summaries into {len(groups)} higher-level summaries (round {round_index}).",
+        )
+        for group_index, group in enumerate(groups, start=1):
+            await send_activity_event(
+                websocket,
+                "synthesize",
+                "Reduction Batch",
+                f"Combining reduction batch {group_index}/{len(groups)} in round {round_index}.",
+            )
+            next_round.append(
+                await condense_attachment_summaries_via_llm(
+                    cleaned_query,
+                    source_lines,
+                    round_index,
+                    group,
+                )
+            )
+        current_summaries = next_round
+        round_index += 1
+
+    await send_activity_event(
+        websocket,
+        "respond",
+        "Document Summary",
+        "Writing the final comprehensive summary from the processed attachment notes.",
+    )
+    return await synthesize_attachment_summary_via_llm(
+        cleaned_query,
+        source_lines,
+        current_summaries,
+    )
+
+
 async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     """Normalize one inbound chat turn into a simpler routing payload."""
     message = data.get('message', '').strip()
@@ -19256,6 +19744,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         repo_bootstrapped=repo_bootstrapped,
         repo_bootstrap_summary=repo_bootstrap_summary,
         assessment=assessment,
+        attachment_paths=list(attachments),
     )
 
 
@@ -19465,6 +19954,32 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 full_response,
                 workflow_execution=workflow_execution,
                 final_outcome="completed_direct_search",
+                active_file_path=prepared.active_file_path,
+                queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
+                turn_kind=prepared.turn_kind,
+            )
+            return
+
+        if should_route_prepared_turn_via_attachment_summary(prepared):
+            mark_foreground_job("running")
+            full_response = await handle_direct_attachment_summary_command(
+                websocket,
+                conv_id,
+                effective_message,
+                prepared.attachment_paths,
+                workflow_execution=workflow_execution,
+            )
+            if not response_started:
+                await websocket.send_json({'type': 'start'})
+                response_started = True
+            await send_final_replacement(websocket, full_response)
+            mark_foreground_job("completed")
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                full_response,
+                workflow_execution=workflow_execution,
+                final_outcome="completed_attachment_summary",
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
