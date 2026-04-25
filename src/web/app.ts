@@ -46,6 +46,31 @@ interface WorkspaceFilePayload {
     media_type?: string;
 }
 
+interface UploadedWorkspaceFile {
+    name: string;
+    path: string;
+    size?: number | null;
+    content_type?: string;
+    kind?: string;
+}
+
+interface WorkspaceUploadResponse {
+    workspace_id: string;
+    workspace_path: string;
+    target_path: string;
+    files: UploadedWorkspaceFile[];
+    count: number;
+    conversation_id?: string;
+}
+
+interface PendingComposerAttachment {
+    name: string;
+    path: string;
+    size?: number | null;
+    contentType?: string;
+    kind?: string;
+}
+
 interface SpreadsheetPreviewPayload {
     path: string;
     file_type: string;
@@ -249,7 +274,10 @@ const state = {
     handledArtifactKeys: new Set<string>(),
     conversationRefreshTimer: 0 as number,
     healthPollTimer: 0 as number,
-    pendingAttachmentPaths: [] as string[],
+    pendingAttachments: [] as PendingComposerAttachment[],
+    composerUploadingCount: 0,
+    composerDropActive: false,
+    activeStreamConversationId: "",
 };
 
 function query<T extends Element>(selector: string): T {
@@ -277,6 +305,7 @@ const connectionBadge = query<HTMLSpanElement>("#connectionBadge");
 const chatMessages = query<HTMLDivElement>("#chatMessages");
 const scrollToBottomButton = query<HTMLButtonElement>("#scrollToBottomButton");
 const composerForm = query<HTMLFormElement>("#composerForm");
+const composerAttachments = query<HTMLDivElement>("#composerAttachments");
 const composerInput = query<HTMLTextAreaElement>("#composerInput");
 const composerHint = query<HTMLSpanElement>("#composerHint");
 const sendButton = query<HTMLButtonElement>("#sendButton");
@@ -689,7 +718,14 @@ function syncComposerHeight(): void {
     composerInput.style.overflowY = composerInput.scrollHeight > nextHeight ? "auto" : "hidden";
 }
 
+function pendingAttachmentPaths(): string[] {
+    return state.pendingAttachments.map((attachment) => attachment.path);
+}
+
 function defaultComposerStatus(): string {
+    if (state.composerUploadingCount > 0) {
+        return `Uploading ${state.composerUploadingCount} file${state.composerUploadingCount === 1 ? "" : "s"}…`;
+    }
     if (state.connectionState === "offline") {
         return "Runtime offline.";
     }
@@ -697,6 +733,10 @@ function defaultComposerStatus(): string {
         return state.modelName ? `Model loading: ${state.modelName}` : "Model loading…";
     }
     return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+}
+
+function syncComposerActions(): void {
+    sendButton.disabled = state.composerUploadingCount > 0 && !state.generating;
 }
 
 function setViewerMode(nextMode: ViewerMode): void {
@@ -775,7 +815,21 @@ function setConnectionState(nextState: ConnectionState): void {
 function setGenerating(nextValue: boolean): void {
     state.generating = nextValue;
     sendButton.textContent = nextValue ? "Stop" : "Send";
+    syncComposerActions();
     setConnectionState(nextValue ? "streaming" : (state.ws?.readyState === WebSocket.OPEN ? "online" : "offline"));
+}
+
+function clearVisibleGenerationState(): void {
+    state.activeAssistantIndex = -1;
+    state.thinkingStatus = null;
+    setGenerating(false);
+    setComposerHint(defaultComposerStatus());
+}
+
+function detachGenerationFromVisibleConversation(conversationId: string): void {
+    if (!conversationId) return;
+    if (state.activeStreamConversationId !== conversationId) return;
+    clearVisibleGenerationState();
 }
 
 function setComposerHint(text: string): void {
@@ -997,18 +1051,141 @@ async function materializeComposerPaste(text: string): Promise<string> {
         throw new Error("Select a workspace before attaching pasted files.");
     }
     const path = suggestPastedFilename(text);
-    await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            path,
-            content: text,
-        }),
-    });
-    state.pendingAttachmentPaths = [...state.pendingAttachmentPaths, path];
+    setComposerUploadState(1);
+    try {
+        await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                path,
+                content: text,
+            }),
+        });
+        const { extension } = inferPastedLanguage(text);
+        state.pendingAttachments = mergePendingAttachments([
+            ...state.pendingAttachments,
+            {
+                name: path.split("/").pop() || path,
+                path,
+                kind: extension,
+                contentType: "text/plain",
+                size: text.length,
+            },
+        ]);
+        renderComposerAttachments();
+    } finally {
+        setComposerUploadState(0);
+    }
     await loadDirectory(parentDirectory(path));
     await openFile(path);
     return path;
+}
+
+function mergePendingAttachments(items: PendingComposerAttachment[]): PendingComposerAttachment[] {
+    const deduped = new Map<string, PendingComposerAttachment>();
+    items.forEach((item) => {
+        if (!item.path) return;
+        deduped.set(item.path, item);
+    });
+    return [...deduped.values()];
+}
+
+function setComposerDropActive(active: boolean): void {
+    state.composerDropActive = active;
+    composerForm.classList.toggle("drag-active", active);
+}
+
+function setComposerUploadState(count: number): void {
+    state.composerUploadingCount = Math.max(0, count);
+    syncComposerActions();
+    renderComposerAttachments();
+    if (!state.generating) {
+        setComposerHint(defaultComposerStatus());
+    }
+}
+
+function removePendingAttachment(path: string): void {
+    state.pendingAttachments = state.pendingAttachments.filter((attachment) => attachment.path !== path);
+    renderComposerAttachments();
+    setComposerHint(state.pendingAttachments.length ? `${state.pendingAttachments.length} file${state.pendingAttachments.length === 1 ? "" : "s"} attached.` : defaultComposerStatus());
+}
+
+function renderComposerAttachments(): void {
+    if (!state.pendingAttachments.length && state.composerUploadingCount <= 0) {
+        composerAttachments.hidden = true;
+        composerAttachments.innerHTML = "";
+        return;
+    }
+    composerAttachments.hidden = false;
+    const uploadingMarkup = state.composerUploadingCount > 0 ? `
+        <div class="composer-attachment-chip uploading" aria-live="polite">
+            <span class="composer-attachment-kind">Upload</span>
+            <span class="composer-attachment-name">
+                Uploading ${state.composerUploadingCount} file${state.composerUploadingCount === 1 ? "" : "s"}…
+            </span>
+        </div>
+    ` : "";
+    const attachmentMarkup = state.pendingAttachments.map((attachment) => {
+        const kindLabel = displayFileKindLabel(attachment.path, attachment.kind || "", "file");
+        return `
+            <div class="composer-attachment-chip" data-path="${escapeHtml(attachment.path)}">
+                <span class="composer-attachment-kind">${escapeHtml(kindLabel)}</span>
+                <span class="composer-attachment-name">${escapeHtml(attachment.name)}</span>
+                <button
+                    type="button"
+                    class="composer-attachment-remove"
+                    data-remove-path="${escapeHtml(attachment.path)}"
+                    aria-label="Remove ${escapeHtml(attachment.name)}"
+                    title="Remove ${escapeHtml(attachment.name)}"
+                >
+                    ×
+                </button>
+            </div>
+        `;
+    }).join("");
+    composerAttachments.innerHTML = `${uploadingMarkup}${attachmentMarkup}`;
+    composerAttachments.querySelectorAll<HTMLButtonElement>("[data-remove-path]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const path = button.dataset.removePath || "";
+            if (!path) return;
+            removePendingAttachment(path);
+        });
+    });
+}
+
+async function uploadComposerFiles(files: File[]): Promise<PendingComposerAttachment[]> {
+    if (!state.currentWorkspaceId) {
+        throw new Error("Select a workspace before attaching files.");
+    }
+    const uploads = files.filter((file) => file && file.size >= 0);
+    if (!uploads.length) return [];
+    setComposerUploadState(uploads.length);
+    let attachments: PendingComposerAttachment[] = [];
+    try {
+        const formData = new FormData();
+        uploads.forEach((file) => formData.append("files", file, file.name));
+        formData.append("target_path", ".");
+        const payload = await fetchJson<WorkspaceUploadResponse>(
+            `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/upload`,
+            {
+                method: "POST",
+                body: formData,
+            },
+        );
+        attachments = (payload.files || []).map((file) => ({
+            name: file.name,
+            path: file.path,
+            size: file.size,
+            kind: file.kind,
+            contentType: file.content_type,
+        }));
+        state.pendingAttachments = mergePendingAttachments([...state.pendingAttachments, ...attachments]);
+        renderComposerAttachments();
+    } finally {
+        setComposerUploadState(0);
+    }
+    await loadDirectory(".");
+    return attachments;
 }
 
 function mergeComposerText(note: string): void {
@@ -2824,6 +3001,8 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
     state.currentWorkspaceId = nextWorkspaceId;
     if (nextWorkspaceId !== previousWorkspaceId) {
         state.latestWorkedFilePath = "";
+        state.pendingAttachments = [];
+        setComposerUploadState(0);
     }
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
@@ -2980,6 +3159,9 @@ async function loadSelectedFixtureDetails(): Promise<void> {
 }
 
 async function loadConversation(id: string): Promise<void> {
+    if (state.generating && state.currentConversationId && state.currentConversationId !== id) {
+        detachGenerationFromVisibleConversation(state.currentConversationId);
+    }
     const payload = await fetchJson<{
         messages: ChatMessage[];
         workspace_id?: string;
@@ -2990,6 +3172,8 @@ async function loadConversation(id: string): Promise<void> {
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
+    state.pendingAttachments = [];
+    setComposerUploadState(0);
     state.selectedFilePath = "";
     state.latestWorkedFilePath = "";
     state.viewerMode = "closed";
@@ -3003,22 +3187,33 @@ async function loadConversation(id: string): Promise<void> {
         renderConversations();
     }
 
+    renderComposerAttachments();
     renderMessages();
     syncShellLayout();
+    if (state.activeStreamConversationId === id) {
+        setGenerating(true);
+        setThinkingStatus("Continuing the reply.", { phase: "thinking" });
+        renderMessages();
+    }
     await loadContextEvalReport();
 }
 
 function startNewChat(): void {
+    if (state.generating && state.currentConversationId) {
+        detachGenerationFromVisibleConversation(state.currentConversationId);
+    }
     state.currentConversationId = generateId();
     state.currentConversationTitle = "New chat";
     state.messages = [];
-    state.pendingAttachmentPaths = [];
+    state.pendingAttachments = [];
+    setComposerUploadState(0);
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
     state.selectedFilePath = "";
     state.latestWorkedFilePath = "";
     state.viewerMode = "closed";
+    renderComposerAttachments();
     renderMessages();
     renderConversations();
     syncShellLayout();
@@ -3044,6 +3239,7 @@ function ensureAssistantMessage(): ChatMessage {
 }
 
 function finishGeneration(options: { preserveThinking?: boolean } = {}): void {
+    state.activeStreamConversationId = "";
     state.activeAssistantIndex = -1;
     setGenerating(false);
     if (!options.preserveThinking) {
@@ -3068,8 +3264,14 @@ function finishGeneration(options: { preserveThinking?: boolean } = {}): void {
 
 function handleChatEvent(event: ChatEvent): void {
     if (!event || typeof event !== "object") return;
+    const eventConversationId = String(event.conversation_id || state.activeStreamConversationId || "").trim();
+    const isVisibleConversationEvent = !eventConversationId || eventConversationId === state.currentConversationId;
 
     if (event.type === "start") {
+        if (eventConversationId) {
+            state.activeStreamConversationId = eventConversationId;
+        }
+        if (!isVisibleConversationEvent) return;
         ensureAssistantMessage();
         setGenerating(true);
         setThinkingStatus(buildThinkingSummary(event));
@@ -3077,6 +3279,7 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if (event.type === "assistant_note") {
+        if (!isVisibleConversationEvent) return;
         if (isSuppressedAssistantNote(event.content || "")) {
             setThinkingStatus("Switching to the fallback path and continuing.", { phase: "thinking" });
             return;
@@ -3088,6 +3291,7 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if (event.type === "final_replace") {
+        if (!isVisibleConversationEvent) return;
         const assistantMessage = ensureAssistantMessage();
         assistantMessage.content = event.content || "";
         renderMessages();
@@ -3095,6 +3299,7 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if (event.type === "token") {
+        if (!isVisibleConversationEvent) return;
         const assistantMessage = ensureAssistantMessage();
         assistantMessage.content += event.content || "";
         renderMessages();
@@ -3102,11 +3307,13 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if ((event.type === "activity" || event.type === "reasoning_note" || event.type === "status") && event.content) {
+        if (!isVisibleConversationEvent) return;
         setThinkingStatus(buildThinkingSummary(event), { phase: event.phase || "thinking" });
         return;
     }
 
     if (event.type === "tool_result" && event.payload?.open_path) {
+        if (!isVisibleConversationEvent) return;
         setLatestWorkedFile(event.payload.open_path);
         void openFile(event.payload.open_path);
         return;
@@ -3123,14 +3330,26 @@ function handleChatEvent(event: ChatEvent): void {
                 approval_target: event.approval_target || "tool",
                 approved: true,
             }));
-            setThinkingStatus(buildThinkingSummary(event), { phase: "permission" });
+            if (isVisibleConversationEvent) {
+                setThinkingStatus(buildThinkingSummary(event), { phase: "permission" });
+            }
         } else {
-            setThinkingStatus(buildThinkingSummary(event), { phase: "permission", error: true, persistent: true });
+            if (isVisibleConversationEvent) {
+                setThinkingStatus(buildThinkingSummary(event), { phase: "permission", error: true, persistent: true });
+            }
         }
         return;
     }
 
     if (event.type === "error") {
+        if (!isVisibleConversationEvent) {
+            if (eventConversationId && eventConversationId === state.activeStreamConversationId) {
+                state.activeStreamConversationId = "";
+            }
+            void loadConversations();
+            void fetchHealth();
+            return;
+        }
         const assistantMessage = state.activeAssistantIndex >= 0
             ? state.messages[state.activeAssistantIndex]
             : null;
@@ -3153,6 +3372,14 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if (event.type === "canceled" || event.type === "done") {
+        if (!isVisibleConversationEvent) {
+            if (eventConversationId && eventConversationId === state.activeStreamConversationId) {
+                state.activeStreamConversationId = "";
+            }
+            void loadConversations();
+            void fetchHealth();
+            return;
+        }
         finishGeneration();
     }
 }
@@ -3181,9 +3408,13 @@ async function sendCurrentMessage(): Promise<void> {
         state.ws?.send(JSON.stringify({ type: "stop" }));
         return;
     }
+    if (state.composerUploadingCount > 0) {
+        setComposerHint(defaultComposerStatus());
+        return;
+    }
 
     const message = composerInput.value.trim();
-    const attachments = [...state.pendingAttachmentPaths];
+    const attachments = pendingAttachmentPaths();
     if (!message && !attachments.length) return;
     if (!state.currentConversationId) {
         startNewChat();
@@ -3197,11 +3428,13 @@ async function sendCurrentMessage(): Promise<void> {
     state.stickChatToBottom = true;
 
     composerInput.value = "";
-    state.pendingAttachmentPaths = [];
+    state.pendingAttachments = [];
     syncComposerHeight();
+    renderComposerAttachments();
     renderMessages();
     renderConversations();
     setGenerating(true);
+    state.activeStreamConversationId = state.currentConversationId;
     setThinkingStatus(state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading.");
 
     const payload = {
@@ -3221,7 +3454,14 @@ async function sendCurrentMessage(): Promise<void> {
     try {
         await dispatchChatPayload(payload);
     } catch (error) {
-        state.pendingAttachmentPaths = attachments;
+        state.pendingAttachments = mergePendingAttachments([
+            ...state.pendingAttachments,
+            ...attachments.map((path) => ({
+                path,
+                name: path.split("/").pop() || path,
+            })),
+        ]);
+        renderComposerAttachments();
         setThinkingStatus(
             error instanceof Error ? summarizeRuntimeError(error.message) : "The reply could not be sent.",
             { error: true, persistent: true },
@@ -3265,6 +3505,8 @@ async function resetAppData(): Promise<void> {
     state.stickChatToBottom = true;
     state.selectedFilePath = "";
     state.viewerMode = "closed";
+    state.pendingAttachments = [];
+    setComposerUploadState(0);
     renderMessages();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     await loadWorkspaces();
@@ -3446,6 +3688,43 @@ function attachEvents(): void {
             });
     });
 
+    composerForm.addEventListener("dragenter", (event: DragEvent) => {
+        if (!event.dataTransfer?.types.includes("Files")) return;
+        event.preventDefault();
+        setComposerDropActive(true);
+    });
+
+    composerForm.addEventListener("dragover", (event: DragEvent) => {
+        if (!event.dataTransfer?.types.includes("Files")) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        if (!state.composerDropActive) setComposerDropActive(true);
+    });
+
+    composerForm.addEventListener("dragleave", (event: DragEvent) => {
+        const relatedTarget = event.relatedTarget as Node | null;
+        if (relatedTarget && composerForm.contains(relatedTarget)) return;
+        setComposerDropActive(false);
+    });
+
+    composerForm.addEventListener("drop", (event: DragEvent) => {
+        const droppedFiles = [...(event.dataTransfer?.files || [])];
+        if (!droppedFiles.length) return;
+        event.preventDefault();
+        setComposerDropActive(false);
+        void uploadComposerFiles(droppedFiles)
+            .then((attachments) => {
+                if (!attachments.length) return;
+                const label = attachments.length === 1
+                    ? `Attached ${attachments[0].name}.`
+                    : `Attached ${attachments.length} files.`;
+                setComposerHint(label);
+            })
+            .catch((error) => {
+                setComposerHint(error instanceof Error ? error.message : "Could not attach dropped files.");
+            });
+    });
+
     composerInput.addEventListener("keydown", (event: KeyboardEvent) => {
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
@@ -3459,6 +3738,7 @@ async function bootstrap(): Promise<void> {
     syncShellLayout();
     renderMessages();
     renderConversations();
+    renderComposerAttachments();
     renderContextEvalReport();
     renderPreviewEmpty("Open a file", "Select a file from the workspace to preview it here.");
     syncComposerHeight();
