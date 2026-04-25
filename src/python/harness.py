@@ -16185,6 +16185,20 @@ def build_capability_recovery_message(
     return "\n".join(lines)
 
 
+def capability_recovery_status_message(allowed_tools: Optional[List[str]]) -> str:
+    """Render a user-facing recovery note without leaking internal routing jargon."""
+    tool_set = {str(item or "").strip() for item in (allowed_tools or []) if str(item or "").strip()}
+    has_web = any(name.startswith("web.") for name in tool_set)
+    has_workspace = any(name.startswith("workspace.") for name in tool_set)
+    if has_web and not has_workspace:
+        return "The first draft missed that this request needs current web sources. Searching the web now."
+    if has_workspace and not has_web:
+        return "The first draft missed that this request still has useful workspace tools. Continuing from saved state."
+    if has_web and has_workspace:
+        return "The first draft missed useful tools for this request. Continuing with saved progress."
+    return "The first draft missed a useful next step. Continuing from saved state."
+
+
 async def maybe_recover_tool_outcome_from_capability_refusal(
     websocket: WebSocket,
     conversation_id: str,
@@ -16217,7 +16231,7 @@ async def maybe_recover_tool_outcome_from_capability_refusal(
         websocket,
         "evaluate",
         "Recover",
-        "The draft either claimed a limitation or handed work back even though this turn still has relevant tools. Continuing from saved state.",
+        capability_recovery_status_message(allowed_tools),
         step_label=activity_step_label,
     )
     recovery_history = list(history)
@@ -18313,7 +18327,7 @@ LOCAL_RAG_HINTS = {
 WEB_SEARCH_HINTS = {
     "latest", "today", "current", "recent", "news", "release", "released", "version",
     "price", "pricing", "weather", "score", "stocks", "docs", "documentation",
-    "announcement", "announcements", "update", "updates",
+    "announcement", "announcements", "update", "updates", "change", "changes", "changelog",
 }
 WEB_SEARCH_ACTION_WORDS = {"search", "browse", "google", "research", "lookup", "check", "find"}
 WEB_SEARCH_CONTEXT_WORDS = {"web", "internet", "online"}
@@ -18338,6 +18352,8 @@ EXPLICIT_WEB_SEARCH_PHRASES = (
     "cite sources",
     "with citations",
     "with sources",
+    "release notes",
+    "changelog",
 )
 EXPLICIT_HISTORY_SEARCH_PHRASES = (
     "search history",
@@ -18506,6 +18522,11 @@ def should_offer_web_search(
     if "http://" in text or "https://" in text:
         return True
     if re.search(r"\b[a-z0-9.-]+\.[a-z]{2,}\b", text):
+        return True
+    if re.search(r"\b\d+\.\d+(?:\.\d+)?\b", text) and (
+        "release notes" in text
+        or {"change", "changes", "changelog", "release", "released", "version", "update", "updates"} & set(re.findall(r"[a-z0-9_+-]+", text))
+    ):
         return True
     words = set(re.findall(r"[a-z0-9_+-]+", text))
     if words & WEB_RECOMMENDATION_HINTS and (
@@ -19618,11 +19639,12 @@ DIRECT_SEARCH_FACT_TERMS = {
     "weather", "temperature", "forecast", "humidity", "wind",
     "price", "pricing", "cost", "stock", "stocks", "market", "quote",
     "score", "scores", "standings",
-    "version", "release", "released", "announcement", "announcements",
+    "version", "release", "released", "announcement", "announcements", "change", "changes", "changelog",
 }
 DIRECT_SEARCH_FACT_LEADINS = (
     "what is", "what's", "whats", "who is", "who's", "when is", "when did",
     "how much", "how many", "current", "latest", "today", "right now",
+    "summarize", "summarise", "can you summarize", "can you summarise",
 )
 DIRECT_SEARCH_FETCH_SKIP_DOMAINS = {"reddit.com", "wikipedia.org"}
 DIRECT_SEARCH_ANSWER_SYSTEM_PROMPT = (
@@ -21045,7 +21067,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         websocket,
                         "evaluate",
                         "Recover",
-                        "The draft either refused a capability or handed the work back even though tools are available. Retrying with tools.",
+                        capability_recovery_status_message(recovery_tools),
                     )
                     recovery_history = list(model_history)
                     recovery_history.append({
