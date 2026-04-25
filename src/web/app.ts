@@ -690,6 +690,18 @@ function fileViewUrl(path: string, nonce = ""): string {
     );
 }
 
+function workspaceFileRenderUrl(path: string, nonce = ""): string {
+    const encodedPath = String(path || "")
+        .split("/")
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+    return withCacheBust(
+        `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/render/${encodedPath}`,
+        nonce,
+    );
+}
+
 function workspaceFileApiUrl(path: string, nonce = ""): string {
     return withCacheBust(
         `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`,
@@ -2916,8 +2928,7 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     }
 
     if (contentKind === "html") {
-        const srcdoc = escapeHtml(buildResponsiveHtmlPreview(payload.content || ""));
-        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="allow-scripts" title="${escapeHtml(payload.path)}" srcdoc="${srcdoc}"></iframe>`;
+        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="allow-scripts" title="${escapeHtml(payload.path)}" src="${workspaceFileRenderUrl(payload.path, state.activePreviewNonce)}"></iframe>`;
         return;
     }
 

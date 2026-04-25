@@ -3333,6 +3333,8 @@ def record_workflow_step(
             phase=str(call.get("arguments", {}).get("phase", "") or ""),
             auto_generated=auto_generated,
         )
+    elif result.get("ok") and tool_name == "workspace.get_diagnostics":
+        verification_payload = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
     elif result.get("ok") and tool_name == "workspace.inspect_html":
         verification_payload = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
 
@@ -3477,6 +3479,89 @@ def resolve_workspace_relative_path_from_root(workspace: pathlib.Path, rel_path:
     if target != workspace_root and workspace_root not in target.parents:
         raise HTTPException(status_code=403, detail="Access denied")
     return target
+
+
+RESPONSIVE_HTML_PREVIEW_STYLE = """
+html {
+    box-sizing: border-box;
+    overflow-x: hidden;
+}
+
+*, *::before, *::after {
+    box-sizing: inherit;
+}
+
+body {
+    margin: 0;
+    padding: 16px;
+    max-width: 100%;
+    overflow-x: hidden;
+    background: white;
+}
+
+img,
+svg,
+video,
+canvas,
+iframe,
+embed,
+object {
+    display: block;
+    max-width: 100% !important;
+}
+
+img,
+svg,
+video {
+    height: auto !important;
+}
+
+canvas {
+    height: auto !important;
+}
+
+table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+pre {
+    max-width: 100%;
+    overflow: auto;
+}
+""".strip()
+
+
+def build_responsive_html_preview(raw_html: str) -> str:
+    html = str(raw_html or "")
+    if "id=\"codex-responsive-preview\"" in html or "id='codex-responsive-preview'" in html:
+        return html
+    viewport_meta = ""
+    if not re.search(r"<meta[^>]+name=[\"']viewport[\"']", html, flags=re.IGNORECASE):
+        viewport_meta = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+    preview_style = f'<style id="codex-responsive-preview">{RESPONSIVE_HTML_PREVIEW_STYLE}</style>'
+    injected_head = f"{viewport_meta}{preview_style}"
+
+    if re.search(r"<head\b", html, flags=re.IGNORECASE):
+        return re.sub(r"<head([^>]*)>", rf"<head\1>{injected_head}", html, count=1, flags=re.IGNORECASE)
+
+    if re.search(r"<html\b", html, flags=re.IGNORECASE):
+        return re.sub(r"<html([^>]*)>", rf"<html\1><head>{injected_head}</head>", html, count=1, flags=re.IGNORECASE)
+
+    return f"<!DOCTYPE html><html><head>{injected_head}</head><body>{html}</body></html>"
+
+
+def render_workspace_file_preview_response(workspace: pathlib.Path, path: str) -> Response:
+    target = resolve_workspace_relative_path_from_root(workspace, path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    headers = {"Cache-Control": "no-store"}
+    if media_type == "text/html" or target.suffix.lower() in {".html", ".htm"}:
+        html = target.read_text(encoding="utf-8", errors="replace")
+        return HTMLResponse(build_responsive_html_preview(html), headers=headers)
+    return FileResponse(target, media_type=media_type, headers=headers)
 
 
 def normalize_attachment_paths_for_workspace(
@@ -6267,6 +6352,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.read_file {"path":"src/python/harness.py"}
 - workspace.inspect_document {"path":"papers/perelman.pdf"}
 - workspace.inspect_html {"path":"src/web/index.html"}
+- workspace.get_diagnostics {"path":"src/python/harness.py"}
 - workspace.patch_file {"path":"src/python/harness.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
@@ -6284,6 +6370,7 @@ Constraints:
 - workspace.grep searches text files in the workspace and returns matching file paths and lines.
 - workspace.inspect_document extracts document structure such as page counts, section titles, chunk previews, and opening summaries for PDFs, text docs, and code-like files.
 - workspace.inspect_html reviews a saved HTML file and returns structural/rubric issues such as missing viewport metadata, sparse layout, or missing headings.
+- workspace.get_diagnostics runs a file-aware syntax or type check when supported and returns structured diagnostics with line and column information.
 - workspace.patch_file uses exact-match replacements; prefer small edits.
 - workspace.run_command takes an argv array, never a shell string.
 - For Python dependencies, use pip installs normally; the server will place them into a managed chat-scoped Python environment outside the workspace and make later Python commands use it when available.
@@ -6654,6 +6741,34 @@ def build_tool_permission_request(
             approval_target="command",
             title=f"Allow {executable}?",
             content=f"The assistant wants to run {preview} in {tool_path_preview(cwd_value, '.')} for this chat.",
+            preview=preview,
+        )
+
+    if name == "workspace.get_diagnostics":
+        path_value = str(arguments.get("path", "") or "").strip()
+        if not path_value:
+            return None
+        spec = infer_diagnostics_command_spec(conversation_id, path_value)
+        if not spec:
+            return None
+        command_list = spec.get("command") if isinstance(spec.get("command"), list) else []
+        if not command_list:
+            return None
+        cwd_value = str(spec.get("cwd", ".") or ".")
+        try:
+            cwd_path = resolve_workspace_relative_path(conversation_id, cwd_value)
+            key = command_permission_key(conversation_id, command_list, cwd_path)
+        except Exception:
+            return None
+        preview = command_preview_text(command_list)
+        return PermissionApprovalRequest(
+            key=key,
+            approval_target="command",
+            title="Allow diagnostics check?",
+            content=(
+                f"The assistant wants to run {preview} to inspect code diagnostics for "
+                f"{tool_path_preview(path_value, 'the file')}."
+            ),
             preview=preview,
         )
 
@@ -11201,6 +11316,8 @@ def allowed_workspace_tools(
     allowed = ["workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"]
     allowed.append("workspace.inspect_document")
     allowed.append("workspace.inspect_html")
+    if features.workspace_run_commands:
+        allowed.append("workspace.get_diagnostics")
     if include_render:
         allowed.append("workspace.render")
     if features.workspace_write and include_write:
@@ -13465,6 +13582,12 @@ async def view_workspace_file_by_workspace(workspace_id: str, path: str):
     return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/workspaces/{workspace_id}/file/render/{path:path}")
+async def render_workspace_file_by_workspace(workspace_id: str, path: str):
+    _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
+    return render_workspace_file_preview_response(workspace, path)
+
+
 @app.get("/api/workspaces/{workspace_id}/file/download")
 async def download_workspace_file_by_workspace(workspace_id: str, path: str):
     _workspace_record, workspace, _run = get_workspace_route_target(workspace_id, create=True)
@@ -13562,6 +13685,12 @@ async def view_workspace_file(conversation_id: str, path: str):
     return await view_workspace_file_by_workspace(workspace_id, path)
 
 
+@app.get("/api/workspace/{conversation_id}/file/render/{path:path}")
+async def render_workspace_file(conversation_id: str, path: str):
+    workspace_id = get_workspace_id_for_conversation(conversation_id)
+    return await render_workspace_file_by_workspace(workspace_id, path)
+
+
 @app.get("/api/workspace/{conversation_id}/file/download")
 async def download_workspace_file(conversation_id: str, path: str):
     workspace_id = get_workspace_id_for_conversation(conversation_id)
@@ -13642,6 +13771,7 @@ SUPPORTED_TOOL_NAMES = {
     "workspace.read_file",
     "workspace.inspect_document",
     "workspace.inspect_html",
+    "workspace.get_diagnostics",
     "workspace.patch_file",
     "workspace.run_command",
     "workspace.render",
@@ -13653,7 +13783,7 @@ SUPPORTED_TOOL_NAMES = {
 
 SUPPORTED_TOOL_NAME_PATTERN = re.compile(
     r'"name"\s*:\s*"(?P<name>'
-    r'workspace\.(?:list_files|grep|read_file|inspect_document|inspect_html|patch_file|run_command|render)'
+    r'workspace\.(?:list_files|grep|read_file|inspect_document|inspect_html|get_diagnostics|patch_file|run_command|render)'
     r'|spreadsheet\.describe'
     r'|conversation\.search_history'
     r'|web\.(?:search|fetch_page)'
@@ -13730,6 +13860,17 @@ def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlag
             )
         return (
             "I tried to run an internal verification command, but the tool payload leaked into the visible reply. "
+            "Please retry the request."
+        )
+
+    if name == "workspace.get_diagnostics":
+        if not features.workspace_run_commands:
+            return (
+                f"I tried to inspect diagnostics for {quoted_path}, but command-backed diagnostics were not available for this turn. "
+                "Retry with code execution enabled if you want me to check syntax and type errors automatically."
+            )
+        return (
+            f"I tried to inspect diagnostics for {quoted_path}, but the internal tool payload leaked into the visible reply. "
             "Please retry the request."
         )
 
@@ -14339,6 +14480,250 @@ def build_html_verification_payload(result: Dict[str, Any]) -> Dict[str, Any]:
         "basic_structure_present": bool(rubric.get("basic_structure_present")),
         "render_review_passed": bool(rubric.get("render_review_passed")),
     }
+
+
+def infer_diagnostics_command_spec(conversation_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+    """Choose a narrow built-in diagnostics command for one file when available."""
+    return infer_auto_verify_command(conversation_id, rel_path)
+
+
+def normalize_diagnostic_severity(value: str) -> str:
+    """Normalize checker-specific severities into a small stable set."""
+    cleaned = str(value or "").strip().lower()
+    if "warn" in cleaned:
+        return "warning"
+    if "note" in cleaned or "info" in cleaned:
+        return "info"
+    return "error"
+
+
+def make_structured_diagnostic(
+    *,
+    path: str,
+    message: str,
+    severity: str = "error",
+    line: Optional[int] = None,
+    column: Optional[int] = None,
+    code: str = "",
+) -> Dict[str, Any]:
+    """Build one normalized diagnostic payload."""
+    payload: Dict[str, Any] = {
+        "path": str(path or "").strip(),
+        "message": truncate_output(str(message or "").strip(), limit=240),
+        "severity": normalize_diagnostic_severity(severity),
+    }
+    if line is not None:
+        payload["line"] = max(1, int(line))
+    if column is not None and int(column) > 0:
+        payload["column"] = int(column)
+    if str(code or "").strip():
+        payload["code"] = str(code).strip()
+    return payload
+
+
+def parse_structured_diagnostics_output(
+    command: List[str],
+    stdout_text: str,
+    stderr_text: str,
+    default_path: str,
+) -> List[Dict[str, Any]]:
+    """Parse common compiler and syntax-check output into structured diagnostics."""
+    preview = command_preview_text(command).lower()
+    text = "\n".join(
+        part for part in (str(stderr_text or "").strip(), str(stdout_text or "").strip()) if part
+    ).strip()
+    if not text:
+        return []
+
+    diagnostics: List[Dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    def add_diag(path: str, message: str, severity: str = "error", line: Optional[int] = None, column: Optional[int] = None, code: str = "") -> None:
+        candidate = make_structured_diagnostic(
+            path=path or default_path,
+            message=message,
+            severity=severity,
+            line=line,
+            column=column,
+            code=code,
+        )
+        key = (
+            candidate.get("path"),
+            candidate.get("line"),
+            candidate.get("column"),
+            candidate.get("severity"),
+            candidate.get("code", ""),
+            candidate.get("message"),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        diagnostics.append(candidate)
+
+    gcc_like = re.compile(
+        r"^(?P<path>.+?):(?P<line>\d+):(?:(?P<column>\d+):)?\s*(?P<severity>fatal error|error|warning|note):\s*(?P<message>.+)$"
+    )
+    tsc_paren = re.compile(
+        r"^(?P<path>.+?)\((?P<line>\d+),(?P<column>\d+)\):\s*(?P<severity>error|warning)\s+(?P<code>[A-Za-z]+\d+):\s*(?P<message>.+)$"
+    )
+    tsc_dash = re.compile(
+        r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+)\s+-\s+(?P<severity>error|warning)\s+(?P<code>[A-Za-z]+\d+):\s*(?P<message>.+)$"
+    )
+    shell_line = re.compile(
+        r"^(?P<path>.+?):\s+line\s+(?P<line>\d+):\s*(?P<message>.+)$"
+    )
+    python_file_line = re.compile(r'File "(?P<path>.+?)", line (?P<line>\d+)')
+    node_check_line = re.compile(r"^(?P<path>.+?):(?P<line>\d+)$")
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    for idx, line_text in enumerate(lines):
+        stripped = line_text.strip()
+        if not stripped:
+            continue
+        matched = False
+        for pattern in (tsc_paren, tsc_dash, gcc_like):
+            match = pattern.match(stripped)
+            if not match:
+                continue
+            add_diag(
+                match.group("path"),
+                match.group("message"),
+                severity=match.group("severity"),
+                line=int(match.group("line")),
+                column=int(match.group("column")) if match.groupdict().get("column") else None,
+                code=match.groupdict().get("code", "") or "",
+            )
+            matched = True
+            break
+        if matched:
+            continue
+
+        match = shell_line.match(stripped)
+        if match:
+            add_diag(
+                match.group("path"),
+                match.group("message"),
+                severity="error",
+                line=int(match.group("line")),
+            )
+            continue
+
+        py_match = python_file_line.search(stripped)
+        if py_match:
+            message = ""
+            for follow_line in lines[idx + 1:]:
+                follow = follow_line.strip()
+                if follow:
+                    message = follow
+            add_diag(
+                py_match.group("path"),
+                message or "Python syntax error",
+                severity="error",
+                line=int(py_match.group("line")),
+            )
+            continue
+
+        if "node --check" in preview:
+            node_match = node_check_line.match(stripped)
+            if node_match:
+                message = ""
+                for follow_line in reversed(lines[idx + 1:]):
+                    follow = follow_line.strip()
+                    if follow and not follow.startswith("^"):
+                        message = follow
+                        break
+                add_diag(
+                    node_match.group("path"),
+                    message or "JavaScript syntax error",
+                    severity="error",
+                    line=int(node_match.group("line")),
+                )
+
+    return diagnostics
+
+
+def build_diagnostics_verification_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize one diagnostics pass as a deterministic verification check."""
+    diagnostics = result.get("diagnostics", []) if isinstance(result.get("diagnostics"), list) else []
+    error_count = int(result.get("error_count", 0) or 0)
+    warning_count = int(result.get("warning_count", 0) or 0)
+    return {
+        "tool": "workspace.get_diagnostics",
+        "kind": "diagnostics",
+        "label": f"Diagnostics for {str(result.get('path', '') or '').strip() or 'file'}",
+        "passed": bool(int(result.get("returncode", 1) or 1) == 0 and error_count == 0),
+        "diagnostic_count": len(diagnostics),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "path": str(result.get("path", "") or "").strip(),
+        "checker": str(result.get("checker", "") or "").strip(),
+    }
+
+
+async def workspace_get_diagnostics_result(
+    conversation_id: str,
+    rel_path: str,
+    features: Optional[FeatureFlags] = None,
+) -> Dict[str, Any]:
+    """Run a file-aware diagnostics command and return structured line diagnostics."""
+    spec = infer_diagnostics_command_spec(conversation_id, rel_path)
+    if not spec:
+        raise ValueError("No built-in diagnostics checker is available for this file yet")
+
+    command = list(spec.get("command") or [])
+    cwd = str(spec.get("cwd", ".") or ".")
+    label = str(spec.get("label", "") or "Diagnostics").strip()
+    phase = str(spec.get("phase", "verify") or "verify")
+    command_result = await workspace_run_command_result(
+        conversation_id,
+        command,
+        cwd,
+        features,
+    )
+    path = str(rel_path or "").strip()
+    diagnostics = parse_structured_diagnostics_output(
+        command,
+        str(command_result.get("stdout", "") or ""),
+        str(command_result.get("stderr", "") or ""),
+        path,
+    )
+    if int(command_result.get("returncode", 0) or 0) != 0 and not diagnostics:
+        fallback_message = (
+            str(command_result.get("stderr", "") or "").strip()
+            or str(command_result.get("stdout", "") or "").strip()
+            or f"{label} failed"
+        )
+        diagnostics = [
+            make_structured_diagnostic(
+                path=path,
+                message=fallback_message,
+                severity="error",
+            )
+        ]
+    error_count = sum(1 for item in diagnostics if item.get("severity") == "error")
+    warning_count = sum(1 for item in diagnostics if item.get("severity") == "warning")
+    payload = {
+        "path": path,
+        "cwd": str(command_result.get("cwd", cwd) or cwd),
+        "command": list(command),
+        "label": label,
+        "phase": phase,
+        "checker": command_preview_text(command),
+        "returncode": int(command_result.get("returncode", 0) or 0),
+        "stdout": str(command_result.get("stdout", "") or ""),
+        "stderr": str(command_result.get("stderr", "") or ""),
+        "diagnostics": diagnostics[:40],
+        "diagnostic_count": len(diagnostics),
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "summary": (
+            f"No diagnostics for {path}."
+            if not diagnostics and int(command_result.get("returncode", 0) or 0) == 0
+            else f"Found {pluralize_tool_count(error_count, 'error')} and {pluralize_tool_count(warning_count, 'warning')} in {path}."
+        ),
+    }
+    payload["verification"] = build_diagnostics_verification_payload(payload)
+    return payload
 
 
 async def workspace_run_command_result(
@@ -15739,6 +16124,8 @@ def tool_activity_label(name: str) -> str:
         return "Review"
     if name == "workspace.inspect_html":
         return "Review"
+    if name == "workspace.get_diagnostics":
+        return "Verify"
     if name in {"workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"}:
         return "Explore"
     if name == "workspace.patch_file":
@@ -15766,6 +16153,8 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
         return f"Inspecting {tool_path_preview(arguments.get('path', ''), 'document')}"
     if name == "workspace.inspect_html":
         return f"Reviewing {tool_path_preview(arguments.get('path', ''), 'HTML file')}"
+    if name == "workspace.get_diagnostics":
+        return f"Checking diagnostics for {tool_path_preview(arguments.get('path', ''), 'file')}"
     if name == "workspace.patch_file":
         return f"Editing {tool_path_preview(arguments.get('path', ''), 'file')}"
     if name == "workspace.run_command":
@@ -15900,6 +16289,20 @@ def tool_result_preview(
             return f"Reviewed {path} ({pluralize_tool_count(issue_count, 'issue')})"
         return f"Reviewed {path} (no obvious structural issues)"
 
+    if name == "workspace.get_diagnostics" or "diagnostics" in payload:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "file")
+        verification = payload.get("verification", {}) if isinstance(payload.get("verification"), dict) else {}
+        if verification:
+            if verification.get("passed"):
+                return f"Verification passed: diagnostics for {path}"
+            return (
+                f"Verification failed: diagnostics for {path} "
+                f"({pluralize_tool_count(verification.get('error_count', 0), 'error')}, "
+                f"{pluralize_tool_count(verification.get('warning_count', 0), 'warning')})"
+            )
+        diagnostic_count = len(payload.get("diagnostics", [])) if isinstance(payload.get("diagnostics", []), list) else 0
+        return f"Inspected diagnostics for {path} ({pluralize_tool_count(diagnostic_count, 'issue')})"
+
     if name == "workspace.render" or payload.get("render"):
         return f"Rendered {tool_path_preview(payload.get('path', 'preview'), 'preview')} in the workspace viewer"
 
@@ -16009,7 +16412,7 @@ def should_attempt_capability_recovery(
     if DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(text):
         return True
     allowed = {tool_name for tool_name in (allowed_tools or []) if isinstance(tool_name, str)}
-    if not allowed.intersection({"workspace.run_command", "workspace.render"}):
+    if not allowed.intersection({"workspace.run_command", "workspace.get_diagnostics", "workspace.render"}):
         return False
     return request_demands_agent_execution(request_text) and response_hands_execution_back_to_user(text)
 
@@ -16265,6 +16668,11 @@ async def execute_tool_call(
             if not path:
                 raise ValueError("path is required")
             result = workspace_inspect_html_result(conversation_id, path)
+        elif name == "workspace.get_diagnostics":
+            path = str(arguments.get("path", "")).strip()
+            if not path:
+                raise ValueError("path is required")
+            result = await workspace_get_diagnostics_result(conversation_id, path, features)
         elif name == "workspace.patch_file":
             path = str(arguments.get("path", "")).strip()
             if not path:
@@ -16836,6 +17244,86 @@ async def run_tool_loop(
                 if not html_result.get("ok"):
                     continue
 
+            if (
+                patched_path
+                and (not allowed_tools or "workspace.get_diagnostics" in allowed_tools)
+                and auto_verify_runs < AUTO_VERIFY_MAX_RUNS
+            ):
+                diagnostic_spec = infer_diagnostics_command_spec(conversation_id, patched_path)
+            else:
+                diagnostic_spec = None
+            if diagnostic_spec:
+                auto_verify_runs += 1
+                diagnostics_call = {
+                    "id": f"{call['id']}_auto_diagnostics",
+                    "name": "workspace.get_diagnostics",
+                    "arguments": {"path": patched_path},
+                }
+                diagnostics_label = f"Auto-check diagnostics for {patched_path}"
+                await websocket.send_json({
+                    "type": "tool_start",
+                    "name": diagnostics_call["name"],
+                    "content": f"{status_prefix}{diagnostics_label}",
+                    "arguments": diagnostics_call["arguments"],
+                })
+                await send_activity_event(
+                    websocket,
+                    "verify",
+                    tool_activity_label(diagnostics_call["name"]),
+                    f"{status_prefix}{diagnostics_label}",
+                    step_label=activity_step_label,
+                )
+                diagnostics_started = time.perf_counter()
+                diagnostics_result = await execute_tool_call(conversation_id, diagnostics_call, features)
+                diagnostics_latency_ms = int((time.perf_counter() - diagnostics_started) * 1000)
+                diagnostics_summary = tool_result_preview(
+                    diagnostics_result,
+                    diagnostics_call["name"],
+                    diagnostics_call.get("arguments", {}),
+                )
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "name": diagnostics_call["name"],
+                    "ok": diagnostics_result.get("ok", False),
+                    "content": f"{status_prefix}{diagnostics_summary}",
+                    "arguments": diagnostics_call["arguments"],
+                    "payload": diagnostics_result.get("result", {}) if diagnostics_result.get("ok") else {
+                        "error": diagnostics_result.get("error", "Tool failed"),
+                    },
+                })
+                await send_activity_event(
+                    websocket,
+                    "verify" if diagnostics_result.get("ok") else "error",
+                    tool_activity_label(diagnostics_call["name"]),
+                    f"{status_prefix}{diagnostics_summary}",
+                    step_label=activity_step_label,
+                )
+                tool_results.append({
+                    "call": diagnostics_call,
+                    "result": diagnostics_result,
+                    "auto_generated": True,
+                })
+                record_workflow_step(
+                    workflow_execution,
+                    step_name=activity_step_label or "auto_diagnostics",
+                    call=diagnostics_call,
+                    result=diagnostics_result,
+                    latency_ms=diagnostics_latency_ms,
+                    auto_generated=True,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "The system ran automatic code diagnostics after the patch.\n"
+                        + build_tool_result_followup_message(diagnostics_result)
+                    ),
+                })
+                if not diagnostics_result.get("ok"):
+                    continue
+                diagnostics_verification = diagnostics_result.get("result", {}).get("verification", {})
+                if isinstance(diagnostics_verification, dict) and not diagnostics_verification.get("passed"):
+                    continue
+
             if not allowed_tools or "workspace.run_command" in allowed_tools:
                 auto_plan = infer_auto_command_plan(conversation_id, patched_path) if patched_path else []
             else:
@@ -17370,6 +17858,8 @@ def should_upgrade_to_workspace_execution(
     name = str(call.get("name", "")).strip()
     if name == "workspace.patch_file":
         return bool(features.workspace_write)
+    if name == "workspace.get_diagnostics":
+        return bool(features.workspace_run_commands)
     if name == "workspace.run_command":
         return bool(features.workspace_write and features.workspace_run_commands)
     return False

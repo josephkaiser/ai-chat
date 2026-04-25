@@ -388,6 +388,10 @@ function withCacheBust(url, nonce = "") {
 function fileViewUrl(path, nonce = "") {
     return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`, nonce);
 }
+function workspaceFileRenderUrl(path, nonce = "") {
+    const encodedPath = String(path || "").split("/").filter(Boolean).map((segment)=>encodeURIComponent(segment)).join("/");
+    return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/render/${encodedPath}`, nonce);
+}
 function workspaceFileApiUrl(path, nonce = "") {
     return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`, nonce);
 }
@@ -2525,8 +2529,7 @@ function renderPreview(payload) {
         return;
     }
     if (contentKind === "html") {
-        const srcdoc = escapeHtml(buildResponsiveHtmlPreview(payload.content || ""));
-        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="allow-scripts" title="${escapeHtml(payload.path)}" srcdoc="${srcdoc}"></iframe>`;
+        filePreview.innerHTML = `<iframe class="file-preview-frame" sandbox="allow-scripts" title="${escapeHtml(payload.path)}" src="${workspaceFileRenderUrl(payload.path, state.activePreviewNonce)}"></iframe>`;
         return;
     }
     if (contentKind === "markdown") {

@@ -162,6 +162,26 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(payload["default_view"], "preview")
         self.assertFalse(payload["truncated"])
 
+    def test_html_preview_injects_responsive_shell(self):
+        html = "<!DOCTYPE html><html><head><title>Demo</title></head><body><h1>Hello</h1></body></html>"
+        rendered = app.build_responsive_html_preview(html)
+        self.assertIn('id="codex-responsive-preview"', rendered)
+        self.assertIn('name="viewport"', rendered)
+        self.assertIn("<title>Demo</title>", rendered)
+        self.assertIn("<h1>Hello</h1>", rendered)
+
+    def test_render_workspace_file_preview_response_wraps_html_without_touching_other_files(self):
+        self._write_text("site/index.html", "<html><body><a href=\"about.html\">About</a></body></html>")
+        css_target = self._write_text("site/style.css", "body { color: red; }\n")
+
+        html_response = app.render_workspace_file_preview_response(self.workspace, "site/index.html")
+        self.assertIsInstance(html_response, app.HTMLResponse)
+
+        css_response = app.render_workspace_file_preview_response(self.workspace, "site/style.css")
+        self.assertIsInstance(css_response, app.FileResponse)
+        response_path = getattr(css_response, "path", None) or getattr(css_response, "content", None)
+        self.assertEqual(pathlib.Path(response_path).resolve(), css_target.resolve())
+
     def test_oversized_text_file_returns_clear_reader_error(self):
         target = self._write_text("big.txt", "a" * ((1024 * 1024) + 1))
         with self.assertRaises(ValueError) as exc_info:
