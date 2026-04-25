@@ -303,17 +303,6 @@ body[data-left-sidebar-open="false"] .sidebar {
     letter-spacing: -0.03em;
 }
 
-.sidebar-workspace-name {
-    min-width: 0;
-    padding: 0 2px;
-    color: var(--muted);
-    font-size: var(--fs-meta);
-    line-height: var(--lh-meta);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .sidebar-brand p,
 .empty-state p,
 .status-note,
@@ -1344,6 +1333,11 @@ body[data-viewer-mode="file"] .file-browser {
     border-style: dashed;
 }
 
+.file-item.latest-worked {
+    border-color: rgba(13, 122, 122, 0.24);
+    background: linear-gradient(180deg, rgba(13, 122, 122, 0.08), rgba(13, 122, 122, 0.03));
+}
+
 .file-item-kind {
     display: inline-flex;
     min-width: 2.25rem;
@@ -1356,6 +1350,25 @@ body[data-viewer-mode="file"] .file-browser {
     font-size: var(--fs-label);
     text-transform: uppercase;
     letter-spacing: 0.08em;
+}
+
+.file-item-kind.latest {
+    background: rgba(13, 122, 122, 0.14);
+    color: var(--accent);
+}
+
+.file-item-name-stacked {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.file-item-subpath {
+    color: var(--muted);
+    font-size: var(--fs-label);
+    line-height: 1.35;
+    word-break: break-all;
 }
 
 .file-preview {
@@ -1870,7 +1883,7 @@ body[data-viewer-mode="file"] .viewer-panel {
 
     .chat-panel {
         padding-top: 60px;
-        padding-bottom: calc(12px + env(safe-area-inset-bottom));
+        padding-bottom: calc(128px + env(safe-area-inset-bottom));
     }
 
     .viewer-panel {
@@ -1921,6 +1934,20 @@ body[data-viewer-mode="file"] .viewer-panel {
     .icon-button {
         width: auto;
         border-radius: 999px;
+    }
+
+    .composer {
+        bottom: calc(env(safe-area-inset-bottom) + 14px);
+        width: min(var(--chat-lane-width), calc(100% - 28px));
+        margin: 0 auto;
+    }
+
+    #composerInput {
+        min-height: 46px;
+    }
+
+    .scroll-jump {
+        bottom: calc(env(safe-area-inset-bottom) + 104px);
     }
 
     .sidebar-content {
