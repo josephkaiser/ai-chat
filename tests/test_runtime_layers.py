@@ -4,6 +4,7 @@ from src.python.ai_chat.runtime_layers import (
     TURN_KIND_RUNTIME_FILE,
     TURN_KIND_VISIBLE_CHAT,
     build_model_history,
+    compose_model_message,
     compose_runtime_turn,
     normalize_turn_kind,
     visible_message_kind_sql,
@@ -51,6 +52,16 @@ class RuntimeLayersTests(unittest.TestCase):
 
         self.assertEqual(history[-1]["content"], "Refine the homepage copy.")
         self.assertIn("<active_draft>", model_history[-1]["content"])
+
+    def test_compose_model_message_rebases_runtime_context_on_rewritten_request(self):
+        model_message = compose_model_message(
+            "Save or update the workspace file index.html for this request: refine the homepage copy",
+            runtime_context="\n<active_draft>\npath: index.html\n</active_draft>",
+        )
+
+        self.assertTrue(model_message.startswith("Save or update the workspace file index.html"))
+        self.assertNotIn("\nyes\n", model_message.lower())
+        self.assertIn("<active_draft>", model_message)
 
     def test_turn_kind_and_visible_sql_helpers_are_stable(self):
         self.assertEqual(normalize_turn_kind("runtime_file"), TURN_KIND_RUNTIME_FILE)
