@@ -228,6 +228,7 @@ const state = {
     fileItems: [] as WorkspaceItem[],
     selectedFilePath: "",
     selectedFileContentKind: "",
+    latestWorkedFilePath: "",
     leftSidebarOpen: false,
     viewerMode: "closed" as ViewerMode,
     contextEvalReport: null as ContextEvalReport | null,
@@ -272,7 +273,6 @@ const workspaceSettingsButton = query<HTMLButtonElement>("#workspaceSettingsButt
 const refreshContextEvalButton = query<HTMLButtonElement>("#refreshContextEvalButton");
 const newChatButton = query<HTMLButtonElement>("#newChatButton");
 const conversationList = query<HTMLDivElement>("#conversationList");
-const workspaceName = query<HTMLDivElement>("#workspaceName");
 const connectionBadge = query<HTMLSpanElement>("#connectionBadge");
 const chatMessages = query<HTMLDivElement>("#chatMessages");
 const scrollToBottomButton = query<HTMLButtonElement>("#scrollToBottomButton");
@@ -687,21 +687,6 @@ function syncComposerHeight(): void {
     const nextHeight = Math.min(Math.max(composerInput.scrollHeight, 42), composerMaxHeight());
     composerInput.style.height = `${nextHeight}px`;
     composerInput.style.overflowY = composerInput.scrollHeight > nextHeight ? "auto" : "hidden";
-}
-
-function currentWorkspaceName(): string {
-    const workspace = state.workspaces.find((entry) => entry.id === state.currentWorkspaceId);
-    if (!workspace) return "";
-    const displayName = String(workspace.display_name || "").trim();
-    const genericNames = new Set(["workspace", "project", "root"]);
-    if (displayName && !genericNames.has(displayName.toLowerCase())) {
-        return displayName;
-    }
-    const rootPath = String(workspace.root_path || "").trim().replace(/\/+$/, "");
-    if (!rootPath) return "";
-    const segments = rootPath.split("/").filter(Boolean);
-    const leafName = segments.at(-1) || rootPath;
-    return genericNames.has(leafName.toLowerCase()) ? "" : leafName;
 }
 
 function defaultComposerStatus(): string {
@@ -1332,6 +1317,7 @@ function maybeHandleAssistantArtifacts(message: ChatMessage, index: number): voi
 
     void (async () => {
         try {
+            setLatestWorkedFile(primaryPath);
             if (shouldMaterializeArtifact(primaryPath, artifactBody)) {
                 await materializeArtifactFromAssistant(primaryPath, artifactBody);
                 return;
@@ -1956,10 +1942,13 @@ function renderConversations(): void {
 
 function renderWorkspaceSummary(): void {
     workspaceSettingsButton.disabled = false;
-    const label = currentWorkspaceName();
-    workspaceName.textContent = label;
-    workspaceName.hidden = !label;
     syncShellLayout();
+}
+
+function setLatestWorkedFile(path: string): void {
+    const normalized = resolveArtifactReferencePath(path);
+    if (!normalized) return;
+    state.latestWorkedFilePath = normalized;
 }
 
 function renderFileList(): void {
@@ -1976,6 +1965,25 @@ function renderFileList(): void {
         buttons.push(`
             <button type="button" class="file-item up" data-path="..">
                 <div class="file-item-name"><span class="file-item-kind">Up</span>Parent directory</div>
+            </button>
+        `);
+    }
+
+    if (state.latestWorkedFilePath) {
+        const latestName = state.latestWorkedFilePath.split("/").pop() || state.latestWorkedFilePath;
+        buttons.push(`
+            <button
+                type="button"
+                class="file-item latest-worked${state.latestWorkedFilePath === state.selectedFilePath ? " active" : ""}"
+                data-path="${escapeHtml(state.latestWorkedFilePath)}"
+                data-kind="file"
+            >
+                <div class="file-item-name file-item-name-stacked">
+                    <span class="file-item-kind latest">Latest</span>
+                    <strong>${escapeHtml(latestName)}</strong>
+                    <span class="file-item-subpath">${escapeHtml(state.latestWorkedFilePath)}</span>
+                </div>
+                <div class="file-item-meta">Open</div>
             </button>
         `);
     }
@@ -2404,7 +2412,6 @@ async function inspectFixtureFromTriage(fixturePath: string): Promise<void> {
 
 function renderSettingsSummary(): void {
     settingsSummary.innerHTML = `
-        <div><strong>Workspace:</strong> ${escapeHtml(currentWorkspaceName())}</div>
         <div><strong>Conversation:</strong> ${escapeHtml(state.currentConversationTitle || "New chat")}</div>
         <div><strong>Runtime:</strong> ${escapeHtml(defaultComposerStatus())}</div>
     `;
@@ -2714,6 +2721,7 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
         default_workspace_id?: string | null;
     }>("/api/workspaces");
 
+    const previousWorkspaceId = state.currentWorkspaceId;
     state.workspaces = payload.workspaces || [];
     const nextWorkspaceId = preferredId
         || state.currentWorkspaceId
@@ -2722,10 +2730,14 @@ async function loadWorkspaces(preferredId = ""): Promise<void> {
         || "";
 
     state.currentWorkspaceId = nextWorkspaceId;
+    if (nextWorkspaceId !== previousWorkspaceId) {
+        state.latestWorkedFilePath = "";
+    }
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
     } else {
         state.selectedFilePath = "";
+        state.latestWorkedFilePath = "";
         closeViewer();
     }
 
@@ -2887,6 +2899,7 @@ async function loadConversation(id: string): Promise<void> {
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
     state.selectedFilePath = "";
+    state.latestWorkedFilePath = "";
     state.viewerMode = "closed";
 
     const matchingConversation = state.conversations.find((conversation) => conversation.id === id);
@@ -2912,6 +2925,7 @@ function startNewChat(): void {
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
     state.selectedFilePath = "";
+    state.latestWorkedFilePath = "";
     state.viewerMode = "closed";
     renderMessages();
     renderConversations();
@@ -3001,6 +3015,7 @@ function handleChatEvent(event: ChatEvent): void {
     }
 
     if (event.type === "tool_result" && event.payload?.open_path) {
+        setLatestWorkedFile(event.payload.open_path);
         void openFile(event.payload.open_path);
         return;
     }
