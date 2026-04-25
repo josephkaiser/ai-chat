@@ -812,6 +812,10 @@ APP_TITLE = "AI Chat"
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
 MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
+try:
+    MODEL_CONTEXT_WINDOW = int(first_env_value("MODEL_MAX_MODEL_LEN", "MODEL_14B_MAX_MODEL_LEN") or "16384")
+except ValueError:
+    MODEL_CONTEXT_WINDOW = 16384
 
 REPO_ROOT_PATH = pathlib.Path(__file__).resolve().parents[2]
 _base_dir = REPO_ROOT_PATH
@@ -8672,12 +8676,16 @@ async def maybe_resume_task_state(session: DeepSession) -> bool:
 
 def get_agent_llm_params() -> Dict[str, Any]:
     """Return fixed default inference parameters for the local runtime."""
+    default_max_tokens = min(
+        MAX_COMPLETION_TOKENS,
+        max(1024, MODEL_CONTEXT_WINDOW // 4),
+    )
     return {
         "temperature": 0.25,
         "top_p": 0.95,
         "frequency_penalty": 0.2,
         "presence_penalty": 0.15,
-        "max_tokens": 4096,
+        "max_tokens": default_max_tokens,
     }
 
 async def vllm_chat_stream(messages: list, max_tokens: int = None, temperature: float = None):
@@ -10248,7 +10256,7 @@ def get_conversation_messages_for_ui(conv_id: str, limit: int = 100) -> List[Dic
 def get_conversation_history(conv_id: str, limit: int = None, max_tokens: int = None, current_query: str = None) -> List[Dict]:
     """Get conversation history, selecting messages by quality and relevance"""
     if max_tokens is None:
-        model_max_len = 32768
+        model_max_len = MODEL_CONTEXT_WINDOW
         max_tokens = int(model_max_len * 0.75)
 
     conn = sqlite3.connect(DB_PATH)

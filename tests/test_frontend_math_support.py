@@ -65,7 +65,7 @@ class FrontendMathSupportTests(unittest.TestCase):
         self.assertIn("MODEL_GPU_MEMORY_UTILIZATION=", model_defaults)
         self.assertIn("MODEL_MAX_MODEL_LEN=", model_defaults)
         self.assertIn("MODEL_ENABLE_PREFIX_CACHING=1", model_defaults)
-        self.assertIn("MODEL_MAX_MODEL_LEN=4096", model_override_sample)
+        self.assertIn("MODEL_MAX_MODEL_LEN=16384", model_override_sample)
         self.assertIn("config/model-overrides.local.env", gitignore)
         self.assertIn(".runtime-model.env", gitignore)
         self.assertIn("MODEL_DEFAULTS_FILE", harness)

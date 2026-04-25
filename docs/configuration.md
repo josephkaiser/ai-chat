@@ -6,7 +6,7 @@ Edit [config/model-defaults.env](/Users/joe/dev/ai-chat/config/model-defaults.en
 DEFAULT_MODEL_PROFILE=14b
 MODEL_NAME=Qwen/Qwen3-14B-AWQ
 MODEL_GPU_MEMORY_UTILIZATION=0.75
-MODEL_MAX_MODEL_LEN=4096
+MODEL_MAX_MODEL_LEN=16384
 MODEL_ENABLE_PREFIX_CACHING=1
 MODEL_MAX_NUM_SEQS=1
 MODEL_ENABLE_CHUNKED_PREFILL=1
@@ -31,7 +31,7 @@ This means each tuning knob is a one-line edit. For example:
 
 - change model: `MODEL_NAME=...`
 - change VRAM cap: `MODEL_GPU_MEMORY_UTILIZATION=0.80`
-- change context: `MODEL_MAX_MODEL_LEN=4096`
+- change context: `MODEL_MAX_MODEL_LEN=16384`
 - change concurrency: `MODEL_MAX_NUM_SEQS=1`
 - add one-off flags: `MODEL_EXTRA_ARGS=--swap-space 8`
 
