@@ -265,6 +265,37 @@ current_runtime_profile() {
     awk -F= '$1=="VLLM_SELECTED_PROFILE"{print $2; exit}' "$RUNTIME_ENV_FILE"
 }
 
+current_runtime_model_name() {
+    if [[ ! -f "$RUNTIME_ENV_FILE" ]]; then
+        printf '%s\n' ""
+        return 0
+    fi
+    awk -F= '$1=="VLLM_SELECTED_MODEL_NAME"{print substr($0, index($0, "=") + 1); exit}' "$RUNTIME_ENV_FILE"
+}
+
+current_runtime_model_args() {
+    if [[ ! -f "$RUNTIME_ENV_FILE" ]]; then
+        printf '%s\n' ""
+        return 0
+    fi
+    awk -F= '$1=="VLLM_SELECTED_MODEL_ARGS"{print substr($0, index($0, "=") + 1); exit}' "$RUNTIME_ENV_FILE"
+}
+
+local_chat_app_image_id() {
+    docker image inspect ai-chat-chat-app -f '{{.Id}}' 2>/dev/null || true
+}
+
+running_chat_app_image_id() {
+    docker inspect -f '{{.Image}}' ai-chat-vllm 2>/dev/null || true
+}
+
+chat_app_image_changed() {
+    local local_id running_id
+    local_id="$(local_chat_app_image_id)"
+    running_id="$(running_chat_app_image_id)"
+    [[ -n "$local_id" && -n "$running_id" && "$local_id" != "$running_id" ]]
+}
+
 model_profile_installed() {
     local profile="$1"
     [[ -f "$(model_marker_path "$profile")" ]] \
@@ -673,28 +704,58 @@ do_start() {
         exit 1
     fi
 
-    local current_profile selected_profile
+    local current_profile current_model_name current_model_args selected_profile selected_model_name selected_model_args
     current_profile="$(current_runtime_profile)"
+    current_model_name="$(current_runtime_model_name)"
+    current_model_args="$(current_runtime_model_args)"
     selected_profile="$(resolve_installed_profile_noninteractive "$current_profile" "${installed_profiles[@]}")"
+    selected_model_name="$(model_profile_name "$selected_profile")"
+    selected_model_args="$(model_profile_args "$selected_profile")"
     write_runtime_env_file "$selected_profile"
 
     # Check if already fully running
     local vllm_running chat_running
     vllm_running=$(docker inspect -f '{{.State.Running}}' vllm 2>/dev/null || echo "false")
     chat_running=$(docker inspect -f '{{.State.Running}}' ai-chat-vllm 2>/dev/null || echo "false")
+    local model_config_changed=0
+    local chat_image_needs_refresh=0
+    if [[ "$current_model_name" != "$selected_model_name" || "$current_model_args" != "$selected_model_args" ]]; then
+        model_config_changed=1
+    fi
+    if chat_app_image_changed; then
+        chat_image_needs_refresh=1
+    fi
 
     if [[ "$vllm_running" == "true" && "$chat_running" == "true" ]]; then
-        if [[ "$current_profile" == "$selected_profile" && "$FRONTEND_BUNDLE_CHANGED" -eq 0 ]]; then
+        if [[ "$model_config_changed" -eq 0 && "$FRONTEND_BUNDLE_CHANGED" -eq 0 && "$chat_image_needs_refresh" -eq 0 ]]; then
             ensure_tailscale_https || true
             echo "Already running."
             print_access_urls
             return 0
         fi
-        if [[ "$current_profile" != "$selected_profile" ]]; then
+        if [[ "$model_config_changed" -eq 1 ]]; then
             echo "Switching to $(model_profile_label "$selected_profile") for this session..."
         fi
-        if [[ "$FRONTEND_BUNDLE_CHANGED" -eq 1 ]]; then
-            echo "Frontend bundle changed; restarting chat-app with the rebuilt assets..."
+        if [[ "$model_config_changed" -eq 0 ]]; then
+            if [[ "$FRONTEND_BUNDLE_CHANGED" -eq 1 ]]; then
+                echo "Frontend bundle changed; restarting chat-app without unloading the model..."
+            elif [[ "$chat_image_needs_refresh" -eq 1 ]]; then
+                echo "chat-app image changed; recreating chat-app without unloading the model..."
+            fi
+            if [[ "$FRONTEND_BUNDLE_CHANGED" -eq 1 ]]; then
+                echo "Rebuilding chat-app image to include the latest frontend bundle..."
+                docker_compose build chat-app
+            fi
+            echo "Refreshing chat-app only..."
+            docker_compose up -d --no-deps --force-recreate chat-app
+            ensure_tailscale_https || true
+            echo ""
+            echo "Started."
+            print_access_urls
+            echo ""
+            echo "Running $(model_profile_label "$selected_profile") for this session."
+            echo "Model weights stayed loaded in vLLM."
+            return 0
         fi
     fi
 
