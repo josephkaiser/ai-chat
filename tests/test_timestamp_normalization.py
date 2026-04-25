@@ -22,6 +22,12 @@ class TimestampNormalizationTests(unittest.TestCase):
         self.assertIn("if parsed.tzinfo is None:", harness)
         self.assertIn("return parsed.astimezone()", harness)
 
+    def test_model_loading_stats_uses_timezone_aware_now(self):
+        harness = HARNESS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('(datetime.now(timezone.utc) - started_at).total_seconds()', harness)
+        self.assertNotIn('(datetime.now() - started_at).total_seconds()', harness)
+
 
 if __name__ == "__main__":
     unittest.main()

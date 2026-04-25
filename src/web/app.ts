@@ -1714,51 +1714,142 @@ function renderRichText(raw: string): string {
         return token;
     });
 
-    const blocks = fenced
-        .split(/\n{2,}/)
-        .map((block) => block.trim())
-        .filter(Boolean)
-        .map((block) => {
-            if (/^@@CODEBLOCK_\d+@@$/.test(block)) return block;
+    const blocks: string[] = [];
+    const paragraphLines: string[] = [];
+    let activeListType: "ul" | "ol" | null = null;
+    let listItems: string[] = [];
+    let quoteLines: string[] = [];
+    let mathFence: "$$" | "\\[" | null = null;
+    let mathLines: string[] = [];
 
-            const mathBlock = renderMathBlock(block);
-            if (mathBlock) return mathBlock;
+    const flushParagraph = () => {
+        if (!paragraphLines.length) return;
+        blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join("\n"))}</p>`);
+        paragraphLines.length = 0;
+    };
 
-            const escaped = escapeHtml(block);
-            const lines = escaped.split("\n");
+    const flushList = () => {
+        if (!activeListType || !listItems.length) {
+            activeListType = null;
+            listItems = [];
+            return;
+        }
+        blocks.push(`<${activeListType}>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${activeListType}>`);
+        activeListType = null;
+        listItems = [];
+    };
 
-            if (lines.every((line) => /^[-*_]{3,}$/.test(line.trim()))) {
-                return "<hr>";
+    const flushQuote = () => {
+        if (!quoteLines.length) return;
+        blocks.push(`<blockquote>${renderInlineMarkdown(quoteLines.join("\n"))}</blockquote>`);
+        quoteLines = [];
+    };
+
+    const flushMathBlock = () => {
+        if (!mathFence) return;
+        blocks.push(`<div class="math-block">${renderDisplayMathExpression(mathLines.join("\n").trim())}</div>`);
+        mathFence = null;
+        mathLines = [];
+    };
+
+    const flushAll = () => {
+        flushParagraph();
+        flushList();
+        flushQuote();
+    };
+
+    for (const rawLine of fenced.split("\n")) {
+        const line = rawLine.replace(/\r$/, "");
+        const trimmed = line.trim();
+
+        if (mathFence) {
+            const closing = mathFence === "$$" ? "$$" : "\\]";
+            if (trimmed.endsWith(closing)) {
+                const content = trimmed.slice(0, Math.max(0, trimmed.length - closing.length)).trim();
+                if (content) mathLines.push(content);
+                flushMathBlock();
+            } else {
+                mathLines.push(line);
             }
+            continue;
+        }
 
-            if (lines.every((line) => /^&gt;\s?/.test(line))) {
-                const quote = lines
-                    .map((line) => line.replace(/^&gt;\s?/, ""))
-                    .join("\n");
-                return `<blockquote>${renderInlineMarkdown(quote)}</blockquote>`;
-            }
+        if (!trimmed) {
+            flushAll();
+            continue;
+        }
 
-            if (lines.every((line) => /^- /.test(line))) {
-                return `<ul>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^- /, ""))}</li>`).join("")}</ul>`;
-            }
+        if (/^@@CODEBLOCK_\d+@@$/.test(trimmed)) {
+            flushAll();
+            blocks.push(trimmed);
+            continue;
+        }
 
-            if (lines.every((line) => /^\d+\. /.test(line))) {
-                return `<ol>${lines.map((line) => `<li>${renderInlineMarkdown(line.replace(/^\d+\. /, ""))}</li>`).join("")}</ol>`;
-            }
+        const mathBlock = renderMathBlock(trimmed);
+        if (mathBlock) {
+            flushAll();
+            blocks.push(mathBlock);
+            continue;
+        }
 
-            const heading = lines[0].match(/^(#{1,4})\s+(.*)$/);
-            if (heading) {
-                const level = Math.min(heading[1].length, 4);
-                const headingHtml = `<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`;
-                const rest = lines.slice(1).join("\n");
-                return rest ? `${headingHtml}<p>${renderInlineMarkdown(rest)}</p>` : headingHtml;
-            }
+        if (trimmed === "$$" || trimmed === "\\[") {
+            flushAll();
+            mathFence = trimmed as "$$" | "\\[";
+            mathLines = [];
+            continue;
+        }
 
-            return `<p>${renderInlineMarkdown(lines.join("\n"))}</p>`;
-        })
-        .join("");
+        if (/^[-*_]{3,}$/.test(trimmed)) {
+            flushAll();
+            blocks.push("<hr>");
+            continue;
+        }
 
-    return blocks.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index: string) => codeBlocks[Number(index)] || "");
+        const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
+        if (heading) {
+            flushAll();
+            const level = Math.min(heading[1].length, 4);
+            blocks.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
+            continue;
+        }
+
+        const quote = line.match(/^\s*>\s?(.*)$/);
+        if (quote) {
+            flushParagraph();
+            flushList();
+            quoteLines.push(quote[1]);
+            continue;
+        }
+        flushQuote();
+
+        const unordered = line.match(/^\s*-\s+(.*)$/);
+        if (unordered) {
+            flushParagraph();
+            if (activeListType && activeListType !== "ul") flushList();
+            activeListType = "ul";
+            listItems.push(unordered[1]);
+            continue;
+        }
+
+        const ordered = line.match(/^\s*\d+\.\s+(.*)$/);
+        if (ordered) {
+            flushParagraph();
+            if (activeListType && activeListType !== "ol") flushList();
+            activeListType = "ol";
+            listItems.push(ordered[1]);
+            continue;
+        }
+
+        flushList();
+        paragraphLines.push(line);
+    }
+
+    flushAll();
+    flushMathBlock();
+
+    return blocks
+        .join("")
+        .replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index: string) => codeBlocks[Number(index)] || "");
 }
 
 function renderMessages(): void {
