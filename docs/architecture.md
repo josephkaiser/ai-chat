@@ -5,11 +5,14 @@
 ```text
 ai-chat/
 ├── app.py                           # Compatibility shim that re-exports src/python/harness.py
-├── src/python/harness.py            # FastAPI app, WS loop, workspace APIs, tool runtime, file-session worker
+├── src/python/harness.py            # FastAPI composition root plus shared backend services
 ├── src/python/ai_chat/
+│   ├── api/                         # Route registration modules grouped by feature area
 │   ├── routing_program.py           # Top-level routing seam
 │   ├── turn_strategy.py             # Heuristic turn assessment
 │   ├── runtime_layers.py            # Model-only runtime context layering
+│   ├── runtime_config.py            # Env/bootstrap helpers for runtime paths and model config
+│   ├── frontend_assets.py           # Frontend bundle/version helpers for the backend
 │   ├── deep_runtime.py              # Deep-session state + preview/execute lifecycle
 │   ├── deep_flow.py                 # Deep execution route decisions
 │   ├── task_engine.py               # Typed task runner for structured plans
@@ -34,13 +37,13 @@ ai-chat/
 ## How the pieces connect
 
 - `app.py` is no longer the real backend implementation. It exists so Docker and local scripts can still launch the app through a stable entrypoint.
-- `src/python/harness.py` is the actual backend. It mounts the frontend, exposes REST and WebSocket routes, persists SQLite state, runs the tool loop, and manages file-session/background-job behavior.
+- `src/python/harness.py` is the backend composition root. It mounts the frontend, owns shared backend services/state, and wires grouped route registrations from `src/python/ai_chat/api/`.
 - Runtime code lives under `src/`; `docs/` is intentionally documentation-only, with roadmaps grouped under `docs/roadmaps/`.
 - `routing_program.py` and `turn_strategy.py` decide whether a request should be answered directly, sent through a scoped tool loop, or upgraded into a deeper inspect/plan/execute flow.
 - `runtime_layers.py` keeps model-only context such as active draft/file metadata out of the visible transcript.
 - `deep_runtime.py`, `deep_flow.py`, and `task_engine.py` split the older monolithic deep-mode logic into smaller orchestration pieces.
 - `context_eval.py` turns retries and negative feedback into replay captures and triage summaries, which the frontend surfaces as the Replay Triage panel.
-- `src/web/app.ts` is intentionally small: it manages the workspace selector, replay triage, chat stream, file browser, and file preview UI.
+- `src/web/app.ts` is the frontend entrypoint. Shared browser types, state, and DOM references now live in sibling frontend modules so UI behavior is easier to follow.
 
 ## Main runtime model
 

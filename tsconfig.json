@@ -6,5 +6,5 @@
     "strict": false,
     "noEmit": true
   },
-  "include": ["src/web/app.ts"]
+  "include": ["src/web/**/*.ts"]
 }
