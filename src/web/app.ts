@@ -294,6 +294,7 @@ const state = {
     composerUploadingCount: 0,
     composerDropActive: false,
     activeStreamConversationId: "",
+    activePreviewNonce: "",
 };
 
 function query<T extends Element>(selector: string): T {
@@ -676,8 +677,24 @@ function parentDirectory(path: string): string {
     return parts.length ? parts.join("/") : ".";
 }
 
-function fileViewUrl(path: string): string {
-    return `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`;
+function withCacheBust(url: string, nonce = ""): string {
+    if (!nonce) return url;
+    const joiner = url.includes("?") ? "&" : "?";
+    return `${url}${joiner}_=${encodeURIComponent(nonce)}`;
+}
+
+function fileViewUrl(path: string, nonce = ""): string {
+    return withCacheBust(
+        `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`,
+        nonce,
+    );
+}
+
+function workspaceFileApiUrl(path: string, nonce = ""): string {
+    return withCacheBust(
+        `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`,
+        nonce,
+    );
 }
 
 function downloadSelectedFile(): void {
@@ -693,7 +710,7 @@ function downloadSelectedFile(): void {
 
 function openSelectedFileInTab(): void {
     if (!state.currentWorkspaceId || !state.selectedFilePath) return;
-    window.open(fileViewUrl(state.selectedFilePath), "_blank", "noopener");
+    window.open(fileViewUrl(state.selectedFilePath, String(Date.now())), "_blank", "noopener");
 }
 
 function inferredPreviewLanguage(path: string): string {
@@ -2889,12 +2906,12 @@ function renderPreview(payload: WorkspaceFilePayload): void {
     viewerMeta.hidden = false;
 
     if (contentKind === "image") {
-        filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}">`;
+        filePreview.innerHTML = `<img class="file-preview-media" alt="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path, state.activePreviewNonce)}">`;
         return;
     }
 
     if (contentKind === "pdf") {
-        filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path)}"></iframe>`;
+        filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<iframe class="file-preview-frame" title="${escapeHtml(payload.path)}" src="${fileViewUrl(payload.path, state.activePreviewNonce)}"></iframe>`;
         return;
     }
 
@@ -3069,7 +3086,11 @@ function openFileTree(): void {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(url, init);
+    const requestInit: RequestInit = {
+        cache: "no-store",
+        ...init,
+    };
+    const response = await fetch(url, requestInit);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
         const message = typeof data.detail === "string" ? data.detail : `Request failed: ${response.status}`;
@@ -3640,7 +3661,10 @@ async function loadDirectory(path: string): Promise<void> {
     const payload = await fetchJson<{
         path: string;
         items: WorkspaceItem[];
-    }>(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/files?path=${encodeURIComponent(path)}`);
+    }>(withCacheBust(
+        `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/files?path=${encodeURIComponent(path)}`,
+        String(Date.now()),
+    ));
 
     state.currentDirectoryPath = payload.path || ".";
     state.fileItems = payload.items || [];
@@ -3653,6 +3677,7 @@ async function openFile(path: string): Promise<void> {
     const samePath = state.selectedFilePath === path;
     const previousPreviewScrollTop = samePath ? filePreview.scrollTop : 0;
     state.selectedFilePath = path;
+    state.activePreviewNonce = String(Date.now());
     if (isMobileViewport()) {
         state.leftSidebarOpen = false;
     }
@@ -3667,7 +3692,7 @@ async function openFile(path: string): Promise<void> {
             return;
         }
         const payload = await fetchJson<WorkspaceFilePayload>(
-            `/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`
+            workspaceFileApiUrl(path, state.activePreviewNonce)
         );
         renderPreview(payload);
         filePreview.scrollTop = previousPreviewScrollTop;
@@ -3739,8 +3764,12 @@ function attachEvents(): void {
     });
 
     refreshWorkspaceButton.addEventListener("click", () => {
-        void loadDirectory(state.currentDirectoryPath);
-        if (state.viewerMode === "file" && state.selectedFilePath) void openFile(state.selectedFilePath);
+        void (async () => {
+            await loadDirectory(state.currentDirectoryPath);
+            if (state.viewerMode === "file" && state.selectedFilePath) {
+                await openFile(state.selectedFilePath);
+            }
+        })();
     });
     openInTabButton.addEventListener("click", () => {
         openSelectedFileInTab();
