@@ -20025,7 +20025,7 @@ def get_model_loading_stats(model_name: str, model_ok: bool) -> Dict[str, Any]:
     target_name = str(loading.get("model_name") or model_name)
     target_matches = target_name == model_name
     started_at = _parse_iso_datetime(loading.get("started_at")) if target_matches else None
-    elapsed_seconds = max(0.0, (datetime.now() - started_at).total_seconds()) if started_at else None
+    elapsed_seconds = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds()) if started_at else None
     estimated_total = history.get("average_seconds")
     eta_seconds = None
     progress = None
