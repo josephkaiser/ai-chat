@@ -1230,6 +1230,232 @@ function renderInlineMarkdown(text) {
     }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n+/g, " ");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
+function renderMarkdownBlocks(blocks) {
+    return blocks.map((block)=>{
+        if (block.type === "paragraph") {
+            return `<p>${renderInlineMarkdown(block.lines.join("\n"))}</p>`;
+        }
+        if (block.type === "heading") {
+            return `<h${block.level}>${renderInlineMarkdown(block.text)}</h${block.level}>`;
+        }
+        if (block.type === "hr") {
+            return "<hr>";
+        }
+        if (block.type === "html") {
+            return block.html;
+        }
+        if (block.type === "quote") {
+            return `<blockquote>${renderInlineMarkdown(block.lines.join("\n"))}</blockquote>`;
+        }
+        if (block.type === "math") {
+            return `<div class="math-block">${renderDisplayMathExpression(block.content)}</div>`;
+        }
+        if (block.type === "list") {
+            const tag = block.ordered ? "ol" : "ul";
+            const startAttr = block.ordered && block.start > 1 ? ` start="${block.start}"` : "";
+            return `<${tag}${startAttr}>${block.items.map((item)=>`<li>${renderInlineMarkdown(item.lines.join("\n"))}</li>`).join("")}</${tag}>`;
+        }
+        return "";
+    }).join("");
+}
+function parseMarkdownBlocks(raw) {
+    const codeBlocks = [];
+    const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code)=>{
+        const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+        const normalizedLanguage = normalizeCodeLanguage(language);
+        const cleanCode = code.replace(/^\n+|\n+$/g, "");
+        if (normalizedLanguage === "latex") {
+            codeBlocks.push(renderDisplayMathExpression(cleanCode));
+            return token;
+        }
+        const displayLanguage = normalizedLanguage === "text" ? "text" : normalizedLanguage;
+        codeBlocks.push(`
+            <div class="message-code-block">
+                <div class="message-code-header">${escapeHtml(displayLanguage)}</div>
+                <pre><code class="language-${escapeHtml(normalizedLanguage)}">${highlightCode(cleanCode, normalizedLanguage)}</code></pre>
+            </div>
+        `.trim());
+        return token;
+    });
+    const blocks = [];
+    const paragraphLines = [];
+    let activeList = null;
+    let quoteLines = [];
+    let mathFence = null;
+    let mathLines = [];
+    const flushParagraph = ()=>{
+        if (!paragraphLines.length) return;
+        blocks.push({
+            type: "paragraph",
+            lines: [
+                ...paragraphLines
+            ]
+        });
+        paragraphLines.length = 0;
+    };
+    const flushList = ()=>{
+        if (!activeList || !activeList.items.length) {
+            activeList = null;
+            return;
+        }
+        blocks.push({
+            type: "list",
+            ordered: activeList.ordered,
+            start: activeList.start,
+            items: activeList.items.map((item)=>({
+                    lines: [
+                        ...item.lines
+                    ]
+                }))
+        });
+        activeList = null;
+    };
+    const flushQuote = ()=>{
+        if (!quoteLines.length) return;
+        blocks.push({
+            type: "quote",
+            lines: [
+                ...quoteLines
+            ]
+        });
+        quoteLines = [];
+    };
+    const flushMathBlock = ()=>{
+        if (!mathFence) return;
+        blocks.push({
+            type: "math",
+            content: mathLines.join("\n").trim()
+        });
+        mathFence = null;
+        mathLines = [];
+    };
+    const flushBlocks = ()=>{
+        flushParagraph();
+        flushList();
+        flushQuote();
+    };
+    const appendListContinuation = (line)=>{
+        if (!activeList || !activeList.items.length) return false;
+        activeList.items[activeList.items.length - 1].lines.push(line.trim());
+        return true;
+    };
+    for (const rawLine of fenced.split("\n")){
+        const line = rawLine.replace(/\r$/, "");
+        const trimmed = line.trim();
+        if (mathFence) {
+            const closing = mathFence === "$$" ? "$$" : "\\]";
+            if (trimmed.endsWith(closing)) {
+                const content = trimmed.slice(0, Math.max(0, trimmed.length - closing.length)).trim();
+                if (content) mathLines.push(content);
+                flushMathBlock();
+            } else {
+                mathLines.push(line);
+            }
+            continue;
+        }
+        if (!trimmed) {
+            flushParagraph();
+            flushQuote();
+            continue;
+        }
+        if (/^@@CODEBLOCK_\d+@@$/.test(trimmed)) {
+            flushBlocks();
+            blocks.push({
+                type: "html",
+                html: trimmed
+            });
+            continue;
+        }
+        const mathBlock = renderMathBlock(trimmed);
+        if (mathBlock) {
+            flushBlocks();
+            blocks.push({
+                type: "html",
+                html: mathBlock
+            });
+            continue;
+        }
+        if (trimmed === "$$" || trimmed === "\\[") {
+            flushBlocks();
+            mathFence = trimmed;
+            mathLines = [];
+            continue;
+        }
+        if (/^[-*_]{3,}$/.test(trimmed)) {
+            flushBlocks();
+            blocks.push({
+                type: "hr"
+            });
+            continue;
+        }
+        const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
+        if (heading) {
+            flushBlocks();
+            blocks.push({
+                type: "heading",
+                level: Math.min(heading[1].length, 4),
+                text: heading[2].trim()
+            });
+            continue;
+        }
+        const quote = line.match(/^\s*>\s?(.*)$/);
+        if (quote) {
+            flushParagraph();
+            flushList();
+            quoteLines.push(quote[1]);
+            continue;
+        }
+        flushQuote();
+        const unordered = line.match(/^\s*[-*]\s+(.*)$/);
+        if (unordered) {
+            flushParagraph();
+            if (activeList && activeList.ordered) flushList();
+            activeList ||= {
+                ordered: false,
+                start: 1,
+                items: []
+            };
+            activeList.items.push({
+                lines: [
+                    unordered[1].trim()
+                ]
+            });
+            continue;
+        }
+        const ordered = line.match(/^\s*(\d+)\.\s+(.*)$/);
+        if (ordered) {
+            flushParagraph();
+            if (activeList && !activeList.ordered) flushList();
+            const start = Number(ordered[1]) || 1;
+            if (!activeList) {
+                activeList = {
+                    ordered: true,
+                    start,
+                    items: []
+                };
+            }
+            activeList.items.push({
+                lines: [
+                    ordered[2].trim()
+                ]
+            });
+            continue;
+        }
+        if (appendListContinuation(line)) {
+            continue;
+        }
+        paragraphLines.push(line);
+    }
+    flushBlocks();
+    flushMathBlock();
+    return blocks.map((block)=>{
+        if (block.type !== "html") return block;
+        return {
+            ...block,
+            html: block.html.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index)=>codeBlocks[Number(index)] || "")
+        };
+    });
+}
 function normalizeCodeLanguage(language) {
     const normalized = String(language || "").trim().toLowerCase();
     if (!normalized) return "text";
@@ -1326,139 +1552,7 @@ function renderRichText(raw) {
     ].includes(singleFence.language)) {
         return renderRichText(singleFence.body);
     }
-    const codeBlocks = [];
-    const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code)=>{
-        const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
-        const normalizedLanguage = normalizeCodeLanguage(language);
-        const cleanCode = code.replace(/^\n+|\n+$/g, "");
-        if (normalizedLanguage === "latex") {
-            codeBlocks.push(renderDisplayMathExpression(cleanCode));
-            return token;
-        }
-        const displayLanguage = normalizedLanguage === "text" ? "text" : normalizedLanguage;
-        codeBlocks.push(`
-            <div class="message-code-block">
-                <div class="message-code-header">${escapeHtml(displayLanguage)}</div>
-                <pre><code class="language-${escapeHtml(normalizedLanguage)}">${highlightCode(cleanCode, normalizedLanguage)}</code></pre>
-            </div>
-        `.trim());
-        return token;
-    });
-    const blocks = [];
-    const paragraphLines = [];
-    let activeListType = null;
-    let listItems = [];
-    let quoteLines = [];
-    let mathFence = null;
-    let mathLines = [];
-    const flushParagraph = ()=>{
-        if (!paragraphLines.length) return;
-        blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join("\n"))}</p>`);
-        paragraphLines.length = 0;
-    };
-    const flushList = ()=>{
-        if (!activeListType || !listItems.length) {
-            activeListType = null;
-            listItems = [];
-            return;
-        }
-        blocks.push(`<${activeListType}>${listItems.map((item)=>`<li>${renderInlineMarkdown(item)}</li>`).join("")}</${activeListType}>`);
-        activeListType = null;
-        listItems = [];
-    };
-    const flushQuote = ()=>{
-        if (!quoteLines.length) return;
-        blocks.push(`<blockquote>${renderInlineMarkdown(quoteLines.join("\n"))}</blockquote>`);
-        quoteLines = [];
-    };
-    const flushMathBlock = ()=>{
-        if (!mathFence) return;
-        blocks.push(`<div class="math-block">${renderDisplayMathExpression(mathLines.join("\n").trim())}</div>`);
-        mathFence = null;
-        mathLines = [];
-    };
-    const flushAll = ()=>{
-        flushParagraph();
-        flushList();
-        flushQuote();
-    };
-    for (const rawLine of fenced.split("\n")){
-        const line = rawLine.replace(/\r$/, "");
-        const trimmed = line.trim();
-        if (mathFence) {
-            const closing = mathFence === "$$" ? "$$" : "\\]";
-            if (trimmed.endsWith(closing)) {
-                const content = trimmed.slice(0, Math.max(0, trimmed.length - closing.length)).trim();
-                if (content) mathLines.push(content);
-                flushMathBlock();
-            } else {
-                mathLines.push(line);
-            }
-            continue;
-        }
-        if (!trimmed) {
-            flushAll();
-            continue;
-        }
-        if (/^@@CODEBLOCK_\d+@@$/.test(trimmed)) {
-            flushAll();
-            blocks.push(trimmed);
-            continue;
-        }
-        const mathBlock = renderMathBlock(trimmed);
-        if (mathBlock) {
-            flushAll();
-            blocks.push(mathBlock);
-            continue;
-        }
-        if (trimmed === "$$" || trimmed === "\\[") {
-            flushAll();
-            mathFence = trimmed;
-            mathLines = [];
-            continue;
-        }
-        if (/^[-*_]{3,}$/.test(trimmed)) {
-            flushAll();
-            blocks.push("<hr>");
-            continue;
-        }
-        const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
-        if (heading) {
-            flushAll();
-            const level = Math.min(heading[1].length, 4);
-            blocks.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
-            continue;
-        }
-        const quote = line.match(/^\s*>\s?(.*)$/);
-        if (quote) {
-            flushParagraph();
-            flushList();
-            quoteLines.push(quote[1]);
-            continue;
-        }
-        flushQuote();
-        const unordered = line.match(/^\s*-\s+(.*)$/);
-        if (unordered) {
-            flushParagraph();
-            if (activeListType && activeListType !== "ul") flushList();
-            activeListType = "ul";
-            listItems.push(unordered[1]);
-            continue;
-        }
-        const ordered = line.match(/^\s*\d+\.\s+(.*)$/);
-        if (ordered) {
-            flushParagraph();
-            if (activeListType && activeListType !== "ol") flushList();
-            activeListType = "ol";
-            listItems.push(ordered[1]);
-            continue;
-        }
-        flushList();
-        paragraphLines.push(line);
-    }
-    flushAll();
-    flushMathBlock();
-    return blocks.join("").replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index)=>codeBlocks[Number(index)] || "");
+    return renderMarkdownBlocks(parseMarkdownBlocks(raw));
 }
 function renderMessages() {
     const previousScrollTop = chatMessages.scrollTop;

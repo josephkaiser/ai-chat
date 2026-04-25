@@ -810,6 +810,12 @@ class RuntimePermissionTests(unittest.TestCase):
 
         self.assertTrue(app.should_offer_web_search(message, features))
 
+    def test_versioned_changelog_request_enables_web_search(self):
+        message = "can you summarize the changes to nvim 0.12"
+        features = app.FeatureFlags(agent_tools=True, web_search=True)
+
+        self.assertTrue(app.should_offer_web_search(message, features))
+
     def test_recommendation_research_request_enables_web_search(self):
         message = "What are the best current note-taking apps? Please compare top options."
         features = app.FeatureFlags(agent_tools=True, web_search=True)
@@ -1475,6 +1481,12 @@ class RuntimePermissionTests(unittest.TestCase):
                 ],
             )
         )
+
+    def test_capability_recovery_status_message_mentions_web_sources_for_web_tools(self):
+        message = app.capability_recovery_status_message(["web.search", "web.fetch_page"])
+
+        self.assertIn("current web sources", message)
+        self.assertNotIn("claimed a limitation", message)
 
     def test_resolve_contextual_followup_request_rewrites_google_followup_from_memory(self):
         original_loader = app.load_conversation_memory
