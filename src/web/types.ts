@@ -19,6 +19,14 @@ export interface ChatMessage {
     content: string;
     timestamp?: string;
     error?: boolean;
+    reasoning_notes?: ReasoningNote[];
+}
+
+export interface ReasoningNote {
+    text: string;
+    phase?: string;
+    step_label?: string;
+    timestamp?: string;
 }
 
 export interface WorkspaceItem {

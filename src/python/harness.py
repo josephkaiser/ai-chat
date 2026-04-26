@@ -3077,15 +3077,320 @@ def get_voice_runtime_summary() -> Dict[str, Any]:
 @dataclass
 class WorkflowExecutionContext:
     """Transient per-turn execution bookkeeping kept only in memory."""
-    workflow_name: str
+    conversation_id: str = ""
+    user_message_id: int = 0
+    workspace_id: str = ""
+    run_id: str = ""
+    workflow_name: str = ""
+    mode: str = ""
+    primary_skill: str = ""
+    enabled_tools: List[str] = field(default_factory=list)
     route_metadata: Dict[str, Any] = field(default_factory=dict)
     tool_count: int = 0
     tool_names: List[str] = field(default_factory=list)
     artifact_paths: List[str] = field(default_factory=list)
+    turn_run_id: int = 0
+    started_at: str = ""
+    first_token_at: str = ""
+    completed_at: str = ""
+    started_perf: float = 0.0
+    first_token_perf: float = 0.0
+    used_web: bool = False
+    used_workspace: bool = False
+    used_deep: bool = False
 
 
 MESSAGE_WORKFLOW_METADATA_CACHE: Dict[int, Dict[str, Any]] = {}
 WORKFLOW_METADATA_CACHE_LIMIT = 500
+
+
+def serialize_turn_run_json(value: Any, *, default: str) -> str:
+    """Serialize structured telemetry fields for SQLite storage."""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return default
+
+
+def create_turn_run_record(execution: WorkflowExecutionContext) -> None:
+    """Persist the durable start record for one assistant turn."""
+    if not execution.conversation_id:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            '''INSERT INTO turn_runs (
+                   conversation_id,
+                   user_message_id,
+                   assistant_message_id,
+                   workspace_id,
+                   run_id,
+                   workflow_name,
+                   primary_skill,
+                   mode,
+                   route_intake_json,
+                   enabled_tools_json,
+                   started_at,
+                   first_token_at,
+                   completed_at,
+                   total_ms,
+                   first_token_ms,
+                   tool_count,
+                   tool_names_json,
+                   artifact_paths_json,
+                   used_web,
+                   used_workspace,
+                   used_deep,
+                   verification_status,
+                   verification_score,
+                   checks_total,
+                   checks_failed,
+                   final_outcome,
+                   error_text,
+                   feedback,
+                   implicit_feedback_category,
+                   context_eval_capture_path
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                execution.conversation_id,
+                int(execution.user_message_id or 0) or None,
+                None,
+                str(execution.workspace_id or "").strip(),
+                str(execution.run_id or "").strip(),
+                str(execution.workflow_name or "").strip(),
+                str(execution.primary_skill or "").strip(),
+                str(execution.mode or "").strip(),
+                serialize_turn_run_json(
+                    execution.route_metadata.get("route_intake") if isinstance(execution.route_metadata, dict) else {},
+                    default="{}",
+                ),
+                serialize_turn_run_json(list(execution.enabled_tools or []), default="[]"),
+                str(execution.started_at or "").strip() or utcnow_iso(),
+                None,
+                None,
+                None,
+                None,
+                int(execution.tool_count or 0),
+                serialize_turn_run_json(list(execution.tool_names or []), default="[]"),
+                serialize_turn_run_json(list(execution.artifact_paths or []), default="[]"),
+                1 if execution.used_web else 0,
+                1 if execution.used_workspace else 0,
+                1 if execution.used_deep else 0,
+                "",
+                None,
+                None,
+                None,
+                "",
+                "",
+                None,
+                "",
+                "",
+            ),
+        )
+        execution.turn_run_id = int(cursor.lastrowid or 0)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_workflow_first_response(execution: Optional[WorkflowExecutionContext]) -> None:
+    """Persist the first visible assistant-content timestamp for one turn."""
+    if not execution or execution.first_token_at:
+        return
+    execution.first_token_perf = time.perf_counter()
+    execution.first_token_at = utcnow_iso()
+    if execution.turn_run_id <= 0:
+        return
+    first_token_ms = max(0, int(round((execution.first_token_perf - execution.started_perf) * 1000)))
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            '''UPDATE turn_runs
+               SET first_token_at = ?, first_token_ms = ?
+               WHERE id = ?''',
+            (execution.first_token_at, first_token_ms, execution.turn_run_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_workflow_usage(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    used_web: bool = False,
+    used_workspace: bool = False,
+    used_deep: bool = False,
+) -> None:
+    """Mark which execution channels were actually used during a turn."""
+    if not execution:
+        return
+    if used_web:
+        execution.used_web = True
+    if used_workspace:
+        execution.used_workspace = True
+    if used_deep:
+        execution.used_deep = True
+
+
+def set_workflow_execution_name(execution: Optional[WorkflowExecutionContext], workflow_name: str) -> None:
+    """Refine the workflow lane name once the runtime chooses a concrete path."""
+    if not execution:
+        return
+    safe_name = str(workflow_name or "").strip()
+    if safe_name:
+        execution.workflow_name = safe_name
+
+
+def update_turn_run_feedback_by_assistant_message_id(
+    assistant_message_id: int,
+    feedback: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    implicit_feedback_category: str = "",
+) -> None:
+    """Sync explicit or implicit user feedback onto the durable turn record."""
+    try:
+        safe_message_id = int(assistant_message_id)
+    except Exception:
+        return
+    if safe_message_id <= 0:
+        return
+    safe_feedback = normalize_feedback_label(feedback)
+    safe_category = str(implicit_feedback_category or "").strip()
+    owns_conn = conn is None
+    connection = conn or sqlite3.connect(DB_PATH)
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            '''UPDATE turn_runs
+               SET feedback = ?,
+                   implicit_feedback_category = CASE
+                     WHEN ? <> '' THEN ?
+                     ELSE implicit_feedback_category
+                   END
+               WHERE assistant_message_id = ?''',
+            (safe_feedback, safe_category, safe_category, safe_message_id),
+        )
+        if owns_conn:
+            connection.commit()
+    finally:
+        if owns_conn:
+            connection.close()
+
+
+def update_turn_run_context_eval_capture_path_by_assistant_message_id(
+    assistant_message_id: int,
+    capture_path: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    """Attach the latest context-eval capture artifact path to one turn record."""
+    try:
+        safe_message_id = int(assistant_message_id)
+    except Exception:
+        return
+    if safe_message_id <= 0:
+        return
+    safe_path = str(capture_path or "").strip()
+    if not safe_path:
+        return
+    owns_conn = conn is None
+    connection = conn or sqlite3.connect(DB_PATH)
+    try:
+        connection.execute(
+            '''UPDATE turn_runs
+               SET context_eval_capture_path = ?
+               WHERE assistant_message_id = ?''',
+            (safe_path, safe_message_id),
+        )
+        if owns_conn:
+            connection.commit()
+    finally:
+        if owns_conn:
+            connection.close()
+
+
+def persist_turn_run_completion(
+    execution: Optional[WorkflowExecutionContext],
+    *,
+    assistant_message_id: Optional[int] = None,
+    final_outcome: str = "",
+    error_text: str = "",
+) -> None:
+    """Update the durable turn record with final timings, routing, and quality data."""
+    if not execution or execution.turn_run_id <= 0:
+        return
+    execution.completed_at = utcnow_iso()
+    total_ms = max(0, int(round((time.perf_counter() - execution.started_perf) * 1000)))
+    verification = finalize_verification_trace(
+        execution.route_metadata.get("verification")
+    )
+    route_intake = (
+        execution.route_metadata.get("route_intake")
+        if isinstance(execution.route_metadata, dict)
+        else {}
+    )
+    feedback = "neutral" if assistant_message_id is not None else None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            '''UPDATE turn_runs
+               SET assistant_message_id = ?,
+                   workspace_id = ?,
+                   run_id = ?,
+                   workflow_name = ?,
+                   primary_skill = ?,
+                   mode = ?,
+                   route_intake_json = ?,
+                   enabled_tools_json = ?,
+                   completed_at = ?,
+                   total_ms = ?,
+                   tool_count = ?,
+                   tool_names_json = ?,
+                   artifact_paths_json = ?,
+                   used_web = ?,
+                   used_workspace = ?,
+                   used_deep = ?,
+                   verification_status = ?,
+                   verification_score = ?,
+                   checks_total = ?,
+                   checks_failed = ?,
+                   final_outcome = ?,
+                   error_text = ?,
+                   feedback = COALESCE(feedback, ?)
+               WHERE id = ?''',
+            (
+                int(assistant_message_id) if assistant_message_id is not None else None,
+                str(execution.workspace_id or "").strip(),
+                str(execution.run_id or "").strip(),
+                str(execution.workflow_name or "").strip(),
+                str(execution.primary_skill or "").strip(),
+                str(execution.mode or "").strip(),
+                serialize_turn_run_json(route_intake or {}, default="{}"),
+                serialize_turn_run_json(list(execution.enabled_tools or []), default="[]"),
+                execution.completed_at,
+                total_ms,
+                int(execution.tool_count or 0),
+                serialize_turn_run_json(list(execution.tool_names or []), default="[]"),
+                serialize_turn_run_json(list(execution.artifact_paths or []), default="[]"),
+                1 if execution.used_web else 0,
+                1 if execution.used_workspace else 0,
+                1 if execution.used_deep else 0,
+                str(verification.get("status") or "").strip(),
+                int(verification.get("score", 0) or 0),
+                int(verification.get("checks_total", 0) or 0),
+                int(verification.get("checks_failed", 0) or 0),
+                str(final_outcome or "").strip(),
+                str(error_text or "").strip(),
+                feedback,
+                execution.turn_run_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def create_workflow_execution(
@@ -3093,13 +3398,37 @@ def create_workflow_execution(
     user_message_id: int,
     workflow_name: str,
     route_metadata: Optional[Dict[str, Any]] = None,
+    *,
+    workspace_id: str = "",
+    run_id: str = "",
+    mode: str = "",
+    primary_skill: str = "",
+    enabled_tools: Optional[List[str]] = None,
 ) -> WorkflowExecutionContext:
     """Create an in-memory workflow context for a single turn."""
-    del conversation_id, user_message_id
-    return WorkflowExecutionContext(
+    execution = WorkflowExecutionContext(
+        conversation_id=str(conversation_id or "").strip(),
+        user_message_id=int(user_message_id or 0),
+        workspace_id=str(workspace_id or "").strip(),
+        run_id=str(run_id or "").strip(),
         workflow_name=str(workflow_name or "direct_answer"),
+        mode=str(mode or "").strip(),
+        primary_skill=str(primary_skill or "").strip(),
+        enabled_tools=list(enabled_tools or []),
         route_metadata=dict(route_metadata or {}),
+        started_at=utcnow_iso(),
+        started_perf=time.perf_counter(),
     )
+    try:
+        create_turn_run_record(execution)
+    except Exception as exc:
+        logger.warning(
+            "Failed to create durable turn run for conversation %s message %s: %s",
+            execution.conversation_id,
+            execution.user_message_id,
+            exc,
+        )
+    return execution
 
 
 def persist_workflow_execution_route(execution: WorkflowExecutionContext) -> None:
@@ -3161,6 +3490,10 @@ def record_workflow_step(
     tool_name = str(call.get("name", "")).strip()
     if tool_name:
         execution.tool_names.append(tool_name)
+        if tool_name.startswith("web."):
+            execution.used_web = True
+        if tool_name.startswith("workspace.") or tool_name == "spreadsheet.describe":
+            execution.used_workspace = True
     payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
     path = str(payload.get("path", "")).strip()
     if result.get("ok") and path and path not in execution.artifact_paths:
@@ -3283,7 +3616,23 @@ def finalize_workflow_execution(
     error_text: str = "",
 ) -> None:
     """Cache compact workflow metadata for later feedback/replay capture."""
-    if not execution or assistant_message_id is None:
+    if not execution:
+        return
+    try:
+        persist_turn_run_completion(
+            execution,
+            assistant_message_id=assistant_message_id,
+            final_outcome=final_outcome,
+            error_text=error_text,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist durable turn run for conversation %s message %s: %s",
+            execution.conversation_id,
+            execution.user_message_id,
+            exc,
+        )
+    if assistant_message_id is None:
         return
     try:
         message_id = int(assistant_message_id)
@@ -3319,10 +3668,10 @@ def get_workflow_metadata_for_message(message_id: int) -> Dict[str, Any]:
 
 def sync_workflow_feedback_for_message(message_id: int, feedback: str) -> None:
     """Compatibility shim for feedback-aware workflow hooks."""
-    del feedback
     message = get_message_by_id(message_id)
     if not message:
         return
+    update_turn_run_feedback_by_assistant_message_id(message_id, feedback)
     conversation_id = str(message.get("conversation_id") or "").strip()
     if conversation_id:
         schedule_conversation_summary_refresh(conversation_id)
@@ -5871,6 +6220,8 @@ def extract_workspace_path_references(message: str) -> List[str]:
             continue
         cleaned = candidate.strip("./")
         if not cleaned or cleaned in refs:
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)+", cleaned):
             continue
         refs.append(cleaned)
     return refs
@@ -8442,6 +8793,98 @@ def should_resume_saved_workspace_task(
     return bool(payload.get("plan"))
 
 
+def route_intake_allows_workspace_execution(route_intake: StructuredRouteIntake) -> bool:
+    """Return whether the structured intake truly calls for workspace execution."""
+    return bool(
+        route_intake.needs_workspace
+        or route_intake.render_requested
+        or str(route_intake.workspace_intent_hint or "none") in {
+            "focused_read",
+            "broad_read",
+            "focused_write",
+            "broad_write",
+        }
+    )
+
+
+def route_intake_prefers_direct_web_summary(
+    route_intake: StructuredRouteIntake,
+    message: str,
+    *,
+    features: FeatureFlags,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether a turn should bypass workspace state and go straight to web search."""
+    if not features.web_search:
+        return False
+    if not (route_intake.web_search_requested and route_intake.needs_fresh_info):
+        return False
+    if route_intake.needs_artifact or route_intake.render_requested:
+        return False
+    if str(route_intake.answer_shape or "answer") not in {
+        "answer",
+        "summary",
+        "comparison",
+        "explanation",
+        "search",
+    }:
+        return False
+    if message_requests_workspace_render(message) or is_contextual_followup_for_render(message, history):
+        return False
+    if (
+        is_affirmative_workspace_save_followup(message, history)
+        or is_contextual_followup_for_workspace_edit(message, history)
+        or is_contextual_followup_for_execution(message, history)
+        or extract_artifact_references(message)
+        or extract_workspace_path_references(message)
+    ):
+        return False
+    return True
+
+
+def force_direct_web_summary_route(
+    route_intake: StructuredRouteIntake,
+    message: str,
+    *,
+    features: FeatureFlags,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> StructuredRouteIntake:
+    """Strip accidental workspace/build hints from pure current-info web summary turns."""
+    if not route_intake_prefers_direct_web_summary(
+        route_intake,
+        message,
+        features=features,
+        history=history,
+    ):
+        return route_intake
+    merged = route_intake.as_metadata()
+    merged.update({
+        "needs_workspace": False,
+        "needs_artifact": False,
+        "workspace_intent_hint": "none",
+        "render_requested": False,
+    })
+    return normalize_structured_route_intake(merged)
+
+
+def format_build_substep_progress_message(
+    current_substep: str,
+    *,
+    substep_index: int,
+    substep_count: int,
+    step_index: int,
+    step_count: int,
+) -> str:
+    """Render a more human progress line for deep build execution."""
+    focus = compact_tool_text(current_substep, limit=160)
+    if not focus:
+        focus = f"build step {step_index + 1}"
+    return (
+        f"{focus}. "
+        f"({substep_index + 1}/{max(1, substep_count)} in step {step_index + 1}/{max(1, step_count)})"
+    )
+
+
 def format_deep_execution_prompt(plan: Dict[str, Any]) -> str:
     """Create an editable execution draft for plan approval and execution."""
     strategy = plan.get("strategy", "Inspect, build, verify, and synthesize.")
@@ -9235,8 +9678,14 @@ async def critique_response(message: str, draft: str) -> Dict:
     }
 
 
-async def send_final_replacement(websocket: WebSocket, content: str):
+async def send_final_replacement(
+    websocket: WebSocket,
+    content: str,
+    *,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+):
     """Replace the currently displayed assistant answer with a refined version."""
+    mark_workflow_first_response(workflow_execution)
     await websocket.send_json({"type": "final_replace", "content": content})
 
 
@@ -9276,6 +9725,9 @@ async def complete_successful_turn(
                         verification,
                         assistant_message_id=assistant_message_id,
                     )
+                    report_path = str(workflow_execution.route_metadata.get("verification_report_path") or "").strip()
+                    if report_path and report_path not in workflow_execution.artifact_paths:
+                        workflow_execution.artifact_paths.append(report_path)
                 except Exception as exc:
                     logger.warning("Failed to persist verification report for %s: %s", conversation_id, exc)
         finalize_workflow_execution(
@@ -9311,8 +9763,14 @@ async def complete_successful_turn(
     return assistant_message_id
 
 
-async def send_assistant_note(websocket: WebSocket, content: str):
+async def send_assistant_note(
+    websocket: WebSocket,
+    content: str,
+    *,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+):
     """Show a transient assistant note while work continues."""
+    mark_workflow_first_response(workflow_execution)
     await websocket.send_json({"type": "assistant_note", "content": content})
 
 
@@ -9416,6 +9874,7 @@ async def stream_chat_response(
     temperature: float = 0.25,
     *,
     start_output: bool = True,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> str:
     """Stream a plain assistant response to the UI and return the final saved text."""
     splitter = ThinkingStreamSplitter()
@@ -9423,9 +9882,13 @@ async def stream_chat_response(
         await websocket.send_json({"type": "start"})
     async for raw_token in vllm_chat_stream(messages, max_tokens=max_tokens, temperature=temperature):
         for event in splitter.feed(raw_token):
+            if event.get("type") == "token":
+                mark_workflow_first_response(workflow_execution)
             await websocket.send_json(event)
 
     for event in splitter.finalize():
+        if event.get("type") == "token":
+            mark_workflow_first_response(workflow_execution)
         await websocket.send_json(event)
 
     return strip_stream_special_tokens(splitter.full_response)
@@ -9704,6 +10167,42 @@ def init_db():
                       error_text TEXT NOT NULL DEFAULT '',
                       FOREIGN KEY(file_session_id) REFERENCES file_sessions(id))''')
 
+        c.execute('''CREATE TABLE IF NOT EXISTS turn_runs
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      conversation_id TEXT NOT NULL,
+                      user_message_id INTEGER,
+                      assistant_message_id INTEGER,
+                      workspace_id TEXT,
+                      run_id TEXT,
+                      workflow_name TEXT NOT NULL DEFAULT '',
+                      primary_skill TEXT NOT NULL DEFAULT '',
+                      mode TEXT NOT NULL DEFAULT '',
+                      route_intake_json TEXT NOT NULL DEFAULT '{}',
+                      enabled_tools_json TEXT NOT NULL DEFAULT '[]',
+                      started_at TEXT NOT NULL,
+                      first_token_at TEXT,
+                      completed_at TEXT,
+                      total_ms INTEGER,
+                      first_token_ms INTEGER,
+                      tool_count INTEGER NOT NULL DEFAULT 0,
+                      tool_names_json TEXT NOT NULL DEFAULT '[]',
+                      artifact_paths_json TEXT NOT NULL DEFAULT '[]',
+                      used_web INTEGER NOT NULL DEFAULT 0,
+                      used_workspace INTEGER NOT NULL DEFAULT 0,
+                      used_deep INTEGER NOT NULL DEFAULT 0,
+                      verification_status TEXT NOT NULL DEFAULT '',
+                      verification_score INTEGER,
+                      checks_total INTEGER,
+                      checks_failed INTEGER,
+                      final_outcome TEXT NOT NULL DEFAULT '',
+                      error_text TEXT NOT NULL DEFAULT '',
+                      feedback TEXT,
+                      implicit_feedback_category TEXT NOT NULL DEFAULT '',
+                      context_eval_capture_path TEXT NOT NULL DEFAULT '',
+                      FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                      FOREIGN KEY(user_message_id) REFERENCES messages(id),
+                      FOREIGN KEY(assistant_message_id) REFERENCES messages(id))''')
+
         try:
             c.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'visible_chat'")
         except sqlite3.OperationalError:
@@ -9780,6 +10279,9 @@ def init_db():
             c.execute('CREATE INDEX IF NOT EXISTS idx_file_sessions_workspace_id ON file_sessions(workspace_id, updated_at)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_file_session_jobs_session_id ON file_session_jobs(file_session_id, updated_at)')
             c.execute('CREATE INDEX IF NOT EXISTS idx_file_session_jobs_workspace_lane ON file_session_jobs(workspace_id, lane, status, updated_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_turn_runs_conversation_started ON turn_runs(conversation_id, started_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_turn_runs_user_message_id ON turn_runs(user_message_id)')
+            c.execute('CREATE INDEX IF NOT EXISTS idx_turn_runs_assistant_message_id ON turn_runs(assistant_message_id)')
         except sqlite3.OperationalError:
             pass
 
@@ -10192,6 +10694,12 @@ def apply_implicit_feedback_from_user_reply(
 
     assistant_message_id = int(row[0])
     cursor.execute('UPDATE messages SET feedback = ? WHERE id = ?', ('negative', assistant_message_id))
+    update_turn_run_feedback_by_assistant_message_id(
+        assistant_message_id,
+        "negative",
+        conn=conn,
+        implicit_feedback_category=signal.get("category", ""),
+    )
     logger.info(
         "Implicit negative feedback detected for assistant message %s in conversation %s (%s)",
         assistant_message_id,
@@ -10203,6 +10711,7 @@ def apply_implicit_feedback_from_user_reply(
         assistant_message_id,
         trigger="implicit_feedback",
         corrective_message=content,
+        db_conn=conn,
     )
     return {
         **signal,
@@ -17332,6 +17841,7 @@ def capture_context_eval_case_for_assistant_message(
     *,
     trigger: str,
     corrective_message: str = "",
+    db_conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Persist one replayable context-eval case for a failed assistant turn."""
     assistant_message = get_message_by_id(assistant_message_id)
@@ -17486,6 +17996,11 @@ def capture_context_eval_case_for_assistant_message(
         conversation_id,
         assistant_message_id,
         rel_path,
+    )
+    update_turn_run_context_eval_capture_path_by_assistant_message_id(
+        assistant_message_id,
+        rel_path,
+        conn=db_conn,
     )
     return rel_path
 
@@ -18166,6 +18681,7 @@ async def finalize_structured_task_turn(
     max_tokens: int,
     *,
     response_started: bool = False,
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
 ) -> tuple[str, bool]:
     """Turn structured task results into the final user-visible assistant reply."""
     if task.status == "blocked":
@@ -18177,7 +18693,11 @@ async def finalize_structured_task_turn(
         if not response_started:
             await websocket.send_json({"type": "start"})
             response_started = True
-        await send_final_replacement(websocket, full_response)
+        await send_final_replacement(
+            websocket,
+            full_response,
+            workflow_execution=workflow_execution,
+        )
         return full_response, response_started
 
     if task.status != "done":
@@ -18199,6 +18719,7 @@ async def finalize_structured_task_turn(
         messages,
         min(max_tokens, 1536),
         start_output=not response_started,
+        workflow_execution=workflow_execution,
     )
     response_started = True
     full_response = strip_unverified_workspace_write_claims(
@@ -18209,7 +18730,11 @@ async def finalize_structured_task_turn(
         )
     )
     if full_response != drafted:
-        await send_final_replacement(websocket, full_response)
+        await send_final_replacement(
+            websocket,
+            full_response,
+            workflow_execution=workflow_execution,
+        )
     return full_response, response_started
 
 
@@ -19257,9 +19782,16 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
         for sub_idx in range(len(completed_substeps), len(substeps)):
             current_substep = substeps[sub_idx]
             substep_label = f"Step {idx + 1}.{sub_idx + 1}: {current_substep}"
+            progress_message = format_build_substep_progress_message(
+                current_substep,
+                substep_index=sub_idx,
+                substep_count=len(substeps),
+                step_index=idx,
+                step_count=len(steps),
+            )
             await send_reasoning_note(
                 session.websocket,
-                f"Current focus is {substep_label}. I'm staying inside this substep until it is complete or blocked.",
+                f"Current focus: {progress_message}",
                 step_label=substep_label,
                 phase="execute",
             )
@@ -19267,10 +19799,7 @@ async def deep_build_workspace(session: DeepSession) -> DeepBuildResult:
                 session.websocket,
                 "execute",
                 "Execute",
-                (
-                    f"Working on substep {sub_idx + 1} of {len(substeps)} "
-                    f"inside build step {idx + 1} of {len(steps)}."
-                ),
+                progress_message,
                 step_label=substep_label,
             )
             await persist_task_board(
@@ -20522,6 +21051,16 @@ def format_turn_route_activity(
     promoted_to_planning: bool,
 ) -> str:
     """Render the high-level skill-loop routing summary for the activity log."""
+    if (
+        assessment.primary_skill == "search"
+        and assessment.requires_search
+        and assessment.execution_style == "direct_answer"
+        and assessment.workspace_intent == "none"
+    ):
+        freshness = "current web sources" if assessment.needs_fresh_info else "web sources"
+        if assessment.is_versioned_release_query and assessment.entity:
+            return f"Routing directly to {freshness} for a concise summary of {assessment.entity}."
+        return f"Routing directly to {freshness} for a concise answer."
     lines = [format_turn_assessment_summary(assessment), f"Mode {mode}. Intent {assessment.workspace_intent}."]
     if promoted_to_planning:
         lines.append("Explicit planning language promoted this turn into the planning loop.")
@@ -20910,6 +21449,12 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         attachments=attachments,
         slash_command_name=(slash_command or {}).get("name", ""),
     )
+    route_intake = force_direct_web_summary_route(
+        route_intake,
+        effective_message,
+        features=features,
+        history=history,
+    )
     workspace_intent = str(route_intake.workspace_intent_hint or "none")
     render_requested = bool(route_intake.render_requested)
     enabled_tools = (
@@ -20922,13 +21467,22 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         )
         if TOOL_LOOP_ENABLED else []
     )
+    direct_web_summary = route_intake_prefers_direct_web_summary(
+        route_intake,
+        effective_message,
+        features=features,
+        history=history,
+    )
 
     resume_saved_workspace = (
         not slash_command
+        and not direct_web_summary
         and should_resume_saved_workspace_task(conv_id, effective_message, features)
     )
     auto_execute_workspace = (
         not slash_command
+        and not direct_web_summary
+        and route_intake_allows_workspace_execution(route_intake)
         and (
             should_auto_execute_workspace_task(conv_id, effective_message, features, history=history)
             or resume_saved_workspace
@@ -21162,16 +21716,22 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 'conversation_id': conv_id,
                 'file_path': prepared.active_file_path,
             })
+        conversation_record = get_conversation_record(conv_id) or {}
         workflow_execution = create_workflow_execution(
             conv_id,
             prepared.user_message_id,
             "chat_turn",
             {
-            "assessment": prepared.assessment.as_metadata(),
-            "route_intake": prepared.route_intake.as_metadata(),
-            "tool_policy": dict(prepared.tool_policy_trace),
-        },
-    )
+                "assessment": prepared.assessment.as_metadata(),
+                "route_intake": prepared.route_intake.as_metadata(),
+                "tool_policy": dict(prepared.tool_policy_trace),
+            },
+            workspace_id=str(conversation_record.get("workspace_id") or "").strip(),
+            run_id=str(conversation_record.get("run_id") or "").strip(),
+            mode=prepared.resolved_mode,
+            primary_skill=str(prepared.assessment.primary_skill or "").strip(),
+            enabled_tools=list(prepared.enabled_tools),
+        )
 
         if prepared.repo_bootstrapped and prepared.repo_bootstrap_summary:
             await send_activity_event(
@@ -21195,6 +21755,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         )
 
         if slash_command:
+            set_workflow_execution_name(workflow_execution, "slash_command")
             mark_foreground_job("running")
             full_response = await handle_direct_slash_command(
                 websocket,
@@ -21208,7 +21769,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             )
             await websocket.send_json({'type': 'start'})
             response_started = True
-            await send_final_replacement(websocket, full_response)
+            await send_final_replacement(
+                websocket,
+                full_response,
+                workflow_execution=workflow_execution,
+            )
             mark_foreground_job("completed")
             await complete_successful_turn(
                 websocket,
@@ -21223,6 +21788,8 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             return
 
         if should_route_prepared_turn_via_direct_search(prepared):
+            set_workflow_execution_name(workflow_execution, "direct_search")
+            mark_workflow_usage(workflow_execution, used_web=True)
             mark_foreground_job("running")
             full_response = await handle_direct_search_command(
                 websocket,
@@ -21237,7 +21804,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             if not response_started:
                 await websocket.send_json({'type': 'start'})
                 response_started = True
-            await send_final_replacement(websocket, full_response)
+            await send_final_replacement(
+                websocket,
+                full_response,
+                workflow_execution=workflow_execution,
+            )
             mark_foreground_job("completed")
             await complete_successful_turn(
                 websocket,
@@ -21252,6 +21823,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             return
 
         if should_route_prepared_turn_via_attachment_summary(prepared):
+            set_workflow_execution_name(workflow_execution, "attachment_summary")
+            mark_workflow_usage(
+                workflow_execution,
+                used_workspace=bool(prepared.attachment_paths),
+            )
             mark_foreground_job("running")
             full_response = await handle_direct_attachment_summary_command(
                 websocket,
@@ -21263,7 +21839,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             if not response_started:
                 await websocket.send_json({'type': 'start'})
                 response_started = True
-            await send_final_replacement(websocket, full_response)
+            await send_final_replacement(
+                websocket,
+                full_response,
+                workflow_execution=workflow_execution,
+            )
             mark_foreground_job("completed")
             await complete_successful_turn(
                 websocket,
@@ -21279,6 +21859,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
 
         if mode == 'deep' or prepared.auto_execute_workspace:
             try:
+                set_workflow_execution_name(workflow_execution, "deep_execution")
+                mark_workflow_usage(
+                    workflow_execution,
+                    used_workspace=True,
+                    used_deep=True,
+                )
                 mark_foreground_job("running")
                 await websocket.send_json({'type': 'start'})
                 response_started = True
@@ -21295,7 +21881,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     workflow_execution=workflow_execution,
                 )
                 full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
-                await send_final_replacement(websocket, full_response)
+                await send_final_replacement(
+                    websocket,
+                    full_response,
+                    workflow_execution=workflow_execution,
+                )
                 mark_foreground_job("completed")
                 await complete_successful_turn(
                     websocket,
@@ -21318,6 +21908,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                             effective_message,
                             error_text=str(e),
                         ),
+                        workflow_execution=workflow_execution,
                     )
                 await websocket.send_json({
                     'type': 'status',
@@ -21337,6 +21928,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 logger.warning("Structured task engine failed before completion, falling back: %s", exc)
 
             if structured_task is not None:
+                set_workflow_execution_name(workflow_execution, "structured_task")
                 if structured_task.status in {"done", "blocked"}:
                     full_response, response_started = await finalize_structured_task_turn(
                         websocket,
@@ -21344,6 +21936,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         system_prompt,
                         max_tokens,
                         response_started=response_started,
+                        workflow_execution=workflow_execution,
                     )
                     mark_foreground_job("completed")
                     await complete_successful_turn(
@@ -21394,6 +21987,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             )
 
             if enabled_tools:
+                set_workflow_execution_name(workflow_execution, "tool_loop")
                 mark_foreground_job("running")
                 tool_outcome = await run_resumable_tool_loop(
                     websocket,
@@ -21417,6 +22011,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     await websocket.send_json({'type': 'start'})
                     response_started = True
                 if tool_outcome.requested_phase_upgrade == "workspace_execution":
+                    set_workflow_execution_name(workflow_execution, "workspace_execution")
+                    mark_workflow_usage(
+                        workflow_execution,
+                        used_workspace=True,
+                        used_deep=True,
+                    )
                     full_response = await continue_prepared_turn_in_workspace_execution(
                         websocket,
                         prepared,
@@ -21431,8 +22031,13 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         tool_results=tool_outcome.tool_results,
                     )
                     full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
-                await send_final_replacement(websocket, full_response)
+                await send_final_replacement(
+                    websocket,
+                    full_response,
+                    workflow_execution=workflow_execution,
+                )
             else:
+                set_workflow_execution_name(workflow_execution, "direct_answer")
                 messages = [{'role': 'system', 'content': system_prompt}]
                 for msg in model_history:
                     messages.append({'role': msg['role'], 'content': msg['content']})
@@ -21443,6 +22048,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     messages,
                     max_tokens,
                     start_output=not response_started,
+                    workflow_execution=workflow_execution,
                 )
                 response_started = True
                 escalated_to_workspace_execution = False
@@ -21488,6 +22094,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         ),
                     )
                     if tool_outcome.requested_phase_upgrade == "workspace_execution":
+                        set_workflow_execution_name(workflow_execution, "workspace_execution")
+                        mark_workflow_usage(
+                            workflow_execution,
+                            used_workspace=True,
+                            used_deep=True,
+                        )
                         full_response = await continue_prepared_turn_in_workspace_execution(
                             websocket,
                             prepared,
@@ -21507,7 +22119,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         tool_results=direct_tool_results,
                     )
                     full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
-                await send_final_replacement(websocket, full_response)
+                await send_final_replacement(
+                    websocket,
+                    full_response,
+                    workflow_execution=workflow_execution,
+                )
             mark_foreground_job("completed")
             await complete_successful_turn(
                 websocket,
@@ -21567,7 +22183,11 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 mark_foreground_job("running")
                 await websocket.send_json({'type': 'start'})
             mark_foreground_job("completed")
-            await send_final_replacement(websocket, fallback_response)
+            await send_final_replacement(
+                websocket,
+                fallback_response,
+                workflow_execution=workflow_execution,
+            )
             await complete_successful_turn(
                 websocket,
                 conv_id,
