@@ -513,6 +513,167 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertTrue(route.web_search_requested)
         self.assertTrue(route.needs_fresh_info)
 
+    def test_route_intake_allows_workspace_execution_only_for_workspace_work(self):
+        self.assertFalse(
+            app.route_intake_allows_workspace_execution(
+                app.StructuredRouteIntake(
+                    needs_fresh_info=True,
+                    web_search_requested=True,
+                    answer_shape="summary",
+                )
+            )
+        )
+        self.assertTrue(
+            app.route_intake_allows_workspace_execution(
+                app.StructuredRouteIntake(
+                    needs_workspace=True,
+                    workspace_intent_hint="focused_write",
+                    needs_artifact=True,
+                )
+            )
+        )
+
+    def test_route_intake_prefers_direct_web_summary_for_versioned_release_query(self):
+        self.assertTrue(
+            app.route_intake_prefers_direct_web_summary(
+                app.StructuredRouteIntake(
+                    needs_fresh_info=True,
+                    is_versioned_release_query=True,
+                    entity="nvim",
+                    answer_shape="summary",
+                    web_search_requested=True,
+                ),
+                "what changed in update to nvim 0.12?",
+                features=app.FeatureFlags(web_search=True),
+                history=[],
+            )
+        )
+        self.assertFalse(
+            app.route_intake_prefers_direct_web_summary(
+                app.StructuredRouteIntake(
+                    needs_fresh_info=True,
+                    answer_shape="summary",
+                    web_search_requested=True,
+                    needs_artifact=True,
+                    needs_workspace=True,
+                    workspace_intent_hint="focused_write",
+                ),
+                "create a downloadable markdown summary of nvim 0.12 changes",
+                features=app.FeatureFlags(web_search=True, agent_tools=True, workspace_write=True),
+                history=[],
+            )
+        )
+
+    def test_force_direct_web_summary_route_clears_workspace_hints(self):
+        route = app.force_direct_web_summary_route(
+            app.StructuredRouteIntake(
+                needs_fresh_info=True,
+                is_versioned_release_query=True,
+                entity="nvim",
+                answer_shape="summary",
+                web_search_requested=True,
+                needs_workspace=True,
+                workspace_intent_hint="focused_write",
+            ),
+            "what changed in update to nvim 0.12?",
+            features=app.FeatureFlags(web_search=True, agent_tools=True, workspace_write=True),
+            history=[],
+        )
+
+        self.assertTrue(route.web_search_requested)
+        self.assertFalse(route.needs_workspace)
+        self.assertFalse(route.needs_artifact)
+        self.assertEqual(route.workspace_intent_hint, "none")
+
+    def test_prepare_turn_request_ignores_stale_workspace_resume_for_pure_web_summary(self):
+        original_resolve_route_intake_for_turn = app.resolve_route_intake_for_turn
+        original_should_resume_saved_workspace_task = app.should_resume_saved_workspace_task
+        original_should_auto_execute_workspace_task = app.should_auto_execute_workspace_task
+        original_maybe_bootstrap_workspace_from_current_repo = app.maybe_bootstrap_workspace_from_current_repo
+        try:
+            async def fake_resolve_route_intake_for_turn(*args, **kwargs):
+                return app.StructuredRouteIntake(
+                    needs_fresh_info=True,
+                    is_versioned_release_query=True,
+                    entity="nvim",
+                    time_sensitivity="versioned",
+                    answer_shape="summary",
+                    web_search_requested=True,
+                    needs_workspace=True,
+                    workspace_intent_hint="focused_write",
+                    reasoning="stale route contamination",
+                    confidence=0.91,
+                )
+
+            app.resolve_route_intake_for_turn = fake_resolve_route_intake_for_turn
+            app.should_resume_saved_workspace_task = lambda *args, **kwargs: True
+            app.should_auto_execute_workspace_task = lambda *args, **kwargs: True
+            app.maybe_bootstrap_workspace_from_current_repo = lambda *args, **kwargs: None
+
+            prepared = asyncio.run(
+                app.prepare_turn_request({
+                    "conversation_id": "conv-nvim-direct",
+                    "message": "what changed in update to nvim 0.12?",
+                    "feature_flags": {
+                        "agent_tools": True,
+                        "workspace_write": True,
+                        "web_search": True,
+                    },
+                })
+            )
+        finally:
+            app.resolve_route_intake_for_turn = original_resolve_route_intake_for_turn
+            app.should_resume_saved_workspace_task = original_should_resume_saved_workspace_task
+            app.should_auto_execute_workspace_task = original_should_auto_execute_workspace_task
+            app.maybe_bootstrap_workspace_from_current_repo = original_maybe_bootstrap_workspace_from_current_repo
+
+        self.assertFalse(prepared.resume_saved_workspace)
+        self.assertFalse(prepared.auto_execute_workspace)
+        self.assertEqual(prepared.workspace_intent, "none")
+        self.assertEqual(prepared.route_intake.workspace_intent_hint, "none")
+        self.assertTrue(app.should_route_prepared_turn_via_direct_search(prepared))
+        self.assertIn("web.search", prepared.enabled_tools)
+        self.assertIn("web.fetch_page", prepared.enabled_tools)
+        self.assertFalse(any(tool.startswith("workspace.") for tool in prepared.enabled_tools))
+
+    def test_format_build_substep_progress_message_uses_focus_text(self):
+        rendered = app.format_build_substep_progress_message(
+            "Inspect the official release notes and pull out the main breaking changes",
+            substep_index=0,
+            substep_count=3,
+            step_index=0,
+            step_count=3,
+        )
+
+        self.assertIn("Inspect the official release notes", rendered)
+        self.assertIn("(1/3 in step 1/3)", rendered)
+
+    def test_format_turn_route_activity_prefers_direct_search_copy(self):
+        rendered = app.format_turn_route_activity(
+            app.TurnAssessment(
+                primary_skill="search",
+                requires_search=True,
+                execution_style="direct_answer",
+                workspace_intent="none",
+                needs_fresh_info=True,
+                is_versioned_release_query=True,
+                entity="nvim",
+            ),
+            mode="chat",
+            promoted_to_planning=False,
+        )
+
+        self.assertEqual(
+            rendered,
+            "Routing directly to current web sources for a concise summary of nvim.",
+        )
+
+    def test_extract_workspace_path_references_ignores_version_numbers(self):
+        self.assertEqual(
+            app.extract_workspace_path_references("what changed in update to nvim 0.12?"),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

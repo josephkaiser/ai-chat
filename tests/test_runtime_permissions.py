@@ -1690,6 +1690,231 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertEqual(payload["capture"]["final_outcome"], "completed_with_tools")
         self.assertEqual(payload["capture"]["workflow_status"], "completed")
 
+    def test_turn_run_persists_route_timing_execution_and_quality(self):
+        original_db_path = app.DB_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                app.DB_PATH = str(db_path)
+                app.init_db()
+
+                now = "2026-04-10T00:00:00+00:00"
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    '''INSERT INTO workspaces (id, display_name, root_path, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)''',
+                    ("ws-turn", "Telemetry workspace", str(pathlib.Path(tempdir) / "workspace"), now, now),
+                )
+                conn.execute(
+                    '''INSERT INTO conversations (id, title, created_at, updated_at, run_id, workspace_id)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                    ("conv-turn", "Telemetry turn", now, now, "run-turn", "ws-turn"),
+                )
+                conn.execute(
+                    '''INSERT INTO runs (id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    ("run-turn", "conv-turn", "ws-turn", "Telemetry turn", "active", str(pathlib.Path(tempdir) / "workspace"), now, None, "", 0),
+                )
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-turn", "user", "what changed in nvim 0.12?", now, "visible_chat", None),
+                )
+                user_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-turn", "assistant", "Neovim 0.12 adds a builtin plugin manager.", now, "visible_chat", "neutral"),
+                )
+                assistant_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.commit()
+                conn.close()
+
+                execution = app.create_workflow_execution(
+                    "conv-turn",
+                    user_message_id,
+                    "chat_turn",
+                    {"route_intake": {"needs_fresh_info": True, "entity": "nvim 0.12"}},
+                    workspace_id="ws-turn",
+                    run_id="run-turn",
+                    mode="chat",
+                    primary_skill="search",
+                    enabled_tools=["web.search", "web.fetch_page"],
+                )
+                app.set_workflow_execution_name(execution, "direct_search")
+                app.mark_workflow_usage(execution, used_web=True)
+                execution.artifact_paths.append("notes/nvim_0_12_changes.md")
+                execution.route_metadata["verification"] = {
+                    "written_paths": ["notes/nvim_0_12_changes.md"],
+                    "checks": [{"label": "summary-check", "passed": True, "auto_generated": False}],
+                }
+                app.record_workflow_step(
+                    execution,
+                    step_name="respond",
+                    call={"name": "web.search", "arguments": {"query": "nvim 0.12 changes"}},
+                    result={"ok": True, "result": {}},
+                )
+                app.mark_workflow_first_response(execution)
+                app.finalize_workflow_execution(
+                    execution,
+                    assistant_message_id=assistant_message_id,
+                    final_outcome="completed_direct_search",
+                )
+
+                conn = sqlite3.connect(app.DB_PATH)
+                row = conn.execute(
+                    '''SELECT conversation_id, user_message_id, assistant_message_id, workspace_id, run_id,
+                              workflow_name, primary_skill, mode, route_intake_json, enabled_tools_json,
+                              started_at, first_token_at, completed_at, total_ms, first_token_ms,
+                              tool_count, tool_names_json, artifact_paths_json, used_web, used_workspace, used_deep,
+                              verification_status, verification_score, checks_total, checks_failed,
+                              final_outcome, error_text, feedback
+                       FROM turn_runs
+                       WHERE assistant_message_id = ?''',
+                    (assistant_message_id,),
+                ).fetchone()
+                conn.close()
+        finally:
+            app.DB_PATH = original_db_path
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "conv-turn")
+        self.assertEqual(row[1], user_message_id)
+        self.assertEqual(row[2], assistant_message_id)
+        self.assertEqual(row[3], "ws-turn")
+        self.assertEqual(row[4], "run-turn")
+        self.assertEqual(row[5], "direct_search")
+        self.assertEqual(row[6], "search")
+        self.assertEqual(row[7], "chat")
+        self.assertEqual(json.loads(row[8])["entity"], "nvim 0.12")
+        self.assertEqual(json.loads(row[9]), ["web.search", "web.fetch_page"])
+        self.assertTrue(row[10])
+        self.assertTrue(row[11])
+        self.assertTrue(row[12])
+        self.assertGreaterEqual(int(row[13]), int(row[14]))
+        self.assertEqual(row[15], 1)
+        self.assertEqual(json.loads(row[16]), ["web.search"])
+        self.assertEqual(json.loads(row[17]), ["notes/nvim_0_12_changes.md"])
+        self.assertEqual(row[18], 1)
+        self.assertEqual(row[19], 0)
+        self.assertEqual(row[20], 0)
+        self.assertEqual(row[21], "verified")
+        self.assertEqual(row[22], 100)
+        self.assertEqual(row[23], 1)
+        self.assertEqual(row[24], 0)
+        self.assertEqual(row[25], "completed_direct_search")
+        self.assertEqual(row[26], "")
+        self.assertEqual(row[27], "neutral")
+
+    def test_implicit_feedback_updates_turn_run_feedback_category_and_capture_path(self):
+        original_db_path = app.DB_PATH
+        original_get_workspace_path = app.get_workspace_path
+        original_cache = dict(app.MESSAGE_WORKFLOW_METADATA_CACHE)
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                db_path = pathlib.Path(tempdir) / "chat.db"
+                workspace_root = pathlib.Path(tempdir) / "workspace"
+                workspace_root.mkdir(parents=True, exist_ok=True)
+                resolved_workspace_root = workspace_root.resolve()
+                app.DB_PATH = str(db_path)
+                app.init_db()
+                app.get_workspace_path = lambda _conversation_id, create=True: resolved_workspace_root
+                app.MESSAGE_WORKFLOW_METADATA_CACHE.clear()
+
+                now = "2026-04-10T00:00:00+00:00"
+                conn = sqlite3.connect(app.DB_PATH)
+                conn.execute(
+                    '''INSERT INTO workspaces (id, display_name, root_path, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?)''',
+                    ("ws-feedback", "Feedback workspace", str(resolved_workspace_root), now, now),
+                )
+                conn.execute(
+                    '''INSERT INTO conversations (id, title, created_at, updated_at, run_id, workspace_id)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                    ("conv-feedback", "Feedback test", now, now, "run-feedback", "ws-feedback"),
+                )
+                conn.execute(
+                    '''INSERT INTO runs (id, conversation_id, workspace_id, title, status, sandbox_path, started_at, ended_at, summary, promoted_count)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    ("run-feedback", "conv-feedback", "ws-feedback", "Feedback test", "active", str(resolved_workspace_root), now, None, "", 0),
+                )
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-feedback", "user", "summarize the nvim 0.12 release", now, "visible_chat", None),
+                )
+                user_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-feedback", "assistant", "I don't have that information.", now, "visible_chat", "neutral"),
+                )
+                assistant_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, timestamp, kind, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("conv-feedback", "user", "no, you should have checked the actual release notes", now, "visible_chat", None),
+                )
+                corrective_message_id = int(conn.execute("SELECT MAX(id) FROM messages").fetchone()[0])
+                conn.commit()
+
+                execution = app.create_workflow_execution(
+                    "conv-feedback",
+                    user_message_id,
+                    "chat_turn",
+                    {
+                        "tool_policy": {
+                            "web_search_requested": True,
+                            "enabled_tools": ["web.search", "web.fetch_page"],
+                            "has_web_tools": True,
+                        }
+                    },
+                    workspace_id="ws-feedback",
+                    run_id="run-feedback",
+                    mode="chat",
+                    primary_skill="search",
+                    enabled_tools=["web.search", "web.fetch_page"],
+                )
+                app.record_workflow_step(
+                    execution,
+                    step_name="respond",
+                    call={"name": "web.search", "arguments": {"query": "nvim 0.12 release notes"}},
+                    result={"ok": True, "result": {}},
+                )
+                app.finalize_workflow_execution(
+                    execution,
+                    assistant_message_id=assistant_message_id,
+                    final_outcome="completed_with_tools",
+                )
+
+                signal = app.apply_implicit_feedback_from_user_reply(
+                    conn,
+                    "conv-feedback",
+                    corrective_message_id,
+                    "no, you should have checked the actual release notes",
+                )
+                conn.commit()
+                conn.close()
+
+                capture_path = signal.get("context_eval_capture_path", "")
+                capture_exists = bool(capture_path) and (resolved_workspace_root / capture_path).exists()
+                feedback_conn = sqlite3.connect(app.DB_PATH)
+                telemetry_row = feedback_conn.execute(
+                    '''SELECT feedback, implicit_feedback_category, context_eval_capture_path
+                       FROM turn_runs
+                       WHERE assistant_message_id = ?''',
+                    (assistant_message_id,),
+                ).fetchone()
+                feedback_conn.close()
+        finally:
+            app.DB_PATH = original_db_path
+            app.get_workspace_path = original_get_workspace_path
+            app.MESSAGE_WORKFLOW_METADATA_CACHE.clear()
+            app.MESSAGE_WORKFLOW_METADATA_CACHE.update(original_cache)
+
+        self.assertEqual(signal.get("label"), "negative")
+        self.assertEqual(signal.get("category"), "output_quality")
+        self.assertEqual(telemetry_row[0], "negative")
+        self.assertEqual(telemetry_row[1], "output_quality")
+        self.assertEqual(telemetry_row[2], capture_path)
+        self.assertTrue(capture_path)
+        self.assertTrue(capture_exists)
+
     def test_direct_search_route_handles_pure_web_facts_turns(self):
         prepared = app.PreparedTurnRequest(
             conversation_id="conv-weather",

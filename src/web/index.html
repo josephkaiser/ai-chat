@@ -209,6 +209,19 @@
         </div>
     </div>
 
+    <div id="reasoningOverlay" class="reasoning-overlay" hidden>
+        <div class="reasoning-dialog">
+            <div class="reasoning-dialog-header">
+                <div class="reasoning-dialog-copy">
+                    <strong id="reasoningTitle">Reasoning</strong>
+                    <p id="reasoningScope" class="panel-subtitle"></p>
+                </div>
+                <button id="closeReasoningButton" type="button">Close</button>
+            </div>
+            <div id="reasoningContent" class="reasoning-content"></div>
+        </div>
+    </div>
+
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
     <script type="module" src="/static/app.js?v={{ static_asset_version }}"></script>
 </body>

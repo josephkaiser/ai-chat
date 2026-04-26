@@ -1,7 +1,39 @@
 // Generated from src/web/app.ts by scripts/build_frontend.mjs
-import { chatMessages, closeSettingsButton, composerAttachments, composerForm, composerHint, composerInput, connectionBadge, conversationList, directoryPath, downloadFileButton, fileList, filePreview, fixtureReviewFilter, isMobileViewport, newChatButton, openInTabButton, refreshContextEvalButton, refreshFixtureReviewButton, refreshWorkspaceButton, resetAppButton, scrollToBottomButton, sendButton, settingsOverlay, settingsSummary, sidebarToggle, viewerCloseButton, viewerMeta, viewerModeButton, viewerTitle, viewerToggle, workspaceSettingsButton } from "./dom.js";
+import { chatMessages, closeReasoningButton, closeSettingsButton, composerAttachments, composerForm, composerHint, composerInput, connectionBadge, conversationList, directoryPath, downloadFileButton, fileList, filePreview, fixtureReviewFilter, isMobileViewport, newChatButton, openInTabButton, refreshContextEvalButton, refreshFixtureReviewButton, refreshWorkspaceButton, reasoningContent, reasoningOverlay, reasoningScope, reasoningTitle, resetAppButton, scrollToBottomButton, sendButton, settingsOverlay, settingsSummary, sidebarToggle, viewerCloseButton, viewerMeta, viewerModeButton, viewerTitle, viewerToggle, workspaceSettingsButton } from "./dom.js";
 import { createContextEvalController } from "./context_eval.js";
 import { FIRST_TURN_COMPOSER_MAX_HEIGHT, LATER_TURN_COMPOSER_MAX_HEIGHT, PASTE_ATTACH_CHAR_THRESHOLD, PASTE_ATTACH_LINE_THRESHOLD, state } from "./state.js";
+const STOPWORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "we",
+    "with",
+    "you",
+    "your"
+]);
+const taskBoardCache = new Map();
 function generateId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
         return crypto.randomUUID();
@@ -223,6 +255,19 @@ function clearVisibleGenerationState() {
     state.thinkingStatus = null;
     setGenerating(false);
     setComposerHint(defaultComposerStatus());
+}
+function clearWorkspaceView() {
+    state.currentWorkspaceId = "";
+    state.currentDirectoryPath = ".";
+    state.fileItems = [];
+    state.selectedFilePath = "";
+    state.selectedFileContentKind = "";
+    state.latestWorkedFilePath = "";
+    state.viewerMode = "closed";
+    localStorage.removeItem("lastWorkspaceId");
+    renderFileList();
+    renderPreviewEmpty("No workspace", "This chat has no workspace yet.");
+    syncShellLayout();
 }
 function detachGenerationFromVisibleConversation(conversationId) {
     if (!conversationId) return;
@@ -658,6 +703,9 @@ function extractArtifactReferences(message) {
 function resolveArtifactReferencePath(path) {
     return String(path || "").trim().replace(/^`|`$/g, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 }
+function isHiddenWorkspacePath(path) {
+    return resolveArtifactReferencePath(path).split("/").filter(Boolean).some((segment)=>segment.startsWith("."));
+}
 function artifactFileExtension(path) {
     const fileName = resolveArtifactReferencePath(path).split("/").pop() || "";
     const match = fileName.match(/\.([A-Za-z0-9]+)$/);
@@ -772,10 +820,13 @@ function stripSingleFenceFromMessage(raw) {
 function parseArtifactMessage(raw) {
     const cleaned = stripArtifactHelperLines(raw);
     const artifactMatch = cleaned.match(/\[\[artifact:([^\]]+)\]\]/i);
-    const artifactPaths = extractArtifactReferences(cleaned).map(resolveArtifactReferencePath);
+    const allArtifactPaths = extractArtifactReferences(cleaned).map(resolveArtifactReferencePath);
+    const artifactPaths = allArtifactPaths.filter((path)=>!isHiddenWorkspacePath(path));
+    const hiddenArtifactPaths = allArtifactPaths.filter((path)=>isHiddenWorkspacePath(path));
     if (!artifactMatch) {
         return {
             artifactPaths,
+            hiddenArtifactPaths,
             displayContent: cleaned,
             materializedBody: ""
         };
@@ -786,6 +837,7 @@ function parseArtifactMessage(raw) {
     if (after && fenceFromAfter) {
         return {
             artifactPaths,
+            hiddenArtifactPaths,
             displayContent: [
                 stripSingleFenceFromMessage(before),
                 stripSingleFenceFromMessage(after)
@@ -797,6 +849,7 @@ function parseArtifactMessage(raw) {
     if (!after && fenceFromBefore) {
         return {
             artifactPaths,
+            hiddenArtifactPaths,
             displayContent: stripSingleFenceFromMessage(before).trim(),
             materializedBody: before
         };
@@ -807,6 +860,7 @@ function parseArtifactMessage(raw) {
     ].filter(Boolean);
     return {
         artifactPaths,
+        hiddenArtifactPaths,
         displayContent: displayParts.join("\n\n").trim(),
         materializedBody: after
     };
@@ -1225,37 +1279,72 @@ function renderInlineMarkdown(text) {
     const extracted = extractInlineMathSegments(text);
     const rendered = extracted.content.replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath)=>{
         const path = resolveArtifactReferencePath(rawPath);
+        if (isHiddenWorkspacePath(path)) return "";
         const label = path.split("/").pop() || path;
         return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
     }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n+/g, " ");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
-function renderMarkdownBlocks(blocks) {
-    return blocks.map((block)=>{
-        if (block.type === "paragraph") {
-            return `<p>${renderInlineMarkdown(block.lines.join("\n"))}</p>`;
+function markdownBlockPlainText(block) {
+    if (block.type === "paragraph") return block.lines.join(" ");
+    if (block.type === "heading") return block.text;
+    if (block.type === "quote") return block.lines.join(" ");
+    if (block.type === "math") return block.content;
+    if (block.type === "list") return block.items.map((item)=>item.lines.join(" ")).join(" ");
+    return "";
+}
+function shouldShowReasoningButtonForBlock(block) {
+    if (block.type === "hr" || block.type === "html") return false;
+    const text = markdownBlockPlainText(block).replace(/\s+/g, " ").trim();
+    if (!text) return false;
+    if (block.type === "list") return true;
+    return text.split(/\s+/).length >= 9;
+}
+function renderMarkdownBlock(block) {
+    if (block.type === "paragraph") {
+        return `<p>${renderInlineMarkdown(block.lines.join("\n"))}</p>`;
+    }
+    if (block.type === "heading") {
+        return `<h${block.level}>${renderInlineMarkdown(block.text)}</h${block.level}>`;
+    }
+    if (block.type === "hr") {
+        return "<hr>";
+    }
+    if (block.type === "html") {
+        return block.html;
+    }
+    if (block.type === "quote") {
+        return `<blockquote>${renderInlineMarkdown(block.lines.join("\n"))}</blockquote>`;
+    }
+    if (block.type === "math") {
+        return `<div class="math-block">${renderDisplayMathExpression(block.content)}</div>`;
+    }
+    if (block.type === "list") {
+        const tag = block.ordered ? "ol" : "ul";
+        const startAttr = block.ordered && block.start > 1 ? ` start="${block.start}"` : "";
+        return `<${tag}${startAttr}>${block.items.map((item)=>`<li>${renderInlineMarkdown(item.lines.join("\n"))}</li>`).join("")}</${tag}>`;
+    }
+    return "";
+}
+function renderMarkdownBlocks(blocks, options = {}) {
+    return blocks.map((block, blockIndex)=>{
+        const blockHtml = renderMarkdownBlock(block);
+        if (!options.reasoningMessageIndex || !shouldShowReasoningButtonForBlock(block)) {
+            return blockHtml;
         }
-        if (block.type === "heading") {
-            return `<h${block.level}>${renderInlineMarkdown(block.text)}</h${block.level}>`;
-        }
-        if (block.type === "hr") {
-            return "<hr>";
-        }
-        if (block.type === "html") {
-            return block.html;
-        }
-        if (block.type === "quote") {
-            return `<blockquote>${renderInlineMarkdown(block.lines.join("\n"))}</blockquote>`;
-        }
-        if (block.type === "math") {
-            return `<div class="math-block">${renderDisplayMathExpression(block.content)}</div>`;
-        }
-        if (block.type === "list") {
-            const tag = block.ordered ? "ol" : "ul";
-            const startAttr = block.ordered && block.start > 1 ? ` start="${block.start}"` : "";
-            return `<${tag}${startAttr}>${block.items.map((item)=>`<li>${renderInlineMarkdown(item.lines.join("\n"))}</li>`).join("")}</${tag}>`;
-        }
-        return "";
+        return `
+            <div class="reasoned-block">
+                <div class="reasoned-block-anchor">
+                    <div class="reasoned-block-body">${blockHtml}</div>
+                    <button
+                        type="button"
+                        class="reasoning-button"
+                        data-reasoning-message-index="${options.reasoningMessageIndex}"
+                        data-reasoning-block-index="${blockIndex}"
+                    >Reasoning</button>
+                </div>
+            </div>
+        `;
     }).join("");
 }
 function parseMarkdownBlocks(raw) {
@@ -1554,6 +1643,161 @@ function renderRichText(raw) {
     }
     return renderMarkdownBlocks(parseMarkdownBlocks(raw));
 }
+function renderAssistantRichText(raw, messageIndex) {
+    const singleFence = unwrapSingleFence(raw);
+    if (singleFence && [
+        "markdown",
+        "md"
+    ].includes(singleFence.language)) {
+        return renderAssistantRichText(singleFence.body, messageIndex);
+    }
+    return renderMarkdownBlocks(parseMarkdownBlocks(raw), {
+        reasoningMessageIndex: messageIndex
+    });
+}
+function reasoningScopeKeywords(text) {
+    const words = cleanConversationText(text).toLowerCase().split(/\s+/).map((word)=>word.replace(/[^a-z0-9_-]/g, "")).filter((word)=>word.length >= 3 && !STOPWORDS.has(word));
+    return [
+        ...new Set(words)
+    ].slice(0, 12);
+}
+function scopeRelevanceScore(scopeText, candidate) {
+    const scopeKeywords = reasoningScopeKeywords(scopeText);
+    if (!scopeKeywords.length) return candidate ? 1 : 0;
+    const haystack = cleanConversationText(candidate).toLowerCase();
+    return scopeKeywords.reduce((score, keyword)=>score + (haystack.includes(keyword) ? 1 : 0), 0);
+}
+function reasoningLabelForPhase(note) {
+    const pieces = [
+        String(note.phase || "reasoning").trim(),
+        String(note.step_label || "").trim()
+    ].filter(Boolean);
+    return pieces.length ? pieces.join(" · ") : "Reasoning";
+}
+function parseTaskBoardSections(raw) {
+    const sections = [];
+    let current = [];
+    for (const line of String(raw || "").split(/\r?\n/)){
+        if (/^\s*#{1,4}\s+/.test(line) && current.length) {
+            sections.push(current.join("\n").trim());
+            current = [];
+        }
+        current.push(line);
+    }
+    if (current.length) {
+        sections.push(current.join("\n").trim());
+    }
+    return sections.filter(Boolean);
+}
+function chooseReasoningSections(scopeText, taskBoardText) {
+    const sections = parseTaskBoardSections(taskBoardText);
+    if (!sections.length) return [];
+    const ranked = sections.map((section)=>({
+            section,
+            score: scopeRelevanceScore(scopeText, section)
+        })).sort((left, right)=>right.score - left.score || left.section.length - right.section.length);
+    const filtered = ranked.filter((entry)=>entry.score > 0).slice(0, 2).map((entry)=>entry.section);
+    if (filtered.length) return filtered;
+    return ranked.slice(0, 1).map((entry)=>entry.section);
+}
+function renderReasoningNotes(notes) {
+    if (!notes.length) {
+        return `<div class="context-eval-empty">No focused notes were captured for this section yet.</div>`;
+    }
+    return `
+        <div class="reasoning-note-list">
+            ${notes.map((note)=>`
+                <div class="reasoning-note-item">
+                    <div class="reasoning-note-meta">${escapeHtml(reasoningLabelForPhase(note))}</div>
+                    <div>${escapeHtml(note.text)}</div>
+                </div>
+            `).join("")}
+        </div>
+    `;
+}
+function renderReasoningTaskBoard(scopeText, taskBoardText) {
+    const sections = chooseReasoningSections(scopeText, taskBoardText);
+    if (!sections.length) {
+        return `<div class="context-eval-empty">No matching task-board context was available for this section.</div>`;
+    }
+    return sections.map((section)=>`<div class="reasoning-card">${renderRichText(section)}</div>`).join("");
+}
+async function loadReasoningTaskBoard(path) {
+    if (!state.currentWorkspaceId || !path) return "";
+    const cacheKey = `${state.currentWorkspaceId}:${path}`;
+    if (taskBoardCache.has(cacheKey)) {
+        return taskBoardCache.get(cacheKey) || "";
+    }
+    try {
+        const payload = await fetchJson(workspaceFileApiUrl(path, String(Date.now())));
+        const content = String(payload.content || "");
+        taskBoardCache.set(cacheKey, content);
+        return content;
+    } catch  {
+        return "";
+    }
+}
+function closeReasoningOverlay() {
+    reasoningOverlay.hidden = true;
+    reasoningTitle.textContent = "Reasoning";
+    reasoningScope.textContent = "";
+    reasoningContent.innerHTML = "";
+}
+async function openReasoningOverlay(messageIndex, blockIndex) {
+    const message = state.messages[messageIndex];
+    if (!message || message.role !== "assistant") return;
+    const parsedArtifacts = parseArtifactMessage(message.content || "");
+    const blocks = parseMarkdownBlocks(parsedArtifacts.displayContent || "");
+    const block = blocks[blockIndex];
+    if (!block) return;
+    const scopeText = markdownBlockPlainText(block).replace(/\s+/g, " ").trim();
+    const rankedNotes = [
+        ...message.reasoning_notes || []
+    ].map((note)=>({
+            note,
+            score: scopeRelevanceScore(scopeText, `${note.step_label || ""} ${note.text || ""}`)
+        })).sort((left, right)=>right.score - left.score).slice(0, 4).map((entry)=>entry.note);
+    const taskBoardPath = [
+        ...parsedArtifacts.hiddenArtifactPaths
+    ].find((path)=>/(?:^|\/)\.ai\/task-board\.md$/i.test(path)) || ".ai/task-board.md";
+    reasoningTitle.textContent = "Reasoning";
+    reasoningScope.textContent = truncatePreview(scopeText, 140);
+    reasoningContent.innerHTML = `
+        <div class="reasoning-card">
+            <div class="reasoning-card-title">Section</div>
+            <div class="rich-text">${renderRichText(scopeText)}</div>
+        </div>
+        <div class="reasoning-card">
+            <div class="reasoning-card-title">Notes</div>
+            ${renderReasoningNotes(rankedNotes)}
+        </div>
+        <div class="reasoning-card">
+            <div class="reasoning-card-title">Task Board</div>
+            <div class="context-eval-empty">Loading hidden planning notes…</div>
+        </div>
+    `;
+    reasoningOverlay.hidden = false;
+    const taskBoardText = await loadReasoningTaskBoard(taskBoardPath);
+    if (reasoningOverlay.hidden) return;
+    const cards = reasoningContent.querySelectorAll(".reasoning-card");
+    const taskBoardCard = cards.item(2);
+    if (!taskBoardCard) return;
+    taskBoardCard.innerHTML = `
+        <div class="reasoning-card-title">Task Board</div>
+        ${renderReasoningTaskBoard(scopeText, taskBoardText)}
+    `;
+}
+function bindReasoningButtons(root) {
+    root.querySelectorAll("[data-reasoning-message-index]").forEach((button)=>{
+        button.addEventListener("click", (event)=>{
+            event.preventDefault();
+            const messageIndex = Number(button.dataset.reasoningMessageIndex || "-1");
+            const blockIndex = Number(button.dataset.reasoningBlockIndex || "-1");
+            if (messageIndex < 0 || blockIndex < 0) return;
+            void openReasoningOverlay(messageIndex, blockIndex);
+        });
+    });
+}
 function renderMessages() {
     const previousScrollTop = chatMessages.scrollTop;
     const shouldStickToBottom = state.stickChatToBottom;
@@ -1575,12 +1819,13 @@ function renderMessages() {
         const role = message.error ? "assistant error" : message.role;
         const parsedArtifacts = message.role === "assistant" ? parseArtifactMessage(message.content || "") : {
             artifactPaths: [],
+            hiddenArtifactPaths: [],
             displayContent: message.content || "",
             materializedBody: ""
         };
         const meta = message.role === "user" ? "You" : message.role === "assistant" ? assistantMetaLabel(message, index) : "System";
         const artifactObjectHtml = message.role === "assistant" && parsedArtifacts.artifactPaths.length && parsedArtifacts.materializedBody ? renderArtifactObject(parsedArtifacts.artifactPaths, parsedArtifacts.displayContent || "", parsedArtifacts.displayContent ? "Updated file in viewer" : "Saved in viewer") : "";
-        const bodyHtml = parsedArtifacts.displayContent ? `<div class="message-content rich-text">${renderRichText(parsedArtifacts.displayContent || "")}</div>` : "";
+        const bodyHtml = parsedArtifacts.displayContent ? `<div class="message-content rich-text">${message.role === "assistant" ? renderAssistantRichText(parsedArtifacts.displayContent || "", index) : renderRichText(parsedArtifacts.displayContent || "")}</div>` : "";
         const messageBody = artifactObjectHtml || `
                 ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
                 ${bodyHtml}
@@ -1607,6 +1852,7 @@ function renderMessages() {
             </div>
         `;
     bindArtifactLinks(chatMessages);
+    bindReasoningButtons(chatMessages);
     state.messages.forEach((message, index)=>{
         maybeHandleAssistantArtifacts(message, index);
     });
@@ -1796,6 +2042,7 @@ function renderSettingsSummary() {
     `;
 }
 function showSettings() {
+    closeReasoningOverlay();
     renderSettingsSummary();
     renderContextEvalReport();
     renderFixtureReviewList();
@@ -2137,7 +2384,8 @@ async function loadWorkspaces(preferredId = "") {
     const payload = await fetchJson("/api/workspaces");
     const previousWorkspaceId = state.currentWorkspaceId;
     state.workspaces = payload.workspaces || [];
-    const nextWorkspaceId = preferredId || state.currentWorkspaceId || payload.default_workspace_id || state.workspaces[0]?.id || "";
+    const rememberedWorkspaceId = localStorage.getItem("lastWorkspaceId") || "";
+    const nextWorkspaceId = preferredId || state.currentWorkspaceId || rememberedWorkspaceId || payload.default_workspace_id || state.workspaces[0]?.id || "";
     state.currentWorkspaceId = nextWorkspaceId;
     if (nextWorkspaceId !== previousWorkspaceId) {
         state.latestWorkedFilePath = "";
@@ -2147,9 +2395,7 @@ async function loadWorkspaces(preferredId = "") {
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
     } else {
-        state.selectedFilePath = "";
-        state.latestWorkedFilePath = "";
-        closeViewer();
+        clearWorkspaceView();
     }
     renderWorkspaceSummary();
     if (nextWorkspaceId) {
@@ -2173,6 +2419,7 @@ async function loadConversation(id) {
     if (state.generating && state.currentConversationId && state.currentConversationId !== id) {
         detachGenerationFromVisibleConversation(state.currentConversationId);
     }
+    closeReasoningOverlay();
     const payload = await fetchJson(`/api/conversation/${encodeURIComponent(id)}`);
     state.currentConversationId = id;
     state.messages = payload.messages || [];
@@ -2186,9 +2433,14 @@ async function loadConversation(id) {
     state.viewerMode = "closed";
     const matchingConversation = state.conversations.find((conversation)=>conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || "New chat";
-    if (payload.workspace_id && payload.workspace_id !== state.currentWorkspaceId) {
-        await loadWorkspaces(payload.workspace_id);
+    if (payload.workspace_id) {
+        if (payload.workspace_id !== state.currentWorkspaceId) {
+            await loadWorkspaces(payload.workspace_id);
+        } else {
+            renderConversations();
+        }
     } else {
+        clearWorkspaceView();
         renderConversations();
     }
     renderComposerAttachments();
@@ -2207,6 +2459,7 @@ function startNewChat() {
     if (state.generating && state.currentConversationId) {
         detachGenerationFromVisibleConversation(state.currentConversationId);
     }
+    closeReasoningOverlay();
     state.currentConversationId = generateId();
     state.currentConversationTitle = "New chat";
     state.messages = [];
@@ -2215,13 +2468,10 @@ function startNewChat() {
     state.stickChatToBottom = true;
     state.activeAssistantIndex = -1;
     state.thinkingStatus = null;
-    state.selectedFilePath = "";
-    state.latestWorkedFilePath = "";
-    state.viewerMode = "closed";
+    clearWorkspaceView();
     renderComposerAttachments();
     renderMessages();
     renderConversations();
-    syncShellLayout();
     syncComposerHeight();
     void loadContextEvalReport();
 }
@@ -2239,6 +2489,25 @@ function ensureAssistantMessage() {
     state.activeAssistantIndex = state.messages.length - 1;
     renderMessages();
     return assistantMessage;
+}
+function recordReasoningNote(event) {
+    if (!(event.content || "").trim()) return;
+    const assistantMessage = ensureAssistantMessage();
+    const note = {
+        text: normalizeThinkingText(event.content || ""),
+        phase: event.phase || "thinking",
+        step_label: event.step_label || "",
+        timestamp: new Date().toISOString()
+    };
+    const notes = assistantMessage.reasoning_notes || [];
+    const duplicate = notes.at(-1);
+    if (duplicate && duplicate.text === note.text && duplicate.phase === note.phase && duplicate.step_label === note.step_label) {
+        return;
+    }
+    assistantMessage.reasoning_notes = [
+        ...notes,
+        note
+    ].slice(-18);
 }
 function finishGeneration(options = {}) {
     state.activeStreamConversationId = "";
@@ -2306,6 +2575,7 @@ function handleChatEvent(event) {
     }
     if ((event.type === "activity" || event.type === "reasoning_note" || event.type === "status") && event.content) {
         if (!isVisibleConversationEvent) return;
+        recordReasoningNote(event);
         setThinkingStatus(buildThinkingSummary(event), {
             phase: event.phase || "thinking"
         });
@@ -2329,12 +2599,14 @@ function handleChatEvent(event) {
                 approved: true
             }));
             if (isVisibleConversationEvent) {
+                recordReasoningNote(event);
                 setThinkingStatus(buildThinkingSummary(event), {
                     phase: "permission"
                 });
             }
         } else {
             if (isVisibleConversationEvent) {
+                recordReasoningNote(event);
                 setThinkingStatus(buildThinkingSummary(event), {
                     phase: "permission",
                     error: true,
@@ -2588,6 +2860,7 @@ function attachEvents() {
     newChatButton.addEventListener("click", ()=>startNewChat());
     workspaceSettingsButton.addEventListener("click", ()=>showSettings());
     closeSettingsButton.addEventListener("click", ()=>closeSettings());
+    closeReasoningButton.addEventListener("click", ()=>closeReasoningOverlay());
     refreshFixtureReviewButton.addEventListener("click", ()=>{
         void loadContextEvalFixtures();
     });
@@ -2600,6 +2873,9 @@ function attachEvents() {
     });
     settingsOverlay.addEventListener("click", (event)=>{
         if (event.target === settingsOverlay) closeSettings();
+    });
+    reasoningOverlay.addEventListener("click", (event)=>{
+        if (event.target === reasoningOverlay) closeReasoningOverlay();
     });
     chatMessages.addEventListener("scroll", ()=>{
         state.stickChatToBottom = isNearBottom(chatMessages);
