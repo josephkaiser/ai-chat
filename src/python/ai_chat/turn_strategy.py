@@ -164,8 +164,6 @@ def infer_planning_required(
         return True
     if str(resolved_mode or "").strip().lower() == "deep":
         return True
-    if workspace_intent == "broad_write":
-        return True
     return infer_explicit_planning_request(message)
 
 

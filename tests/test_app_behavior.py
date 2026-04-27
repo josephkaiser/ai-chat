@@ -205,6 +205,52 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(payload["preview_rows"][0]["Name"], "Alice")
         self.assertIn("format_warning", payload)
 
+    @unittest.skipIf(app.pd is None, "pandas is not installed")
+    def test_spreadsheet_create_result_writes_real_xlsx(self):
+        original_get_workspace_path = app.get_workspace_path
+        try:
+            app.get_workspace_path = lambda _conversation_id, create=True: self.workspace
+            payload = app.spreadsheet_create_result(
+                "conv-sheet",
+                "numbers_table.xlsx",
+                ["Number"],
+                [[index] for index in range(10)],
+                sheet="Numbers",
+            )
+        finally:
+            app.get_workspace_path = original_get_workspace_path
+
+        target = self.workspace / "numbers_table.xlsx"
+        self.assertTrue(target.exists())
+        self.assertEqual(payload["path"], "numbers_table.xlsx")
+        self.assertEqual(payload["file_type"], "spreadsheet")
+        self.assertEqual(payload["row_count"], 10)
+        self.assertEqual(payload["column_count"], 1)
+        self.assertEqual(payload["sheet"], "Numbers")
+
+    def test_finalize_model_response_text_attaches_created_spreadsheet_artifact(self):
+        response = app.finalize_model_response_text(
+            "I created the workbook.",
+            "create an excel file with numbers 0-9",
+            tool_results=[
+                {
+                    "call": {"name": "spreadsheet.create", "arguments": {"path": "numbers_table.xlsx"}},
+                    "result": {
+                        "ok": True,
+                        "result": {
+                            "path": "numbers_table.xlsx",
+                            "content_kind": "spreadsheet",
+                            "row_count": 10,
+                            "column_count": 1,
+                        },
+                    },
+                }
+            ],
+        )
+
+        self.assertIn("Created `numbers_table.xlsx`.", response)
+        self.assertIn("[[artifact:numbers_table.xlsx]]", response)
+
     def test_hard_limit_message_drops_step_confirmation_language(self):
         message = workspace_reader.build_tool_loop_hard_limit_message("Updated `plan.json` and inspected `DESIGN.md`.")
         self.assertIn("Paused after reaching the current tool budget.", message)
@@ -513,23 +559,35 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertTrue(route.web_search_requested)
         self.assertTrue(route.needs_fresh_info)
 
-    def test_route_intake_allows_workspace_execution_only_for_workspace_work(self):
+    def test_route_intake_allows_workspace_execution_only_for_project_scale_workspace_work(self):
         self.assertFalse(
             app.route_intake_allows_workspace_execution(
                 app.StructuredRouteIntake(
                     needs_fresh_info=True,
                     web_search_requested=True,
                     answer_shape="summary",
-                )
+                ),
+                "what changed in update to nvim 0.12?",
+            )
+        )
+        self.assertFalse(
+            app.route_intake_allows_workspace_execution(
+                app.StructuredRouteIntake(
+                    needs_workspace=True,
+                    workspace_intent_hint="focused_write",
+                    needs_artifact=True,
+                ),
+                "create a markdown file with ten bullets",
             )
         )
         self.assertTrue(
             app.route_intake_allows_workspace_execution(
                 app.StructuredRouteIntake(
                     needs_workspace=True,
-                    workspace_intent_hint="focused_write",
+                    workspace_intent_hint="broad_write",
                     needs_artifact=True,
-                )
+                ),
+                "refactor this repo and run tests after each step",
             )
         )
 
@@ -635,6 +693,135 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("web.search", prepared.enabled_tools)
         self.assertIn("web.fetch_page", prepared.enabled_tools)
         self.assertFalse(any(tool.startswith("workspace.") for tool in prepared.enabled_tools))
+
+    def test_request_is_simple_spreadsheet_build_detects_narrow_excel_file_request(self):
+        route = app.StructuredRouteIntake(
+            needs_workspace=True,
+            needs_artifact=True,
+            workspace_intent_hint="focused_write",
+        )
+
+        self.assertTrue(
+            app.request_is_simple_spreadsheet_build(
+                "create an excel file that shows a simple data table with numbers 0-9",
+                route,
+            )
+        )
+        self.assertFalse(
+            app.request_is_simple_spreadsheet_build(
+                "create an excel dashboard with charts, pivots, and formulas for revenue trends",
+                route,
+            )
+        )
+
+    def test_request_is_simple_single_artifact_build_detects_markdown_file_request(self):
+        self.assertTrue(
+            app.request_is_simple_single_artifact_build(
+                "create a markdown file with ten bullets about closures",
+            )
+        )
+        self.assertFalse(
+            app.request_is_simple_single_artifact_build(
+                "build a tracker app for daily revenue and refactor the workflow around it",
+            )
+        )
+
+    def test_should_auto_execute_workspace_task_skips_simple_spreadsheet_build(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+
+        self.assertFalse(
+            app.should_auto_execute_workspace_task(
+                "conv-sheet",
+                "create an excel file that shows a simple data table with numbers 0-9",
+                features,
+            )
+        )
+
+    def test_should_auto_execute_workspace_task_requires_autonomy_for_project_candidate(self):
+        features = app.FeatureFlags(agent_tools=True, workspace_write=True)
+        message = "Start making a python model to keep track of AVGO daily and build a DCF tracker."
+
+        self.assertTrue(app.request_requires_project_execution(message))
+        self.assertFalse(app.should_auto_execute_workspace_task("conv-avgo", message, features))
+        self.assertTrue(
+            app.should_auto_execute_workspace_task(
+                "conv-avgo",
+                message,
+                features,
+                history=[
+                    {"role": "assistant", "content": "I can keep iterating on larger builds too."},
+                    {"role": "user", "content": "go ahead and make progress if it looks like a bigger task"},
+                ],
+            )
+        )
+
+    def test_select_enabled_tools_prefers_spreadsheet_create_for_simple_workbook_request(self):
+        allowed = app.select_enabled_tools_from_route_intake(
+            "conv-sheet",
+            "create an excel file that shows a simple data table with numbers 0-9",
+            app.FeatureFlags(agent_tools=True, workspace_write=True, workspace_run_commands=True),
+            app.StructuredRouteIntake(
+                needs_workspace=True,
+                needs_artifact=True,
+                workspace_intent_hint="focused_write",
+            ),
+        )
+
+        self.assertIn("spreadsheet.create", allowed)
+        self.assertIn("spreadsheet.describe", allowed)
+        self.assertNotIn("workspace.patch_file", allowed)
+        self.assertNotIn("workspace.run_command", allowed)
+
+    def test_select_enabled_tools_uses_small_surface_for_simple_markdown_artifact(self):
+        allowed = app.select_enabled_tools_from_route_intake(
+            "conv-note",
+            "create a markdown file with ten bullets about closures",
+            app.FeatureFlags(agent_tools=True, workspace_write=True, workspace_run_commands=True),
+            app.StructuredRouteIntake(
+                needs_workspace=True,
+                needs_artifact=True,
+                workspace_intent_hint="focused_write",
+            ),
+        )
+
+        self.assertIn("workspace.patch_file", allowed)
+        self.assertNotIn("workspace.run_command", allowed)
+        self.assertNotIn("workspace.list_files", allowed)
+
+    def test_prepare_turn_request_promotes_project_candidate_without_auto_execute(self):
+        original_resolve_route_intake_for_turn = app.resolve_route_intake_for_turn
+        original_maybe_bootstrap_workspace_from_current_repo = app.maybe_bootstrap_workspace_from_current_repo
+        try:
+            async def fake_resolve_route_intake_for_turn(*args, **kwargs):
+                return app.StructuredRouteIntake(
+                    needs_workspace=True,
+                    needs_artifact=True,
+                    workspace_intent_hint="focused_write",
+                    answer_shape="build",
+                    reasoning="project_candidate",
+                    confidence=0.88,
+                )
+
+            app.resolve_route_intake_for_turn = fake_resolve_route_intake_for_turn
+            app.maybe_bootstrap_workspace_from_current_repo = lambda *args, **kwargs: None
+
+            prepared = asyncio.run(
+                app.prepare_turn_request({
+                    "conversation_id": "conv-project-preview",
+                    "message": "Start making a python model to keep track of AVGO daily and build a DCF tracker.",
+                    "feature_flags": {
+                        "agent_tools": True,
+                        "workspace_write": True,
+                    },
+                })
+            )
+        finally:
+            app.resolve_route_intake_for_turn = original_resolve_route_intake_for_turn
+            app.maybe_bootstrap_workspace_from_current_repo = original_maybe_bootstrap_workspace_from_current_repo
+
+        self.assertEqual(prepared.resolved_mode, "deep")
+        self.assertTrue(prepared.promoted_to_planning)
+        self.assertFalse(prepared.auto_execute_workspace)
 
     def test_format_build_substep_progress_message_uses_focus_text(self):
         rendered = app.format_build_substep_progress_message(

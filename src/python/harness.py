@@ -3465,7 +3465,10 @@ def build_tool_policy_trace(
         "resume_saved_workspace": bool(resume_saved_workspace),
         "route_intake": route_intake.as_metadata() if route_intake else {},
         "enabled_tools": tool_names,
-        "has_workspace_tools": any(name.startswith("workspace.") or name == "spreadsheet.describe" for name in tool_names),
+        "has_workspace_tools": any(
+            name.startswith("workspace.") or name in {"spreadsheet.describe", "spreadsheet.create"}
+            for name in tool_names
+        ),
         "has_web_tools": any(name.startswith("web.") for name in tool_names),
         "has_history_tools": "conversation.search_history" in tool_names,
         "has_render_tools": any(name == "workspace.render" for name in tool_names),
@@ -3492,7 +3495,7 @@ def record_workflow_step(
         execution.tool_names.append(tool_name)
         if tool_name.startswith("web."):
             execution.used_web = True
-        if tool_name.startswith("workspace.") or tool_name == "spreadsheet.describe":
+        if tool_name.startswith("workspace.") or tool_name in {"spreadsheet.describe", "spreadsheet.create"}:
             execution.used_workspace = True
     payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
     path = str(payload.get("path", "")).strip()
@@ -4554,6 +4557,119 @@ def load_spreadsheet_summary(target: pathlib.Path, sheet: Optional[str] = None) 
         "columns": dataframe_column_summaries(df),
         "preview_rows": dataframe_preview_records(df),
     }
+
+
+def sanitize_spreadsheet_sheet_name(name: str, fallback: str = "Sheet1") -> str:
+    """Return an Excel-safe worksheet name."""
+    cleaned = re.sub(r"[\[\]:*?/\\]+", " ", str(name or "").strip())
+    cleaned = " ".join(cleaned.split()).strip("'")
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:31]
+
+
+def normalize_spreadsheet_create_payload(
+    columns: Any,
+    rows: Any,
+) -> tuple[List[str], List[List[Any]]]:
+    """Normalize tool-call spreadsheet data into column labels plus rectangular rows."""
+    normalized_columns = [str(item).strip() for item in (columns or []) if str(item).strip()]
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list):
+        raise ValueError("rows must be an array")
+
+    if not rows:
+        if not normalized_columns:
+            normalized_columns = ["Value"]
+        return normalized_columns, []
+
+    if all(isinstance(item, dict) for item in rows):
+        if not normalized_columns:
+            seen: List[str] = []
+            for item in rows:
+                for key in item.keys():
+                    cleaned = str(key).strip()
+                    if cleaned and cleaned not in seen:
+                        seen.append(cleaned)
+            normalized_columns = seen or ["Value"]
+        normalized_rows: List[List[Any]] = []
+        for item in rows:
+            normalized_rows.append([item.get(column) for column in normalized_columns])
+        return normalized_columns, normalized_rows
+
+    if all(isinstance(item, (list, tuple)) for item in rows):
+        max_width = max((len(item) for item in rows), default=0)
+        if not normalized_columns:
+            normalized_columns = [f"Column {index + 1}" for index in range(max(1, max_width))]
+        width = max(len(normalized_columns), max_width)
+        if len(normalized_columns) < width:
+            normalized_columns.extend(
+                f"Column {index + 1}"
+                for index in range(len(normalized_columns), width)
+            )
+        normalized_rows = []
+        for item in rows:
+            values = list(item)
+            if len(values) < width:
+                values.extend([None] * (width - len(values)))
+            normalized_rows.append(values[:width])
+        return normalized_columns[:width], normalized_rows
+
+    if len(normalized_columns) > 1:
+        raise ValueError("scalar rows only support a single column")
+    if not normalized_columns:
+        normalized_columns = ["Value"]
+    return normalized_columns, [[item] for item in rows]
+
+
+def spreadsheet_create_result(
+    conversation_id: str,
+    rel_path: str,
+    columns: Any,
+    rows: Any,
+    *,
+    sheet: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a small CSV/TSV/XLSX spreadsheet artifact directly in the workspace."""
+    cleaned_path = str(rel_path or "").strip()
+    if not cleaned_path:
+        raise ValueError("path is required")
+    target = resolve_workspace_relative_path(conversation_id, cleaned_path)
+    suffix = target.suffix.lower()
+    if not suffix:
+        target = target.with_suffix(".xlsx")
+        suffix = ".xlsx"
+    if suffix not in SPREADSHEET_SUPPORTED_EXTENSIONS:
+        raise ValueError("spreadsheet path must end with .xlsx, .xlsm, .csv, or .tsv")
+    if suffix == ".xls":
+        raise ValueError("legacy .xls writing is not supported; use .xlsx instead")
+    if pd is None:
+        raise ValueError("Spreadsheet creation is unavailable because pandas is not installed")
+
+    normalized_columns, normalized_rows = normalize_spreadsheet_create_payload(columns, rows)
+    frame = pd.DataFrame(normalized_rows, columns=normalized_columns)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if suffix in {".csv", ".tsv"}:
+        frame.to_csv(target, index=False, sep="\t" if suffix == ".tsv" else ",")
+        chosen_sheet = pathlib.Path(target.name).name
+    else:
+        chosen_sheet = sanitize_spreadsheet_sheet_name(
+            str(sheet or pathlib.Path(target.name).stem or "Sheet1"),
+            fallback="Sheet1",
+        )
+        with pd.ExcelWriter(target, engine="openpyxl") as writer:
+            frame.to_excel(writer, sheet_name=chosen_sheet, index=False)
+
+    summary = load_spreadsheet_summary(target, sheet=chosen_sheet if suffix in {".xlsx", ".xlsm"} else None)
+    summary.update({
+        "path": format_workspace_path(target, get_workspace_path(conversation_id)),
+        "open_path": format_workspace_path(target, get_workspace_path(conversation_id)),
+        "created": True,
+        "content_kind": "spreadsheet" if suffix in BINARY_SPREADSHEET_EXTENSIONS else "csv",
+    })
+    return summary
 
 
 def is_pdf_path(path: str | pathlib.Path) -> bool:
@@ -6270,7 +6386,7 @@ def successful_workspace_write_paths(tool_results: List[Dict[str, Any]]) -> set[
         if not isinstance(payload, dict):
             continue
         tool_name = str(call.get("name") or "").strip()
-        if tool_name in {"workspace.patch_file", "workspace.render", "workspace.run_command"}:
+        if tool_name in {"workspace.patch_file", "workspace.render", "workspace.run_command", "spreadsheet.create"}:
             add_path(payload.get("path", ""))
         items = payload.get("items", [])
         if isinstance(items, list):
@@ -6404,6 +6520,7 @@ def finalize_model_response_text(
         history=history,
         tool_results=tool_results,
     )
+    cleaned = maybe_attach_created_workspace_artifact_reference(cleaned, tool_results)
     return cleaned
 
 
@@ -6540,6 +6657,100 @@ def maybe_attach_inline_code_artifact_reference(
     return f"{cleaned}\n\n[[artifact:{path}]]"
 
 
+PREVIEWABLE_CREATED_ARTIFACT_EXTENSIONS = {
+    ".xlsx", ".xlsm", ".csv", ".tsv", ".html", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".md", ".txt",
+}
+
+
+def created_artifact_priority(path: str, content_kind: str = "") -> int:
+    """Score a created workspace artifact for user-facing preview emphasis."""
+    cleaned_path = str(path or "").strip()
+    if not cleaned_path or cleaned_path.startswith(".ai/"):
+        return -1
+    suffix = pathlib.Path(cleaned_path).suffix.lower()
+    kind = str(content_kind or "").strip().lower()
+    if kind == "spreadsheet" or suffix in {".xlsx", ".xlsm"}:
+        return 120
+    if kind == "csv" or suffix in {".csv", ".tsv"}:
+        return 110
+    if suffix in {".html", ".pdf"}:
+        return 100
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg"}:
+        return 95
+    if suffix in {".md", ".txt"}:
+        return 70
+    if suffix in PREVIEWABLE_CREATED_ARTIFACT_EXTENSIONS:
+        return 60
+    return -1
+
+
+def preferred_created_workspace_artifact_path(
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Choose the best user-visible artifact created during this turn."""
+    candidates: List[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for entry_index, entry in enumerate(tool_results or []):
+        result = entry.get("result", {})
+        if not isinstance(result, dict) or not result.get("ok"):
+            continue
+        payload = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+        if not isinstance(payload, dict):
+            continue
+
+        def add_candidate(raw_path: Any, content_kind: Any = "") -> None:
+            cleaned_path = str(raw_path or "").strip()
+            if not cleaned_path or cleaned_path in seen:
+                return
+            priority = created_artifact_priority(cleaned_path, str(content_kind or ""))
+            if priority < 0:
+                return
+            seen.add(cleaned_path)
+            candidates.append((priority, entry_index, cleaned_path))
+
+        add_candidate(payload.get("path", ""), payload.get("content_kind", ""))
+        items = payload.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                add_candidate(item.get("path", ""), item.get("content_kind", ""))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def maybe_attach_created_workspace_artifact_reference(
+    response: str,
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Append a created artifact reference when a real user-visible file exists but was never surfaced."""
+    cleaned = str(response or "").strip()
+    if not cleaned:
+        return ""
+    if extract_artifact_references(cleaned):
+        return cleaned
+
+    preferred_path = preferred_created_workspace_artifact_path(tool_results)
+    if not preferred_path:
+        return cleaned
+
+    written_paths = successful_workspace_write_paths(tool_results or [])
+    referenced_path = ""
+    for raw_ref in extract_workspace_path_references(cleaned):
+        canonical = canonicalize_workspace_reference_path(raw_ref, written_paths)
+        if canonical == preferred_path:
+            referenced_path = canonical
+            break
+
+    artifact_tag = f"[[artifact:{preferred_path}]]"
+    if referenced_path:
+        return f"{cleaned}\n\n{artifact_tag}"
+    return f"{cleaned}\n\nCreated `{preferred_path}`.\n\n{artifact_tag}"
+
+
 def truncate_output(text: str, limit: int = COMMAND_OUTPUT_LIMIT) -> str:
     """Trim long command output while making truncation explicit."""
     if len(text) <= limit:
@@ -6567,6 +6778,7 @@ def build_tool_system_prompt(base_system_prompt: str) -> str:
 - workspace.inspect_document {"path":"papers/perelman.pdf"}
 - workspace.inspect_html {"path":"src/web/index.html"}
 - workspace.get_diagnostics {"path":"src/python/harness.py"}
+- spreadsheet.create {"path":"numbers_table.xlsx","sheet":"Numbers","columns":["Number"],"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}
 - workspace.patch_file {"path":"src/python/harness.py","edits":[{"old_text":"before","new_text":"after","expected_count":1}]}
 - workspace.patch_file {"path":"notes/todo.txt","create":true,"new_content":"hello"}
 - workspace.run_command {"command":["python3","main.py"],"cwd":"."}
@@ -6591,6 +6803,8 @@ Constraints:
 - When choosing Python packages or troubleshooting installs, use web.search or web.fetch_page to verify current package names, docs, and examples when helpful.
 - If workspace.run_command is available for this turn, use it instead of claiming you cannot run code, install packages, convert files, or inspect real command output.
 - workspace.render displays HTML in the workspace viewer panel; use it when the user asks to preview, render, or display HTML content.
+- spreadsheet.create writes a real CSV, TSV, or Excel workbook directly into the workspace; prefer it over ad hoc scripts when the user asked for a spreadsheet file.
+- If the user explicitly asked for an Excel workbook or `.xlsx` file, create `.xlsx` unless they clearly asked for CSV or TSV instead.
 - For HTML, dashboard, mini-app, landing-page, or visualization work, inspect the saved HTML with `workspace.inspect_html` after edits so you can critique responsiveness, structure, and likely blank-page issues before finishing.
 - When you generate a chart, plot, screenshot, PDF, or other visual result, save it as a workspace file such as PNG, SVG, HTML, or PDF so the UI can surface it as an artifact.
 - spreadsheet.describe is for CSV, TSV, and Excel inspection.
@@ -6770,6 +6984,7 @@ async def finalize_tool_loop_answer(
         history=history,
         tool_results=tool_results,
     )
+    cleaned = maybe_attach_created_workspace_artifact_reference(cleaned, tool_results)
     return ToolLoopOutcome(final_text=cleaned, tool_results=tool_results)
 
 @dataclass
@@ -6994,6 +7209,16 @@ def build_tool_permission_request(
             approval_target="tool",
             title="Use workspace files?",
             content=f"The assistant wants to inspect {path_preview} in this chat's workspace to ground the answer.",
+            preview=path_preview,
+        )
+
+    if name == "spreadsheet.create":
+        path_preview = tool_path_preview(arguments.get("path", "spreadsheet.xlsx"), "spreadsheet file")
+        return PermissionApprovalRequest(
+            key="tool:workspace.write",
+            approval_target="tool",
+            title="Create spreadsheet files?",
+            content=f"The assistant wants to create {path_preview} in this chat's workspace.",
             preview=path_preview,
         )
 
@@ -7338,6 +7563,131 @@ def request_prefers_illustrative_output(message: str) -> bool:
     if words & {"chart", "graph", "plot", "sequence", "table"} and words & {"show", "display", "render", "artifact", "output", "result"}:
         return True
     if words & display_terms and words & {"result", "output", "artifact"} and words & work_terms:
+        return True
+    return False
+
+
+def request_is_simple_spreadsheet_build(
+    message: str,
+    route_intake: Optional[StructuredRouteIntake] = None,
+) -> bool:
+    """Return whether the turn is a narrow file-creation ask for one spreadsheet artifact."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    file_terms = {"excel", "xlsx", "xls", "xlsm", "csv", "tsv", "spreadsheet", "workbook", "sheet"}
+    create_terms = {"create", "make", "generate", "write", "build"}
+    repo_terms = {"repo", "repository", "codebase", "project", "app", "service", "api", "website", "frontend", "backend"}
+    complex_terms = {
+        "chart", "graph", "plot", "dashboard", "pivot", "macro", "formulas", "formula",
+        "analysis", "analyze", "financial", "budget", "styled", "beautiful", "multi-file", "multifile",
+    }
+    if not (words & file_terms and words & create_terms):
+        return False
+    if words & repo_terms:
+        return False
+    if words & complex_terms:
+        return False
+    if request_prefers_illustrative_output(message) or message_requests_workspace_render(message):
+        return False
+    if request_is_repo_scaffold(message) or infer_explicit_planning_request(message):
+        return False
+    if route_intake is not None:
+        if str(route_intake.workspace_intent_hint or "none") not in {"focused_write", "none"}:
+            return False
+        if route_intake.web_search_requested or route_intake.local_rag_requested or route_intake.render_requested:
+            return False
+    return True
+
+
+def request_is_simple_single_artifact_build(
+    message: str,
+    route_intake: Optional[StructuredRouteIntake] = None,
+) -> bool:
+    """Return whether the turn asks for one narrow file artifact instead of a project build."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    if request_is_simple_spreadsheet_build(message, route_intake):
+        return True
+    if infer_explicit_planning_request(message) or request_is_repo_scaffold(message) or request_targets_current_repo(message):
+        return False
+
+    path_refs = extract_workspace_path_references(message)
+    if len(path_refs) > 1:
+        return False
+
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    create_terms = {"create", "make", "generate", "write", "draft", "build"}
+    artifact_terms = {
+        "file", "markdown", "md", "json", "yaml", "yml", "toml", "ini", "txt", "text",
+        "html", "page", "webpage", "website", "site", "readme", "note", "notes",
+        "csv", "tsv", "xml", "config", "template",
+    }
+    project_terms = {
+        "repo", "repository", "codebase", "project", "app", "application", "service", "api",
+        "backend", "frontend", "fullstack", "tracker", "workflow", "pipeline", "automation",
+        "dashboard", "model", "models", "system", "architecture", "component", "components",
+        "module", "modules", "package", "packages", "directory", "directories", "folder", "folders",
+        "script", "scripts", "program", "programs", "scrape", "scraper", "crawler", "bot",
+    }
+    explicit_single_file_suffixes = {
+        ".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".html",
+        ".csv", ".tsv", ".xml",
+    }
+    if not (words & create_terms):
+        return False
+    if words & project_terms:
+        return False
+    if any(phrase in text for phrase in ("multiple files", "multi file", "multi-file", "across files", "across multiple files")):
+        return False
+    if any(pathlib.Path(path).suffix.lower() in explicit_single_file_suffixes for path in path_refs):
+        return True
+    return bool(words & artifact_terms)
+
+
+def request_requires_project_execution(
+    message: str,
+    route_intake: Optional[StructuredRouteIntake] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether the request is big enough to justify deep project execution."""
+    text = " ".join((message or "").strip().lower().split())
+    if not text:
+        return False
+    if (
+        infer_explicit_planning_request(message)
+        or is_explicit_plan_execution_request(message)
+        or is_plan_approval_reply(message)
+    ):
+        return True
+    if request_is_simple_single_artifact_build(message, route_intake):
+        return False
+    if request_is_repo_scaffold(message) or request_targets_current_repo(message):
+        return True
+
+    path_refs = extract_workspace_path_references(message)
+    if len(path_refs) > 1:
+        return True
+
+    words = set(re.findall(r"[a-z0-9_+-]+", text))
+    project_object_terms = {
+        "repo", "repository", "codebase", "project", "app", "application", "service", "api",
+        "tracker", "workflow", "pipeline", "automation", "dashboard", "model", "models",
+        "system", "systems", "component", "components", "module", "modules", "package", "packages",
+    }
+    project_build_terms = {
+        "refactor", "rewrite", "restructure", "migrate", "integrate", "split", "extract",
+        "scaffold", "bootstrap", "wire", "implement", "fix", "debug", "build", "start", "setup",
+    }
+    if {"multiple", "multi", "many", "across"} & words and {"files", "modules", "components", "pages", "routes"} & words:
+        return True
+    if words & project_build_terms and words & project_object_terms:
+        return True
+    if route_intake is not None and str(route_intake.workspace_intent_hint or "none") == "broad_write":
+        return True
+    if request_demands_agent_execution(message, history=history) and words & project_object_terms:
         return True
     return False
 
@@ -8743,7 +9093,10 @@ def should_preview_deep_plan(session: "DeepSession") -> bool:
         return False
     if infer_explicit_planning_request(session.message):
         return True
-    return classify_workspace_intent(session.message, history=session.history) in {"focused_write", "broad_write"}
+    return request_requires_project_execution(
+        session.message,
+        history=session.history,
+    )
 
 
 def should_auto_execute_workspace_task(
@@ -8759,14 +9112,15 @@ def should_auto_execute_workspace_task(
         return False
     if request_is_about_limitations(message):
         return False
-    if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
+    if request_is_simple_single_artifact_build(message):
         return False
-    intent = classify_workspace_intent(message, history=history)
-    if intent not in {"focused_write", "broad_write"}:
+    if not request_requires_project_execution(message, history=history):
+        return False
+    if is_explicit_plan_execution_request(message) or is_plan_approval_reply(message):
         return False
     if conversation_prefers_autonomous_progress(message, history=history):
         return True
-    return should_use_workspace_tools(conversation_id, message, features, history=history)
+    return False
 
 
 def should_resume_saved_workspace_task(
@@ -8793,9 +9147,13 @@ def should_resume_saved_workspace_task(
     return bool(payload.get("plan"))
 
 
-def route_intake_allows_workspace_execution(route_intake: StructuredRouteIntake) -> bool:
-    """Return whether the structured intake truly calls for workspace execution."""
-    return bool(
+def route_intake_allows_workspace_execution(
+    route_intake: StructuredRouteIntake,
+    message: str = "",
+    history: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Return whether this turn should be eligible for deep project execution."""
+    if not (
         route_intake.needs_workspace
         or route_intake.render_requested
         or str(route_intake.workspace_intent_hint or "none") in {
@@ -8804,6 +9162,12 @@ def route_intake_allows_workspace_execution(route_intake: StructuredRouteIntake)
             "focused_write",
             "broad_write",
         }
+    ):
+        return False
+    return request_requires_project_execution(
+        message,
+        route_intake=route_intake,
+        history=history,
     )
 
 
@@ -11694,6 +12058,7 @@ def allowed_workspace_tools(
     if include_render:
         allowed.append("workspace.render")
     if features.workspace_write and include_write:
+        allowed.append("spreadsheet.create")
         allowed.append("workspace.patch_file")
     if features.workspace_run_commands:
         allowed.append("workspace.run_command")
@@ -14032,6 +14397,7 @@ SUPPORTED_TOOL_NAMES = {
     "workspace.patch_file",
     "workspace.run_command",
     "workspace.render",
+    "spreadsheet.create",
     "spreadsheet.describe",
     "conversation.search_history",
     "web.search",
@@ -14041,7 +14407,7 @@ SUPPORTED_TOOL_NAMES = {
 SUPPORTED_TOOL_NAME_PATTERN = re.compile(
     r'"name"\s*:\s*"(?P<name>'
     r'workspace\.(?:list_files|grep|read_file|inspect_document|inspect_html|get_diagnostics|patch_file|run_command|render)'
-    r'|spreadsheet\.describe'
+    r'|spreadsheet\.(?:create|describe)'
     r'|conversation\.search_history'
     r'|web\.(?:search|fetch_page)'
     r')"'
@@ -14131,7 +14497,7 @@ def format_leaked_tool_call_message(call: Dict[str, Any], features: "FeatureFlag
             "Please retry the request."
         )
 
-    if name.startswith("workspace.") or name == "spreadsheet.describe":
+    if name.startswith("workspace.") or name in {"spreadsheet.describe", "spreadsheet.create"}:
         return (
             "I accidentally exposed an internal workspace tool call instead of a normal reply. "
             "Please retry the request."
@@ -16385,6 +16751,8 @@ def tool_activity_label(name: str) -> str:
         return "Verify"
     if name in {"workspace.list_files", "workspace.grep", "workspace.read_file", "spreadsheet.describe"}:
         return "Explore"
+    if name == "spreadsheet.create":
+        return "Create"
     if name == "workspace.patch_file":
         return "Edit"
     if name == "workspace.render":
@@ -16418,6 +16786,9 @@ def tool_status_summary(name: str, arguments: Dict[str, Any]) -> str:
         return f"Running {command_preview_text(arguments.get('command', []))}"
     if name == "workspace.render":
         return f"Rendering {tool_path_preview(arguments.get('title', 'HTML preview'), 'HTML preview')}"
+    if name == "spreadsheet.create":
+        target = tool_path_preview(arguments.get("path", "spreadsheet.xlsx"), "spreadsheet")
+        return f"Creating {target}"
     if name == "spreadsheet.describe":
         target = tool_path_preview(arguments.get("path", ""), "spreadsheet")
         sheet = compact_tool_text(arguments.get("sheet", ""), limit=40)
@@ -16572,6 +16943,16 @@ def tool_result_preview(
         if payload.get("created"):
             return f"Created {path} ({payload.get('bytes_written', 0)} bytes{validation_note})"
         return f"Edited {path} ({pluralize_tool_count(payload.get('edits_applied', 0), 'change')}{validation_note})"
+
+    if name == "spreadsheet.create" or payload.get("content_kind") in {"spreadsheet", "csv"}:
+        path = tool_path_preview(payload.get("path", arguments.get("path", "")), "spreadsheet")
+        sheet = compact_tool_text(payload.get("sheet", arguments.get("sheet", "")), limit=40)
+        sheet_note = f" [{sheet}]" if sheet else ""
+        return (
+            f"Created {path}{sheet_note}: "
+            f"{pluralize_tool_count(payload.get('row_count', 0), 'row')}, "
+            f"{pluralize_tool_count(payload.get('column_count', 0), 'column')}"
+        )
 
     if name == "spreadsheet.describe" or "sheet_names" in payload:
         sheet = compact_tool_text(payload.get("sheet", ""), limit=40)
@@ -16960,6 +17341,14 @@ async def execute_tool_call(
                 conversation_id,
                 str(arguments.get("html", "")),
                 str(arguments.get("title", "")),
+            )
+        elif name == "spreadsheet.create":
+            result = spreadsheet_create_result(
+                conversation_id,
+                str(arguments.get("path", "")),
+                arguments.get("columns"),
+                arguments.get("rows"),
+                sheet=str(arguments.get("sheet", "")).strip() or None,
             )
         elif name == "workspace.run_command":
             result = await workspace_run_command_result(
@@ -19408,6 +19797,8 @@ def select_enabled_tools_from_route_intake(
     allowed: List[str] = []
     intent = str(route_intake.workspace_intent_hint or "none")
     render_requested = bool(route_intake.render_requested)
+    simple_spreadsheet_build = request_is_simple_spreadsheet_build(message, route_intake)
+    simple_single_artifact_build = request_is_simple_single_artifact_build(message, route_intake)
     workspace_requested = bool(
         route_intake.needs_workspace
         or render_requested
@@ -19418,7 +19809,25 @@ def select_enabled_tools_from_route_intake(
         )
     )
     if workspace_requested and features.agent_tools:
-        if intent == "focused_read":
+        if simple_spreadsheet_build:
+            if features.workspace_write:
+                allowed.append("spreadsheet.create")
+            allowed.append("spreadsheet.describe")
+        elif simple_single_artifact_build:
+            if features.workspace_write:
+                allowed.append("workspace.patch_file")
+            htmlish = bool(
+                {"html", "page", "webpage", "website", "site"} & set(re.findall(r"[a-z0-9_+-]+", message.lower()))
+                or any(
+                    pathlib.Path(path).suffix.lower() == ".html"
+                    for path in extract_workspace_path_references(message)
+                )
+            )
+            if htmlish:
+                allowed.append("workspace.inspect_html")
+                if render_requested:
+                    allowed.append("workspace.render")
+        elif intent == "focused_read":
             path_refs = extract_workspace_path_references(message)
             if path_refs and any(pathlib.Path(path).suffix.lower() in SPREADSHEET_SUPPORTED_EXTENSIONS for path in path_refs):
                 allowed.append("spreadsheet.describe")
@@ -21063,7 +21472,10 @@ def format_turn_route_activity(
         return f"Routing directly to {freshness} for a concise answer."
     lines = [format_turn_assessment_summary(assessment), f"Mode {mode}. Intent {assessment.workspace_intent}."]
     if promoted_to_planning:
-        lines.append("Explicit planning language promoted this turn into the planning loop.")
+        if assessment.explicit_planning_request:
+            lines.append("Explicit planning language promoted this turn into project mode.")
+        else:
+            lines.append("This request looks big enough for project mode, so I prepared a plan before execution.")
     return " ".join(line for line in lines if line)
 
 
@@ -21080,7 +21492,7 @@ def should_route_prepared_turn_via_direct_search(prepared: PreparedTurnRequest) 
     if prepared.assessment.primary_skill != "search":
         return False
     if any(
-        tool_name.startswith("workspace.") or tool_name == "spreadsheet.describe"
+        tool_name.startswith("workspace.") or tool_name in {"spreadsheet.describe", "spreadsheet.create"}
         for tool_name in prepared.enabled_tools
     ):
         return False
@@ -21473,6 +21885,15 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         features=features,
         history=history,
     )
+    deep_mode_candidate = (
+        not slash_command
+        and not direct_web_summary
+        and route_intake_allows_workspace_execution(
+            route_intake,
+            effective_message,
+            history=history,
+        )
+    )
 
     resume_saved_workspace = (
         not slash_command
@@ -21482,7 +21903,7 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     auto_execute_workspace = (
         not slash_command
         and not direct_web_summary
-        and route_intake_allows_workspace_execution(route_intake)
+        and deep_mode_candidate
         and (
             should_auto_execute_workspace_task(conv_id, effective_message, features, history=history)
             or resume_saved_workspace
@@ -21490,12 +21911,19 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
     )
     workspace_requested = (
         bool(route_intake.needs_workspace)
+        or deep_mode_candidate
         or auto_execute_workspace
         or resume_saved_workspace
     )
     local_rag_requested = bool(route_intake.local_rag_requested)
     web_search_requested = bool(route_intake.web_search_requested)
-    if not slash_command and mode != "deep" and not auto_execute_workspace and not resume_saved_workspace:
+    if (
+        not slash_command
+        and mode != "deep"
+        and not auto_execute_workspace
+        and not resume_saved_workspace
+        and not deep_mode_candidate
+    ):
         enabled_tools = select_direct_answer_tools(
             effective_message,
             enabled_tools,
@@ -21536,7 +21964,8 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         not slash_command
         and mode != "deep"
         and (
-            (assessment.explicit_planning_request and workspace_requested)
+            deep_mode_candidate
+            or (assessment.explicit_planning_request and workspace_requested)
             or auto_execute_workspace
             or resume_saved_workspace
         )
