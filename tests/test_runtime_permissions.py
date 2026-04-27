@@ -744,13 +744,14 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("approval panel", preview)
         self.assertIn("Approve And Run", preview)
 
-    def test_natural_python_build_request_auto_executes_workspace_flow(self):
+    def test_natural_python_build_request_escalates_to_project_mode_but_not_auto_execute(self):
         message = "Start making a python model to keep track of AVGO daily and build a DCF tracker."
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)
 
         self.assertEqual(app.classify_workspace_intent(message), "focused_write")
         self.assertTrue(app.should_use_workspace_tools("conv-avgo", message, features))
-        self.assertTrue(app.should_auto_execute_workspace_task("conv-avgo", message, features))
+        self.assertTrue(app.request_requires_project_execution(message))
+        self.assertFalse(app.should_auto_execute_workspace_task("conv-avgo", message, features))
 
     def test_autonomy_preference_is_detected_from_recent_user_history(self):
         prefers = app.conversation_prefers_autonomous_progress(
@@ -1079,6 +1080,16 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("workspace.get_diagnostics", tools)
         self.assertIn("workspace.run_command", tools)
 
+    def test_allowed_workspace_tools_include_spreadsheet_create_when_write_enabled(self):
+        tools = app.allowed_workspace_tools(
+            app.FeatureFlags(workspace_write=True),
+            include_write=True,
+        )
+
+        self.assertIn("spreadsheet.create", tools)
+        self.assertIn("spreadsheet.describe", tools)
+        self.assertIn("workspace.patch_file", tools)
+
     def test_allowed_workspace_tools_include_html_inspection(self):
         features = app.FeatureFlags(agent_tools=True, workspace_write=True)
         allowed = app.allowed_workspace_tools(features, include_write=True, include_render=True)
@@ -1086,8 +1097,6 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("workspace.inspect_html", allowed)
         self.assertIn("workspace.patch_file", allowed)
         self.assertIn("workspace.render", allowed)
-        self.assertEqual(result["items"][0]["content_kind"], "image")
-        self.assertEqual(result["items"][1]["path"], "notes.txt")
 
     def test_request_targets_current_repo_detects_existing_repo_language(self):
         self.assertTrue(app.request_targets_current_repo("Review this repo for the top 3 issues."))
