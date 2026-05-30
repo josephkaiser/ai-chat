@@ -235,13 +235,17 @@ function defaultComposerStatus(): string {
     if (state.composerUploadingCount > 0) {
         return `Uploading ${state.composerUploadingCount} file${state.composerUploadingCount === 1 ? "" : "s"}…`;
     }
-    if (state.connectionState === "offline") {
+    if (!state.runtimeReachable) {
         return "Runtime offline.";
     }
     if (!state.modelAvailable) {
         return state.modelName ? `Model loading: ${state.modelName}` : "Model loading…";
     }
-    return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+    const readyLabel = state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+    if (!state.wsConnected) {
+        return `${readyLabel} Using HTTP fallback (websocket unavailable).`;
+    }
+    return readyLabel;
 }
 
 function syncComposerActions(): void {
@@ -294,15 +298,15 @@ function syncShellLayout(): void {
 }
 
 function syncRuntimeSummary(): void {
-    if (state.connectionState === "offline") {
-        connectionBadge.className = "status-badge offline";
-        connectionBadge.textContent = "Offline";
-        return;
-    }
-
     if (state.generating) {
         connectionBadge.className = "status-badge streaming";
         connectionBadge.textContent = "Streaming";
+        return;
+    }
+
+    if (!state.runtimeReachable) {
+        connectionBadge.className = "status-badge offline";
+        connectionBadge.textContent = "Offline";
         return;
     }
 
@@ -874,6 +878,12 @@ function stripSingleFenceFromMessage(raw: string): string {
     return [before, after].filter(Boolean).join("\n\n").trim();
 }
 
+function artifactMaterializedBody(raw: string): string {
+    const fence = extractSingleFenceFromMessage(raw);
+    if (fence) return fence.body;
+    return String(raw || "").trim();
+}
+
 function parseArtifactMessage(raw: string): {
     artifactPaths: string[];
     hiddenArtifactPaths: string[];
@@ -901,8 +911,8 @@ function parseArtifactMessage(raw: string): {
         return {
             artifactPaths,
             hiddenArtifactPaths,
-            displayContent: [stripSingleFenceFromMessage(before), stripSingleFenceFromMessage(after)].filter(Boolean).join("\n\n").trim(),
-            materializedBody: after,
+            displayContent: [before, stripSingleFenceFromMessage(after)].filter(Boolean).join("\n\n").trim(),
+            materializedBody: artifactMaterializedBody(after),
         };
     }
 
@@ -912,16 +922,17 @@ function parseArtifactMessage(raw: string): {
             artifactPaths,
             hiddenArtifactPaths,
             displayContent: stripSingleFenceFromMessage(before).trim(),
-            materializedBody: before,
+            materializedBody: artifactMaterializedBody(before),
         };
     }
 
     const displayParts = [before, after].filter(Boolean);
+    const materializedSource = after || before;
     return {
         artifactPaths,
         hiddenArtifactPaths,
-        displayContent: displayParts.join("\n\n").trim(),
-        materializedBody: after,
+        displayContent: stripSingleFenceFromMessage(displayParts.join("\n\n")).trim(),
+        materializedBody: artifactMaterializedBody(materializedSource),
     };
 }
 
@@ -934,19 +945,16 @@ function shouldMaterializeArtifact(path: string, body: string): boolean {
 function normalizeArtifactBodyForWrite(path: string, raw: string): string {
     const trimmed = String(raw || "").trim();
     const fence = unwrapSingleFence(trimmed) || extractSingleFenceFromMessage(trimmed);
-    if (!fence) return trimmed;
     const extension = artifactFileExtension(path);
-    if (!extension) return fence.body;
-    if (extension === "md" && ["markdown", "md", "text"].includes(fence.language)) {
-        return fence.body;
+    if (fence) {
+        if (!extension) return fence.body;
+        if (extension === "md" && ["markdown", "md", "text"].includes(fence.language)) {
+            return fence.body;
+        }
+        if (extension !== "md") {
+            return fence.body;
+        }
     }
-    if (extension === fence.language) {
-        return fence.body;
-    }
-    if (extension === "py" && fence.language === "python") return fence.body;
-    if (extension === "js" && fence.language === "javascript") return fence.body;
-    if (extension === "ts" && fence.language === "javascript") return fence.body;
-    if (extension === "sh" && fence.language === "bash") return fence.body;
     return trimmed;
 }
 
@@ -1663,6 +1671,16 @@ function highlightCode(rawCode: string, language?: string): string {
     return highlighted.replace(/@@CODETOKEN_(\d+)@@/g, (_match, index: string) => placeholders[Number(index)] || "");
 }
 
+function renderCodePreview(content: string, language: string): string {
+    const normalizedLanguage = normalizeCodeLanguage(language);
+    const cleanCode = String(content || "").replace(/\r\n?/g, "\n");
+    return `
+        <div class="preview-code-block">
+            <pre><code class="language-${escapeHtml(normalizedLanguage)}">${highlightCode(cleanCode, normalizedLanguage)}</code></pre>
+        </div>
+    `.trim();
+}
+
 function renderRichText(raw: string): string {
     const singleFence = unwrapSingleFence(raw);
     if (singleFence && ["markdown", "md"].includes(singleFence.language)) {
@@ -1871,17 +1889,17 @@ function renderMessages(): void {
         const artifactObjectHtml = message.role === "assistant" && parsedArtifacts.artifactPaths.length && parsedArtifacts.materializedBody
             ? renderArtifactObject(
                 parsedArtifacts.artifactPaths,
-                parsedArtifacts.displayContent || "",
+                "",
                 parsedArtifacts.displayContent ? "Updated file in viewer" : "Saved in viewer",
             )
             : "";
         const bodyHtml = parsedArtifacts.displayContent
             ? `<div class="message-content rich-text">${message.role === "assistant" ? renderAssistantRichText(parsedArtifacts.displayContent || "", index) : renderRichText(parsedArtifacts.displayContent || "")}</div>`
             : "";
-        const messageBody = artifactObjectHtml || `
-                ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
-                ${bodyHtml}
-            `;
+        const refHtml = !artifactObjectHtml && parsedArtifacts.artifactPaths.length
+            ? renderArtifactReferences(parsedArtifacts.artifactPaths)
+            : "";
+        const messageBody = [artifactObjectHtml, bodyHtml, refHtml].filter(Boolean).join("") || "";
 
         return `
             <article class="message ${role}">
@@ -2369,8 +2387,7 @@ function renderPreview(payload: WorkspaceFilePayload): void {
         }
         if (shouldRenderTextAsCode(payload.path || "")) {
             const language = inferredPreviewLanguage(payload.path || "");
-            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderRichText(`\`\`\`${language}\n${payload.content || ""}\n\`\`\``)}</div>`;
-            bindArtifactLinks(filePreview);
+            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderCodePreview(payload.content || "", language)}</div>`;
             return;
         }
     }
@@ -2518,10 +2535,29 @@ async function fetchHealth(): Promise<void> {
             model_available: boolean;
             model: string;
             message: string;
+            loading?: {
+                eta_seconds?: number | null;
+                elapsed_seconds?: number | null;
+                status?: string;
+            };
         }>("/health");
+        state.runtimeReachable = true;
         state.modelAvailable = Boolean(health.model_available);
         state.modelName = String(health.model || "").trim();
+        if (!state.modelAvailable) {
+            const loading = health.loading || {};
+            const eta = typeof loading.eta_seconds === "number" ? loading.eta_seconds : null;
+            if (eta && eta > 0) {
+                state.modelName = state.modelName || "Qwen3-14B";
+                if (!state.generating) {
+                    setComposerHint(
+                        `${health.message || "Model loading…"} (~${Math.round(eta)}s remaining)`,
+                    );
+                }
+            }
+        }
     } catch (error) {
+        state.runtimeReachable = false;
         state.modelAvailable = false;
         state.modelName = "";
         setComposerHint(error instanceof Error ? error.message : "Health check failed");
@@ -2833,6 +2869,194 @@ function handleChatEvent(event: ChatEvent): void {
     }
 }
 
+type SlashCommandDef = {
+    name: string;
+    aliases: string[];
+    description: string;
+};
+
+type ParsedSlashCommand = {
+    name: string;
+    raw_name: string;
+    args: string;
+};
+
+const SLASH_COMMANDS: SlashCommandDef[] = [
+    { name: "search", aliases: ["web"], description: "Search the web and summarize sources" },
+    { name: "grep", aliases: [], description: "Search text inside workspace files" },
+    { name: "plan", aliases: [], description: "Plan workspace changes before executing" },
+    { name: "code", aliases: ["edit"], description: "Inspect the workspace and implement a change" },
+    { name: "pip", aliases: [], description: "Install Python packages into the managed environment" },
+];
+
+const slashMenuState = {
+    open: false,
+    query: "",
+    activeIndex: 0,
+    triggerStart: 0,
+};
+
+function slashCommandMenuElement(): HTMLDivElement | null {
+    return document.getElementById("slashCommandMenu") as HTMLDivElement | null;
+}
+
+function resolveSlashCommandName(raw: string): SlashCommandDef | undefined {
+    const normalized = raw.trim().toLowerCase();
+    return SLASH_COMMANDS.find((item) => item.name === normalized || item.aliases.includes(normalized));
+}
+
+function parseComposerSlashCommand(message: string): ParsedSlashCommand | null {
+    const cleaned = message.trim().replace(/^\uFEFF/, "");
+    const match = cleaned.match(/^\s*\/([a-z0-9_-]+)(?:\s+(.*))?\s*$/is);
+    if (!match) return null;
+    const raw = String(match[1] || "").trim().toLowerCase();
+    const definition = resolveSlashCommandName(raw);
+    if (!definition) return null;
+    return {
+        name: definition.name,
+        raw_name: raw,
+        args: String(match[2] || "").trim(),
+    };
+}
+
+function composerSlashTrigger(): { query: string; start: number } | null {
+    const value = composerInput.value;
+    const caret = composerInput.selectionStart ?? value.length;
+    const before = value.slice(0, caret);
+    const match = before.match(/(?:^|\s)\/([a-z0-9_-]*)$/i);
+    if (!match) return null;
+    const token = match[0];
+    const start = before.length - token.length + (token.startsWith(" ") ? 1 : 0);
+    return { query: String(match[1] || "").toLowerCase(), start };
+}
+
+function filteredSlashCommands(query: string): SlashCommandDef[] {
+    if (!query) return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter(
+        (item) => item.name.startsWith(query) || item.aliases.some((alias) => alias.startsWith(query)),
+    );
+}
+
+function hideSlashCommandMenu(): void {
+    slashMenuState.open = false;
+    slashMenuState.activeIndex = 0;
+    const menu = slashCommandMenuElement();
+    if (!menu) return;
+    menu.hidden = true;
+    menu.innerHTML = "";
+}
+
+function applySlashCommandSelection(name: string, start: number): void {
+    const value = composerInput.value;
+    const caret = composerInput.selectionStart ?? value.length;
+    const prefix = value.slice(0, start);
+    const suffix = value.slice(caret);
+    composerInput.value = `${prefix}/${name} ${suffix}`;
+    const nextCaret = prefix.length + name.length + 2;
+    composerInput.setSelectionRange(nextCaret, nextCaret);
+    hideSlashCommandMenu();
+    composerInput.focus();
+    syncComposerHeight();
+    updateSlashCommandMenu();
+}
+
+function renderSlashCommandMenu(): void {
+    const menu = slashCommandMenuElement();
+    if (!menu) return;
+    const trigger = composerSlashTrigger();
+    if (!trigger) {
+        hideSlashCommandMenu();
+        return;
+    }
+    const matches = filteredSlashCommands(trigger.query);
+    if (!matches.length) {
+        hideSlashCommandMenu();
+        return;
+    }
+    slashMenuState.open = true;
+    slashMenuState.query = trigger.query;
+    slashMenuState.triggerStart = trigger.start;
+    if (slashMenuState.activeIndex >= matches.length) {
+        slashMenuState.activeIndex = 0;
+    }
+    menu.hidden = false;
+    menu.innerHTML = matches.map((item, index) => {
+        const aliasNote = item.aliases.length ? ` · /${item.aliases.join(", /")}` : "";
+        return `
+            <button
+                type="button"
+                class="slash-command-item${index === slashMenuState.activeIndex ? " active" : ""}"
+                data-slash-name="${escapeHtml(item.name)}"
+                role="option"
+                aria-selected="${index === slashMenuState.activeIndex ? "true" : "false"}"
+            >
+                <span class="slash-command-name">/${escapeHtml(item.name)}</span>
+                <span class="slash-command-meta">${escapeHtml(item.description)}${aliasNote ? `<span class="slash-command-aliases">${escapeHtml(aliasNote)}</span>` : ""}</span>
+            </button>
+        `;
+    }).join("");
+    menu.querySelectorAll<HTMLButtonElement>(".slash-command-item").forEach((button, index) => {
+        button.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            applySlashCommandSelection(button.dataset.slashName || matches[index].name, slashMenuState.triggerStart);
+        });
+    });
+}
+
+function updateSlashCommandMenu(): void {
+    renderSlashCommandMenu();
+}
+
+function buildChatFeatureFlags(message: string): {
+    agent_tools: boolean;
+    workspace_write: boolean;
+    workspace_run_commands: boolean;
+    local_rag: boolean;
+    web_search: boolean;
+    auto_approve_tool_permissions: boolean;
+} {
+    const slashCommand = parseComposerSlashCommand(message);
+    const agentMode = slashCommand !== null;
+    return {
+        agent_tools: agentMode,
+        workspace_write: agentMode,
+        workspace_run_commands: agentMode,
+        local_rag: agentMode,
+        web_search: agentMode,
+        auto_approve_tool_permissions: agentMode,
+    };
+}
+
+function handleSlashCommandMenuKeydown(event: KeyboardEvent): boolean {
+    if (!slashMenuState.open) return false;
+    const matches = filteredSlashCommands(slashMenuState.query);
+    if (!matches.length) return false;
+    if (event.key === "ArrowDown") {
+        event.preventDefault();
+        slashMenuState.activeIndex = (slashMenuState.activeIndex + 1) % matches.length;
+        renderSlashCommandMenu();
+        return true;
+    }
+    if (event.key === "ArrowUp") {
+        event.preventDefault();
+        slashMenuState.activeIndex = (slashMenuState.activeIndex - 1 + matches.length) % matches.length;
+        renderSlashCommandMenu();
+        return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const selected = matches[slashMenuState.activeIndex] || matches[0];
+        applySlashCommandSelection(selected.name, slashMenuState.triggerStart);
+        return true;
+    }
+    if (event.key === "Escape") {
+        event.preventDefault();
+        hideSlashCommandMenu();
+        return true;
+    }
+    return false;
+}
+
 async function dispatchChatPayload(payload: Record<string, unknown>): Promise<void> {
     const socket = state.ws;
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -2869,6 +3093,12 @@ async function sendCurrentMessage(): Promise<void> {
         startNewChat();
     }
 
+    const slashCommand = parseComposerSlashCommand(message);
+    if (slashCommand && !slashCommand.args.trim()) {
+        setComposerHint(`Add a task after /${slashCommand.name}, for example: /${slashCommand.name} fix the login bug`);
+        return;
+    }
+
     state.messages.push({
         role: "user",
         content: message || attachments.map((path) => `Attached \`${path.split("/").pop() || path}\``).join(", "),
@@ -2884,21 +3114,26 @@ async function sendCurrentMessage(): Promise<void> {
     renderConversations();
     setGenerating(true);
     state.activeStreamConversationId = state.currentConversationId;
-    setThinkingStatus(state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading.");
+    setThinkingStatus(
+        slashCommand
+            ? `Running /${slashCommand.name}…`
+            : (state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading."),
+    );
 
-    const payload = {
+    hideSlashCommandMenu();
+    const features = buildChatFeatureFlags(message);
+    const payload: Record<string, unknown> = {
         message,
         conversation_id: state.currentConversationId,
         workspace_id: state.currentWorkspaceId || null,
         attachments,
         mode: "auto",
         turn_kind: "visible_chat",
-        features: {
-            agent_tools: true,
-            workspace_write: true,
-            auto_approve_tool_permissions: true,
-        },
+        features,
     };
+    if (slashCommand) {
+        payload.slash_command = slashCommand;
+    }
 
     try {
         await dispatchChatPayload(payload);
@@ -3017,9 +3252,11 @@ async function openFile(path: string): Promise<void> {
 function connectWebSocket(): void {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     state.ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
+    state.wsConnected = false;
     setConnectionState("offline");
 
     state.ws.addEventListener("open", () => {
+        state.wsConnected = true;
         setConnectionState(state.generating ? "streaming" : "online");
         void fetchHealth();
     });
@@ -3034,7 +3271,9 @@ function connectWebSocket(): void {
     });
 
     state.ws.addEventListener("close", () => {
+        state.wsConnected = false;
         setConnectionState("offline");
+        syncRuntimeSummary();
         if (state.generating) {
             setThinkingStatus("The reply stopped before it could finish.", { error: true, persistent: true });
             finishGeneration({ preserveThinking: true });
@@ -3044,7 +3283,9 @@ function connectWebSocket(): void {
     });
 
     state.ws.addEventListener("error", () => {
+        state.wsConnected = false;
         setConnectionState("offline");
+        syncRuntimeSummary();
     });
 }
 
@@ -3131,6 +3372,11 @@ function attachEvents(): void {
 
     composerInput.addEventListener("input", () => {
         syncComposerHeight();
+        updateSlashCommandMenu();
+    });
+
+    composerInput.addEventListener("blur", () => {
+        window.setTimeout(() => hideSlashCommandMenu(), 120);
     });
 
     composerInput.addEventListener("paste", (event: ClipboardEvent) => {
@@ -3187,6 +3433,9 @@ function attachEvents(): void {
     });
 
     composerInput.addEventListener("keydown", (event: KeyboardEvent) => {
+        if (handleSlashCommandMenuKeydown(event)) {
+            return;
+        }
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             void sendCurrentMessage();
@@ -3196,6 +3445,7 @@ function attachEvents(): void {
 
 async function bootstrap(): Promise<void> {
     attachEvents();
+    hideSlashCommandMenu();
     syncShellLayout();
     renderMessages();
     renderConversations();

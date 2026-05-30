@@ -47,6 +47,3 @@ export const refreshFixtureReviewButton = query("#refreshFixtureReviewButton");
 export const fixtureReviewList = query("#fixtureReviewList");
 export const fixtureReviewDetail = query("#fixtureReviewDetail");
 export const resetAppButton = query("#resetAppButton");
-
-
-//# sourceURL=/Users/joe/dev/ai-chat/src/web/dom.ts

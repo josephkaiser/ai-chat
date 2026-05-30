@@ -11,10 +11,32 @@ import re
 from typing import Dict, List, Tuple
 
 # Pairs (open, close) — order matters when multiple opens appear in one buffer (earliest wins).
+THINK_OPEN = "<" + "think" + ">"
+THINK_CLOSE = "</" + "think" + ">"
 THINK_TAG_PAIRS: Tuple[Tuple[str, str], ...] = (
-    ("<redacted_thinking>", "</redacted_thinking>"),
     ("<think>", "</think>"),
+    (THINK_OPEN, THINK_CLOSE),
 )
+
+
+def strip_stream_special_tokens(text: str) -> str:
+    """Remove chat-template special tokens and thinking blocks from saved text."""
+    if not text:
+        return text
+    text = re.sub(r"<\|[^|]*\|>", "", text)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(
+        rf"{re.escape(THINK_OPEN)}.*?{re.escape(THINK_CLOSE)}",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return text.strip()
+
+
+def visible_model_text_from_stream(text: str) -> str:
+    """Return user-visible answer text from a raw streamed completion."""
+    return strip_stream_special_tokens(text)
 
 
 def _strip_incomplete_tag_suffix(buffer: str, *needles: str) -> Tuple[str, str]:
@@ -27,18 +49,6 @@ def _strip_incomplete_tag_suffix(buffer: str, *needles: str) -> Tuple[str, str]:
             if needle.startswith(buffer[-k:]):
                 return buffer[:-k], buffer[-k:]
     return buffer, ""
-
-
-def strip_stream_special_tokens(text: str) -> str:
-    """Remove chat-template special tokens and thinking blocks from saved text."""
-    if not text:
-        return text
-    # Remove <|xxx|> template tokens
-    text = re.sub(r"<\|[^|]*\|>", "", text)
-    # Remove <think>...</think> and <redacted_thinking>...</redacted_thinking> blocks
-    text = re.sub(r"<redacted_thinking>.*?</redacted_thinking>", "", text, flags=re.DOTALL)
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    return text.strip()
 
 
 def _strip_template_noise(raw: str) -> str:

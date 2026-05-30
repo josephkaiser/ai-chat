@@ -1,26 +1,35 @@
 // Generated from src/web/context_eval.ts by scripts/build_frontend.mjs
-import { contextEvalReport, fixtureReviewDetail, fixtureReviewList, settingsOverlay } from "./dom.js";
+import { contextEvalReport, fixtureReviewDetail, fixtureReviewList, settingsOverlay, } from "./dom.js";
 import { state } from "./state.js";
 export function createContextEvalController(deps) {
     function workspaceRelativeCapturePath(sourcePath) {
         const normalized = String(sourcePath || "").replace(/\\/g, "/");
         const marker = "/.ai/context-evals/";
         const markerIndex = normalized.lastIndexOf(marker);
-        if (markerIndex === -1) return "";
+        if (markerIndex === -1)
+            return "";
         return `.ai/context-evals/${normalized.slice(markerIndex + marker.length)}`;
     }
     function suggestContextEvalFixtureName(bucket, exampleCase) {
         const segments = [
             exampleCase.phase || "capture",
             bucket.category || "context_eval",
-            bucket.key || exampleCase.name || "case"
+            bucket.key || exampleCase.name || "case",
         ];
-        return segments.join("_").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "captured_context_eval_case";
+        return segments
+            .join("_")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, "")
+            || "captured_context_eval_case";
     }
     function describeFixtureCoverage(coverage) {
-        if (coverage?.accepted_count) return "covered by accepted fixture";
-        if (coverage?.candidate_count) return "candidate fixture exists";
-        if (coverage?.suggested_count) return "suggested fixture queued";
+        if (coverage?.accepted_count)
+            return "covered by accepted fixture";
+        if (coverage?.candidate_count)
+            return "candidate fixture exists";
+        if (coverage?.suggested_count)
+            return "suggested fixture queued";
         return "needs promotion";
     }
     function renderFixtureReviewList() {
@@ -29,12 +38,12 @@ export function createContextEvalController(deps) {
             return;
         }
         const selectedFilter = state.fixtureReviewFilter || "all";
-        const fixtures = (state.contextEvalFixtures || []).filter((fixture)=>selectedFilter === "all" ? true : fixture.review_status === selectedFilter);
+        const fixtures = (state.contextEvalFixtures || []).filter((fixture) => (selectedFilter === "all" ? true : fixture.review_status === selectedFilter));
         if (!fixtures.length) {
             fixtureReviewList.innerHTML = `<div class="context-eval-empty">No fixtures for this filter yet.</div>`;
             return;
         }
-        fixtureReviewList.innerHTML = fixtures.map((fixture)=>{
+        fixtureReviewList.innerHTML = fixtures.map((fixture) => {
             const fixturePath = workspaceRelativeCapturePath(fixture.path) || fixture.path;
             const sourcePath = workspaceRelativeCapturePath(fixture.source_path) || fixture.source_path;
             return `
@@ -74,10 +83,11 @@ export function createContextEvalController(deps) {
                 </article>
             `;
         }).join("");
-        fixtureReviewList.querySelectorAll("[data-fixture-select]").forEach((button)=>{
-            button.addEventListener("click", async ()=>{
+        fixtureReviewList.querySelectorAll("[data-fixture-select]").forEach((button) => {
+            button.addEventListener("click", async () => {
                 const fixturePath = button.dataset.fixtureSelect || "";
-                if (!fixturePath) return;
+                if (!fixturePath)
+                    return;
                 state.selectedFixturePath = fixturePath;
                 if (state.compareFixturePath === fixturePath) {
                     state.compareFixturePath = "";
@@ -87,32 +97,33 @@ export function createContextEvalController(deps) {
                 await loadSelectedFixtureDetails();
             });
         });
-        fixtureReviewList.querySelectorAll("[data-fixture-open]").forEach((button)=>{
-            button.addEventListener("click", ()=>{
+        fixtureReviewList.querySelectorAll("[data-fixture-open]").forEach((button) => {
+            button.addEventListener("click", () => {
                 const path = button.dataset.fixtureOpen || "";
-                if (!path || path.startsWith("/")) return;
+                if (!path || path.startsWith("/"))
+                    return;
                 void deps.openFile(path);
             });
         });
-        fixtureReviewList.querySelectorAll("[data-fixture-status]").forEach((button)=>{
-            button.addEventListener("click", async ()=>{
+        fixtureReviewList.querySelectorAll("[data-fixture-status]").forEach((button) => {
+            button.addEventListener("click", async () => {
                 const fixturePath = button.dataset.fixturePath || "";
                 const reviewStatus = button.dataset.fixtureStatus || "";
-                if (!fixturePath || !reviewStatus) return;
+                if (!fixturePath || !reviewStatus)
+                    return;
                 try {
                     const response = await deps.fetchJson("/api/context-evals/fixtures/review", {
                         method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        },
+                        headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                             fixture_path: fixturePath,
-                            review_status: reviewStatus
-                        })
+                            review_status: reviewStatus,
+                        }),
                     });
                     deps.setComposerHint(`Updated ${response.fixture_name} to ${response.review_status}.`);
                     await loadContextEvalFixtures();
-                } catch (error) {
+                }
+                catch (error) {
                     deps.setComposerHint(error instanceof Error ? error.message : "Could not update fixture review state.");
                 }
             });
@@ -120,15 +131,17 @@ export function createContextEvalController(deps) {
     }
     function renderFixtureDetailValue(value) {
         if (Array.isArray(value)) {
-            if (!value.length) return `<div class="context-eval-empty">None</div>`;
-            return `<ul class="context-eval-detail-list">${value.map((item)=>`<li>${deps.escapeHtml(String(item))}</li>`).join("")}</ul>`;
+            if (!value.length)
+                return `<div class="context-eval-empty">None</div>`;
+            return `<ul class="context-eval-detail-list">${value.map((item) => `<li>${deps.escapeHtml(String(item))}</li>`).join("")}</ul>`;
         }
         if (value && typeof value === "object") {
             const entries = Object.entries(value);
-            if (!entries.length) return `<div class="context-eval-empty">None</div>`;
+            if (!entries.length)
+                return `<div class="context-eval-empty">None</div>`;
             return `
                 <div class="fixture-detail-kv-list">
-                    ${entries.map(([key, itemValue])=>`
+                    ${entries.map(([key, itemValue]) => `
                         <div class="fixture-detail-kv-row">
                             <span class="fixture-detail-kv-key">${deps.escapeHtml(key)}</span>
                             <code>${deps.escapeHtml(JSON.stringify(itemValue))}</code>
@@ -151,12 +164,22 @@ export function createContextEvalController(deps) {
         const selectedCandidates = JSON.stringify(selectedFixture.payload.selection_candidates || []);
         const compareCandidates = JSON.stringify(compareFixture.payload.selection_candidates || []);
         const differences = [
-            selectedFixture.review_status !== compareFixture.review_status ? `Review status: ${selectedFixture.review_status} vs ${compareFixture.review_status}` : "",
-            selectedExpectation !== compareExpectation ? "Expectation payload differs" : "",
-            selectedCandidates !== compareCandidates ? "Selection candidates differ" : "",
-            JSON.stringify(selectedFixture.payload.policy_inputs || {}) !== JSON.stringify(compareFixture.payload.policy_inputs || {}) ? "Policy inputs differ" : ""
+            selectedFixture.review_status !== compareFixture.review_status
+                ? `Review status: ${selectedFixture.review_status} vs ${compareFixture.review_status}`
+                : "",
+            selectedExpectation !== compareExpectation
+                ? "Expectation payload differs"
+                : "",
+            selectedCandidates !== compareCandidates
+                ? "Selection candidates differ"
+                : "",
+            JSON.stringify(selectedFixture.payload.policy_inputs || {}) !== JSON.stringify(compareFixture.payload.policy_inputs || {})
+                ? "Policy inputs differ"
+                : "",
         ].filter(Boolean);
-        return differences.length ? `<ul class="context-eval-detail-list">${differences.map((item)=>`<li>${deps.escapeHtml(item)}</li>`).join("")}</ul>` : `<div class="context-eval-empty">These fixtures currently have matching core payload sections.</div>`;
+        return differences.length
+            ? `<ul class="context-eval-detail-list">${differences.map((item) => `<li>${deps.escapeHtml(item)}</li>`).join("")}</ul>`
+            : `<div class="context-eval-empty">These fixtures currently have matching core payload sections.</div>`;
     }
     function renderFixtureReviewDetail() {
         if (state.fixtureDetailLoading) {
@@ -168,11 +191,14 @@ export function createContextEvalController(deps) {
             fixtureReviewDetail.innerHTML = `<div class="context-eval-empty">Select a fixture to inspect its full payload and compare it with another reviewed case.</div>`;
             return;
         }
-        const compareOptions = (state.contextEvalFixtures || []).filter((fixture)=>fixture.path !== selectedFixture.path).map((fixture)=>`
+        const compareOptions = (state.contextEvalFixtures || [])
+            .filter((fixture) => fixture.path !== selectedFixture.path)
+            .map((fixture) => `
                 <option value="${deps.escapeHtml(fixture.path)}"${fixture.path === state.compareFixturePath ? " selected" : ""}>
                     ${deps.escapeHtml(`${fixture.name} (${fixture.review_status})`)}
                 </option>
-            `).join("");
+            `)
+            .join("");
         fixtureReviewDetail.innerHTML = `
             <div class="context-eval-card">
                 <div class="context-eval-label">Fixture Detail</div>
@@ -216,7 +242,7 @@ export function createContextEvalController(deps) {
         `;
         const compareSelect = fixtureReviewDetail.querySelector("#fixtureCompareSelect");
         if (compareSelect) {
-            compareSelect.addEventListener("change", async ()=>{
+            compareSelect.addEventListener("change", async () => {
                 state.compareFixturePath = compareSelect.value || "";
                 await loadSelectedFixtureDetails();
             });
@@ -243,12 +269,20 @@ export function createContextEvalController(deps) {
         const recommended = report.recommended_fix;
         const topBuckets = report.top_triage_buckets || [];
         const recentFailures = report.recent_failures || [];
-        const selectedBucket = topBuckets.find((bucket)=>bucket.key === state.selectedContextEvalBucketKey) || recommended || topBuckets[0] || null;
+        const selectedBucket = topBuckets.find((bucket) => bucket.key === state.selectedContextEvalBucketKey)
+            || recommended
+            || topBuckets[0]
+            || null;
         const exampleCases = selectedBucket?.example_cases || [];
         const selectedExample = exampleCases[Math.min(Math.max(state.selectedContextEvalExampleIndex, 0), Math.max(exampleCases.length - 1, 0))] || null;
         const selectedCapturePath = selectedExample ? workspaceRelativeCapturePath(selectedExample.source_path) : "";
-        const needsPromotion = Boolean(selectedBucket && !selectedBucket.fixture_coverage?.accepted_count && !selectedBucket.fixture_coverage?.suggested_count && !selectedBucket.fixture_coverage?.candidate_count);
-        const suggestedFixtureName = selectedBucket && selectedExample ? suggestContextEvalFixtureName(selectedBucket, selectedExample) : "";
+        const needsPromotion = Boolean(selectedBucket
+            && !selectedBucket.fixture_coverage?.accepted_count
+            && !selectedBucket.fixture_coverage?.suggested_count
+            && !selectedBucket.fixture_coverage?.candidate_count);
+        const suggestedFixtureName = selectedBucket && selectedExample
+            ? suggestContextEvalFixtureName(selectedBucket, selectedExample)
+            : "";
         const promotionSuggestion = selectedBucket?.promotion_suggestion || null;
         contextEvalReport.innerHTML = `
             <div class="context-eval-card">
@@ -293,7 +327,7 @@ export function createContextEvalController(deps) {
                 <div class="context-eval-label">Top Fixes</div>
                 ${topBuckets.length ? `
                     <div class="context-eval-list">
-                        ${topBuckets.slice(0, 4).map((bucket)=>`
+                        ${topBuckets.slice(0, 4).map((bucket) => `
                             <article class="context-eval-item${selectedBucket?.key === bucket.key ? " active" : ""}">
                                 <div class="context-eval-focus">
                                     <strong>${deps.escapeHtml(bucket.title)}</strong>
@@ -352,7 +386,7 @@ export function createContextEvalController(deps) {
                         <div class="context-eval-example">
                             <div class="context-eval-label">Fixture Coverage</div>
                             <div class="context-eval-list">
-                                ${selectedBucket.fixture_coverage.fixtures.map((fixture)=>`
+                                ${selectedBucket.fixture_coverage.fixtures.map((fixture) => `
                                     <article class="context-eval-item">
                                         <strong>${deps.escapeHtml(fixture.name)}</strong>
                                         <div class="context-eval-meta">
@@ -375,7 +409,7 @@ export function createContextEvalController(deps) {
                     ` : ""}
                     ${exampleCases.length > 1 ? `
                         <div class="context-eval-actions">
-                            ${exampleCases.map((exampleCase, index)=>`
+                            ${exampleCases.map((exampleCase, index) => `
                                 <button
                                     type="button"
                                     class="context-eval-button${selectedExample === exampleCase ? " active" : ""}"
@@ -418,7 +452,7 @@ export function createContextEvalController(deps) {
                     </div>
                     ${selectedBucket.fixture_coverage?.fixtures?.length ? `
                         <div class="context-eval-actions">
-                            ${selectedBucket.fixture_coverage.fixtures.map((fixture)=>`
+                            ${selectedBucket.fixture_coverage.fixtures.map((fixture) => `
                                 <button
                                     type="button"
                                     class="context-eval-button"
@@ -434,7 +468,7 @@ export function createContextEvalController(deps) {
                             <div class="context-eval-label">Failed Checks</div>
                             ${(selectedExample.failed_checks || []).length ? `
                                 <ul class="context-eval-detail-list">
-                                    ${(selectedExample.failed_checks || []).map((failedCheck)=>`
+                                    ${(selectedExample.failed_checks || []).map((failedCheck) => `
                                         <li>${deps.escapeHtml(failedCheck)}</li>
                                     `).join("")}
                                 </ul>
@@ -444,7 +478,7 @@ export function createContextEvalController(deps) {
                             <div class="context-eval-label">Selected Keys</div>
                             ${(selectedExample.selected_keys || []).length ? `
                                 <ul class="context-eval-detail-list">
-                                    ${(selectedExample.selected_keys || []).map((selectedKey)=>`
+                                    ${(selectedExample.selected_keys || []).map((selectedKey) => `
                                         <li><code>${deps.escapeHtml(selectedKey)}</code></li>
                                     `).join("")}
                                 </ul>
@@ -457,7 +491,7 @@ export function createContextEvalController(deps) {
                 <div class="context-eval-label">Recent Failures</div>
                 ${recentFailures.length ? `
                     <div class="context-eval-list">
-                        ${recentFailures.slice(0, 3).map((failure)=>`
+                        ${recentFailures.slice(0, 3).map((failure) => `
                             <article class="context-eval-item">
                                 <strong>${deps.escapeHtml(failure.name)}</strong>
                                 <div class="context-eval-meta">
@@ -471,61 +505,72 @@ export function createContextEvalController(deps) {
                 ` : `<div class="context-eval-empty">No recent failures.</div>`}
             </div>
         `;
-        contextEvalReport.querySelectorAll("[data-context-eval-bucket]").forEach((button)=>{
-            button.addEventListener("click", ()=>{
+        contextEvalReport.querySelectorAll("[data-context-eval-bucket]").forEach((button) => {
+            button.addEventListener("click", () => {
                 const bucketKey = button.dataset.contextEvalBucket || "";
-                if (!bucketKey) return;
+                if (!bucketKey)
+                    return;
                 state.selectedContextEvalBucketKey = bucketKey;
                 state.selectedContextEvalExampleIndex = 0;
                 renderContextEvalReport();
             });
         });
-        contextEvalReport.querySelectorAll("[data-context-eval-bucket-example]").forEach((button)=>{
-            button.addEventListener("click", ()=>{
+        contextEvalReport.querySelectorAll("[data-context-eval-bucket-example]").forEach((button) => {
+            button.addEventListener("click", () => {
                 const rawIndex = button.dataset.contextEvalBucketExample || "0";
                 const nextIndex = Number.parseInt(rawIndex, 10);
                 state.selectedContextEvalExampleIndex = Number.isFinite(nextIndex) ? Math.max(0, nextIndex) : 0;
                 renderContextEvalReport();
             });
         });
-        contextEvalReport.querySelectorAll("[data-context-eval-open-capture]").forEach((button)=>{
-            button.addEventListener("click", ()=>{
-                if (!selectedCapturePath) return;
+        contextEvalReport.querySelectorAll("[data-context-eval-open-capture]").forEach((button) => {
+            button.addEventListener("click", () => {
+                if (!selectedCapturePath)
+                    return;
                 void deps.openFile(selectedCapturePath);
             });
         });
-        contextEvalReport.querySelectorAll("[data-context-eval-promote-capture]").forEach((button)=>{
-            button.addEventListener("click", async ()=>{
-                if (!selectedExample?.source_path) return;
-                const suggestedName = selectedBucket ? suggestContextEvalFixtureName(selectedBucket, selectedExample) : selectedExample.name;
+        contextEvalReport.querySelectorAll("[data-context-eval-promote-capture]").forEach((button) => {
+            button.addEventListener("click", async () => {
+                if (!selectedExample?.source_path)
+                    return;
+                const suggestedName = selectedBucket
+                    ? suggestContextEvalFixtureName(selectedBucket, selectedExample)
+                    : selectedExample.name;
                 const fixtureName = window.prompt("Fixture name", suggestedName);
-                if (!fixtureName || !fixtureName.trim()) return;
+                if (!fixtureName || !fixtureName.trim())
+                    return;
                 const reviewStatus = window.prompt("Review status (suggested, candidate, accepted, superseded)", "candidate");
-                if (!reviewStatus || !reviewStatus.trim()) return;
+                if (!reviewStatus || !reviewStatus.trim())
+                    return;
                 try {
                     const response = await promoteContextEvalCapture(selectedExample.source_path, fixtureName.trim(), reviewStatus.trim().toLowerCase());
                     deps.setComposerHint(`Promoted replay case as ${response.fixture_name} (${response.review_status}).`);
-                } catch (error) {
+                }
+                catch (error) {
                     deps.setComposerHint(error instanceof Error ? error.message : "Could not promote replay case.");
                 }
             });
         });
-        contextEvalReport.querySelectorAll("[data-context-eval-promote-candidate]").forEach((button)=>{
-            button.addEventListener("click", async ()=>{
-                if (!selectedExample?.source_path || !selectedBucket) return;
+        contextEvalReport.querySelectorAll("[data-context-eval-promote-candidate]").forEach((button) => {
+            button.addEventListener("click", async () => {
+                if (!selectedExample?.source_path || !selectedBucket)
+                    return;
                 const fixtureName = suggestContextEvalFixtureName(selectedBucket, selectedExample);
                 try {
                     const response = await promoteContextEvalCapture(selectedExample.source_path, fixtureName, "candidate");
                     deps.setComposerHint(`Promoted ${response.fixture_name} as candidate.`);
-                } catch (error) {
+                }
+                catch (error) {
                     deps.setComposerHint(error instanceof Error ? error.message : "Could not promote candidate fixture.");
                 }
             });
         });
-        contextEvalReport.querySelectorAll("[data-context-eval-open-fixture]").forEach((button)=>{
-            button.addEventListener("click", async ()=>{
+        contextEvalReport.querySelectorAll("[data-context-eval-open-fixture]").forEach((button) => {
+            button.addEventListener("click", async () => {
                 const fixturePath = button.dataset.contextEvalOpenFixture || "";
-                if (!fixturePath) return;
+                if (!fixturePath)
+                    return;
                 await inspectFixtureFromTriage(fixturePath);
             });
         });
@@ -533,14 +578,12 @@ export function createContextEvalController(deps) {
     async function promoteContextEvalCapture(sourcePath, fixtureName, reviewStatus) {
         const response = await deps.fetchJson("/api/context-evals/promote", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 source_path: sourcePath,
                 fixture_name: fixtureName,
-                review_status: reviewStatus
-            })
+                review_status: reviewStatus,
+            }),
         });
         await loadContextEvalFixtures();
         state.selectedFixturePath = response.fixture_path;
@@ -551,14 +594,12 @@ export function createContextEvalController(deps) {
     async function autoDraftContextEvalFixture(sourcePath, bucketKey, fixtureName) {
         return deps.fetchJson("/api/context-evals/auto-draft", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 source_path: sourcePath,
                 bucket_key: bucketKey,
-                fixture_name: fixtureName
-            })
+                fixture_name: fixtureName,
+            }),
         });
     }
     async function inspectFixtureFromTriage(fixturePath) {
@@ -579,23 +620,27 @@ export function createContextEvalController(deps) {
         state.contextEvalLoading = true;
         state.contextEvalError = "";
         renderContextEvalReport();
-        const conversationId = state.conversations.some((conversation)=>conversation.id === state.currentConversationId) ? state.currentConversationId : "";
+        const conversationId = state.conversations.some((conversation) => conversation.id === state.currentConversationId)
+            ? state.currentConversationId
+            : "";
         const params = new URLSearchParams({
             limit: "100",
-            ...conversationId ? {
-                conversation_id: conversationId
-            } : {
-                workspace_id: state.currentWorkspaceId
-            }
+            ...(conversationId ? { conversation_id: conversationId } : { workspace_id: state.currentWorkspaceId }),
         });
         const reportUrl = `/api/context-evals/report?${params.toString()}`;
         try {
             let report = await deps.fetchJson(reportUrl);
-            const suggestionTargets = (report.top_triage_buckets || []).filter((bucket)=>bucket.promotion_suggestion?.should_suggest && !bucket.fixture_coverage?.accepted_count && !bucket.fixture_coverage?.suggested_count && !bucket.fixture_coverage?.candidate_count).slice(0, 3);
+            const suggestionTargets = (report.top_triage_buckets || [])
+                .filter((bucket) => (bucket.promotion_suggestion?.should_suggest
+                && !bucket.fixture_coverage?.accepted_count
+                && !bucket.fixture_coverage?.suggested_count
+                && !bucket.fixture_coverage?.candidate_count))
+                .slice(0, 3);
             let createdAnySuggestions = false;
-            for (const bucket of suggestionTargets){
+            for (const bucket of suggestionTargets) {
                 const exampleCase = bucket.example_cases?.[0];
-                if (!exampleCase?.source_path) continue;
+                if (!exampleCase?.source_path)
+                    continue;
                 const response = await autoDraftContextEvalFixture(exampleCase.source_path, bucket.key, "");
                 createdAnySuggestions = Boolean(response.created) || createdAnySuggestions;
             }
@@ -607,15 +652,19 @@ export function createContextEvalController(deps) {
             }
             state.contextEvalReport = report;
             const topBucket = state.contextEvalReport.top_triage_buckets?.[0];
-            const selectedStillExists = state.contextEvalReport.top_triage_buckets?.some((bucket)=>bucket.key === state.selectedContextEvalBucketKey);
-            state.selectedContextEvalBucketKey = selectedStillExists ? state.selectedContextEvalBucketKey : topBucket?.key || "";
+            const selectedStillExists = state.contextEvalReport.top_triage_buckets?.some((bucket) => bucket.key === state.selectedContextEvalBucketKey);
+            state.selectedContextEvalBucketKey = selectedStillExists
+                ? state.selectedContextEvalBucketKey
+                : (topBucket?.key || "");
             state.selectedContextEvalExampleIndex = 0;
-        } catch (error) {
+        }
+        catch (error) {
             state.contextEvalReport = null;
             state.contextEvalError = error instanceof Error ? error.message : "Could not load replay report.";
             state.selectedContextEvalBucketKey = "";
             state.selectedContextEvalExampleIndex = 0;
-        } finally{
+        }
+        finally {
             state.contextEvalLoading = false;
             renderContextEvalReport();
         }
@@ -626,17 +675,19 @@ export function createContextEvalController(deps) {
         try {
             const payload = await deps.fetchJson("/api/context-evals/fixtures");
             state.contextEvalFixtures = payload.fixtures || [];
-            const selectedStillExists = state.contextEvalFixtures.some((fixture)=>fixture.path === state.selectedFixturePath);
+            const selectedStillExists = state.contextEvalFixtures.some((fixture) => fixture.path === state.selectedFixturePath);
             if (!selectedStillExists) {
                 state.selectedFixturePath = state.contextEvalFixtures[0]?.path || "";
                 state.compareFixturePath = "";
                 state.selectedFixtureDetail = null;
                 state.compareFixtureDetail = null;
             }
-        } catch (error) {
+        }
+        catch (error) {
             state.contextEvalFixtures = [];
             deps.setComposerHint(error instanceof Error ? error.message : "Could not load promoted fixtures.");
-        } finally{
+        }
+        finally {
             state.fixtureReviewLoading = false;
             renderFixtureReviewList();
             void loadSelectedFixtureDetails();
@@ -656,14 +707,17 @@ export function createContextEvalController(deps) {
             state.selectedFixtureDetail = await deps.fetchJson(`/api/context-evals/fixtures/detail?fixture_path=${encodeURIComponent(state.selectedFixturePath)}`);
             if (state.compareFixturePath) {
                 state.compareFixtureDetail = await deps.fetchJson(`/api/context-evals/fixtures/detail?fixture_path=${encodeURIComponent(state.compareFixturePath)}`);
-            } else {
+            }
+            else {
                 state.compareFixtureDetail = null;
             }
-        } catch (error) {
+        }
+        catch (error) {
             state.selectedFixtureDetail = null;
             state.compareFixtureDetail = null;
             deps.setComposerHint(error instanceof Error ? error.message : "Could not load fixture detail.");
-        } finally{
+        }
+        finally {
             state.fixtureDetailLoading = false;
             renderFixtureReviewDetail();
         }
@@ -673,9 +727,6 @@ export function createContextEvalController(deps) {
         loadContextEvalReport,
         renderContextEvalReport,
         renderFixtureReviewDetail,
-        renderFixtureReviewList
+        renderFixtureReviewList,
     };
 }
-
-
-//# sourceURL=/Users/joe/dev/ai-chat/src/web/context_eval.ts

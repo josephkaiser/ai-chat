@@ -17,6 +17,8 @@ export const state = {
     ws: null as WebSocket | null,
     reconnectTimer: 0 as number,
     connectionState: "offline" as ConnectionState,
+    wsConnected: false,
+    runtimeReachable: false,
     generating: false,
     modelAvailable: false,
     modelName: "",

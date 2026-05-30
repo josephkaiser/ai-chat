@@ -4,6 +4,8 @@ export const state = {
     ws: null,
     reconnectTimer: 0,
     connectionState: "offline",
+    wsConnected: false,
+    runtimeReachable: false,
     generating: false,
     modelAvailable: false,
     modelName: "",
@@ -43,12 +45,9 @@ export const state = {
     composerUploadingCount: 0,
     composerDropActive: false,
     activeStreamConversationId: "",
-    activePreviewNonce: ""
+    activePreviewNonce: "",
 };
 export const PASTE_ATTACH_CHAR_THRESHOLD = 1200;
 export const PASTE_ATTACH_LINE_THRESHOLD = 28;
 export const FIRST_TURN_COMPOSER_MAX_HEIGHT = 260;
 export const LATER_TURN_COMPOSER_MAX_HEIGHT = 152;
-
-
-//# sourceURL=/Users/joe/dev/ai-chat/src/web/state.ts

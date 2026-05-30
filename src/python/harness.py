@@ -375,8 +375,9 @@ DEFAULT_MODEL_PROFILE = os.getenv("DEFAULT_MODEL_PROFILE", "14b").strip().lower(
 DEEP_CRITIQUE_ENABLED = os.getenv("DEEP_CRITIQUE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 TOOL_LOOP_ENABLED = os.getenv("TOOL_LOOP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 STRUCTURED_TASK_ENGINE_ENABLED = os.getenv("STRUCTURED_TASK_ENGINE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
-TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "8"))
-TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "3")))
+CHAT_ONLY_MODE = os.getenv("CHAT_ONLY_MODE", "1").strip().lower() not in {"0", "false", "no"}
+TOOL_LOOP_MAX_STEPS = int(os.getenv("TOOL_LOOP_MAX_STEPS", "3"))
+TOOL_LOOP_MAX_CONTINUATIONS = max(0, int(os.getenv("TOOL_LOOP_MAX_CONTINUATIONS", "1")))
 AUTO_VERIFY_AFTER_PATCH = os.getenv("AUTO_VERIFY_AFTER_PATCH", "1").strip().lower() not in {"0", "false", "no"}
 AUTO_VERIFY_MAX_RUNS = max(0, int(os.getenv("AUTO_VERIFY_MAX_RUNS", "2")))
 WORKSPACE_FILE_SIZE_LIMIT = 1024 * 1024
@@ -702,7 +703,7 @@ APP_TITLE = "AI Chat"
 
 # Completion budget: ceiling only. The model still ends the stream when it predicts EOS
 # (end of sequence); it does not "fill" unused max_tokens. Tune via env if replies truncate.
-MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "4096"))
+MAX_COMPLETION_TOKENS = int(os.getenv("MAX_COMPLETION_TOKENS", "2048"))
 try:
     MODEL_CONTEXT_WINDOW = int(first_env_value("MODEL_MAX_MODEL_LEN", "MODEL_14B_MAX_MODEL_LEN") or "16384")
 except ValueError:
@@ -6524,6 +6525,17 @@ def finalize_model_response_text(
     return cleaned
 
 
+def combine_one_shot_with_tool_followup(one_shot: str, followup: str) -> str:
+    """Keep the first useful answer visible when tools pause instead of improving it."""
+    draft = str(one_shot or "").strip()
+    addition = str(followup or "").strip()
+    if not draft:
+        return addition
+    if not addition or addition == draft:
+        return draft
+    return f"{draft}\n\n{addition}"
+
+
 INLINE_CODE_ARTIFACT_EXTENSION_MAP = {
     "c": "c",
     "h": "h",
@@ -6654,7 +6666,23 @@ def maybe_attach_inline_code_artifact_reference(
     path = infer_inline_code_artifact_path(request_text, history, fence["language"])
     if not path:
         return cleaned
-    return f"{cleaned}\n\n[[artifact:{path}]]"
+    return format_inline_code_artifact_response(cleaned, path)
+
+
+def format_inline_code_artifact_response(response: str, path: str) -> str:
+    """Keep commentary in chat and place only the code block after the artifact tag."""
+    cleaned = str(response or "").strip()
+    match = re.search(r"```[^\n`]*\n[\s\S]*?\n```", cleaned)
+    if not match:
+        return f"{cleaned}\n\n[[artifact:{path}]]"
+    preamble = cleaned[: match.start()].strip()
+    fence_block = match.group(0).strip()
+    parts: List[str] = []
+    if preamble:
+        parts.append(preamble)
+    parts.append(f"[[artifact:{path}]]")
+    parts.append(fence_block)
+    return "\n\n".join(parts)
 
 
 PREVIEWABLE_CREATED_ARTIFACT_EXTENSIONS = {
@@ -6990,10 +7018,10 @@ async def finalize_tool_loop_answer(
 @dataclass
 class FeatureFlags:
     """Per-request feature switches from the UI."""
-    agent_tools: bool = True
+    agent_tools: bool = False
     workspace_write: bool = False
     workspace_run_commands: bool = False
-    local_rag: bool = True
+    local_rag: bool = False
     web_search: bool = False
     auto_approve_tool_permissions: bool = False
     allowed_commands: List[str] = field(default_factory=list)
@@ -7030,6 +7058,23 @@ class PreparedTurnRequest:
     assessment: TurnAssessment
     route_intake: StructuredRouteIntake = field(default_factory=StructuredRouteIntake)
     attachment_paths: List[str] = field(default_factory=list)
+
+
+def turn_schedule_metadata_refresh(prepared: PreparedTurnRequest) -> bool:
+    """Return whether post-turn summary/memory/title refreshes are worth the extra LLM calls."""
+    if prepared.slash_command:
+        return True
+    if prepared.resolved_mode == "deep":
+        return True
+    if prepared.features.agent_tools:
+        return True
+    if prepared.enabled_tools:
+        return True
+    if prepared.promoted_to_planning:
+        return True
+    if prepared.attachment_paths:
+        return True
+    return False
 
 
 def normalize_requested_mode(value: Any) -> str:
@@ -7072,7 +7117,8 @@ def parse_direct_slash_command_payload(payload: Any) -> Optional[Dict[str, str]]
 
 def infer_direct_slash_command_from_message(message: str) -> Optional[Dict[str, str]]:
     """Fallback parser so typed slash commands still work without explicit client metadata."""
-    match = re.match(r"^\s*/([a-z0-9_-]+)(?:\s+([\s\S]*\S))?\s*$", str(message or ""), re.IGNORECASE)
+    cleaned = str(message or "").strip().lstrip("\ufeff")
+    match = re.match(r"^\s*/([a-z0-9_-]+)(?:\s+(.*))?\s*$", cleaned, re.IGNORECASE | re.DOTALL)
     if not match:
         return None
     name = normalize_direct_slash_command(match.group(1))
@@ -7083,6 +7129,53 @@ def infer_direct_slash_command_from_message(message: str) -> Optional[Dict[str, 
         "raw_name": str(match.group(1) or "").strip().lower(),
         "args": str(match.group(2) or "").strip(),
     }
+
+
+def apply_slash_command_features(
+    features: FeatureFlags,
+    slash_command: Optional[Dict[str, str]],
+) -> FeatureFlags:
+    """Turn on agent mode for explicit slash commands even in chat-first UI defaults."""
+    if not slash_command:
+        return features
+    return replace(
+        features,
+        agent_tools=True,
+        workspace_write=True,
+        auto_approve_tool_permissions=True,
+    )
+
+
+def normalize_chat_only_features(
+    features: FeatureFlags,
+    *,
+    slash_command: Optional[Dict[str, str]] = None,
+) -> FeatureFlags:
+    """Force lightweight chat defaults unless the user invoked an agent slash command."""
+    if slash_command or not CHAT_ONLY_MODE:
+        return features
+    return replace(
+        features,
+        agent_tools=False,
+        workspace_write=False,
+        workspace_run_commands=False,
+        local_rag=False,
+        web_search=False,
+        auto_approve_tool_permissions=False,
+    )
+
+
+def is_chat_only_turn(prepared: PreparedTurnRequest) -> bool:
+    """Return whether this turn should use the direct streaming path only."""
+    if prepared.slash_command:
+        return False
+    if prepared.resolved_mode == "deep":
+        return False
+    if prepared.auto_execute_workspace or prepared.resume_saved_workspace:
+        return False
+    if prepared.features.agent_tools or prepared.enabled_tools:
+        return False
+    return True
 
 
 async def wait_for_command_approval(
@@ -9612,8 +9705,8 @@ def build_saved_progress_fallback_response(
     if not payload:
         if error_text:
             return (
-                "I hit an unexpected internal error before I could finish the reply. "
-                "Please say continue and I'll retry from the current workspace state."
+                "I wasn't able to finish the reply cleanly. "
+                "Say continue and I'll retry from the current workspace state."
             )
         return ""
 
@@ -10063,6 +10156,7 @@ async def complete_successful_turn(
     active_file_path: str = "",
     queue_background_optimize: bool = False,
     turn_kind: str = TURN_KIND_VISIBLE_CHAT,
+    schedule_metadata_refresh: bool = True,
 ) -> Optional[int]:
     """Persist assistant output best-effort, then close the turn without surfacing bookkeeping errors."""
     assistant_message_id: Optional[int] = None
@@ -10102,10 +10196,11 @@ async def complete_successful_turn(
     except Exception as exc:
         logger.warning("Failed to finalize workflow execution for %s: %s", conversation_id, exc)
 
-    try:
-        schedule_conversation_summary_refresh(conversation_id)
-    except Exception as exc:
-        logger.warning("Failed to schedule conversation summary refresh for %s: %s", conversation_id, exc)
+    if schedule_metadata_refresh:
+        try:
+            schedule_conversation_summary_refresh(conversation_id)
+        except Exception as exc:
+            logger.warning("Failed to schedule conversation summary refresh for %s: %s", conversation_id, exc)
 
     if queue_background_optimize and active_file_path:
         try:
@@ -10125,6 +10220,48 @@ async def complete_successful_turn(
         await websocket.send_json({'type': 'message_id', 'message_id': assistant_message_id})
     await websocket.send_json({'type': 'done'})
     return assistant_message_id
+
+
+async def send_turn_fallback_response(
+    websocket: WebSocket,
+    conversation_id: str,
+    request_text: str,
+    *,
+    error_text: str = "",
+    workflow_execution: Optional[WorkflowExecutionContext] = None,
+    response_started: bool = False,
+    final_outcome: str = "exception_fallback",
+    active_file_path: str = "",
+    queue_background_optimize: bool = False,
+    turn_kind: str = TURN_KIND_VISIBLE_CHAT,
+) -> bool:
+    """Deliver and persist a visible assistant fallback for failed turn paths."""
+    fallback_response = ensure_nonempty_turn_response(
+        "",
+        conversation_id,
+        request_text,
+        error_text=error_text,
+    )
+    if not fallback_response:
+        return False
+    if not response_started:
+        await websocket.send_json({'type': 'start'})
+    await send_final_replacement(
+        websocket,
+        fallback_response,
+        workflow_execution=workflow_execution,
+    )
+    await complete_successful_turn(
+        websocket,
+        conversation_id,
+        fallback_response,
+        workflow_execution=workflow_execution,
+        final_outcome=final_outcome,
+        active_file_path=active_file_path,
+        queue_background_optimize=queue_background_optimize,
+        turn_kind=turn_kind,
+    )
+    return True
 
 
 async def send_assistant_note(
@@ -11983,6 +12120,7 @@ def schedule_conversation_summary_refresh(conv_id: str):
 def parse_feature_flags(raw: Any) -> FeatureFlags:
     """Decode feature flags from WebSocket payloads with sensible defaults."""
     payload = raw if isinstance(raw, dict) else {}
+    chat_defaults = CHAT_ONLY_MODE
 
     def flag(name: str, default: bool) -> bool:
         value = payload.get(name, default)
@@ -12007,14 +12145,14 @@ def parse_feature_flags(raw: Any) -> FeatureFlags:
 
     return FeatureFlags(
         agent_tools=(
-            flag("agent_tools", True)
+            flag("agent_tools", not chat_defaults)
             if "agent_tools" in payload
-            else flag("workspace", True)
+            else flag("workspace", not chat_defaults)
         ),
         workspace_write=flag("workspace_write", False),
         workspace_run_commands=flag("workspace_run_commands", False),
-        local_rag=flag("local_rag", True),
-        web_search=flag("web_search", True),
+        local_rag=flag("local_rag", not chat_defaults),
+        web_search=flag("web_search", not chat_defaults),
         auto_approve_tool_permissions=flag("auto_approve_tool_permissions", False),
         allowed_commands=sorted(set(allowed_commands)),
         allowed_tool_permissions=sorted(set(allowed_tool_permissions)),
@@ -19164,6 +19302,25 @@ async def run_structured_task_turn(
     )
 
 
+def message_references_workspace_file(message: str) -> bool:
+    """Return whether the message likely points at a repo file rather than inline code."""
+    text = str(message or "")
+    if not text.strip():
+        return False
+    if re.search(r"`[^`]*/[^`]+`", text):
+        return True
+    if re.search(r"(?:^|\s)(?:\.\./|\./)[\w./-]+\.[A-Za-z0-9]+", text):
+        return True
+    if re.search(r"\b(?:src|tests|docs|config|lib|app|scripts)/[\w./-]+\.[A-Za-z0-9]+\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b[\w.-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|php|css|html|json|yaml|yml|toml|md|sql|sh)\b", text, re.IGNORECASE):
+        if re.search(r"[/\\]", text):
+            return True
+        if re.search(r"\b(?:in|from|open|read|edit|fix|update|change|modify|patch|refactor|inspect|check|review|debug)\b", text, re.IGNORECASE):
+            return True
+    return False
+
+
 def should_use_workspace_tools(
     conversation_id: str,
     message: str,
@@ -19195,10 +19352,10 @@ def should_use_workspace_tools(
     if message_requests_workspace_render(message):
         return True
 
-    if any(token in text for token in ("workspace", "repo", "repository", "codebase", "project folder")):
+    if message_references_workspace_file(message):
         return True
 
-    if re.search(r"(`[^`]+`|[\w./-]+\.[A-Za-z0-9]+)", text):
+    if any(token in text for token in ("workspace", "repo", "repository", "codebase", "project folder")):
         return True
 
     words = set(re.findall(r"[a-z0-9_+-]+", text))
@@ -19657,6 +19814,44 @@ def format_route_history_excerpt(
     return "\n".join(lines) if lines else "(none)"
 
 
+def should_skip_route_intake_llm(
+    conversation_id: str,
+    message: str,
+    features: FeatureFlags,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    active_file_path: str = "",
+    attachments: Optional[List[str]] = None,
+    fallback: Optional[StructuredRouteIntake] = None,
+) -> bool:
+    """Use heuristic routing when an extra LLM pass would not change the path."""
+    if os.getenv("ROUTE_INTAKE_LLM", "1").strip().lower() in {"0", "false", "no"}:
+        return True
+    attachments = list(attachments or [])
+    if attachments or str(active_file_path or "").strip():
+        return False
+    if not features.agent_tools:
+        return True
+    intake = fallback or build_heuristic_route_intake(
+        conversation_id,
+        message,
+        features,
+        history=history,
+        active_file_path=active_file_path,
+        attachments=attachments,
+    )
+    if (
+        not intake.web_search_requested
+        and not intake.local_rag_requested
+        and not intake.needs_workspace
+        and not intake.needs_fresh_info
+        and not intake.render_requested
+        and str(intake.workspace_intent_hint or "none") == "none"
+    ):
+        return True
+    return False
+
+
 async def infer_structured_route_intake_via_llm(
     *,
     message: str,
@@ -19767,6 +19962,16 @@ async def resolve_route_intake_for_turn(
         active_file_path=active_file_path,
         attachments=attachments,
     )
+    if should_skip_route_intake_llm(
+        conversation_id,
+        message,
+        features,
+        history=history,
+        active_file_path=active_file_path,
+        attachments=attachments,
+        fallback=fallback,
+    ):
+        return fallback
     try:
         candidate = await infer_structured_route_intake_via_llm(
             message=message,
@@ -19793,6 +19998,8 @@ def select_enabled_tools_from_route_intake(
     route_intake: StructuredRouteIntake,
 ) -> List[str]:
     """Expose tools from a structured route intake instead of recomputing heuristics."""
+    if not features.agent_tools:
+        return []
     del conversation_id
     allowed: List[str] = []
     intent = str(route_intake.workspace_intent_hint or "none")
@@ -19915,6 +20122,8 @@ def direct_response_tool_recovery_candidates(
     features: FeatureFlags,
 ) -> List[str]:
     """Give direct-mode replies one recovery pass when they falsely refuse an available capability."""
+    if not features.agent_tools:
+        return []
     if (
         not DIRECT_TOOL_RECOVERY_REFUSAL_PATTERN.search(str(response or ""))
         and not (
@@ -21460,6 +21669,7 @@ def format_turn_route_activity(
     promoted_to_planning: bool,
 ) -> str:
     """Render the high-level skill-loop routing summary for the activity log."""
+    del mode
     if (
         assessment.primary_skill == "search"
         and assessment.requires_search
@@ -21470,13 +21680,19 @@ def format_turn_route_activity(
         if assessment.is_versioned_release_query and assessment.entity:
             return f"Routing directly to {freshness} for a concise summary of {assessment.entity}."
         return f"Routing directly to {freshness} for a concise answer."
-    lines = [format_turn_assessment_summary(assessment), f"Mode {mode}. Intent {assessment.workspace_intent}."]
     if promoted_to_planning:
         if assessment.explicit_planning_request:
-            lines.append("Explicit planning language promoted this turn into project mode.")
-        else:
-            lines.append("This request looks big enough for project mode, so I prepared a plan before execution.")
-    return " ".join(line for line in lines if line)
+            return "Preparing a plan before taking action."
+        return "Preparing a project pass before taking action."
+    if assessment.requires_workspace or assessment.requires_coding_loop or assessment.requires_file_creation:
+        return "Checking the workspace so the answer can stay grounded in the files."
+    if assessment.requires_search:
+        return "Checking sources so the answer can stay grounded."
+    if assessment.compare_to_rag:
+        return "Checking relevant context before finalizing the answer."
+    if assessment.enabled_tools:
+        return "Checking useful context before finalizing the answer."
+    return "Answering directly."
 
 
 def should_route_prepared_turn_via_direct_search(prepared: PreparedTurnRequest) -> bool:
@@ -21772,6 +21988,14 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         parse_direct_slash_command_payload(data.get("slash_command"))
         or infer_direct_slash_command_from_message(message)
     )
+    features = apply_slash_command_features(features, slash_command)
+    features = normalize_chat_only_features(features, slash_command=slash_command)
+    if slash_command:
+        logger.info(
+            "Resolved slash command /%s with args=%r",
+            slash_command.get("name", ""),
+            slash_command.get("args", ""),
+        )
 
     if requested_workspace_id and active_file_path:
         ensured_session = ensure_file_session_record(
@@ -21964,10 +22188,13 @@ async def prepare_turn_request(data: Dict[str, Any]) -> PreparedTurnRequest:
         not slash_command
         and mode != "deep"
         and (
-            deep_mode_candidate
-            or (assessment.explicit_planning_request and workspace_requested)
-            or auto_execute_workspace
+            auto_execute_workspace
             or resume_saved_workspace
+            or is_explicit_plan_execution_request(effective_message)
+            or (
+                assessment.explicit_planning_request
+                and infer_explicit_planning_request(effective_message)
+            )
         )
     ):
         mode = "deep"
@@ -22070,6 +22297,26 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
         await websocket.send_json({'type': 'error', 'content': 'Empty message'})
         return
 
+    if not await vllm_health_check():
+        loading = get_model_loading_stats(get_active_model_name(), False)
+        eta_seconds = loading.get("eta_seconds")
+        eta_note = ""
+        if isinstance(eta_seconds, (int, float)) and eta_seconds > 0:
+            eta_note = f" Estimated time remaining: about {int(round(eta_seconds))}s."
+        elif loading.get("status") == "failed":
+            detail = str(loading.get("detail") or "Check ./chat logs for vLLM errors.").strip()
+            eta_note = f" {detail}"
+        else:
+            eta_note = " Run `./chat logs` and wait for vLLM to finish loading the model."
+        await send_turn_fallback_response(
+            websocket,
+            str(data.get("conversation_id") or "").strip(),
+            message,
+            error_text=f"The model is still loading.{eta_note}",
+            final_outcome="model_not_ready",
+        )
+        return
+
     workflow_execution: Optional[WorkflowExecutionContext] = None
     response_started = False
     foreground_job_workspace_id = ""
@@ -22117,6 +22364,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             setattr(websocket, "active_client_turn_id", client_turn_id)
         prepared = await prepare_turn_request(data)
         conv_id = prepared.conversation_id
+        schedule_metadata_refresh = turn_schedule_metadata_refresh(prepared)
         mode = prepared.resolved_mode
         slash_command = prepared.slash_command
         features = prepared.features
@@ -22213,6 +22461,54 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
+                schedule_metadata_refresh=schedule_metadata_refresh,
+            )
+            return
+
+        if is_chat_only_turn(prepared):
+            set_workflow_execution_name(workflow_execution, "chat_only")
+            mark_foreground_job("running")
+            await send_activity_event(
+                websocket,
+                "respond",
+                "Respond",
+                "Answering directly.",
+            )
+            messages = [{"role": "system", "content": system_prompt}]
+            for msg in model_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+            full_response = await stream_chat_response(
+                websocket,
+                messages,
+                max_tokens,
+                start_output=True,
+                workflow_execution=workflow_execution,
+            )
+            response_started = True
+            full_response = finalize_model_response_text(
+                full_response,
+                effective_message,
+                history=history,
+                features=features,
+                tool_results=[],
+            )
+            full_response = ensure_nonempty_turn_response(full_response, conv_id, effective_message)
+            await send_final_replacement(
+                websocket,
+                full_response,
+                workflow_execution=workflow_execution,
+            )
+            mark_foreground_job("completed")
+            await complete_successful_turn(
+                websocket,
+                conv_id,
+                full_response,
+                workflow_execution=workflow_execution,
+                final_outcome="completed_chat_only",
+                active_file_path=prepared.active_file_path,
+                queue_background_optimize=False,
+                turn_kind=prepared.turn_kind,
+                schedule_metadata_refresh=False,
             )
             return
 
@@ -22248,6 +22544,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
+                schedule_metadata_refresh=schedule_metadata_refresh,
             )
             return
 
@@ -22283,6 +22580,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
+                schedule_metadata_refresh=schedule_metadata_refresh,
             )
             return
 
@@ -22325,6 +22623,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                     active_file_path=prepared.active_file_path,
                     queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                     turn_kind=prepared.turn_kind,
+                    schedule_metadata_refresh=schedule_metadata_refresh,
                 )
                 deep_succeeded = True
             except Exception as e:
@@ -22381,6 +22680,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                         active_file_path=prepared.active_file_path,
                         queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                         turn_kind=prepared.turn_kind,
+                        schedule_metadata_refresh=schedule_metadata_refresh,
                     )
                     return
 
@@ -22418,6 +22718,12 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             if enabled_tools:
                 set_workflow_execution_name(workflow_execution, "tool_loop")
                 mark_foreground_job("running")
+                await send_activity_event(
+                    websocket,
+                    "respond",
+                    "Respond",
+                    "Checking whether tools can improve the answer.",
+                )
                 tool_outcome = await run_resumable_tool_loop(
                     websocket,
                     conv_id,
@@ -22567,6 +22873,7 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
                 active_file_path=prepared.active_file_path,
                 queue_background_optimize=bool(prepared.active_file_path and not background_job_id),
                 turn_kind=prepared.turn_kind,
+                schedule_metadata_refresh=schedule_metadata_refresh,
             )
 
     except asyncio.CancelledError:
@@ -22583,7 +22890,18 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             error_text=f"vLLM HTTP {e.response.status_code}",
         )
         logger.error(f"vLLM API error: {e}")
-        await websocket.send_json({'type': 'error', 'content': f'vLLM error: {e.response.status_code}. Is the model loaded?'})
+        delivered = await send_turn_fallback_response(
+            websocket,
+            conv_id,
+            message,
+            error_text=f"vLLM HTTP {e.response.status_code}",
+            workflow_execution=workflow_execution,
+            response_started=response_started,
+            final_outcome="http_error_fallback",
+            turn_kind=prepared.turn_kind if 'prepared' in locals() else TURN_KIND_VISIBLE_CHAT,
+        )
+        if delivered:
+            mark_foreground_job("completed")
     except httpx.ConnectError:
         mark_foreground_job("failed", error_text="Cannot connect to vLLM")
         finalize_workflow_execution(
@@ -22592,7 +22910,18 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             final_outcome="connect_error",
             error_text="Cannot connect to vLLM",
         )
-        await websocket.send_json({'type': 'error', 'content': 'Cannot connect to vLLM. Is it running?'})
+        delivered = await send_turn_fallback_response(
+            websocket,
+            conv_id,
+            message,
+            error_text="Cannot connect to vLLM",
+            workflow_execution=workflow_execution,
+            response_started=response_started,
+            final_outcome="connect_error_fallback",
+            turn_kind=prepared.turn_kind if 'prepared' in locals() else TURN_KIND_VISIBLE_CHAT,
+        )
+        if delivered:
+            mark_foreground_job("completed")
     except Exception as e:
         finalize_workflow_execution(
             workflow_execution,
@@ -22601,32 +22930,20 @@ async def process_chat_turn(websocket: WebSocket, data: Dict[str, Any]) -> None:
             error_text=str(e),
         )
         logger.error(f"Chat error: {e}\n{traceback.format_exc()}")
-        fallback_response = ensure_nonempty_turn_response(
-            "",
+        if not response_started:
+            mark_foreground_job("running")
+        delivered = await send_turn_fallback_response(
+            websocket,
             conv_id,
             message,
             error_text=str(e),
+            workflow_execution=workflow_execution,
+            response_started=response_started,
+            final_outcome="exception_fallback",
+            turn_kind=prepared.turn_kind if 'prepared' in locals() else TURN_KIND_VISIBLE_CHAT,
         )
-        if fallback_response:
-            if not response_started:
-                mark_foreground_job("running")
-                await websocket.send_json({'type': 'start'})
+        if delivered:
             mark_foreground_job("completed")
-            await send_final_replacement(
-                websocket,
-                fallback_response,
-                workflow_execution=workflow_execution,
-            )
-            await complete_successful_turn(
-                websocket,
-                conv_id,
-                fallback_response,
-                workflow_execution=workflow_execution,
-                final_outcome="exception_fallback",
-                active_file_path="",
-                queue_background_optimize=False,
-                turn_kind=prepared.turn_kind if 'prepared' in locals() else TURN_KIND_VISIBLE_CHAT,
-            )
         else:
             mark_foreground_job("failed", error_text=str(e))
             await websocket.send_json({'type': 'error', 'content': f'Error: {str(e)}'})

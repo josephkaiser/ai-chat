@@ -390,6 +390,7 @@ class AppBehaviorTests(unittest.TestCase):
 
     def test_process_chat_turn_escalates_workspace_upgrade_instead_of_leaking_internal_message(self):
         original_prepare_turn_request = app.prepare_turn_request
+        original_stream_chat_response = app.stream_chat_response
         original_run_resumable_tool_loop = app.run_resumable_tool_loop
         original_orchestrated_chat = app.orchestrated_chat
         original_create_workflow_execution = app.create_workflow_execution
@@ -438,6 +439,9 @@ class AppBehaviorTests(unittest.TestCase):
         async def fake_prepare_turn_request(_data):
             return prepared
 
+        async def fake_stream_chat_response(*args, **kwargs):
+            return "A one-shot toy OS answer."
+
         async def fake_run_resumable_tool_loop(*args, **kwargs):
             return app.ToolLoopOutcome(
                 final_text=(
@@ -473,6 +477,7 @@ class AppBehaviorTests(unittest.TestCase):
         websocket = DummyWebSocket()
         try:
             app.prepare_turn_request = fake_prepare_turn_request
+            app.stream_chat_response = fake_stream_chat_response
             app.run_resumable_tool_loop = fake_run_resumable_tool_loop
             app.orchestrated_chat = fake_orchestrated_chat
             app.create_workflow_execution = fake_create_workflow_execution
@@ -488,6 +493,7 @@ class AppBehaviorTests(unittest.TestCase):
             )
         finally:
             app.prepare_turn_request = original_prepare_turn_request
+            app.stream_chat_response = original_stream_chat_response
             app.run_resumable_tool_loop = original_run_resumable_tool_loop
             app.orchestrated_chat = original_orchestrated_chat
             app.create_workflow_execution = original_create_workflow_execution
@@ -498,6 +504,186 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(final_replacements[0]["content"], "Created `toy_kernel.c` in the workspace.")
         joined_payloads = "\n".join(str(payload) for payload in websocket.sent)
         self.assertNotIn("The next step needs workspace execution", joined_payloads)
+
+    def test_process_chat_turn_keeps_one_shot_when_tool_route_pauses(self):
+        original_prepare_turn_request = app.prepare_turn_request
+        original_stream_chat_response = app.stream_chat_response
+        original_run_resumable_tool_loop = app.run_resumable_tool_loop
+        original_create_workflow_execution = app.create_workflow_execution
+        original_complete_successful_turn = app.complete_successful_turn
+
+        class DummyWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-tool-pause",
+            active_file_path="",
+            turn_kind=app.TURN_KIND_VISIBLE_CHAT,
+            user_message_id=1,
+            saved_user_message="search my notes for routing leaks",
+            effective_message="search my notes for routing leaks",
+            model_message="search my notes for routing leaks",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="focused_read",
+            tool_policy_trace={},
+            enabled_tools=["workspace.grep"],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(
+                requires_search=True,
+                requires_workspace=True,
+                execution_style="one_shot_skill",
+                workspace_intent="focused_read",
+                enabled_tools=["workspace.grep"],
+            ),
+            attachment_paths=[],
+        )
+
+        async def fake_prepare_turn_request(_data):
+            return prepared
+
+        async def fake_stream_chat_response(*args, **kwargs):
+            return "One-shot answer: the likely leak is in the routing fallback."
+
+        async def fake_run_resumable_tool_loop(*args, **kwargs):
+            return app.ToolLoopOutcome(
+                final_text="I need workspace search permission before I can add grounded evidence.",
+                blocked_on_permission=True,
+                hit_limit=False,
+            )
+
+        def fake_create_workflow_execution(*args, **kwargs):
+            return None
+
+        async def fake_complete_successful_turn(websocket, *args, **kwargs):
+            await websocket.send_json({"type": "done"})
+            return 7
+
+        websocket = DummyWebSocket()
+        try:
+            app.prepare_turn_request = fake_prepare_turn_request
+            app.stream_chat_response = fake_stream_chat_response
+            app.run_resumable_tool_loop = fake_run_resumable_tool_loop
+            app.create_workflow_execution = fake_create_workflow_execution
+            app.complete_successful_turn = fake_complete_successful_turn
+            asyncio.run(
+                app.process_chat_turn(
+                    websocket,
+                    {
+                        "conversation_id": "conv-tool-pause",
+                        "message": "search my notes for routing leaks",
+                    },
+                )
+            )
+        finally:
+            app.prepare_turn_request = original_prepare_turn_request
+            app.stream_chat_response = original_stream_chat_response
+            app.run_resumable_tool_loop = original_run_resumable_tool_loop
+            app.create_workflow_execution = original_create_workflow_execution
+            app.complete_successful_turn = original_complete_successful_turn
+
+        final_replacements = [payload for payload in websocket.sent if payload.get("type") == "final_replace"]
+        self.assertEqual(len(final_replacements), 1)
+        self.assertIn("One-shot answer", final_replacements[0]["content"])
+        self.assertIn("workspace search permission", final_replacements[0]["content"])
+        self.assertTrue(any(payload.get("type") == "done" for payload in websocket.sent))
+
+    def test_process_chat_turn_connect_error_uses_visible_fallback(self):
+        original_prepare_turn_request = app.prepare_turn_request
+        original_stream_chat_response = app.stream_chat_response
+        original_create_workflow_execution = app.create_workflow_execution
+        original_complete_successful_turn = app.complete_successful_turn
+
+        class DummyWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, payload):
+                self.sent.append(payload)
+
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-connect-error",
+            active_file_path="",
+            turn_kind=app.TURN_KIND_VISIBLE_CHAT,
+            user_message_id=1,
+            saved_user_message="explain routing leaks",
+            effective_message="explain routing leaks",
+            model_message="explain routing leaks",
+            history=[],
+            model_history=[],
+            system_prompt="system",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(agent_tools=True),
+            slash_command=None,
+            max_tokens=1024,
+            workspace_intent="none",
+            tool_policy_trace={},
+            enabled_tools=[],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(execution_style="direct_answer"),
+            attachment_paths=[],
+        )
+
+        async def fake_prepare_turn_request(_data):
+            return prepared
+
+        async def fake_stream_chat_response(*args, **kwargs):
+            raise app.httpx.ConnectError("cannot connect")
+
+        def fake_create_workflow_execution(*args, **kwargs):
+            return None
+
+        async def fake_complete_successful_turn(websocket, *args, **kwargs):
+            await websocket.send_json({"type": "done"})
+            return 11
+
+        websocket = DummyWebSocket()
+        try:
+            app.prepare_turn_request = fake_prepare_turn_request
+            app.stream_chat_response = fake_stream_chat_response
+            app.create_workflow_execution = fake_create_workflow_execution
+            app.complete_successful_turn = fake_complete_successful_turn
+            asyncio.run(
+                app.process_chat_turn(
+                    websocket,
+                    {
+                        "conversation_id": "conv-connect-error",
+                        "message": "explain routing leaks",
+                    },
+                )
+            )
+        finally:
+            app.prepare_turn_request = original_prepare_turn_request
+            app.stream_chat_response = original_stream_chat_response
+            app.create_workflow_execution = original_create_workflow_execution
+            app.complete_successful_turn = original_complete_successful_turn
+
+        self.assertFalse(any(payload.get("type") == "error" for payload in websocket.sent))
+        final_replacements = [payload for payload in websocket.sent if payload.get("type") == "final_replace"]
+        self.assertEqual(len(final_replacements), 1)
+        self.assertIn("wasn't able to finish", final_replacements[0]["content"])
+        self.assertTrue(any(payload.get("type") == "done" for payload in websocket.sent))
 
     def test_resolve_route_intake_for_turn_uses_structured_llm_pass(self):
         original_infer = app.infer_structured_route_intake_via_llm
@@ -819,8 +1005,8 @@ class AppBehaviorTests(unittest.TestCase):
             app.resolve_route_intake_for_turn = original_resolve_route_intake_for_turn
             app.maybe_bootstrap_workspace_from_current_repo = original_maybe_bootstrap_workspace_from_current_repo
 
-        self.assertEqual(prepared.resolved_mode, "deep")
-        self.assertTrue(prepared.promoted_to_planning)
+        self.assertEqual(prepared.resolved_mode, "chat")
+        self.assertFalse(prepared.promoted_to_planning)
         self.assertFalse(prepared.auto_execute_workspace)
 
     def test_format_build_substep_progress_message_uses_focus_text(self):
@@ -855,11 +1041,153 @@ class AppBehaviorTests(unittest.TestCase):
             "Routing directly to current web sources for a concise summary of nvim.",
         )
 
+    def test_format_turn_route_activity_hides_internal_skill_summary(self):
+        rendered = app.format_turn_route_activity(
+            app.TurnAssessment(
+                primary_skill="plan_and_code",
+                requires_search=True,
+                requires_workspace=True,
+                requires_coding_loop=True,
+                requires_step_review=True,
+                execution_style="plan_execution",
+                workspace_intent="focused_write",
+                enabled_tools=["workspace.grep", "workspace.patch_file"],
+            ),
+            mode="chat",
+            promoted_to_planning=False,
+        )
+
+        self.assertNotIn("Skill loop:", rendered)
+        self.assertNotIn("RAG", rendered)
+        self.assertEqual(rendered, "Checking the workspace so the answer can stay grounded in the files.")
+
+    def test_prepare_turn_request_enables_agent_for_slash_code_command(self):
+        original_resolve_route_intake_for_turn = app.resolve_route_intake_for_turn
+        original_maybe_bootstrap_workspace_from_current_repo = app.maybe_bootstrap_workspace_from_current_repo
+        try:
+            async def fake_resolve_route_intake_for_turn(*args, **kwargs):
+                return app.StructuredRouteIntake()
+
+            app.resolve_route_intake_for_turn = fake_resolve_route_intake_for_turn
+            app.maybe_bootstrap_workspace_from_current_repo = lambda *args, **kwargs: None
+
+            prepared = asyncio.run(
+                app.prepare_turn_request({
+                    "conversation_id": "conv-slash-code",
+                    "message": "/code fix the login bug",
+                    "features": {
+                        "agent_tools": False,
+                        "workspace_write": False,
+                        "auto_approve_tool_permissions": False,
+                    },
+                    "slash_command": {
+                        "name": "code",
+                        "raw_name": "code",
+                        "args": "fix the login bug",
+                    },
+                })
+            )
+        finally:
+            app.resolve_route_intake_for_turn = original_resolve_route_intake_for_turn
+            app.maybe_bootstrap_workspace_from_current_repo = original_maybe_bootstrap_workspace_from_current_repo
+
+        self.assertIsNotNone(prepared.slash_command)
+        self.assertEqual(prepared.slash_command.get("name"), "code")
+        self.assertEqual(prepared.slash_command.get("args"), "fix the login bug")
+        self.assertTrue(prepared.features.agent_tools)
+        self.assertTrue(prepared.features.workspace_write)
+        self.assertTrue(prepared.features.auto_approve_tool_permissions)
+
+    def test_infer_direct_slash_command_from_message_accepts_multiline_args(self):
+        parsed = app.infer_direct_slash_command_from_message("/code fix login\n\nUse the workspace files.")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.get("name"), "code")
+        self.assertIn("fix login", parsed.get("args", ""))
+
     def test_extract_workspace_path_references_ignores_version_numbers(self):
         self.assertEqual(
             app.extract_workspace_path_references("what changed in update to nvim 0.12?"),
             [],
         )
+
+    def test_should_skip_route_intake_llm_for_chat_only_mode(self):
+        self.assertTrue(
+            app.should_skip_route_intake_llm(
+                "conv-chat",
+                "what is a python decorator?",
+                app.FeatureFlags(agent_tools=False),
+            )
+        )
+
+    def test_should_skip_route_intake_llm_for_simple_agent_chat(self):
+        self.assertTrue(
+            app.should_skip_route_intake_llm(
+                "conv-chat",
+                "what is a python decorator?",
+                app.FeatureFlags(agent_tools=True),
+            )
+        )
+
+    def test_should_not_skip_route_intake_llm_for_web_search_request(self):
+        self.assertFalse(
+            app.should_skip_route_intake_llm(
+                "conv-chat",
+                "search the web for the latest FastAPI release",
+                app.FeatureFlags(agent_tools=True, web_search=True),
+            )
+        )
+
+    def test_message_references_workspace_file_ignores_inline_code_examples(self):
+        self.assertFalse(app.message_references_workspace_file("explain `list.append` in python"))
+        self.assertFalse(app.message_references_workspace_file("what does app.py do conceptually?"))
+
+    def test_message_references_workspace_file_detects_repo_paths(self):
+        self.assertTrue(app.message_references_workspace_file("fix the bug in src/python/harness.py"))
+        self.assertTrue(app.message_references_workspace_file("please update `./config/model-defaults.env`"))
+
+    def test_select_enabled_tools_returns_empty_without_agent_tools(self):
+        route_intake = app.build_heuristic_route_intake(
+            "conv-chat",
+            "search the web for the latest FastAPI release",
+            app.FeatureFlags(agent_tools=False, web_search=True),
+        )
+        tools = app.select_enabled_tools_from_route_intake(
+            "conv-chat",
+            "search the web for the latest FastAPI release",
+            app.FeatureFlags(agent_tools=False, web_search=True),
+            route_intake,
+        )
+        self.assertEqual(tools, [])
+
+    def test_is_chat_only_turn_for_plain_chat(self):
+        prepared = app.PreparedTurnRequest(
+            conversation_id="conv-chat",
+            active_file_path="",
+            turn_kind=app.TURN_KIND_VISIBLE_CHAT,
+            user_message_id=1,
+            saved_user_message="is this good rust code?",
+            effective_message="is this good rust code?",
+            model_message="is this good rust code?",
+            history=[],
+            model_history=[],
+            system_prompt="You are helpful.",
+            requested_mode="auto",
+            resolved_mode="chat",
+            features=app.FeatureFlags(),
+            slash_command=None,
+            max_tokens=2048,
+            workspace_intent="none",
+            tool_policy_trace={},
+            enabled_tools=[],
+            auto_execute_workspace=False,
+            resume_saved_workspace=False,
+            plan_override_builder_steps=[],
+            promoted_to_planning=False,
+            repo_bootstrapped=False,
+            repo_bootstrap_summary="",
+            assessment=app.TurnAssessment(),
+        )
+        self.assertTrue(app.is_chat_only_turn(prepared))
 
 
 if __name__ == "__main__":

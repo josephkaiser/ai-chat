@@ -1,37 +1,11 @@
 // Generated from src/web/app.ts by scripts/build_frontend.mjs
-import { chatMessages, closeReasoningButton, closeSettingsButton, composerAttachments, composerForm, composerHint, composerInput, connectionBadge, conversationList, directoryPath, downloadFileButton, fileList, filePreview, fixtureReviewFilter, isMobileViewport, newChatButton, openInTabButton, refreshContextEvalButton, refreshFixtureReviewButton, refreshWorkspaceButton, reasoningContent, reasoningOverlay, reasoningScope, reasoningTitle, resetAppButton, scrollToBottomButton, sendButton, settingsOverlay, settingsSummary, sidebarToggle, viewerCloseButton, viewerMeta, viewerModeButton, viewerTitle, viewerToggle, workspaceSettingsButton } from "./dom.js";
+import { chatMessages, closeReasoningButton, closeSettingsButton, composerAttachments, composerForm, composerHint, composerInput, connectionBadge, conversationList, directoryPath, downloadFileButton, fileList, filePreview, fixtureReviewFilter, isMobileViewport, newChatButton, openInTabButton, refreshContextEvalButton, refreshFixtureReviewButton, refreshWorkspaceButton, reasoningContent, reasoningOverlay, reasoningScope, reasoningTitle, resetAppButton, scrollToBottomButton, sendButton, settingsOverlay, settingsSummary, sidebarToggle, viewerCloseButton, viewerMeta, viewerModeButton, viewerTitle, viewerToggle, workspaceSettingsButton, } from "./dom.js";
 import { createContextEvalController } from "./context_eval.js";
-import { FIRST_TURN_COMPOSER_MAX_HEIGHT, LATER_TURN_COMPOSER_MAX_HEIGHT, PASTE_ATTACH_CHAR_THRESHOLD, PASTE_ATTACH_LINE_THRESHOLD, state } from "./state.js";
+import { FIRST_TURN_COMPOSER_MAX_HEIGHT, LATER_TURN_COMPOSER_MAX_HEIGHT, PASTE_ATTACH_CHAR_THRESHOLD, PASTE_ATTACH_LINE_THRESHOLD, state, } from "./state.js";
 const STOPWORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "how",
-    "i",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "this",
-    "to",
-    "was",
-    "we",
-    "with",
-    "you",
-    "your"
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "i",
+    "if", "in", "into", "is", "it", "of", "on", "or", "that", "the", "this",
+    "to", "was", "we", "with", "you", "your",
 ]);
 const taskBoardCache = new Map();
 function generateId() {
@@ -41,7 +15,12 @@ function generateId() {
     return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 function escapeHtml(value) {
-    return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 function getKatexRenderer() {
     const candidate = globalThis.katex;
@@ -51,59 +30,63 @@ function getKatexRenderer() {
     return null;
 }
 function formatRelativeTime(value) {
-    if (!value) return "";
+    if (!value)
+        return "";
     const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
+    if (Number.isNaN(date.getTime()))
+        return "";
     const diffMs = date.getTime() - Date.now();
     const minutes = Math.round(diffMs / 60000);
-    const formatter = new Intl.RelativeTimeFormat(undefined, {
-        numeric: "auto"
-    });
-    if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    if (Math.abs(minutes) < 60)
+        return formatter.format(minutes, "minute");
     const hours = Math.round(minutes / 60);
-    if (Math.abs(hours) < 48) return formatter.format(hours, "hour");
+    if (Math.abs(hours) < 48)
+        return formatter.format(hours, "hour");
     const days = Math.round(hours / 24);
     return formatter.format(days, "day");
 }
 function formatElapsedDuration(startValue, endMs = Date.now()) {
-    if (!startValue) return "";
+    if (!startValue)
+        return "";
     const startMs = new Date(startValue).getTime();
-    if (Number.isNaN(startMs)) return "";
+    if (Number.isNaN(startMs))
+        return "";
     const diffMs = Math.max(0, endMs - startMs);
     const totalSeconds = Math.round(diffMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    if (minutes <= 0) return `${seconds}s`;
+    if (minutes <= 0)
+        return `${seconds}s`;
     return `${minutes}m ${seconds}s`;
 }
 function formatBytes(value) {
-    if (!value) return "";
-    const units = [
-        "B",
-        "KB",
-        "MB",
-        "GB"
-    ];
+    if (!value)
+        return "";
+    const units = ["B", "KB", "MB", "GB"];
     let size = value;
     let unitIndex = 0;
-    while(size >= 1024 && unitIndex < units.length - 1){
+    while (size >= 1024 && unitIndex < units.length - 1) {
         size /= 1024;
         unitIndex += 1;
     }
     return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 function formatDecimal(value, digits = 2) {
-    if (typeof value !== "number" || Number.isNaN(value)) return "0";
+    if (typeof value !== "number" || Number.isNaN(value))
+        return "0";
     return value.toFixed(digits);
 }
 function parentDirectory(path) {
-    if (!path || path === ".") return ".";
+    if (!path || path === ".")
+        return ".";
     const parts = path.split("/").filter(Boolean);
     parts.pop();
     return parts.length ? parts.join("/") : ".";
 }
 function withCacheBust(url, nonce = "") {
-    if (!nonce) return url;
+    if (!nonce)
+        return url;
     const joiner = url.includes("?") ? "&" : "?";
     return `${url}${joiner}_=${encodeURIComponent(nonce)}`;
 }
@@ -111,14 +94,19 @@ function fileViewUrl(path, nonce = "") {
     return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/view?path=${encodeURIComponent(path)}`, nonce);
 }
 function workspaceFileRenderUrl(path, nonce = "") {
-    const encodedPath = String(path || "").split("/").filter(Boolean).map((segment)=>encodeURIComponent(segment)).join("/");
+    const encodedPath = String(path || "")
+        .split("/")
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
     return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file/render/${encodedPath}`, nonce);
 }
 function workspaceFileApiUrl(path, nonce = "") {
     return withCacheBust(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file?path=${encodeURIComponent(path)}`, nonce);
 }
 function downloadSelectedFile() {
-    if (!state.currentWorkspaceId || !state.selectedFilePath) return;
+    if (!state.currentWorkspaceId || !state.selectedFilePath)
+        return;
     const anchor = document.createElement("a");
     anchor.href = fileViewUrl(state.selectedFilePath);
     anchor.download = state.selectedFilePath.split("/").pop() || "download";
@@ -128,7 +116,8 @@ function downloadSelectedFile() {
     anchor.remove();
 }
 function openSelectedFileInTab() {
-    if (!state.currentWorkspaceId || !state.selectedFilePath) return;
+    if (!state.currentWorkspaceId || !state.selectedFilePath)
+        return;
     window.open(fileViewUrl(state.selectedFilePath, String(Date.now())), "_blank", "noopener");
 }
 function inferredPreviewLanguage(path) {
@@ -137,25 +126,21 @@ function inferredPreviewLanguage(path) {
 }
 function shouldRenderTextAsMarkdown(path, content) {
     const extension = artifactFileExtension(path);
-    if ([
-        "md",
-        "markdown",
-        "mdx"
-    ].includes(extension)) return true;
+    if (["md", "markdown", "mdx"].includes(extension))
+        return true;
     const trimmed = String(content || "").trim();
-    return Boolean(trimmed) && (trimmed.includes("[[artifact:") || /(^|\n)#{1,4}\s/.test(trimmed) || /```[\s\S]*?```/.test(trimmed) || /\$\$[\s\S]*?\$\$/.test(trimmed) || /\\\[[\s\S]*?\\\]/.test(trimmed));
+    return Boolean(trimmed) && (trimmed.includes("[[artifact:")
+        || /(^|\n)#{1,4}\s/.test(trimmed)
+        || /```[\s\S]*?```/.test(trimmed)
+        || /\$\$[\s\S]*?\$\$/.test(trimmed)
+        || /\\\[[\s\S]*?\\\]/.test(trimmed));
 }
 function shouldRenderTextAsCode(path) {
     const extension = artifactFileExtension(path);
-    return Boolean(extension) && ![
-        "md",
-        "markdown",
-        "mdx",
-        "txt"
-    ].includes(extension);
+    return Boolean(extension) && !["md", "markdown", "mdx", "txt"].includes(extension);
 }
 function composerHasConversationHistory() {
-    return state.messages.some((message)=>message.role === "user" || message.role === "assistant");
+    return state.messages.some((message) => message.role === "user" || message.role === "assistant");
 }
 function composerMaxHeight() {
     return composerHasConversationHistory() ? LATER_TURN_COMPOSER_MAX_HEIGHT : FIRST_TURN_COMPOSER_MAX_HEIGHT;
@@ -167,19 +152,23 @@ function syncComposerHeight() {
     composerInput.style.overflowY = composerInput.scrollHeight > nextHeight ? "auto" : "hidden";
 }
 function pendingAttachmentPaths() {
-    return state.pendingAttachments.map((attachment)=>attachment.path);
+    return state.pendingAttachments.map((attachment) => attachment.path);
 }
 function defaultComposerStatus() {
     if (state.composerUploadingCount > 0) {
         return `Uploading ${state.composerUploadingCount} file${state.composerUploadingCount === 1 ? "" : "s"}…`;
     }
-    if (state.connectionState === "offline") {
+    if (!state.runtimeReachable) {
         return "Runtime offline.";
     }
     if (!state.modelAvailable) {
         return state.modelName ? `Model loading: ${state.modelName}` : "Model loading…";
     }
-    return state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+    const readyLabel = state.modelName ? `Model ready: ${state.modelName}` : "Model ready.";
+    if (!state.wsConnected) {
+        return `${readyLabel} Using HTTP fallback (websocket unavailable).`;
+    }
+    return readyLabel;
 }
 function syncComposerActions() {
     sendButton.disabled = state.composerUploadingCount > 0 && !state.generating;
@@ -201,7 +190,9 @@ function syncShellLayout() {
     viewerToggle.hidden = state.viewerMode !== "closed";
     refreshWorkspaceButton.hidden = state.viewerMode === "closed";
     refreshWorkspaceButton.disabled = !state.currentWorkspaceId;
-    const showOpenInTabButton = state.viewerMode === "file" && Boolean(state.selectedFilePath) && state.selectedFileContentKind === "html";
+    const showOpenInTabButton = state.viewerMode === "file"
+        && Boolean(state.selectedFilePath)
+        && state.selectedFileContentKind === "html";
     openInTabButton.hidden = !showOpenInTabButton;
     openInTabButton.disabled = !showOpenInTabButton;
     downloadFileButton.hidden = !(state.viewerMode === "file" && state.selectedFilePath);
@@ -214,7 +205,7 @@ function syncShellLayout() {
         viewerModeButton.dataset.tooltip = viewerModeLabel;
     }
     viewerCloseButton.hidden = state.viewerMode === "closed";
-    window.requestAnimationFrame(()=>{
+    window.requestAnimationFrame(() => {
         if (state.stickChatToBottom) {
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
@@ -222,14 +213,14 @@ function syncShellLayout() {
     });
 }
 function syncRuntimeSummary() {
-    if (state.connectionState === "offline") {
-        connectionBadge.className = "status-badge offline";
-        connectionBadge.textContent = "Offline";
-        return;
-    }
     if (state.generating) {
         connectionBadge.className = "status-badge streaming";
         connectionBadge.textContent = "Streaming";
+        return;
+    }
+    if (!state.runtimeReachable) {
+        connectionBadge.className = "status-badge offline";
+        connectionBadge.textContent = "Offline";
         return;
     }
     if (!state.modelAvailable) {
@@ -248,7 +239,7 @@ function setGenerating(nextValue) {
     state.generating = nextValue;
     sendButton.textContent = nextValue ? "Stop" : "Send";
     syncComposerActions();
-    setConnectionState(nextValue ? "streaming" : state.ws?.readyState === WebSocket.OPEN ? "online" : "offline");
+    setConnectionState(nextValue ? "streaming" : (state.ws?.readyState === WebSocket.OPEN ? "online" : "offline"));
 }
 function clearVisibleGenerationState() {
     state.activeAssistantIndex = -1;
@@ -270,18 +261,24 @@ function clearWorkspaceView() {
     syncShellLayout();
 }
 function detachGenerationFromVisibleConversation(conversationId) {
-    if (!conversationId) return;
-    if (state.activeStreamConversationId !== conversationId) return;
+    if (!conversationId)
+        return;
+    if (state.activeStreamConversationId !== conversationId)
+        return;
     clearVisibleGenerationState();
 }
 function setComposerHint(text) {
     composerHint.textContent = text;
 }
 function normalizeThinkingText(text) {
-    return String(text || "").replace(/^(Inspect|Deep|Verify|Synthesize):\s*/i, "").replace(/^Slash \/[a-z0-9_-]+:\s*/i, "").replace(/\s+/g, " ").trim();
+    return String(text || "")
+        .replace(/^(Inspect|Deep|Verify|Synthesize):\s*/i, "")
+        .replace(/^Slash \/[a-z0-9_-]+:\s*/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 function findAssistantWorkStartedAt(messages, assistantIndex) {
-    for(let index = assistantIndex - 1; index >= 0; index -= 1){
+    for (let index = assistantIndex - 1; index >= 0; index -= 1) {
         const candidate = messages[index];
         if (candidate.role === "user" && candidate.timestamp) {
             return candidate.timestamp;
@@ -295,18 +292,24 @@ function assistantMetaLabel(message, index) {
     }
     const startedAt = findAssistantWorkStartedAt(state.messages, index);
     const duration = formatElapsedDuration(startedAt || message.timestamp);
-    if (duration) return `Worked for ${duration}`;
+    if (duration)
+        return `Worked for ${duration}`;
     return "Assistant";
 }
 function thinkingStatusLabel(status) {
-    if (status.error) return "Attention";
-    if (status.phase === "permission") return "Permissions";
-    if (status.phase === "thinking") return "Working";
+    if (status.error)
+        return "Attention";
+    if (status.phase === "permission")
+        return "Permissions";
+    if (status.phase === "thinking")
+        return "Working";
     return "Status";
 }
 function isSuppressedAssistantNote(text) {
     const normalized = normalizeThinkingText(text).toLowerCase();
-    return normalized.includes("i hit an unexpected internal error before i could finish the reply") || normalized.includes("please say continue and i'll retry from the current workspace state") || normalized.includes("please say continue and i’ll retry from the current workspace state");
+    return normalized.includes("i hit an unexpected internal error before i could finish the reply")
+        || normalized.includes("please say continue and i'll retry from the current workspace state")
+        || normalized.includes("please say continue and i’ll retry from the current workspace state");
 }
 function summarizeRuntimeError(text) {
     const normalized = normalizeThinkingText(text);
@@ -352,12 +355,13 @@ function buildThinkingSummary(event) {
 }
 function setThinkingStatus(text, options = {}) {
     const normalized = normalizeThinkingText(text);
-    if (!normalized) return;
+    if (!normalized)
+        return;
     state.thinkingStatus = {
         text: normalized,
         phase: options.phase || "thinking",
         error: Boolean(options.error),
-        persistent: Boolean(options.persistent)
+        persistent: Boolean(options.persistent),
     };
     setComposerHint(`Thinking: ${normalized}`);
     renderMessages();
@@ -369,11 +373,17 @@ function clearThinkingStatus() {
 }
 function truncatePreview(value, limit = 88) {
     const flattened = value.replace(/\s+/g, " ").trim();
-    if (flattened.length <= limit) return flattened;
+    if (flattened.length <= limit)
+        return flattened;
     return `${flattened.slice(0, limit - 1)}…`;
 }
 function cleanConversationText(value) {
-    return String(value || "").replace(/<\/?think>/gi, " ").replace(/\[\[artifact:([^\]]+)\]\]/gi, "$1").replace(/[`*_#>\[\]]+/g, " ").replace(/\s+/g, " ").trim();
+    return String(value || "")
+        .replace(/<\/?think>/gi, " ")
+        .replace(/\[\[artifact:([^\]]+)\]\]/gi, "$1")
+        .replace(/[`*_#>\[\]]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 function conversationTitleLooksLowQuality(title) {
     const normalized = cleanConversationText(title).toLowerCase();
@@ -384,34 +394,21 @@ function conversationTitleLooksLowQuality(title) {
         return true;
     }
     return [
-        "okay",
-        "ok",
-        "sure",
-        "yes",
-        "no",
-        "here",
-        "heres",
-        "here's",
-        "let's",
-        "lets",
-        "i can",
-        "i will",
-        "i'll",
-        "we can",
-        "you can",
-        "can you",
-        "could you",
-        "would you",
-        "help me"
-    ].some((prefix)=>normalized.startsWith(prefix));
+        "okay", "ok", "sure", "yes", "no", "here", "heres", "here's",
+        "let's", "lets", "i can", "i will", "i'll", "we can", "you can",
+        "can you", "could you", "would you", "help me",
+    ].some((prefix) => normalized.startsWith(prefix));
 }
 function displayConversationTitle(title, preview, seed = "") {
     const cleanedTitle = cleanConversationText(title);
     const cleanedSeed = cleanConversationText(seed);
     const cleanedPreview = cleanConversationText(preview);
-    const base = cleanedTitle && !conversationTitleLooksLowQuality(cleanedTitle) ? cleanedTitle : cleanedSeed || cleanedPreview || "New chat";
+    const base = cleanedTitle && !conversationTitleLooksLowQuality(cleanedTitle)
+        ? cleanedTitle
+        : (cleanedSeed || cleanedPreview || "New chat");
     const words = base.split(/\s+/).filter(Boolean);
-    if (words.length <= 5) return base;
+    if (words.length <= 5)
+        return base;
     return `${words.slice(0, 5).join(" ")}…`;
 }
 function displayConversationPreview(title, preview) {
@@ -427,63 +424,41 @@ function lineCount(text) {
 }
 function inferPastedLanguage(text) {
     const trimmed = text.trim();
-    if (!trimmed) return {
-        language: "text",
-        extension: "txt"
-    };
+    if (!trimmed)
+        return { language: "text", extension: "txt" };
     if (/^#!/.test(trimmed) || /(^|\n)\s*(from\s+\w+\s+import|import\s+\w+|def\s+\w+\(|class\s+\w+[\(:])/m.test(trimmed)) {
-        return {
-            language: "python",
-            extension: "py"
-        };
+        return { language: "python", extension: "py" };
     }
     if (/^\s*<!doctype html>|<html\b|<body\b|<head\b/i.test(trimmed)) {
-        return {
-            language: "html",
-            extension: "html"
-        };
+        return { language: "html", extension: "html" };
     }
     if (/(^|\n)\s*(SELECT|INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE|ALTER TABLE)\b/i.test(trimmed)) {
-        return {
-            language: "sql",
-            extension: "sql"
-        };
+        return { language: "sql", extension: "sql" };
     }
     if (/^\s*[{[]/.test(trimmed)) {
         try {
             JSON.parse(trimmed);
-            return {
-                language: "json",
-                extension: "json"
-            };
-        } catch (_error) {}
+            return { language: "json", extension: "json" };
+        }
+        catch (_error) {
+            // Ignore malformed JSON and continue through the remaining heuristics.
+        }
     }
     if (/(^|\n)\s*(export\s+default|export\s+(const|function|class)|import\s+.+from\s+['"]|const\s+\w+\s*=|let\s+\w+\s*=|function\s+\w+\()/m.test(trimmed)) {
-        return {
-            language: "javascript",
-            extension: "js"
-        };
+        return { language: "javascript", extension: "js" };
     }
     if (/(^|\n)\s*#\s+/.test(trimmed) || /(^|\n)\s*##\s+/.test(trimmed)) {
-        return {
-            language: "markdown",
-            extension: "md"
-        };
+        return { language: "markdown", extension: "md" };
     }
     if (/(^|\n)\s*(body|html|main|div|section|header|footer)\s*\{/.test(trimmed)) {
-        return {
-            language: "css",
-            extension: "css"
-        };
+        return { language: "css", extension: "css" };
     }
-    return {
-        language: "text",
-        extension: "txt"
-    };
+    return { language: "text", extension: "txt" };
 }
 function shouldMaterializePastedText(text) {
     const trimmed = text.trim();
-    if (!trimmed) return false;
+    if (!trimmed)
+        return false;
     const chars = trimmed.length;
     const lines = lineCount(trimmed);
     if (chars >= PASTE_ATTACH_CHAR_THRESHOLD || lines >= PASTE_ATTACH_LINE_THRESHOLD) {
@@ -506,13 +481,11 @@ async function materializeComposerPaste(text) {
     try {
         await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 path,
-                content: text
-            })
+                content: text,
+            }),
         });
         const { extension } = inferPastedLanguage(text);
         state.pendingAttachments = mergePendingAttachments([
@@ -522,11 +495,12 @@ async function materializeComposerPaste(text) {
                 path,
                 kind: extension,
                 contentType: "text/plain",
-                size: text.length
-            }
+                size: text.length,
+            },
         ]);
         renderComposerAttachments();
-    } finally{
+    }
+    finally {
         setComposerUploadState(0);
     }
     await loadDirectory(parentDirectory(path));
@@ -535,13 +509,12 @@ async function materializeComposerPaste(text) {
 }
 function mergePendingAttachments(items) {
     const deduped = new Map();
-    items.forEach((item)=>{
-        if (!item.path) return;
+    items.forEach((item) => {
+        if (!item.path)
+            return;
         deduped.set(item.path, item);
     });
-    return [
-        ...deduped.values()
-    ];
+    return [...deduped.values()];
 }
 function setComposerDropActive(active) {
     state.composerDropActive = active;
@@ -556,7 +529,7 @@ function setComposerUploadState(count) {
     }
 }
 function removePendingAttachment(path) {
-    state.pendingAttachments = state.pendingAttachments.filter((attachment)=>attachment.path !== path);
+    state.pendingAttachments = state.pendingAttachments.filter((attachment) => attachment.path !== path);
     renderComposerAttachments();
     setComposerHint(state.pendingAttachments.length ? `${state.pendingAttachments.length} file${state.pendingAttachments.length === 1 ? "" : "s"} attached.` : defaultComposerStatus());
 }
@@ -575,7 +548,7 @@ function renderComposerAttachments() {
             </span>
         </div>
     ` : "";
-    const attachmentMarkup = state.pendingAttachments.map((attachment)=>{
+    const attachmentMarkup = state.pendingAttachments.map((attachment) => {
         const kindLabel = displayFileKindLabel(attachment.path, attachment.kind || "", "file");
         return `
             <div class="composer-attachment-chip" data-path="${escapeHtml(attachment.path)}">
@@ -594,10 +567,11 @@ function renderComposerAttachments() {
         `;
     }).join("");
     composerAttachments.innerHTML = `${uploadingMarkup}${attachmentMarkup}`;
-    composerAttachments.querySelectorAll("[data-remove-path]").forEach((button)=>{
-        button.addEventListener("click", ()=>{
+    composerAttachments.querySelectorAll("[data-remove-path]").forEach((button) => {
+        button.addEventListener("click", () => {
             const path = button.dataset.removePath || "";
-            if (!path) return;
+            if (!path)
+                return;
             removePendingAttachment(path);
         });
     });
@@ -606,31 +580,30 @@ async function uploadComposerFiles(files) {
     if (!state.currentWorkspaceId) {
         throw new Error("Select a workspace before attaching files.");
     }
-    const uploads = files.filter((file)=>file && file.size >= 0);
-    if (!uploads.length) return [];
+    const uploads = files.filter((file) => file && file.size >= 0);
+    if (!uploads.length)
+        return [];
     setComposerUploadState(uploads.length);
     let attachments = [];
     try {
         const formData = new FormData();
-        uploads.forEach((file)=>formData.append("files", file, file.name));
+        uploads.forEach((file) => formData.append("files", file, file.name));
         formData.append("target_path", ".");
         const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/upload`, {
             method: "POST",
-            body: formData
+            body: formData,
         });
-        attachments = (payload.files || []).map((file)=>({
-                name: file.name,
-                path: file.path,
-                size: file.size,
-                kind: file.kind,
-                contentType: file.content_type
-            }));
-        state.pendingAttachments = mergePendingAttachments([
-            ...state.pendingAttachments,
-            ...attachments
-        ]);
+        attachments = (payload.files || []).map((file) => ({
+            name: file.name,
+            path: file.path,
+            size: file.size,
+            kind: file.kind,
+            contentType: file.content_type,
+        }));
+        state.pendingAttachments = mergePendingAttachments([...state.pendingAttachments, ...attachments]);
         renderComposerAttachments();
-    } finally{
+    }
+    finally {
         setComposerUploadState(0);
     }
     await loadDirectory(".");
@@ -643,38 +616,12 @@ function mergeComposerText(note) {
 }
 const ARTIFACT_HELPER_TEXT_PATTERNS = [
     /^\s*(?:you can )?(?:open|view|inspect|see|read|preview|find)\b[^.!?]*?(?:here|below)?[:.]?\s*$/i,
-    /^\s*(?:saved plan(?: and notes)?|saved progress|task board|feedback digest|full feedback digest|artifact|artifacts?)[:.]?\s*$/i
+    /^\s*(?:saved plan(?: and notes)?|saved progress|task board|feedback digest|full feedback digest|artifact|artifacts?)[:.]?\s*$/i,
 ];
 const MATERIALIZABLE_ARTIFACT_EXTENSIONS = new Set([
-    "md",
-    "txt",
-    "py",
-    "js",
-    "ts",
-    "tsx",
-    "jsx",
-    "json",
-    "html",
-    "css",
-    "sql",
-    "sh",
-    "bash",
-    "zsh",
-    "yaml",
-    "yml",
-    "toml",
-    "csv",
-    "xml",
-    "svg",
-    "c",
-    "h",
-    "cpp",
-    "hpp",
-    "java",
-    "rs",
-    "go",
-    "rb",
-    "php"
+    "md", "txt", "py", "js", "ts", "tsx", "jsx", "json", "html", "css", "sql",
+    "sh", "bash", "zsh", "yaml", "yml", "toml", "csv", "xml", "svg", "c", "h",
+    "cpp", "hpp", "java", "rs", "go", "rb", "php",
 ]);
 function isNearBottom(element, threshold = 72) {
     return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
@@ -683,16 +630,13 @@ function syncScrollJumpButton() {
     scrollToBottomButton.hidden = !state.messages.length || state.stickChatToBottom;
 }
 function scrollChatToBottom(behavior = "auto") {
-    chatMessages.scrollTo({
-        top: chatMessages.scrollHeight,
-        behavior
-    });
+    chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior });
     state.stickChatToBottom = true;
     syncScrollJumpButton();
 }
 function extractArtifactReferences(message) {
     const refs = [];
-    for (const match of String(message || "").matchAll(/\[\[artifact:([^\]]+)\]\]/gi)){
+    for (const match of String(message || "").matchAll(/\[\[artifact:([^\]]+)\]\]/gi)) {
         const cleaned = String(match[1] || "").trim();
         if (cleaned && !refs.includes(cleaned)) {
             refs.push(cleaned);
@@ -701,10 +645,18 @@ function extractArtifactReferences(message) {
     return refs;
 }
 function resolveArtifactReferencePath(path) {
-    return String(path || "").trim().replace(/^`|`$/g, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+    return String(path || "")
+        .trim()
+        .replace(/^`|`$/g, "")
+        .replace(/\\/g, "/")
+        .replace(/^\.\//, "")
+        .replace(/^\/+/, "");
 }
 function isHiddenWorkspacePath(path) {
-    return resolveArtifactReferencePath(path).split("/").filter(Boolean).some((segment)=>segment.startsWith("."));
+    return resolveArtifactReferencePath(path)
+        .split("/")
+        .filter(Boolean)
+        .some((segment) => segment.startsWith("."));
 }
 function artifactFileExtension(path) {
     const fileName = resolveArtifactReferencePath(path).split("/").pop() || "";
@@ -713,122 +665,160 @@ function artifactFileExtension(path) {
 }
 function isSpreadsheetPreviewPath(path) {
     const extension = artifactFileExtension(path);
-    return [
-        "xlsx",
-        "xls",
-        "xlsm"
-    ].includes(extension);
+    return ["xlsx", "xls", "xlsm"].includes(extension);
 }
 function displayFileKindLabel(path, contentKind = "", itemType = "file") {
-    if (itemType === "directory") return "Dir";
+    if (itemType === "directory")
+        return "Dir";
     const extension = artifactFileExtension(path);
-    if (extension === "c") return "C";
-    if (extension === "h") return "Header";
-    if ([
-        "cpp",
-        "cxx",
-        "cc"
-    ].includes(extension)) return "C++";
-    if (extension === "hpp") return "C++ Header";
-    if (extension === "py") return "Python";
-    if (extension === "js") return "JS";
-    if (extension === "ts") return "TS";
-    if (extension === "tsx") return "TSX";
-    if (extension === "jsx") return "JSX";
-    if (extension === "rs") return "Rust";
-    if (extension === "go") return "Go";
-    if (extension === "java") return "Java";
-    if (extension === "sql") return "SQL";
-    if (extension === "html") return "HTML";
-    if (extension === "css") return "CSS";
-    if (extension === "json") return "JSON";
-    if (extension === "md") return "Markdown";
+    if (extension === "c")
+        return "C";
+    if (extension === "h")
+        return "Header";
+    if (["cpp", "cxx", "cc"].includes(extension))
+        return "C++";
+    if (extension === "hpp")
+        return "C++ Header";
+    if (extension === "py")
+        return "Python";
+    if (extension === "js")
+        return "JS";
+    if (extension === "ts")
+        return "TS";
+    if (extension === "tsx")
+        return "TSX";
+    if (extension === "jsx")
+        return "JSX";
+    if (extension === "rs")
+        return "Rust";
+    if (extension === "go")
+        return "Go";
+    if (extension === "java")
+        return "Java";
+    if (extension === "sql")
+        return "SQL";
+    if (extension === "html")
+        return "HTML";
+    if (extension === "css")
+        return "CSS";
+    if (extension === "json")
+        return "JSON";
+    if (extension === "md")
+        return "Markdown";
     const normalized = String(contentKind || "").trim().toLowerCase();
-    if (normalized === "code") return "Code";
-    if (normalized === "markdown") return "Markdown";
-    if (normalized === "html") return "HTML";
-    if (normalized === "pdf") return "PDF";
-    if (normalized === "image") return "Image";
-    if (normalized === "csv") return "CSV";
-    if (normalized === "spreadsheet") return "Sheet";
+    if (normalized === "code")
+        return "Code";
+    if (normalized === "markdown")
+        return "Markdown";
+    if (normalized === "html")
+        return "HTML";
+    if (normalized === "pdf")
+        return "PDF";
+    if (normalized === "image")
+        return "Image";
+    if (normalized === "csv")
+        return "CSV";
+    if (normalized === "spreadsheet")
+        return "Sheet";
     return "File";
 }
 function displayFilePreviewLabel(path, contentKind = "") {
     const extension = artifactFileExtension(path);
-    if (extension === "c") return "C source";
-    if (extension === "h") return "C header";
-    if ([
-        "cpp",
-        "cxx",
-        "cc"
-    ].includes(extension)) return "C++ source";
-    if (extension === "hpp") return "C++ header";
-    if (extension === "py") return "Python";
-    if (extension === "js") return "JavaScript";
-    if (extension === "ts") return "TypeScript";
-    if (extension === "tsx") return "TSX";
-    if (extension === "jsx") return "JSX";
-    if (extension === "rs") return "Rust";
-    if (extension === "go") return "Go";
-    if (extension === "java") return "Java";
-    if (extension === "sql") return "SQL";
-    if (extension === "html") return "HTML";
-    if (extension === "css") return "CSS";
-    if (extension === "json") return "JSON";
-    if (extension === "md") return "Markdown";
+    if (extension === "c")
+        return "C source";
+    if (extension === "h")
+        return "C header";
+    if (["cpp", "cxx", "cc"].includes(extension))
+        return "C++ source";
+    if (extension === "hpp")
+        return "C++ header";
+    if (extension === "py")
+        return "Python";
+    if (extension === "js")
+        return "JavaScript";
+    if (extension === "ts")
+        return "TypeScript";
+    if (extension === "tsx")
+        return "TSX";
+    if (extension === "jsx")
+        return "JSX";
+    if (extension === "rs")
+        return "Rust";
+    if (extension === "go")
+        return "Go";
+    if (extension === "java")
+        return "Java";
+    if (extension === "sql")
+        return "SQL";
+    if (extension === "html")
+        return "HTML";
+    if (extension === "css")
+        return "CSS";
+    if (extension === "json")
+        return "JSON";
+    if (extension === "md")
+        return "Markdown";
     const normalized = String(contentKind || "").trim().toLowerCase();
-    if (normalized === "text") return "Text";
-    if (normalized === "code") return "Code";
-    if (normalized) return normalized.toUpperCase();
+    if (normalized === "text")
+        return "Text";
+    if (normalized === "code")
+        return "Code";
+    if (normalized)
+        return normalized.toUpperCase();
     return "Preview";
 }
 function unwrapSingleFence(raw) {
     const trimmed = String(raw || "").trim();
     const match = trimmed.match(/^```([^\n`]*)\n([\s\S]*)\n```$/);
-    if (!match) return null;
+    if (!match)
+        return null;
     return {
         language: normalizeCodeLanguage(match[1] || ""),
-        body: String(match[2] || "").replace(/\r\n?/g, "\n")
+        body: String(match[2] || "").replace(/\r\n?/g, "\n"),
     };
 }
 function extractSingleFenceFromMessage(raw) {
-    const matches = [
-        ...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)
-    ];
-    if (matches.length !== 1) return null;
+    const matches = [...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)];
+    if (matches.length !== 1)
+        return null;
     return {
         language: normalizeCodeLanguage(matches[0][1] || ""),
-        body: String(matches[0][2] || "").replace(/\r\n?/g, "\n")
+        body: String(matches[0][2] || "").replace(/\r\n?/g, "\n"),
     };
 }
 function stripArtifactHelperLines(text) {
-    return String(text || "").split(/\r?\n/).filter((line)=>!ARTIFACT_HELPER_TEXT_PATTERNS.some((pattern)=>pattern.test(line.trim()))).join("\n");
+    return String(text || "")
+        .split(/\r?\n/)
+        .filter((line) => !ARTIFACT_HELPER_TEXT_PATTERNS.some((pattern) => pattern.test(line.trim())))
+        .join("\n");
 }
 function stripSingleFenceFromMessage(raw) {
-    const matches = [
-        ...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)
-    ];
-    if (matches.length !== 1) return String(raw || "").trim();
+    const matches = [...String(raw || "").matchAll(/```([^\n`]*)\n([\s\S]*?)\n```/g)];
+    if (matches.length !== 1)
+        return String(raw || "").trim();
     const match = matches[0];
     const before = String(raw || "").slice(0, match.index || 0).trim();
     const after = String(raw || "").slice((match.index || 0) + match[0].length).trim();
-    return [
-        before,
-        after
-    ].filter(Boolean).join("\n\n").trim();
+    return [before, after].filter(Boolean).join("\n\n").trim();
+}
+function artifactMaterializedBody(raw) {
+    const fence = extractSingleFenceFromMessage(raw);
+    if (fence)
+        return fence.body;
+    return String(raw || "").trim();
 }
 function parseArtifactMessage(raw) {
     const cleaned = stripArtifactHelperLines(raw);
     const artifactMatch = cleaned.match(/\[\[artifact:([^\]]+)\]\]/i);
     const allArtifactPaths = extractArtifactReferences(cleaned).map(resolveArtifactReferencePath);
-    const artifactPaths = allArtifactPaths.filter((path)=>!isHiddenWorkspacePath(path));
-    const hiddenArtifactPaths = allArtifactPaths.filter((path)=>isHiddenWorkspacePath(path));
+    const artifactPaths = allArtifactPaths.filter((path) => !isHiddenWorkspacePath(path));
+    const hiddenArtifactPaths = allArtifactPaths.filter((path) => isHiddenWorkspacePath(path));
     if (!artifactMatch) {
         return {
             artifactPaths,
             hiddenArtifactPaths,
             displayContent: cleaned,
-            materializedBody: ""
+            materializedBody: "",
         };
     }
     const before = cleaned.slice(0, artifactMatch.index || 0).trim();
@@ -838,11 +828,8 @@ function parseArtifactMessage(raw) {
         return {
             artifactPaths,
             hiddenArtifactPaths,
-            displayContent: [
-                stripSingleFenceFromMessage(before),
-                stripSingleFenceFromMessage(after)
-            ].filter(Boolean).join("\n\n").trim(),
-            materializedBody: after
+            displayContent: [before, stripSingleFenceFromMessage(after)].filter(Boolean).join("\n\n").trim(),
+            materializedBody: artifactMaterializedBody(after),
         };
     }
     const fenceFromBefore = extractSingleFenceFromMessage(before);
@@ -851,67 +838,60 @@ function parseArtifactMessage(raw) {
             artifactPaths,
             hiddenArtifactPaths,
             displayContent: stripSingleFenceFromMessage(before).trim(),
-            materializedBody: before
+            materializedBody: artifactMaterializedBody(before),
         };
     }
-    const displayParts = [
-        before,
-        after
-    ].filter(Boolean);
+    const displayParts = [before, after].filter(Boolean);
+    const materializedSource = after || before;
     return {
         artifactPaths,
         hiddenArtifactPaths,
-        displayContent: displayParts.join("\n\n").trim(),
-        materializedBody: after
+        displayContent: stripSingleFenceFromMessage(displayParts.join("\n\n")).trim(),
+        materializedBody: artifactMaterializedBody(materializedSource),
     };
 }
 function shouldMaterializeArtifact(path, body) {
-    if (!resolveArtifactReferencePath(path) || !String(body || "").trim()) return false;
+    if (!resolveArtifactReferencePath(path) || !String(body || "").trim())
+        return false;
     const extension = artifactFileExtension(path);
     return !extension || MATERIALIZABLE_ARTIFACT_EXTENSIONS.has(extension);
 }
 function normalizeArtifactBodyForWrite(path, raw) {
     const trimmed = String(raw || "").trim();
     const fence = unwrapSingleFence(trimmed) || extractSingleFenceFromMessage(trimmed);
-    if (!fence) return trimmed;
     const extension = artifactFileExtension(path);
-    if (!extension) return fence.body;
-    if (extension === "md" && [
-        "markdown",
-        "md",
-        "text"
-    ].includes(fence.language)) {
-        return fence.body;
+    if (fence) {
+        if (!extension)
+            return fence.body;
+        if (extension === "md" && ["markdown", "md", "text"].includes(fence.language)) {
+            return fence.body;
+        }
+        if (extension !== "md") {
+            return fence.body;
+        }
     }
-    if (extension === fence.language) {
-        return fence.body;
-    }
-    if (extension === "py" && fence.language === "python") return fence.body;
-    if (extension === "js" && fence.language === "javascript") return fence.body;
-    if (extension === "ts" && fence.language === "javascript") return fence.body;
-    if (extension === "sh" && fence.language === "bash") return fence.body;
     return trimmed;
 }
 async function materializeArtifactFromAssistant(path, content) {
-    if (!state.currentWorkspaceId) return;
+    if (!state.currentWorkspaceId)
+        return;
     await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/file`, {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             path,
-            content: normalizeArtifactBodyForWrite(path, content)
-        })
+            content: normalizeArtifactBodyForWrite(path, content),
+        }),
     });
     await loadDirectory(parentDirectory(path));
     await openFile(path);
 }
 function renderArtifactReferences(paths) {
-    if (!paths.length) return "";
+    if (!paths.length)
+        return "";
     return `
         <div class="artifact-ref-list">
-            ${paths.map((path)=>`
+            ${paths.map((path) => `
                 <button
                     type="button"
                     class="artifact-ref"
@@ -926,12 +906,15 @@ function renderArtifactReferences(paths) {
 }
 function summarizeArtifactDisplayText(text, limit = 140) {
     const cleaned = cleanConversationText(text);
-    if (!cleaned) return "";
-    if (cleaned.length <= limit) return cleaned;
+    if (!cleaned)
+        return "";
+    if (cleaned.length <= limit)
+        return cleaned;
     return `${cleaned.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
 }
 function renderArtifactObject(paths, note = "", status = "Saved in viewer") {
-    if (!paths.length) return "";
+    if (!paths.length)
+        return "";
     const summary = summarizeArtifactDisplayText(note);
     return `
         <div class="artifact-object">
@@ -942,31 +925,36 @@ function renderArtifactObject(paths, note = "", status = "Saved in viewer") {
     `;
 }
 function bindArtifactLinks(root) {
-    root.querySelectorAll("[data-artifact-path]").forEach((element)=>{
-        element.addEventListener("click", (event)=>{
+    root.querySelectorAll("[data-artifact-path]").forEach((element) => {
+        element.addEventListener("click", (event) => {
             event.preventDefault();
             const path = resolveArtifactReferencePath(element.dataset.artifactPath || "");
-            if (!path) return;
+            if (!path)
+                return;
             void openFile(path);
         });
     });
 }
 function maybeHandleAssistantArtifacts(message, index) {
-    if (message.role !== "assistant" || !state.currentWorkspaceId) return;
-    if (state.generating && index === state.activeAssistantIndex) return;
+    if (message.role !== "assistant" || !state.currentWorkspaceId)
+        return;
+    if (state.generating && index === state.activeAssistantIndex)
+        return;
     const parsed = parseArtifactMessage(message.content || "");
-    if (!parsed.artifactPaths.length) return;
+    if (!parsed.artifactPaths.length)
+        return;
     const artifactBody = parsed.materializedBody;
     const primaryPath = parsed.artifactPaths[0];
     const artifactKey = [
         state.currentConversationId,
         primaryPath,
         artifactBody.length,
-        artifactBody.slice(0, 120)
+        artifactBody.slice(0, 120),
     ].join(":");
-    if (state.handledArtifactKeys.has(artifactKey)) return;
+    if (state.handledArtifactKeys.has(artifactKey))
+        return;
     state.handledArtifactKeys.add(artifactKey);
-    void (async ()=>{
+    void (async () => {
         try {
             setLatestWorkedFile(primaryPath);
             if (shouldMaterializeArtifact(primaryPath, artifactBody)) {
@@ -974,7 +962,8 @@ function maybeHandleAssistantArtifacts(message, index) {
                 return;
             }
             await openFile(primaryPath);
-        } catch (_error) {
+        }
+        catch (_error) {
             state.handledArtifactKeys.delete(artifactKey);
         }
     })();
@@ -1032,29 +1021,22 @@ const MATH_COMMAND_HTML = {
     sec: "sec",
     csc: "csc",
     cot: "cot",
-    lim: "lim"
+    lim: "lim",
 };
 const MATH_SPACING_COMMANDS = new Set([
-    "quad",
-    "qquad",
-    ",",
-    ";",
-    "!",
-    ":",
-    "enspace",
-    "enskip",
-    "medspace",
-    "thinspace"
+    "quad", "qquad", ",", ";", "!", ":", "enspace", "enskip", "medspace", "thinspace",
 ]);
 function readMathGroup(source, start) {
-    if (source[start] !== "{") return null;
+    if (source[start] !== "{")
+        return null;
     let depth = 0;
     let i = start;
     let content = "";
-    while(i < source.length){
+    while (i < source.length) {
         const char = source[i];
         if (char === "{") {
-            if (depth > 0) content += char;
+            if (depth > 0)
+                content += char;
             depth += 1;
             i += 1;
             continue;
@@ -1062,12 +1044,10 @@ function readMathGroup(source, start) {
         if (char === "}") {
             depth -= 1;
             if (depth === 0) {
-                return {
-                    content,
-                    end: i + 1
-                };
+                return { content, end: i + 1 };
             }
-            if (depth < 0) return null;
+            if (depth < 0)
+                return null;
             content += char;
             i += 1;
             continue;
@@ -1078,59 +1058,47 @@ function readMathGroup(source, start) {
     return null;
 }
 function readMathEntity(source, start) {
-    if (source[start] !== "&") return null;
+    if (source[start] !== "&")
+        return null;
     const end = source.indexOf(";", start + 1);
-    if (end === -1) return null;
-    return {
-        html: source.slice(start, end + 1),
-        end: end + 1
-    };
+    if (end === -1)
+        return null;
+    return { html: source.slice(start, end + 1), end: end + 1 };
 }
 function readMathAtom(source, start) {
-    if (start >= source.length) return {
-        html: "",
-        end: start
-    };
+    if (start >= source.length)
+        return { html: "", end: start };
     const char = source[start];
-    if (char === " ") return {
-        html: " ",
-        end: start + 1
-    };
-    if (char === "\n") return {
-        html: "<br>",
-        end: start + 1
-    };
+    if (char === " ")
+        return { html: " ", end: start + 1 };
+    if (char === "\n")
+        return { html: "<br>", end: start + 1 };
     const entity = readMathEntity(source, start);
-    if (entity) return entity;
+    if (entity)
+        return entity;
     if (char === "{") {
         const group = readMathGroup(source, start);
         if (group) {
-            return {
-                html: renderMathExpression(group.content),
-                end: group.end
-            };
+            return { html: renderMathExpression(group.content), end: group.end };
         }
     }
     if (char === "\\") {
         const commandMatch = source.slice(start + 1).match(/^([A-Za-z]+|.)/);
-        if (!commandMatch) return {
-            html: "\\",
-            end: start + 1
-        };
+        if (!commandMatch)
+            return { html: "\\", end: start + 1 };
         const command = commandMatch[1];
         const end = start + 1 + command.length;
-        if (command === "\\") return {
-            html: "<br>",
-            end
-        };
-        if (command === "left" || command === "right") return readMathAtom(source, end);
+        if (command === "\\")
+            return { html: "<br>", end };
+        if (command === "left" || command === "right")
+            return readMathAtom(source, end);
         if (command === "frac") {
             const numerator = readMathGroup(source, end);
             const denominator = numerator ? readMathGroup(source, numerator.end) : null;
             if (numerator && denominator) {
                 return {
                     html: `<span class="math-frac"><span class="math-frac-num">${renderMathExpression(numerator.content)}</span><span class="math-frac-den">${renderMathExpression(denominator.content)}</span></span>`,
-                    end: denominator.end
+                    end: denominator.end,
                 };
             }
         }
@@ -1139,7 +1107,7 @@ function readMathAtom(source, start) {
             if (radicand) {
                 return {
                     html: `<span class="math-sqrt"><span class="math-sqrt-sign">&radic;</span><span class="math-sqrt-body">${renderMathExpression(radicand.content)}</span></span>`,
-                    end: radicand.end
+                    end: radicand.end,
                 };
             }
         }
@@ -1148,36 +1116,23 @@ function readMathAtom(source, start) {
             if (textGroup) {
                 return {
                     html: `<span class="math-text">${textGroup.content}</span>`,
-                    end: textGroup.end
+                    end: textGroup.end,
                 };
             }
         }
-        if (MATH_SPACING_COMMANDS.has(command)) return {
-            html: "&nbsp;",
-            end
-        };
-        return {
-            html: MATH_COMMAND_HTML[command] || command,
-            end
-        };
+        if (MATH_SPACING_COMMANDS.has(command))
+            return { html: "&nbsp;", end };
+        return { html: MATH_COMMAND_HTML[command] || command, end };
     }
-    return {
-        html: char,
-        end: start + 1
-    };
+    return { html: char, end: start + 1 };
 }
 function readMathScript(source, start) {
-    if (start >= source.length) return {
-        html: "",
-        end: start
-    };
+    if (start >= source.length)
+        return { html: "", end: start };
     if (source[start] === "{") {
         const group = readMathGroup(source, start);
         if (group) {
-            return {
-                html: renderMathExpression(group.content),
-                end: group.end
-            };
+            return { html: renderMathExpression(group.content), end: group.end };
         }
     }
     return readMathAtom(source, start);
@@ -1189,17 +1144,20 @@ function renderMathExpression(source) {
             return katex.renderToString(source, {
                 displayMode: false,
                 throwOnError: false,
-                strict: "ignore"
+                strict: "ignore",
             });
-        } catch  {}
+        }
+        catch {
+            // Fall through to the built-in renderer if KaTeX chokes on malformed input.
+        }
     }
     let i = 0;
     let html = "";
-    while(i < source.length){
+    while (i < source.length) {
         const atom = readMathAtom(source, i);
         let base = atom.html;
         i = atom.end;
-        while(i < source.length && (source[i] === "^" || source[i] === "_")){
+        while (i < source.length && (source[i] === "^" || source[i] === "_")) {
             const operator = source[i];
             const script = readMathScript(source, i + 1);
             const tag = operator === "^" ? "sup" : "sub";
@@ -1217,25 +1175,25 @@ function renderDisplayMathExpression(source) {
             return katex.renderToString(source, {
                 displayMode: true,
                 throwOnError: false,
-                strict: "ignore"
+                strict: "ignore",
             });
-        } catch  {}
+        }
+        catch {
+            // Fall through to the built-in renderer if KaTeX chokes on malformed input.
+        }
     }
     return `<div class="math-block">${renderMathExpression(source)}</div>`;
 }
 function extractInlineMathSegments(text) {
     const mathSegments = [];
     let content = "";
-    const stash = (html)=>{
+    const stash = (html) => {
         const placeholder = `@@MATH_${mathSegments.length}@@`;
-        mathSegments.push({
-            placeholder,
-            html
-        });
+        mathSegments.push({ placeholder, html });
         return placeholder;
     };
     let i = 0;
-    while(i < text.length){
+    while (i < text.length) {
         if (text[i] === "$" && text[i + 1] !== "$") {
             const end = text.indexOf("$", i + 1);
             if (end > i + 1) {
@@ -1255,13 +1213,10 @@ function extractInlineMathSegments(text) {
         content += text[i];
         i += 1;
     }
-    return {
-        content,
-        mathSegments
-    };
+    return { content, mathSegments };
 }
 function restoreMathSegments(text, mathSegments) {
-    return mathSegments.reduce((current, segment)=>current.replace(segment.placeholder, segment.html), text);
+    return mathSegments.reduce((current, segment) => current.replace(segment.placeholder, segment.html), text);
 }
 function renderMathBlock(block) {
     const trimmed = block.trim();
@@ -1277,27 +1232,42 @@ function renderMathBlock(block) {
 }
 function renderInlineMarkdown(text) {
     const extracted = extractInlineMathSegments(text);
-    const rendered = extracted.content.replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath)=>{
+    const rendered = extracted.content
+        .replace(/\[\[artifact:([^\]]+)\]\]/gi, (_match, rawPath) => {
         const path = resolveArtifactReferencePath(rawPath);
-        if (isHiddenWorkspacePath(path)) return "";
+        if (isHiddenWorkspacePath(path))
+            return "";
         const label = path.split("/").pop() || path;
         return `<button type="button" class="artifact-inline-ref" data-artifact-path="${escapeHtml(path)}">${escapeHtml(label)}</button>`;
-    }).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>').replace(/\n+/g, " ");
+    })
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+        .replace(/\n+/g, " ");
     return restoreMathSegments(rendered, extracted.mathSegments);
 }
 function markdownBlockPlainText(block) {
-    if (block.type === "paragraph") return block.lines.join(" ");
-    if (block.type === "heading") return block.text;
-    if (block.type === "quote") return block.lines.join(" ");
-    if (block.type === "math") return block.content;
-    if (block.type === "list") return block.items.map((item)=>item.lines.join(" ")).join(" ");
+    if (block.type === "paragraph")
+        return block.lines.join(" ");
+    if (block.type === "heading")
+        return block.text;
+    if (block.type === "quote")
+        return block.lines.join(" ");
+    if (block.type === "math")
+        return block.content;
+    if (block.type === "list")
+        return block.items.map((item) => item.lines.join(" ")).join(" ");
     return "";
 }
 function shouldShowReasoningButtonForBlock(block) {
-    if (block.type === "hr" || block.type === "html") return false;
+    if (block.type === "hr" || block.type === "html")
+        return false;
     const text = markdownBlockPlainText(block).replace(/\s+/g, " ").trim();
-    if (!text) return false;
-    if (block.type === "list") return true;
+    if (!text)
+        return false;
+    if (block.type === "list")
+        return true;
     return text.split(/\s+/).length >= 9;
 }
 function renderMarkdownBlock(block) {
@@ -1322,12 +1292,12 @@ function renderMarkdownBlock(block) {
     if (block.type === "list") {
         const tag = block.ordered ? "ol" : "ul";
         const startAttr = block.ordered && block.start > 1 ? ` start="${block.start}"` : "";
-        return `<${tag}${startAttr}>${block.items.map((item)=>`<li>${renderInlineMarkdown(item.lines.join("\n"))}</li>`).join("")}</${tag}>`;
+        return `<${tag}${startAttr}>${block.items.map((item) => `<li>${renderInlineMarkdown(item.lines.join("\n"))}</li>`).join("")}</${tag}>`;
     }
     return "";
 }
 function renderMarkdownBlocks(blocks, options = {}) {
-    return blocks.map((block, blockIndex)=>{
+    return blocks.map((block, blockIndex) => {
         const blockHtml = renderMarkdownBlock(block);
         if (!options.reasoningMessageIndex || !shouldShowReasoningButtonForBlock(block)) {
             return blockHtml;
@@ -1349,7 +1319,7 @@ function renderMarkdownBlocks(blocks, options = {}) {
 }
 function parseMarkdownBlocks(raw) {
     const codeBlocks = [];
-    const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code)=>{
+    const fenced = raw.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, language, code) => {
         const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
         const normalizedLanguage = normalizeCodeLanguage(language);
         const cleanCode = code.replace(/^\n+|\n+$/g, "");
@@ -1372,17 +1342,13 @@ function parseMarkdownBlocks(raw) {
     let quoteLines = [];
     let mathFence = null;
     let mathLines = [];
-    const flushParagraph = ()=>{
-        if (!paragraphLines.length) return;
-        blocks.push({
-            type: "paragraph",
-            lines: [
-                ...paragraphLines
-            ]
-        });
+    const flushParagraph = () => {
+        if (!paragraphLines.length)
+            return;
+        blocks.push({ type: "paragraph", lines: [...paragraphLines] });
         paragraphLines.length = 0;
     };
-    const flushList = ()=>{
+    const flushList = () => {
         if (!activeList || !activeList.items.length) {
             activeList = null;
             return;
@@ -1391,53 +1357,46 @@ function parseMarkdownBlocks(raw) {
             type: "list",
             ordered: activeList.ordered,
             start: activeList.start,
-            items: activeList.items.map((item)=>({
-                    lines: [
-                        ...item.lines
-                    ]
-                }))
+            items: activeList.items.map((item) => ({ lines: [...item.lines] })),
         });
         activeList = null;
     };
-    const flushQuote = ()=>{
-        if (!quoteLines.length) return;
-        blocks.push({
-            type: "quote",
-            lines: [
-                ...quoteLines
-            ]
-        });
+    const flushQuote = () => {
+        if (!quoteLines.length)
+            return;
+        blocks.push({ type: "quote", lines: [...quoteLines] });
         quoteLines = [];
     };
-    const flushMathBlock = ()=>{
-        if (!mathFence) return;
-        blocks.push({
-            type: "math",
-            content: mathLines.join("\n").trim()
-        });
+    const flushMathBlock = () => {
+        if (!mathFence)
+            return;
+        blocks.push({ type: "math", content: mathLines.join("\n").trim() });
         mathFence = null;
         mathLines = [];
     };
-    const flushBlocks = ()=>{
+    const flushBlocks = () => {
         flushParagraph();
         flushList();
         flushQuote();
     };
-    const appendListContinuation = (line)=>{
-        if (!activeList || !activeList.items.length) return false;
+    const appendListContinuation = (line) => {
+        if (!activeList || !activeList.items.length)
+            return false;
         activeList.items[activeList.items.length - 1].lines.push(line.trim());
         return true;
     };
-    for (const rawLine of fenced.split("\n")){
+    for (const rawLine of fenced.split("\n")) {
         const line = rawLine.replace(/\r$/, "");
         const trimmed = line.trim();
         if (mathFence) {
             const closing = mathFence === "$$" ? "$$" : "\\]";
             if (trimmed.endsWith(closing)) {
                 const content = trimmed.slice(0, Math.max(0, trimmed.length - closing.length)).trim();
-                if (content) mathLines.push(content);
+                if (content)
+                    mathLines.push(content);
                 flushMathBlock();
-            } else {
+            }
+            else {
                 mathLines.push(line);
             }
             continue;
@@ -1449,19 +1408,13 @@ function parseMarkdownBlocks(raw) {
         }
         if (/^@@CODEBLOCK_\d+@@$/.test(trimmed)) {
             flushBlocks();
-            blocks.push({
-                type: "html",
-                html: trimmed
-            });
+            blocks.push({ type: "html", html: trimmed });
             continue;
         }
         const mathBlock = renderMathBlock(trimmed);
         if (mathBlock) {
             flushBlocks();
-            blocks.push({
-                type: "html",
-                html: mathBlock
-            });
+            blocks.push({ type: "html", html: mathBlock });
             continue;
         }
         if (trimmed === "$$" || trimmed === "\\[") {
@@ -1472,19 +1425,13 @@ function parseMarkdownBlocks(raw) {
         }
         if (/^[-*_]{3,}$/.test(trimmed)) {
             flushBlocks();
-            blocks.push({
-                type: "hr"
-            });
+            blocks.push({ type: "hr" });
             continue;
         }
         const heading = line.match(/^\s*(#{1,4})\s+(.*)$/);
         if (heading) {
             flushBlocks();
-            blocks.push({
-                type: "heading",
-                level: Math.min(heading[1].length, 4),
-                text: heading[2].trim()
-            });
+            blocks.push({ type: "heading", level: Math.min(heading[1].length, 4), text: heading[2].trim() });
             continue;
         }
         const quote = line.match(/^\s*>\s?(.*)$/);
@@ -1498,36 +1445,22 @@ function parseMarkdownBlocks(raw) {
         const unordered = line.match(/^\s*[-*]\s+(.*)$/);
         if (unordered) {
             flushParagraph();
-            if (activeList && activeList.ordered) flushList();
-            activeList ||= {
-                ordered: false,
-                start: 1,
-                items: []
-            };
-            activeList.items.push({
-                lines: [
-                    unordered[1].trim()
-                ]
-            });
+            if (activeList && activeList.ordered)
+                flushList();
+            activeList ||= { ordered: false, start: 1, items: [] };
+            activeList.items.push({ lines: [unordered[1].trim()] });
             continue;
         }
         const ordered = line.match(/^\s*(\d+)\.\s+(.*)$/);
         if (ordered) {
             flushParagraph();
-            if (activeList && !activeList.ordered) flushList();
+            if (activeList && !activeList.ordered)
+                flushList();
             const start = Number(ordered[1]) || 1;
             if (!activeList) {
-                activeList = {
-                    ordered: true,
-                    start,
-                    items: []
-                };
+                activeList = { ordered: true, start, items: [] };
             }
-            activeList.items.push({
-                lines: [
-                    ordered[2].trim()
-                ]
-            });
+            activeList.items.push({ lines: [ordered[2].trim()] });
             continue;
         }
         if (appendListContinuation(line)) {
@@ -1537,82 +1470,61 @@ function parseMarkdownBlocks(raw) {
     }
     flushBlocks();
     flushMathBlock();
-    return blocks.map((block)=>{
-        if (block.type !== "html") return block;
+    return blocks.map((block) => {
+        if (block.type !== "html")
+            return block;
         return {
             ...block,
-            html: block.html.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index)=>codeBlocks[Number(index)] || "")
+            html: block.html.replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index) => codeBlocks[Number(index)] || ""),
         };
     });
 }
 function normalizeCodeLanguage(language) {
     const normalized = String(language || "").trim().toLowerCase();
-    if (!normalized) return "text";
-    if ([
-        "py",
-        "python"
-    ].includes(normalized)) return "python";
-    if ([
-        "js",
-        "jsx",
-        "javascript",
-        "ts",
-        "tsx",
-        "typescript"
-    ].includes(normalized)) return "javascript";
-    if ([
-        "sh",
-        "shell",
-        "bash",
-        "zsh"
-    ].includes(normalized)) return "bash";
-    if ([
-        "c",
-        "h",
-        "cpp",
-        "cxx",
-        "hpp"
-    ].includes(normalized)) return "c";
-    if ([
-        "sql",
-        "sqlite",
-        "postgresql",
-        "postgres",
-        "mysql"
-    ].includes(normalized)) return "sql";
-    if ([
-        "json"
-    ].includes(normalized)) return "json";
-    if ([
-        "latex",
-        "tex",
-        "math"
-    ].includes(normalized)) return "latex";
+    if (!normalized)
+        return "text";
+    if (["py", "python"].includes(normalized))
+        return "python";
+    if (["js", "jsx", "javascript", "ts", "tsx", "typescript"].includes(normalized))
+        return "javascript";
+    if (["sh", "shell", "bash", "zsh"].includes(normalized))
+        return "bash";
+    if (["c", "h", "cpp", "cxx", "hpp"].includes(normalized))
+        return "c";
+    if (["sql", "sqlite", "postgresql", "postgres", "mysql"].includes(normalized))
+        return "sql";
+    if (["json"].includes(normalized))
+        return "json";
+    if (["latex", "tex", "math"].includes(normalized))
+        return "latex";
     return normalized;
 }
 function keywordPatternForLanguage(language) {
     const patterns = {
-        python: String.raw`\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b`,
-        javascript: String.raw`\b(?:async|await|break|case|catch|class|const|continue|default|delete|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|switch|throw|true|try|typeof|var|while|yield)\b`,
-        bash: String.raw`\b(?:if|then|else|elif|fi|for|do|done|case|esac|while|in|function|return|local|export)\b`,
-        c: String.raw`\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b`,
-        sql: String.raw`\b(?:add|all|alter|and|as|asc|avg|begin|between|by|case|check|column|commit|constraint|count|create|database|default|delete|desc|distinct|drop|else|end|exists|from|group|having|in|index|insert|into|is|join|key|like|limit|not|null|on|or|order|primary|references|rollback|select|set|table|then|transaction|union|unique|update|values|view|where)\b`,
-        json: String.raw`\b(?:true|false|null)\b`
+        python: String.raw `\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|False|finally|for|from|if|import|in|is|lambda|None|nonlocal|not|or|pass|raise|return|True|try|while|with|yield)\b`,
+        javascript: String.raw `\b(?:async|await|break|case|catch|class|const|continue|default|delete|else|export|extends|false|finally|for|from|function|if|import|in|instanceof|let|new|null|of|return|switch|throw|true|try|typeof|var|while|yield)\b`,
+        bash: String.raw `\b(?:if|then|else|elif|fi|for|do|done|case|esac|while|in|function|return|local|export)\b`,
+        c: String.raw `\b(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b`,
+        sql: String.raw `\b(?:add|all|alter|and|as|asc|avg|begin|between|by|case|check|column|commit|constraint|count|create|database|default|delete|desc|distinct|drop|else|end|exists|from|group|having|in|index|insert|into|is|join|key|like|limit|not|null|on|or|order|primary|references|rollback|select|set|table|then|transaction|union|unique|update|values|view|where)\b`,
+        json: String.raw `\b(?:true|false|null)\b`,
     };
     const pattern = patterns[language];
     return pattern ? new RegExp(pattern, "g") : null;
 }
 function commentPatternForLanguage(language) {
-    if (language === "python" || language === "bash") return /#.*$/gm;
-    if (language === "javascript" || language === "c") return /\/\/.*$|\/\*[\s\S]*?\*\//gm;
-    if (language === "sql") return /--.*$/gm;
+    if (language === "python" || language === "bash")
+        return /#.*$/gm;
+    if (language === "javascript" || language === "c")
+        return /\/\/.*$|\/\*[\s\S]*?\*\//gm;
+    if (language === "sql")
+        return /--.*$/gm;
     return null;
 }
 function highlightCode(rawCode, language) {
     const normalizedLanguage = normalizeCodeLanguage(language);
     const placeholders = [];
-    const stash = (text, pattern, className)=>{
-        return text.replace(pattern, (match)=>{
+    const stash = (text, pattern, className) => {
+        return text.replace(pattern, (match) => {
             const token = `@@CODETOKEN_${placeholders.length}@@`;
             placeholders.push(`<span class="${className}">${escapeHtml(match)}</span>`);
             return token;
@@ -1631,53 +1543,56 @@ function highlightCode(rawCode, language) {
     }
     highlighted = highlighted.replace(/\b([A-Za-z_][A-Za-z0-9_]*)(?=\s*\()/g, '<span class="tok-function">$1</span>');
     highlighted = highlighted.replace(/\b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
-    return highlighted.replace(/@@CODETOKEN_(\d+)@@/g, (_match, index)=>placeholders[Number(index)] || "");
+    return highlighted.replace(/@@CODETOKEN_(\d+)@@/g, (_match, index) => placeholders[Number(index)] || "");
+}
+function renderCodePreview(content, language) {
+    const normalizedLanguage = normalizeCodeLanguage(language);
+    const cleanCode = String(content || "").replace(/\r\n?/g, "\n");
+    return `
+        <div class="preview-code-block">
+            <pre><code class="language-${escapeHtml(normalizedLanguage)}">${highlightCode(cleanCode, normalizedLanguage)}</code></pre>
+        </div>
+    `.trim();
 }
 function renderRichText(raw) {
     const singleFence = unwrapSingleFence(raw);
-    if (singleFence && [
-        "markdown",
-        "md"
-    ].includes(singleFence.language)) {
+    if (singleFence && ["markdown", "md"].includes(singleFence.language)) {
         return renderRichText(singleFence.body);
     }
     return renderMarkdownBlocks(parseMarkdownBlocks(raw));
 }
 function renderAssistantRichText(raw, messageIndex) {
     const singleFence = unwrapSingleFence(raw);
-    if (singleFence && [
-        "markdown",
-        "md"
-    ].includes(singleFence.language)) {
+    if (singleFence && ["markdown", "md"].includes(singleFence.language)) {
         return renderAssistantRichText(singleFence.body, messageIndex);
     }
     return renderMarkdownBlocks(parseMarkdownBlocks(raw), {
-        reasoningMessageIndex: messageIndex
+        reasoningMessageIndex: messageIndex,
     });
 }
 function reasoningScopeKeywords(text) {
-    const words = cleanConversationText(text).toLowerCase().split(/\s+/).map((word)=>word.replace(/[^a-z0-9_-]/g, "")).filter((word)=>word.length >= 3 && !STOPWORDS.has(word));
-    return [
-        ...new Set(words)
-    ].slice(0, 12);
+    const words = cleanConversationText(text)
+        .toLowerCase()
+        .split(/\s+/)
+        .map((word) => word.replace(/[^a-z0-9_-]/g, ""))
+        .filter((word) => word.length >= 3 && !STOPWORDS.has(word));
+    return [...new Set(words)].slice(0, 12);
 }
 function scopeRelevanceScore(scopeText, candidate) {
     const scopeKeywords = reasoningScopeKeywords(scopeText);
-    if (!scopeKeywords.length) return candidate ? 1 : 0;
+    if (!scopeKeywords.length)
+        return candidate ? 1 : 0;
     const haystack = cleanConversationText(candidate).toLowerCase();
-    return scopeKeywords.reduce((score, keyword)=>score + (haystack.includes(keyword) ? 1 : 0), 0);
+    return scopeKeywords.reduce((score, keyword) => score + (haystack.includes(keyword) ? 1 : 0), 0);
 }
 function reasoningLabelForPhase(note) {
-    const pieces = [
-        String(note.phase || "reasoning").trim(),
-        String(note.step_label || "").trim()
-    ].filter(Boolean);
+    const pieces = [String(note.phase || "reasoning").trim(), String(note.step_label || "").trim()].filter(Boolean);
     return pieces.length ? pieces.join(" · ") : "Reasoning";
 }
 function parseTaskBoardSections(raw) {
     const sections = [];
     let current = [];
-    for (const line of String(raw || "").split(/\r?\n/)){
+    for (const line of String(raw || "").split(/\r?\n/)) {
         if (/^\s*#{1,4}\s+/.test(line) && current.length) {
             sections.push(current.join("\n").trim());
             current = [];
@@ -1691,14 +1606,15 @@ function parseTaskBoardSections(raw) {
 }
 function chooseReasoningSections(scopeText, taskBoardText) {
     const sections = parseTaskBoardSections(taskBoardText);
-    if (!sections.length) return [];
-    const ranked = sections.map((section)=>({
-            section,
-            score: scopeRelevanceScore(scopeText, section)
-        })).sort((left, right)=>right.score - left.score || left.section.length - right.section.length);
-    const filtered = ranked.filter((entry)=>entry.score > 0).slice(0, 2).map((entry)=>entry.section);
-    if (filtered.length) return filtered;
-    return ranked.slice(0, 1).map((entry)=>entry.section);
+    if (!sections.length)
+        return [];
+    const ranked = sections
+        .map((section) => ({ section, score: scopeRelevanceScore(scopeText, section) }))
+        .sort((left, right) => right.score - left.score || left.section.length - right.section.length);
+    const filtered = ranked.filter((entry) => entry.score > 0).slice(0, 2).map((entry) => entry.section);
+    if (filtered.length)
+        return filtered;
+    return ranked.slice(0, 1).map((entry) => entry.section);
 }
 function renderReasoningNotes(notes) {
     if (!notes.length) {
@@ -1706,7 +1622,7 @@ function renderReasoningNotes(notes) {
     }
     return `
         <div class="reasoning-note-list">
-            ${notes.map((note)=>`
+            ${notes.map((note) => `
                 <div class="reasoning-note-item">
                     <div class="reasoning-note-meta">${escapeHtml(reasoningLabelForPhase(note))}</div>
                     <div>${escapeHtml(note.text)}</div>
@@ -1720,10 +1636,13 @@ function renderReasoningTaskBoard(scopeText, taskBoardText) {
     if (!sections.length) {
         return `<div class="context-eval-empty">No matching task-board context was available for this section.</div>`;
     }
-    return sections.map((section)=>`<div class="reasoning-card">${renderRichText(section)}</div>`).join("");
+    return sections
+        .map((section) => `<div class="reasoning-card">${renderRichText(section)}</div>`)
+        .join("");
 }
 async function loadReasoningTaskBoard(path) {
-    if (!state.currentWorkspaceId || !path) return "";
+    if (!state.currentWorkspaceId || !path)
+        return "";
     const cacheKey = `${state.currentWorkspaceId}:${path}`;
     if (taskBoardCache.has(cacheKey)) {
         return taskBoardCache.get(cacheKey) || "";
@@ -1733,7 +1652,8 @@ async function loadReasoningTaskBoard(path) {
         const content = String(payload.content || "");
         taskBoardCache.set(cacheKey, content);
         return content;
-    } catch  {
+    }
+    catch {
         return "";
     }
 }
@@ -1745,21 +1665,25 @@ function closeReasoningOverlay() {
 }
 async function openReasoningOverlay(messageIndex, blockIndex) {
     const message = state.messages[messageIndex];
-    if (!message || message.role !== "assistant") return;
+    if (!message || message.role !== "assistant")
+        return;
     const parsedArtifacts = parseArtifactMessage(message.content || "");
     const blocks = parseMarkdownBlocks(parsedArtifacts.displayContent || "");
     const block = blocks[blockIndex];
-    if (!block) return;
+    if (!block)
+        return;
     const scopeText = markdownBlockPlainText(block).replace(/\s+/g, " ").trim();
-    const rankedNotes = [
-        ...message.reasoning_notes || []
-    ].map((note)=>({
-            note,
-            score: scopeRelevanceScore(scopeText, `${note.step_label || ""} ${note.text || ""}`)
-        })).sort((left, right)=>right.score - left.score).slice(0, 4).map((entry)=>entry.note);
-    const taskBoardPath = [
-        ...parsedArtifacts.hiddenArtifactPaths
-    ].find((path)=>/(?:^|\/)\.ai\/task-board\.md$/i.test(path)) || ".ai/task-board.md";
+    const rankedNotes = [...(message.reasoning_notes || [])]
+        .map((note) => ({
+        note,
+        score: scopeRelevanceScore(scopeText, `${note.step_label || ""} ${note.text || ""}`),
+    }))
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 4)
+        .map((entry) => entry.note);
+    const taskBoardPath = [...parsedArtifacts.hiddenArtifactPaths]
+        .find((path) => /(?:^|\/)\.ai\/task-board\.md$/i.test(path))
+        || ".ai/task-board.md";
     reasoningTitle.textContent = "Reasoning";
     reasoningScope.textContent = truncatePreview(scopeText, 140);
     reasoningContent.innerHTML = `
@@ -1778,22 +1702,25 @@ async function openReasoningOverlay(messageIndex, blockIndex) {
     `;
     reasoningOverlay.hidden = false;
     const taskBoardText = await loadReasoningTaskBoard(taskBoardPath);
-    if (reasoningOverlay.hidden) return;
+    if (reasoningOverlay.hidden)
+        return;
     const cards = reasoningContent.querySelectorAll(".reasoning-card");
     const taskBoardCard = cards.item(2);
-    if (!taskBoardCard) return;
+    if (!taskBoardCard)
+        return;
     taskBoardCard.innerHTML = `
         <div class="reasoning-card-title">Task Board</div>
         ${renderReasoningTaskBoard(scopeText, taskBoardText)}
     `;
 }
 function bindReasoningButtons(root) {
-    root.querySelectorAll("[data-reasoning-message-index]").forEach((button)=>{
-        button.addEventListener("click", (event)=>{
+    root.querySelectorAll("[data-reasoning-message-index]").forEach((button) => {
+        button.addEventListener("click", (event) => {
             event.preventDefault();
             const messageIndex = Number(button.dataset.reasoningMessageIndex || "-1");
             const blockIndex = Number(button.dataset.reasoningBlockIndex || "-1");
-            if (messageIndex < 0 || blockIndex < 0) return;
+            if (messageIndex < 0 || blockIndex < 0)
+                return;
             void openReasoningOverlay(messageIndex, blockIndex);
         });
     });
@@ -1801,7 +1728,9 @@ function bindReasoningButtons(root) {
 function renderMessages() {
     const previousScrollTop = chatMessages.scrollTop;
     const shouldStickToBottom = state.stickChatToBottom;
-    const visibleThinking = state.thinkingStatus && (state.generating || state.thinkingStatus.persistent) ? state.thinkingStatus : null;
+    const visibleThinking = state.thinkingStatus && (state.generating || state.thinkingStatus.persistent)
+        ? state.thinkingStatus
+        : null;
     if (!state.messages.length && !visibleThinking) {
         chatMessages.innerHTML = `
             <div class="empty-state">
@@ -1815,21 +1744,24 @@ function renderMessages() {
         syncScrollJumpButton();
         return;
     }
-    const messagesHtml = state.messages.map((message, index)=>{
+    const messagesHtml = state.messages.map((message, index) => {
         const role = message.error ? "assistant error" : message.role;
-        const parsedArtifacts = message.role === "assistant" ? parseArtifactMessage(message.content || "") : {
-            artifactPaths: [],
-            hiddenArtifactPaths: [],
-            displayContent: message.content || "",
-            materializedBody: ""
-        };
-        const meta = message.role === "user" ? "You" : message.role === "assistant" ? assistantMetaLabel(message, index) : "System";
-        const artifactObjectHtml = message.role === "assistant" && parsedArtifacts.artifactPaths.length && parsedArtifacts.materializedBody ? renderArtifactObject(parsedArtifacts.artifactPaths, parsedArtifacts.displayContent || "", parsedArtifacts.displayContent ? "Updated file in viewer" : "Saved in viewer") : "";
-        const bodyHtml = parsedArtifacts.displayContent ? `<div class="message-content rich-text">${message.role === "assistant" ? renderAssistantRichText(parsedArtifacts.displayContent || "", index) : renderRichText(parsedArtifacts.displayContent || "")}</div>` : "";
-        const messageBody = artifactObjectHtml || `
-                ${renderArtifactReferences(parsedArtifacts.artifactPaths)}
-                ${bodyHtml}
-            `;
+        const parsedArtifacts = message.role === "assistant"
+            ? parseArtifactMessage(message.content || "")
+            : { artifactPaths: [], hiddenArtifactPaths: [], displayContent: message.content || "", materializedBody: "" };
+        const meta = message.role === "user"
+            ? "You"
+            : (message.role === "assistant" ? assistantMetaLabel(message, index) : "System");
+        const artifactObjectHtml = message.role === "assistant" && parsedArtifacts.artifactPaths.length && parsedArtifacts.materializedBody
+            ? renderArtifactObject(parsedArtifacts.artifactPaths, "", parsedArtifacts.displayContent ? "Updated file in viewer" : "Saved in viewer")
+            : "";
+        const bodyHtml = parsedArtifacts.displayContent
+            ? `<div class="message-content rich-text">${message.role === "assistant" ? renderAssistantRichText(parsedArtifacts.displayContent || "", index) : renderRichText(parsedArtifacts.displayContent || "")}</div>`
+            : "";
+        const refHtml = !artifactObjectHtml && parsedArtifacts.artifactPaths.length
+            ? renderArtifactReferences(parsedArtifacts.artifactPaths)
+            : "";
+        const messageBody = [artifactObjectHtml, bodyHtml, refHtml].filter(Boolean).join("") || "";
         return `
             <article class="message ${role}">
                 <div class="message-role">${escapeHtml(meta)}</div>
@@ -1843,7 +1775,9 @@ function renderMessages() {
             <span class="message-thinking-text">${escapeHtml(visibleThinking.text)}</span>
         </div>
     ` : "";
-    chatMessages.innerHTML = messagesHtml || thinkingHtml ? `${messagesHtml}${thinkingHtml}` : `
+    chatMessages.innerHTML = messagesHtml || thinkingHtml
+        ? `${messagesHtml}${thinkingHtml}`
+        : `
             <div class="empty-state">
                 <div>
                     <div class="empty-state-title">Start a conversation</div>
@@ -1853,28 +1787,28 @@ function renderMessages() {
         `;
     bindArtifactLinks(chatMessages);
     bindReasoningButtons(chatMessages);
-    state.messages.forEach((message, index)=>{
+    state.messages.forEach((message, index) => {
         maybeHandleAssistantArtifacts(message, index);
     });
     if (shouldStickToBottom) {
         scrollChatToBottom("auto");
-    } else {
+    }
+    else {
         chatMessages.scrollTop = previousScrollTop;
         syncScrollJumpButton();
     }
 }
 function renderConversations() {
-    const items = [
-        ...state.conversations
-    ];
-    const hasTransientConversation = state.currentConversationId && !items.some((conversation)=>conversation.id === state.currentConversationId);
+    const items = [...state.conversations];
+    const hasTransientConversation = state.currentConversationId
+        && !items.some((conversation) => conversation.id === state.currentConversationId);
     if (hasTransientConversation) {
         items.unshift({
             id: state.currentConversationId,
             title: state.currentConversationTitle,
             updated_at: new Date().toISOString(),
             last_message: state.messages.at(-1)?.content || "",
-            workspace_id: state.currentWorkspaceId
+            workspace_id: state.currentWorkspaceId,
         });
     }
     if (!items.length) {
@@ -1888,7 +1822,7 @@ function renderConversations() {
         `;
         return;
     }
-    conversationList.innerHTML = items.map((conversation)=>{
+    conversationList.innerHTML = items.map((conversation) => {
         const editableTitle = cleanConversationText(conversation.title || "");
         const visibleTitle = displayConversationTitle(conversation.title || "", conversation.last_message || "", conversation.seed_message || "");
         const visiblePreview = displayConversationPreview(conversation.title || "", conversation.last_message || "");
@@ -1927,10 +1861,11 @@ function renderConversations() {
             </div>
         `;
     }).join("");
-    conversationList.querySelectorAll(".conversation-item").forEach((button)=>{
-        button.addEventListener("click", ()=>{
+    conversationList.querySelectorAll(".conversation-item").forEach((button) => {
+        button.addEventListener("click", () => {
             const id = button.dataset.conversationId || "";
-            if (!id) return;
+            if (!id)
+                return;
             if (isMobileViewport()) {
                 state.leftSidebarOpen = false;
                 syncShellLayout();
@@ -1938,11 +1873,12 @@ function renderConversations() {
             void loadConversation(id);
         });
     });
-    conversationList.querySelectorAll(".conversation-action-button").forEach((button)=>{
-        button.addEventListener("click", (event)=>{
+    conversationList.querySelectorAll(".conversation-action-button").forEach((button) => {
+        button.addEventListener("click", (event) => {
             event.stopPropagation();
             const id = button.dataset.conversationId || "";
-            if (!id) return;
+            if (!id)
+                return;
             if (button.dataset.action === "rename") {
                 void renameConversation(id, button.dataset.title || "");
                 return;
@@ -1959,7 +1895,8 @@ function renderWorkspaceSummary() {
 }
 function setLatestWorkedFile(path) {
     const normalized = resolveArtifactReferencePath(path);
-    if (!normalized) return;
+    if (!normalized)
+        return;
     state.latestWorkedFilePath = normalized;
 }
 function renderFileList() {
@@ -1996,7 +1933,7 @@ function renderFileList() {
             </button>
         `);
     }
-    buttons.push(...state.fileItems.map((item)=>`
+    buttons.push(...state.fileItems.map((item) => `
         <button
             type="button"
             class="file-item${item.path === state.selectedFilePath ? " active" : ""}"
@@ -2019,10 +1956,11 @@ function renderFileList() {
         </div>
     `;
     fileList.scrollTop = previousScrollTop;
-    fileList.querySelectorAll(".file-item").forEach((button)=>{
-        button.addEventListener("click", ()=>{
+    fileList.querySelectorAll(".file-item").forEach((button) => {
+        button.addEventListener("click", () => {
             const path = button.dataset.path || "";
-            if (!path) return;
+            if (!path)
+                return;
             if (path === "..") {
                 void loadDirectory(parentDirectory(state.currentDirectoryPath));
                 return;
@@ -2069,22 +2007,29 @@ function renderPreviewEmpty(title, body) {
     `;
 }
 function formatSpreadsheetCell(value) {
-    if (value === null || value === undefined || value === "") return "";
-    if (typeof value === "string") return escapeHtml(value);
-    if (typeof value === "number" || typeof value === "boolean") return escapeHtml(String(value));
+    if (value === null || value === undefined || value === "")
+        return "";
+    if (typeof value === "string")
+        return escapeHtml(value);
+    if (typeof value === "number" || typeof value === "boolean")
+        return escapeHtml(String(value));
     return escapeHtml(JSON.stringify(value));
 }
 function renderSpreadsheetPreview(payload) {
     state.selectedFileContentKind = "spreadsheet";
     const sheetNames = payload.sheet_names || [];
     const previewRows = payload.preview_rows || [];
-    const columns = previewRows.length ? Object.keys(previewRows[0] || {}) : (payload.columns || []).map((column)=>typeof column === "string" ? column : String(column.name || ""));
-    const workbookSummary = (payload.workbook_sheets || []).map((sheet)=>`
+    const columns = previewRows.length
+        ? Object.keys(previewRows[0] || {})
+        : (payload.columns || []).map((column) => typeof column === "string" ? column : String(column.name || ""));
+    const workbookSummary = (payload.workbook_sheets || [])
+        .map((sheet) => `
             <div class="spreadsheet-sheet-chip${sheet.name === payload.sheet ? " active" : ""}">
                 <strong>${escapeHtml(sheet.name)}</strong>
                 <span>${escapeHtml(`${sheet.row_count} rows • ${sheet.column_count} cols`)}</span>
             </div>
-        `).join("");
+        `)
+        .join("");
     filePreview.innerHTML = `
         <div class="spreadsheet-preview">
             <div class="spreadsheet-preview-header">
@@ -2097,7 +2042,7 @@ function renderSpreadsheetPreview(payload) {
                     <label class="spreadsheet-sheet-picker">
                         <span>Sheet</span>
                         <select id="spreadsheetSheetSelect">
-                            ${sheetNames.map((name)=>`<option value="${escapeHtml(name)}"${name === payload.sheet ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}
+                            ${sheetNames.map((name) => `<option value="${escapeHtml(name)}"${name === payload.sheet ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}
                         </select>
                     </label>
                 ` : ""}
@@ -2107,11 +2052,11 @@ function renderSpreadsheetPreview(payload) {
                 <div class="preview-table-shell">
                     <table class="preview-table">
                         <thead>
-                            <tr>${columns.map((column)=>`<th>${escapeHtml(column)}</th>`).join("")}</tr>
+                            <tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr>
                         </thead>
                         <tbody>
-                            ${previewRows.length ? previewRows.map((row)=>`
-                                <tr>${columns.map((column)=>`<td>${formatSpreadsheetCell(row[column])}</td>`).join("")}</tr>
+                            ${previewRows.length ? previewRows.map((row) => `
+                                <tr>${columns.map((column) => `<td>${formatSpreadsheetCell(row[column])}</td>`).join("")}</tr>
                             `).join("") : `<tr><td colspan="${Math.max(columns.length, 1)}">No preview rows available.</td></tr>`}
                         </tbody>
                     </table>
@@ -2121,7 +2066,7 @@ function renderSpreadsheetPreview(payload) {
     `;
     const sheetSelect = filePreview.querySelector("#spreadsheetSheetSelect");
     if (sheetSelect) {
-        sheetSelect.addEventListener("change", ()=>{
+        sheetSelect.addEventListener("change", () => {
             void openSpreadsheetFile(payload.path, sheetSelect.value);
         });
     }
@@ -2178,7 +2123,9 @@ pre {
 `.trim();
 function buildResponsiveHtmlPreview(rawHtml) {
     const html = String(rawHtml || "");
-    const viewportMeta = /<meta[^>]+name=["']viewport["']/i.test(html) ? "" : '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">';
+    const viewportMeta = /<meta[^>]+name=["']viewport["']/i.test(html)
+        ? ""
+        : '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">';
     const previewStyle = `<style id="codex-responsive-preview">${RESPONSIVE_HTML_PREVIEW_STYLE}</style>`;
     const injectedHead = `${viewportMeta}${previewStyle}`;
     if (/<head\b/i.test(html)) {
@@ -2190,7 +2137,8 @@ function buildResponsiveHtmlPreview(rawHtml) {
     return `<!DOCTYPE html><html><head>${injectedHead}</head><body>${html}</body></html>`;
 }
 async function openSpreadsheetFile(path, sheet = "") {
-    if (!state.currentWorkspaceId) return;
+    if (!state.currentWorkspaceId)
+        return;
     const query = sheet ? `&sheet=${encodeURIComponent(sheet)}` : "";
     const payload = await fetchJson(`/api/workspaces/${encodeURIComponent(state.currentWorkspaceId)}/spreadsheet?path=${encodeURIComponent(path)}${query}`);
     renderSpreadsheetPreview(payload);
@@ -2223,7 +2171,11 @@ function renderPreview(payload) {
         return;
     }
     if (contentKind === "csv") {
-        const rows = (payload.content || "").split(/\r?\n/).filter(Boolean).slice(0, 40).map((row)=>row.split(",").map((cell)=>escapeHtml(cell.trim())));
+        const rows = (payload.content || "")
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .slice(0, 40)
+            .map((row) => row.split(",").map((cell) => escapeHtml(cell.trim())));
         if (!rows.length) {
             renderPreviewEmpty("Empty table", "This file does not contain any rows.");
             return;
@@ -2233,10 +2185,10 @@ function renderPreview(payload) {
         filePreview.innerHTML = `
             <table class="preview-table">
                 <thead>
-                    <tr>${header.map((cell)=>`<th>${cell}</th>`).join("")}</tr>
+                    <tr>${header.map((cell) => `<th>${cell}</th>`).join("")}</tr>
                 </thead>
                 <tbody>
-                    ${bodyRows.map((row)=>`<tr>${row.map((cell)=>`<td>${cell}</td>`).join("")}</tr>`).join("")}
+                    ${bodyRows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
                 </tbody>
             </table>
         `;
@@ -2258,8 +2210,7 @@ function renderPreview(payload) {
         }
         if (shouldRenderTextAsCode(payload.path || "")) {
             const language = inferredPreviewLanguage(payload.path || "");
-            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderRichText(`\`\`\`${language}\n${payload.content || ""}\n\`\`\``)}</div>`;
-            bindArtifactLinks(filePreview);
+            filePreview.innerHTML = `${renderDocumentStructurePanel(payload)}<div class="preview-markdown rich-text">${renderCodePreview(payload.content || "", language)}</div>`;
             return;
         }
     }
@@ -2289,7 +2240,8 @@ function formatPreviewChunkLabel(chunk) {
     const pageEnd = typeof chunk.page_end === "number" ? chunk.page_end : null;
     if (pageStart && pageEnd && pageStart !== pageEnd) {
         parts.push(`pages ${pageStart}-${pageEnd}`);
-    } else if (pageStart) {
+    }
+    else if (pageStart) {
         parts.push(`page ${pageStart}`);
     }
     if (!parts.length) {
@@ -2298,8 +2250,12 @@ function formatPreviewChunkLabel(chunk) {
     return parts.join(" • ");
 }
 function renderDocumentStructurePanel(payload) {
-    const sections = Array.isArray(payload.section_titles) ? payload.section_titles.map((item)=>String(item || "").trim()).filter(Boolean).slice(0, 10) : [];
-    const previewChunks = Array.isArray(payload.preview_chunks) ? payload.preview_chunks.filter((chunk)=>chunk && String(chunk.text || "").trim()).slice(0, 3) : [];
+    const sections = Array.isArray(payload.section_titles)
+        ? payload.section_titles.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 10)
+        : [];
+    const previewChunks = Array.isArray(payload.preview_chunks)
+        ? payload.preview_chunks.filter((chunk) => chunk && String(chunk.text || "").trim()).slice(0, 3)
+        : [];
     const openingPreview = String(payload.opening_preview || "").trim();
     const summary = String(payload.summary || "").trim();
     const hasStructure = Boolean(summary || sections.length || openingPreview || previewChunks.length);
@@ -2307,19 +2263,33 @@ function renderDocumentStructurePanel(payload) {
         return "";
     }
     const statItems = [
-        typeof payload.page_count === "number" && payload.page_count > 0 ? `<span class="document-structure-stat">${payload.page_count} page${payload.page_count === 1 ? "" : "s"}</span>` : "",
-        typeof payload.chunk_count === "number" && payload.chunk_count > 0 ? `<span class="document-structure-stat">${payload.chunk_count} chunk${payload.chunk_count === 1 ? "" : "s"}</span>` : "",
-        typeof payload.line_count === "number" && payload.line_count > 0 ? `<span class="document-structure-stat">${payload.line_count.toLocaleString()} lines</span>` : "",
-        String(payload.extractor || "").trim() ? `<span class="document-structure-stat">${escapeHtml(String(payload.extractor || "").trim())}</span>` : ""
+        typeof payload.page_count === "number" && payload.page_count > 0
+            ? `<span class="document-structure-stat">${payload.page_count} page${payload.page_count === 1 ? "" : "s"}</span>`
+            : "",
+        typeof payload.chunk_count === "number" && payload.chunk_count > 0
+            ? `<span class="document-structure-stat">${payload.chunk_count} chunk${payload.chunk_count === 1 ? "" : "s"}</span>`
+            : "",
+        typeof payload.line_count === "number" && payload.line_count > 0
+            ? `<span class="document-structure-stat">${payload.line_count.toLocaleString()} lines</span>`
+            : "",
+        String(payload.extractor || "").trim()
+            ? `<span class="document-structure-stat">${escapeHtml(String(payload.extractor || "").trim())}</span>`
+            : "",
     ].filter(Boolean).join("");
-    const sectionHtml = sections.length ? `<div class="document-structure-sections">${sections.map((section)=>`<span class="document-structure-section">${escapeHtml(section)}</span>`).join("")}</div>` : "";
-    const openingHtml = openingPreview ? `<div class="document-structure-opening">${escapeHtml(openingPreview)}</div>` : "";
-    const chunkHtml = previewChunks.length ? `<div class="document-structure-chunks">${previewChunks.map((chunk)=>`
+    const sectionHtml = sections.length
+        ? `<div class="document-structure-sections">${sections.map((section) => `<span class="document-structure-section">${escapeHtml(section)}</span>`).join("")}</div>`
+        : "";
+    const openingHtml = openingPreview
+        ? `<div class="document-structure-opening">${escapeHtml(openingPreview)}</div>`
+        : "";
+    const chunkHtml = previewChunks.length
+        ? `<div class="document-structure-chunks">${previewChunks.map((chunk) => `
             <article class="document-structure-chunk">
                 <div class="document-structure-chunk-label">${escapeHtml(formatPreviewChunkLabel(chunk))}</div>
                 <div class="document-structure-chunk-text">${escapeHtml(String(chunk.text || "").trim())}</div>
             </article>
-        `).join("")}</div>` : "";
+        `).join("")}</div>`
+        : "";
     return `
         <section class="document-structure-panel">
             <div class="document-structure-header">
@@ -2337,7 +2307,8 @@ function closeViewer() {
     setViewerMode("closed");
 }
 function openFileTree() {
-    if (!state.currentWorkspaceId) return;
+    if (!state.currentWorkspaceId)
+        return;
     if (isMobileViewport()) {
         state.leftSidebarOpen = false;
     }
@@ -2347,30 +2318,43 @@ function openFileTree() {
 async function fetchJson(url, init) {
     const requestInit = {
         cache: "no-store",
-        ...init
+        ...init,
     };
     const response = await fetch(url, requestInit);
-    const data = await response.json().catch(()=>({}));
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) {
         const message = typeof data.detail === "string" ? data.detail : `Request failed: ${response.status}`;
         throw new Error(message);
     }
     return data;
 }
-const { loadContextEvalFixtures, loadContextEvalReport, renderContextEvalReport, renderFixtureReviewDetail, renderFixtureReviewList } = createContextEvalController({
+const { loadContextEvalFixtures, loadContextEvalReport, renderContextEvalReport, renderFixtureReviewDetail, renderFixtureReviewList, } = createContextEvalController({
     escapeHtml,
     fetchJson,
     formatDecimal,
     openFile,
     setComposerHint,
-    showSettings
+    showSettings,
 });
 async function fetchHealth() {
     try {
         const health = await fetchJson("/health");
+        state.runtimeReachable = true;
         state.modelAvailable = Boolean(health.model_available);
         state.modelName = String(health.model || "").trim();
-    } catch (error) {
+        if (!state.modelAvailable) {
+            const loading = health.loading || {};
+            const eta = typeof loading.eta_seconds === "number" ? loading.eta_seconds : null;
+            if (eta && eta > 0) {
+                state.modelName = state.modelName || "Qwen3-14B";
+                if (!state.generating) {
+                    setComposerHint(`${health.message || "Model loading…"} (~${Math.round(eta)}s remaining)`);
+                }
+            }
+        }
+    }
+    catch (error) {
+        state.runtimeReachable = false;
         state.modelAvailable = false;
         state.modelName = "";
         setComposerHint(error instanceof Error ? error.message : "Health check failed");
@@ -2385,7 +2369,12 @@ async function loadWorkspaces(preferredId = "") {
     const previousWorkspaceId = state.currentWorkspaceId;
     state.workspaces = payload.workspaces || [];
     const rememberedWorkspaceId = localStorage.getItem("lastWorkspaceId") || "";
-    const nextWorkspaceId = preferredId || state.currentWorkspaceId || rememberedWorkspaceId || payload.default_workspace_id || state.workspaces[0]?.id || "";
+    const nextWorkspaceId = preferredId
+        || state.currentWorkspaceId
+        || rememberedWorkspaceId
+        || payload.default_workspace_id
+        || state.workspaces[0]?.id
+        || "";
     state.currentWorkspaceId = nextWorkspaceId;
     if (nextWorkspaceId !== previousWorkspaceId) {
         state.latestWorkedFilePath = "";
@@ -2394,13 +2383,15 @@ async function loadWorkspaces(preferredId = "") {
     }
     if (nextWorkspaceId) {
         localStorage.setItem("lastWorkspaceId", nextWorkspaceId);
-    } else {
+    }
+    else {
         clearWorkspaceView();
     }
     renderWorkspaceSummary();
     if (nextWorkspaceId) {
         await loadDirectory(".");
-    } else {
+    }
+    else {
         state.fileItems = [];
         renderFileList();
     }
@@ -2409,7 +2400,7 @@ async function loadWorkspaces(preferredId = "") {
 async function loadConversations() {
     const payload = await fetchJson("/api/conversations");
     state.conversations = payload.conversations || [];
-    const active = state.conversations.find((conversation)=>conversation.id === state.currentConversationId);
+    const active = state.conversations.find((conversation) => conversation.id === state.currentConversationId);
     if (active) {
         state.currentConversationTitle = active.title || state.currentConversationTitle;
     }
@@ -2431,15 +2422,17 @@ async function loadConversation(id) {
     state.selectedFilePath = "";
     state.latestWorkedFilePath = "";
     state.viewerMode = "closed";
-    const matchingConversation = state.conversations.find((conversation)=>conversation.id === id);
+    const matchingConversation = state.conversations.find((conversation) => conversation.id === id);
     state.currentConversationTitle = matchingConversation?.title || "New chat";
     if (payload.workspace_id) {
         if (payload.workspace_id !== state.currentWorkspaceId) {
             await loadWorkspaces(payload.workspace_id);
-        } else {
+        }
+        else {
             renderConversations();
         }
-    } else {
+    }
+    else {
         clearWorkspaceView();
         renderConversations();
     }
@@ -2448,9 +2441,7 @@ async function loadConversation(id) {
     syncShellLayout();
     if (state.activeStreamConversationId === id) {
         setGenerating(true);
-        setThinkingStatus("Continuing the reply.", {
-            phase: "thinking"
-        });
+        setThinkingStatus("Continuing the reply.", { phase: "thinking" });
         renderMessages();
     }
     await loadContextEvalReport();
@@ -2483,7 +2474,7 @@ function ensureAssistantMessage() {
     const assistantMessage = {
         role: "assistant",
         content: "",
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
     };
     state.messages.push(assistantMessage);
     state.activeAssistantIndex = state.messages.length - 1;
@@ -2491,23 +2482,21 @@ function ensureAssistantMessage() {
     return assistantMessage;
 }
 function recordReasoningNote(event) {
-    if (!(event.content || "").trim()) return;
+    if (!(event.content || "").trim())
+        return;
     const assistantMessage = ensureAssistantMessage();
     const note = {
         text: normalizeThinkingText(event.content || ""),
         phase: event.phase || "thinking",
         step_label: event.step_label || "",
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
     };
     const notes = assistantMessage.reasoning_notes || [];
     const duplicate = notes.at(-1);
     if (duplicate && duplicate.text === note.text && duplicate.phase === note.phase && duplicate.step_label === note.step_label) {
         return;
     }
-    assistantMessage.reasoning_notes = [
-        ...notes,
-        note
-    ].slice(-18);
+    assistantMessage.reasoning_notes = [...notes, note].slice(-18);
 }
 function finishGeneration(options = {}) {
     state.activeStreamConversationId = "";
@@ -2516,15 +2505,17 @@ function finishGeneration(options = {}) {
     if (!options.preserveThinking) {
         state.thinkingStatus = null;
         setComposerHint(defaultComposerStatus());
-    } else if (state.thinkingStatus) {
+    }
+    else if (state.thinkingStatus) {
         setComposerHint(`Thinking: ${state.thinkingStatus.text}`);
-    } else {
+    }
+    else {
         setComposerHint(defaultComposerStatus());
     }
     renderMessages();
     window.clearTimeout(state.conversationRefreshTimer);
     void loadConversations();
-    state.conversationRefreshTimer = window.setTimeout(()=>{
+    state.conversationRefreshTimer = window.setTimeout(() => {
         void loadConversations();
     }, 1600);
     void fetchHealth();
@@ -2533,25 +2524,26 @@ function finishGeneration(options = {}) {
     syncComposerHeight();
 }
 function handleChatEvent(event) {
-    if (!event || typeof event !== "object") return;
+    if (!event || typeof event !== "object")
+        return;
     const eventConversationId = String(event.conversation_id || state.activeStreamConversationId || "").trim();
     const isVisibleConversationEvent = !eventConversationId || eventConversationId === state.currentConversationId;
     if (event.type === "start") {
         if (eventConversationId) {
             state.activeStreamConversationId = eventConversationId;
         }
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         ensureAssistantMessage();
         setGenerating(true);
         setThinkingStatus(buildThinkingSummary(event));
         return;
     }
     if (event.type === "assistant_note") {
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         if (isSuppressedAssistantNote(event.content || "")) {
-            setThinkingStatus("Switching to the fallback path and continuing.", {
-                phase: "thinking"
-            });
+            setThinkingStatus("Switching to the fallback path and continuing.", { phase: "thinking" });
             return;
         }
         const assistantMessage = ensureAssistantMessage();
@@ -2560,29 +2552,31 @@ function handleChatEvent(event) {
         return;
     }
     if (event.type === "final_replace") {
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         const assistantMessage = ensureAssistantMessage();
         assistantMessage.content = event.content || "";
         renderMessages();
         return;
     }
     if (event.type === "token") {
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         const assistantMessage = ensureAssistantMessage();
         assistantMessage.content += event.content || "";
         renderMessages();
         return;
     }
     if ((event.type === "activity" || event.type === "reasoning_note" || event.type === "status") && event.content) {
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         recordReasoningNote(event);
-        setThinkingStatus(buildThinkingSummary(event), {
-            phase: event.phase || "thinking"
-        });
+        setThinkingStatus(buildThinkingSummary(event), { phase: event.phase || "thinking" });
         return;
     }
     if (event.type === "tool_result" && event.payload?.open_path) {
-        if (!isVisibleConversationEvent) return;
+        if (!isVisibleConversationEvent)
+            return;
         setLatestWorkedFile(event.payload.open_path);
         void openFile(event.payload.open_path);
         return;
@@ -2596,22 +2590,17 @@ function handleChatEvent(event) {
                 client_turn_id: event.client_turn_id || "",
                 permission_key: event.permission_key || "",
                 approval_target: event.approval_target || "tool",
-                approved: true
+                approved: true,
             }));
             if (isVisibleConversationEvent) {
                 recordReasoningNote(event);
-                setThinkingStatus(buildThinkingSummary(event), {
-                    phase: "permission"
-                });
+                setThinkingStatus(buildThinkingSummary(event), { phase: "permission" });
             }
-        } else {
+        }
+        else {
             if (isVisibleConversationEvent) {
                 recordReasoningNote(event);
-                setThinkingStatus(buildThinkingSummary(event), {
-                    phase: "permission",
-                    error: true,
-                    persistent: true
-                });
+                setThinkingStatus(buildThinkingSummary(event), { phase: "permission", error: true, persistent: true });
             }
         }
         return;
@@ -2625,20 +2614,22 @@ function handleChatEvent(event) {
             void fetchHealth();
             return;
         }
-        const assistantMessage = state.activeAssistantIndex >= 0 ? state.messages[state.activeAssistantIndex] : null;
-        const hasVisibleReply = Boolean(assistantMessage && assistantMessage.role === "assistant" && String(assistantMessage.content || "").trim());
+        const assistantMessage = state.activeAssistantIndex >= 0
+            ? state.messages[state.activeAssistantIndex]
+            : null;
+        const hasVisibleReply = Boolean(assistantMessage
+            && assistantMessage.role === "assistant"
+            && String(assistantMessage.content || "").trim());
         setThinkingStatus(buildThinkingSummary(event), {
             phase: event.phase || "thinking",
             error: true,
-            persistent: !hasVisibleReply
+            persistent: !hasVisibleReply,
         });
         if (assistantMessage && assistantMessage.role === "assistant" && hasVisibleReply) {
             assistantMessage.error = true;
             renderMessages();
         }
-        finishGeneration({
-            preserveThinking: !hasVisibleReply
-        });
+        finishGeneration({ preserveThinking: !hasVisibleReply });
         return;
     }
     if (event.type === "canceled" || event.type === "done") {
@@ -2653,6 +2644,168 @@ function handleChatEvent(event) {
         finishGeneration();
     }
 }
+const SLASH_COMMANDS = [
+    { name: "search", aliases: ["web"], description: "Search the web and summarize sources" },
+    { name: "grep", aliases: [], description: "Search text inside workspace files" },
+    { name: "plan", aliases: [], description: "Plan workspace changes before executing" },
+    { name: "code", aliases: ["edit"], description: "Inspect the workspace and implement a change" },
+    { name: "pip", aliases: [], description: "Install Python packages into the managed environment" },
+];
+const slashMenuState = {
+    open: false,
+    query: "",
+    activeIndex: 0,
+    triggerStart: 0,
+};
+function slashCommandMenuElement() {
+    return document.getElementById("slashCommandMenu");
+}
+function resolveSlashCommandName(raw) {
+    const normalized = raw.trim().toLowerCase();
+    return SLASH_COMMANDS.find((item) => item.name === normalized || item.aliases.includes(normalized));
+}
+function parseComposerSlashCommand(message) {
+    const cleaned = message.trim().replace(/^\uFEFF/, "");
+    const match = cleaned.match(/^\s*\/([a-z0-9_-]+)(?:\s+(.*))?\s*$/is);
+    if (!match)
+        return null;
+    const raw = String(match[1] || "").trim().toLowerCase();
+    const definition = resolveSlashCommandName(raw);
+    if (!definition)
+        return null;
+    return {
+        name: definition.name,
+        raw_name: raw,
+        args: String(match[2] || "").trim(),
+    };
+}
+function composerSlashTrigger() {
+    const value = composerInput.value;
+    const caret = composerInput.selectionStart ?? value.length;
+    const before = value.slice(0, caret);
+    const match = before.match(/(?:^|\s)\/([a-z0-9_-]*)$/i);
+    if (!match)
+        return null;
+    const token = match[0];
+    const start = before.length - token.length + (token.startsWith(" ") ? 1 : 0);
+    return { query: String(match[1] || "").toLowerCase(), start };
+}
+function filteredSlashCommands(query) {
+    if (!query)
+        return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((item) => item.name.startsWith(query) || item.aliases.some((alias) => alias.startsWith(query)));
+}
+function hideSlashCommandMenu() {
+    slashMenuState.open = false;
+    slashMenuState.activeIndex = 0;
+    const menu = slashCommandMenuElement();
+    if (!menu)
+        return;
+    menu.hidden = true;
+    menu.innerHTML = "";
+}
+function applySlashCommandSelection(name, start) {
+    const value = composerInput.value;
+    const caret = composerInput.selectionStart ?? value.length;
+    const prefix = value.slice(0, start);
+    const suffix = value.slice(caret);
+    composerInput.value = `${prefix}/${name} ${suffix}`;
+    const nextCaret = prefix.length + name.length + 2;
+    composerInput.setSelectionRange(nextCaret, nextCaret);
+    hideSlashCommandMenu();
+    composerInput.focus();
+    syncComposerHeight();
+    updateSlashCommandMenu();
+}
+function renderSlashCommandMenu() {
+    const menu = slashCommandMenuElement();
+    if (!menu)
+        return;
+    const trigger = composerSlashTrigger();
+    if (!trigger) {
+        hideSlashCommandMenu();
+        return;
+    }
+    const matches = filteredSlashCommands(trigger.query);
+    if (!matches.length) {
+        hideSlashCommandMenu();
+        return;
+    }
+    slashMenuState.open = true;
+    slashMenuState.query = trigger.query;
+    slashMenuState.triggerStart = trigger.start;
+    if (slashMenuState.activeIndex >= matches.length) {
+        slashMenuState.activeIndex = 0;
+    }
+    menu.hidden = false;
+    menu.innerHTML = matches.map((item, index) => {
+        const aliasNote = item.aliases.length ? ` · /${item.aliases.join(", /")}` : "";
+        return `
+            <button
+                type="button"
+                class="slash-command-item${index === slashMenuState.activeIndex ? " active" : ""}"
+                data-slash-name="${escapeHtml(item.name)}"
+                role="option"
+                aria-selected="${index === slashMenuState.activeIndex ? "true" : "false"}"
+            >
+                <span class="slash-command-name">/${escapeHtml(item.name)}</span>
+                <span class="slash-command-meta">${escapeHtml(item.description)}${aliasNote ? `<span class="slash-command-aliases">${escapeHtml(aliasNote)}</span>` : ""}</span>
+            </button>
+        `;
+    }).join("");
+    menu.querySelectorAll(".slash-command-item").forEach((button, index) => {
+        button.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            applySlashCommandSelection(button.dataset.slashName || matches[index].name, slashMenuState.triggerStart);
+        });
+    });
+}
+function updateSlashCommandMenu() {
+    renderSlashCommandMenu();
+}
+function buildChatFeatureFlags(message) {
+    const slashCommand = parseComposerSlashCommand(message);
+    const agentMode = slashCommand !== null;
+    return {
+        agent_tools: agentMode,
+        workspace_write: agentMode,
+        workspace_run_commands: agentMode,
+        local_rag: agentMode,
+        web_search: agentMode,
+        auto_approve_tool_permissions: agentMode,
+    };
+}
+function handleSlashCommandMenuKeydown(event) {
+    if (!slashMenuState.open)
+        return false;
+    const matches = filteredSlashCommands(slashMenuState.query);
+    if (!matches.length)
+        return false;
+    if (event.key === "ArrowDown") {
+        event.preventDefault();
+        slashMenuState.activeIndex = (slashMenuState.activeIndex + 1) % matches.length;
+        renderSlashCommandMenu();
+        return true;
+    }
+    if (event.key === "ArrowUp") {
+        event.preventDefault();
+        slashMenuState.activeIndex = (slashMenuState.activeIndex - 1 + matches.length) % matches.length;
+        renderSlashCommandMenu();
+        return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const selected = matches[slashMenuState.activeIndex] || matches[0];
+        applySlashCommandSelection(selected.name, slashMenuState.triggerStart);
+        return true;
+    }
+    if (event.key === "Escape") {
+        event.preventDefault();
+        hideSlashCommandMenu();
+        return true;
+    }
+    return false;
+}
 async function dispatchChatPayload(payload) {
     const socket = state.ws;
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -2661,21 +2814,17 @@ async function dispatchChatPayload(payload) {
     }
     const response = await fetchJson("/api/chat", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
     });
-    (response.events || []).forEach((event)=>handleChatEvent(event));
-    if (!(response.events || []).some((event)=>event.type === "done" || event.type === "error")) {
+    (response.events || []).forEach((event) => handleChatEvent(event));
+    if (!(response.events || []).some((event) => event.type === "done" || event.type === "error")) {
         finishGeneration();
     }
 }
 async function sendCurrentMessage() {
     if (state.generating) {
-        state.ws?.send(JSON.stringify({
-            type: "stop"
-        }));
+        state.ws?.send(JSON.stringify({ type: "stop" }));
         return;
     }
     if (state.composerUploadingCount > 0) {
@@ -2684,14 +2833,20 @@ async function sendCurrentMessage() {
     }
     const message = composerInput.value.trim();
     const attachments = pendingAttachmentPaths();
-    if (!message && !attachments.length) return;
+    if (!message && !attachments.length)
+        return;
     if (!state.currentConversationId) {
         startNewChat();
     }
+    const slashCommand = parseComposerSlashCommand(message);
+    if (slashCommand && !slashCommand.args.trim()) {
+        setComposerHint(`Add a task after /${slashCommand.name}, for example: /${slashCommand.name} fix the login bug`);
+        return;
+    }
     state.messages.push({
         role: "user",
-        content: message || attachments.map((path)=>`Attached \`${path.split("/").pop() || path}\``).join(", "),
-        timestamp: new Date().toISOString()
+        content: message || attachments.map((path) => `Attached \`${path.split("/").pop() || path}\``).join(", "),
+        timestamp: new Date().toISOString(),
     });
     state.stickChatToBottom = true;
     composerInput.value = "";
@@ -2702,7 +2857,11 @@ async function sendCurrentMessage() {
     renderConversations();
     setGenerating(true);
     state.activeStreamConversationId = state.currentConversationId;
-    setThinkingStatus(state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading.");
+    setThinkingStatus(slashCommand
+        ? `Running /${slashCommand.name}…`
+        : (state.modelAvailable ? "Getting started." : "Getting started while the model finishes loading."));
+    hideSlashCommandMenu();
+    const features = buildChatFeatureFlags(message);
     const payload = {
         message,
         conversation_id: state.currentConversationId,
@@ -2710,43 +2869,35 @@ async function sendCurrentMessage() {
         attachments,
         mode: "auto",
         turn_kind: "visible_chat",
-        features: {
-            agent_tools: true,
-            workspace_write: true,
-            auto_approve_tool_permissions: true
-        }
+        features,
     };
+    if (slashCommand) {
+        payload.slash_command = slashCommand;
+    }
     try {
         await dispatchChatPayload(payload);
-    } catch (error) {
+    }
+    catch (error) {
         state.pendingAttachments = mergePendingAttachments([
             ...state.pendingAttachments,
-            ...attachments.map((path)=>({
-                    path,
-                    name: path.split("/").pop() || path
-                }))
+            ...attachments.map((path) => ({
+                path,
+                name: path.split("/").pop() || path,
+            })),
         ]);
         renderComposerAttachments();
-        setThinkingStatus(error instanceof Error ? summarizeRuntimeError(error.message) : "The reply could not be sent.", {
-            error: true,
-            persistent: true
-        });
-        finishGeneration({
-            preserveThinking: true
-        });
+        setThinkingStatus(error instanceof Error ? summarizeRuntimeError(error.message) : "The reply could not be sent.", { error: true, persistent: true });
+        finishGeneration({ preserveThinking: true });
     }
 }
 async function renameConversation(conversationId, currentTitle) {
     const nextTitle = String(prompt("Rename chat", currentTitle) || "").trim();
-    if (!nextTitle) return;
+    if (!nextTitle)
+        return;
     await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}/rename`, {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            title: nextTitle
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle }),
     });
     if (conversationId === state.currentConversationId) {
         state.currentConversationTitle = nextTitle;
@@ -2754,9 +2905,10 @@ async function renameConversation(conversationId, currentTitle) {
     await loadConversations();
 }
 async function deleteConversation(conversationId) {
-    if (!confirm("Delete this chat?")) return;
+    if (!confirm("Delete this chat?"))
+        return;
     await fetchJson(`/api/conversation/${encodeURIComponent(conversationId)}`, {
-        method: "DELETE"
+        method: "DELETE",
     });
     if (conversationId === state.currentConversationId) {
         startNewChat();
@@ -2764,10 +2916,9 @@ async function deleteConversation(conversationId) {
     await loadConversations();
 }
 async function resetAppData() {
-    if (!confirm("Reset all app data? This deletes chats, workspaces, and related runtime state.")) return;
-    await fetchJson("/api/reset-all", {
-        method: "POST"
-    });
+    if (!confirm("Reset all app data? This deletes chats, workspaces, and related runtime state."))
+        return;
+    await fetchJson("/api/reset-all", { method: "POST" });
     closeSettings();
     state.currentConversationId = "";
     state.currentConversationTitle = "New chat";
@@ -2796,7 +2947,8 @@ async function loadDirectory(path) {
     renderFileList();
 }
 async function openFile(path) {
-    if (!state.currentWorkspaceId) return;
+    if (!state.currentWorkspaceId)
+        return;
     const samePath = state.selectedFilePath === path;
     const previousPreviewScrollTop = samePath ? filePreview.scrollTop : 0;
     state.selectedFilePath = path;
@@ -2816,168 +2968,189 @@ async function openFile(path) {
         const payload = await fetchJson(workspaceFileApiUrl(path, state.activePreviewNonce));
         renderPreview(payload);
         filePreview.scrollTop = previousPreviewScrollTop;
-    } catch (error) {
+    }
+    catch (error) {
         renderPreviewEmpty("Preview unavailable", error instanceof Error ? error.message : "Could not open that file.");
     }
 }
 function connectWebSocket() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     state.ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
+    state.wsConnected = false;
     setConnectionState("offline");
-    state.ws.addEventListener("open", ()=>{
+    state.ws.addEventListener("open", () => {
+        state.wsConnected = true;
         setConnectionState(state.generating ? "streaming" : "online");
         void fetchHealth();
     });
-    state.ws.addEventListener("message", (messageEvent)=>{
+    state.ws.addEventListener("message", (messageEvent) => {
         const payload = JSON.parse(messageEvent.data);
         if (payload.type === "ping") {
-            state.ws?.send(JSON.stringify({
-                type: "pong"
-            }));
+            state.ws?.send(JSON.stringify({ type: "pong" }));
             return;
         }
         handleChatEvent(payload);
     });
-    state.ws.addEventListener("close", ()=>{
+    state.ws.addEventListener("close", () => {
+        state.wsConnected = false;
         setConnectionState("offline");
+        syncRuntimeSummary();
         if (state.generating) {
-            setThinkingStatus("The reply stopped before it could finish.", {
-                error: true,
-                persistent: true
-            });
-            finishGeneration({
-                preserveThinking: true
-            });
+            setThinkingStatus("The reply stopped before it could finish.", { error: true, persistent: true });
+            finishGeneration({ preserveThinking: true });
         }
         window.clearTimeout(state.reconnectTimer);
-        state.reconnectTimer = window.setTimeout(()=>connectWebSocket(), 2000);
+        state.reconnectTimer = window.setTimeout(() => connectWebSocket(), 2000);
     });
-    state.ws.addEventListener("error", ()=>{
+    state.ws.addEventListener("error", () => {
+        state.wsConnected = false;
         setConnectionState("offline");
+        syncRuntimeSummary();
     });
 }
 function attachEvents() {
-    newChatButton.addEventListener("click", ()=>startNewChat());
-    workspaceSettingsButton.addEventListener("click", ()=>showSettings());
-    closeSettingsButton.addEventListener("click", ()=>closeSettings());
-    closeReasoningButton.addEventListener("click", ()=>closeReasoningOverlay());
-    refreshFixtureReviewButton.addEventListener("click", ()=>{
+    newChatButton.addEventListener("click", () => startNewChat());
+    workspaceSettingsButton.addEventListener("click", () => showSettings());
+    closeSettingsButton.addEventListener("click", () => closeSettings());
+    closeReasoningButton.addEventListener("click", () => closeReasoningOverlay());
+    refreshFixtureReviewButton.addEventListener("click", () => {
         void loadContextEvalFixtures();
     });
-    fixtureReviewFilter.addEventListener("change", ()=>{
+    fixtureReviewFilter.addEventListener("change", () => {
         state.fixtureReviewFilter = fixtureReviewFilter.value || "all";
         renderFixtureReviewList();
     });
-    resetAppButton.addEventListener("click", ()=>{
+    resetAppButton.addEventListener("click", () => {
         void resetAppData();
     });
-    settingsOverlay.addEventListener("click", (event)=>{
-        if (event.target === settingsOverlay) closeSettings();
+    settingsOverlay.addEventListener("click", (event) => {
+        if (event.target === settingsOverlay)
+            closeSettings();
     });
-    reasoningOverlay.addEventListener("click", (event)=>{
-        if (event.target === reasoningOverlay) closeReasoningOverlay();
+    reasoningOverlay.addEventListener("click", (event) => {
+        if (event.target === reasoningOverlay)
+            closeReasoningOverlay();
     });
-    chatMessages.addEventListener("scroll", ()=>{
+    chatMessages.addEventListener("scroll", () => {
         state.stickChatToBottom = isNearBottom(chatMessages);
         syncScrollJumpButton();
     });
-    scrollToBottomButton.addEventListener("click", ()=>{
+    scrollToBottomButton.addEventListener("click", () => {
         scrollChatToBottom("smooth");
     });
-    refreshContextEvalButton.addEventListener("click", ()=>{
+    refreshContextEvalButton.addEventListener("click", () => {
         void loadContextEvalReport();
     });
-    refreshWorkspaceButton.addEventListener("click", ()=>{
-        void (async ()=>{
+    refreshWorkspaceButton.addEventListener("click", () => {
+        void (async () => {
             await loadDirectory(state.currentDirectoryPath);
             if (state.viewerMode === "file" && state.selectedFilePath) {
                 await openFile(state.selectedFilePath);
             }
         })();
     });
-    openInTabButton.addEventListener("click", ()=>{
+    openInTabButton.addEventListener("click", () => {
         openSelectedFileInTab();
     });
-    downloadFileButton.addEventListener("click", ()=>{
+    downloadFileButton.addEventListener("click", () => {
         downloadSelectedFile();
     });
-    sidebarToggle.addEventListener("click", ()=>{
+    sidebarToggle.addEventListener("click", () => {
         state.leftSidebarOpen = !state.leftSidebarOpen;
         if (state.leftSidebarOpen && isMobileViewport()) {
             state.viewerMode = "closed";
         }
         syncShellLayout();
     });
-    viewerToggle.addEventListener("click", ()=>{
+    viewerToggle.addEventListener("click", () => {
         if (state.viewerMode === "closed") {
             openFileTree();
             return;
         }
         closeViewer();
     });
-    viewerModeButton.addEventListener("click", ()=>{
-        if (!state.selectedFilePath) return;
+    viewerModeButton.addEventListener("click", () => {
+        if (!state.selectedFilePath)
+            return;
         if (state.viewerMode === "file") {
             openFileTree();
             return;
         }
         void openFile(state.selectedFilePath);
     });
-    viewerCloseButton.addEventListener("click", ()=>{
+    viewerCloseButton.addEventListener("click", () => {
         closeViewer();
     });
-    composerForm.addEventListener("submit", (event)=>{
+    composerForm.addEventListener("submit", (event) => {
         event.preventDefault();
         void sendCurrentMessage();
     });
-    composerInput.addEventListener("input", ()=>{
+    composerInput.addEventListener("input", () => {
         syncComposerHeight();
+        updateSlashCommandMenu();
     });
-    composerInput.addEventListener("paste", (event)=>{
+    composerInput.addEventListener("blur", () => {
+        window.setTimeout(() => hideSlashCommandMenu(), 120);
+    });
+    composerInput.addEventListener("paste", (event) => {
         const pastedText = event.clipboardData?.getData("text/plain") || "";
-        if (!shouldMaterializePastedText(pastedText)) return;
+        if (!shouldMaterializePastedText(pastedText))
+            return;
         event.preventDefault();
-        void materializeComposerPaste(pastedText).then((path)=>{
+        void materializeComposerPaste(pastedText)
+            .then((path) => {
             const filename = path.split("/").pop() || path;
             mergeComposerText(`Attached \`${filename}\`. Please use that file for this request.`);
             setComposerHint(`Attached pasted file: ${filename}`);
-        }).catch((error)=>{
+        })
+            .catch((error) => {
             mergeComposerText(pastedText);
             setComposerHint(error instanceof Error ? error.message : "Could not attach pasted file.");
         });
     });
-    composerForm.addEventListener("dragenter", (event)=>{
-        if (!event.dataTransfer?.types.includes("Files")) return;
+    composerForm.addEventListener("dragenter", (event) => {
+        if (!event.dataTransfer?.types.includes("Files"))
+            return;
         event.preventDefault();
         setComposerDropActive(true);
     });
-    composerForm.addEventListener("dragover", (event)=>{
-        if (!event.dataTransfer?.types.includes("Files")) return;
+    composerForm.addEventListener("dragover", (event) => {
+        if (!event.dataTransfer?.types.includes("Files"))
+            return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "copy";
-        if (!state.composerDropActive) setComposerDropActive(true);
+        if (!state.composerDropActive)
+            setComposerDropActive(true);
     });
-    composerForm.addEventListener("dragleave", (event)=>{
+    composerForm.addEventListener("dragleave", (event) => {
         const relatedTarget = event.relatedTarget;
-        if (relatedTarget && composerForm.contains(relatedTarget)) return;
+        if (relatedTarget && composerForm.contains(relatedTarget))
+            return;
         setComposerDropActive(false);
     });
-    composerForm.addEventListener("drop", (event)=>{
-        const droppedFiles = [
-            ...event.dataTransfer?.files || []
-        ];
-        if (!droppedFiles.length) return;
+    composerForm.addEventListener("drop", (event) => {
+        const droppedFiles = [...(event.dataTransfer?.files || [])];
+        if (!droppedFiles.length)
+            return;
         event.preventDefault();
         setComposerDropActive(false);
-        void uploadComposerFiles(droppedFiles).then((attachments)=>{
-            if (!attachments.length) return;
-            const label = attachments.length === 1 ? `Attached ${attachments[0].name}.` : `Attached ${attachments.length} files.`;
+        void uploadComposerFiles(droppedFiles)
+            .then((attachments) => {
+            if (!attachments.length)
+                return;
+            const label = attachments.length === 1
+                ? `Attached ${attachments[0].name}.`
+                : `Attached ${attachments.length} files.`;
             setComposerHint(label);
-        }).catch((error)=>{
+        })
+            .catch((error) => {
             setComposerHint(error instanceof Error ? error.message : "Could not attach dropped files.");
         });
     });
-    composerInput.addEventListener("keydown", (event)=>{
+    composerInput.addEventListener("keydown", (event) => {
+        if (handleSlashCommandMenuKeydown(event)) {
+            return;
+        }
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             void sendCurrentMessage();
@@ -2986,6 +3159,7 @@ function attachEvents() {
 }
 async function bootstrap() {
     attachEvents();
+    hideSlashCommandMenu();
     syncShellLayout();
     renderMessages();
     renderConversations();
@@ -2995,7 +3169,7 @@ async function bootstrap() {
     syncComposerHeight();
     connectWebSocket();
     window.clearInterval(state.healthPollTimer);
-    state.healthPollTimer = window.setInterval(()=>{
+    state.healthPollTimer = window.setInterval(() => {
         void fetchHealth();
     }, 2500);
     void fetchHealth();
@@ -3005,11 +3179,9 @@ async function bootstrap() {
     await workspacesPromise;
     if (state.conversations.length) {
         await loadConversation(state.conversations[0].id);
-    } else {
+    }
+    else {
         startNewChat();
     }
 }
 void bootstrap();
-
-
-//# sourceURL=/Users/joe/dev/ai-chat/src/web/app.ts

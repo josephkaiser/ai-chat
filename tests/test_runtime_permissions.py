@@ -22,6 +22,7 @@ class RuntimePermissionTests(unittest.TestCase):
 
     def test_parse_feature_flags_keeps_allowed_tool_permissions(self):
         features = app.parse_feature_flags({
+            "web_search": True,
             "allowed_tool_permissions": ["tool:web.search", " TOOL:workspace.write "],
             "auto_approve_tool_permissions": True,
         })
@@ -1350,6 +1351,24 @@ class RuntimePermissionTests(unittest.TestCase):
         self.assertIn("[[artifact:", wrapped)
         self.assertIn("linked_list.c", wrapped)
         self.assertIn(".c]]", wrapped)
+
+    def test_inline_code_artifact_response_puts_code_after_artifact_tag(self):
+        response = (
+            "The code has several issues.\n\n"
+            "Here's an improved version:\n\n"
+            "```rust\n"
+            "fn main() {\n"
+            "    println!(\"hello\");\n"
+            "}\n"
+            "```"
+        )
+        wrapped = app.format_inline_code_artifact_response(response, "continue.rs")
+        self.assertIn("The code has several issues.", wrapped)
+        self.assertIn("[[artifact:continue.rs]]", wrapped)
+        artifact_index = wrapped.index("[[artifact:continue.rs]]")
+        fence_index = wrapped.index("```rust")
+        self.assertLess(artifact_index, fence_index)
+        self.assertNotIn("issues.", wrapped[fence_index:])
 
     def test_inline_code_response_does_not_get_artifact_reference_after_real_write(self):
         response = "```c\nint main(void) { return 0; }\n```"
