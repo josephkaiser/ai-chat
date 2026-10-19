@@ -169,7 +169,7 @@ model_profile_keys() {
 
 model_profile_label() {
     case "$1" in
-        14b) printf '%s\n' "14B" ;;
+        14b) printf '%s\n' "Gemma 4 26B-A4B" ;;
         *) return 1 ;;
     esac
 }
@@ -330,7 +330,7 @@ download_model_profile() {
     docker run --rm \
         -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
         --entrypoint python \
-        vllm/vllm-openai:latest \
+        vllm/vllm-openai:v0.22.0 \
         -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$model_name', resume_download=True)"
     mark_model_installed "$profile"
     echo "Downloaded $(model_profile_label "$profile")."

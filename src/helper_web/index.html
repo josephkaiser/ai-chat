@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Helper</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/vendor/hl-dark.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/vendor/hl-light.css" media="(prefers-color-scheme: light)">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <button id="new-chat" class="primary" title="New chat (Ctrl+Shift+O)">＋ New chat</button>
+    <nav id="chat-list" aria-label="Chats"></nav>
+    <div id="model-status" class="muted small"></div>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <button id="toggle-sidebar" class="icon" title="Chats">☰</button>
+      <h1 id="chat-title" title="Click to rename">New chat</h1>
+      <div id="ctx-meter" title="Context used by the last turn">
+        <div class="bar"><span></span></div>
+        <span class="label small muted"></span>
+      </div>
+      <button id="toggle-panel" class="icon" title="Files & memory">▤</button>
+    </header>
+
+    <section id="messages" aria-live="polite">
+      <div id="empty-state">
+        <h2>Drop anything here</h2>
+        <p class="muted">Files, folders of code (zip), PDFs, docs, spreadsheets, logs, screenshots — or paste text.
+        Everything stays in this chat's context; big material gets read through in passes and noted in <code>memory.md</code>.</p>
+      </div>
+    </section>
+
+    <form id="composer">
+      <div id="pending" class="chips"></div>
+      <div id="status-line" class="small muted" hidden></div>
+      <div class="row">
+        <button type="button" id="attach" class="icon" title="Attach files">📎</button>
+        <input type="file" id="file-input" multiple hidden>
+        <textarea id="input" rows="1" placeholder="Message — Enter to send, Shift+Enter for newline. Paste or drop files anywhere."></textarea>
+        <button type="submit" id="send" class="primary">Send</button>
+      </div>
+      <div class="row options small">
+        <label title="Let the model reason before answering (slower, better on hard tasks)"><input type="checkbox" id="thinking"> Think</label>
+        <label title="Large pastes become an attached file instead of message text"><input type="checkbox" id="paste-as-file" checked> Big pastes → file</label>
+        <span class="spacer"></span>
+        <span id="composer-tokens" class="muted"></span>
+      </div>
+    </form>
+  </main>
+
+  <aside id="panel">
+    <section>
+      <div class="panel-head">
+        <h3>Files</h3>
+        <span id="files-total" class="small muted"></span>
+      </div>
+      <div id="file-list"></div>
+      <p class="small muted hint">Checked files are in context every turn. If they don't all fit, the overflow is read in passes and summarised into memory.</p>
+    </section>
+    <section class="grow">
+      <div class="panel-head">
+        <h3>memory.md</h3>
+        <span class="small muted">this chat only</span>
+        <button id="memory-save" class="small" hidden>Save</button>
+      </div>
+      <textarea id="memory" spellcheck="false"></textarea>
+    </section>
+  </aside>
+</div>
+
+<div id="drop-overlay" hidden><div>Drop to add to this chat</div></div>
+
+<dialog id="viewer">
+  <header><strong id="viewer-title"></strong><span class="spacer"></span>
+    <button id="viewer-copy" class="small">Copy</button>
+    <button id="viewer-close" class="small">Close</button></header>
+  <pre id="viewer-body"></pre>
+</dialog>
+
+<div id="toast" hidden></div>
+
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/vendor/highlight.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

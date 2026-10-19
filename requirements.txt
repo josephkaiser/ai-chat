@@ -11,3 +11,4 @@ numpy
 fastembed
 pandas
 openpyxl
+python-docx
